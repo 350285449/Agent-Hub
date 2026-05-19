@@ -1,0 +1,43 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "state_dir": ".agent-hub/state",
+  "inbox_dir": ".agent-hub/inbox",
+  "outbox_dir": ".agent-hub/outbox",
+  "archive_dir": ".agent-hub/archive",
+  "include_raw_responses": false,
+  "default_route": ["claude-coder", "openai-coder", "local-coder"],
+  "routes": [
+    {
+      "name": "coding",
+      "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
+      "agents": ["claude-coder", "openai-coder", "local-coder"]
+    }
+  ],
+  "agents": [
+    {
+      "name": "claude-coder",
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5-20250929",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "max_tokens": 4096,
+      "cooldown_seconds": 300
+    },
+    {
+      "name": "openai-coder",
+      "provider": "openai",
+      "model": "gpt-5.2",
+      "api_key_env": "OPENAI_API_KEY",
+      "max_tokens": 4096,
+      "cooldown_seconds": 300
+    },
+    {
+      "name": "local-coder",
+      "provider": "openai-compatible",
+      "model": "local-model",
+      "base_url": "http://127.0.0.1:1234",
+      "max_tokens": 4096,
+      "cooldown_seconds": 60
+    }
+  ]
+}

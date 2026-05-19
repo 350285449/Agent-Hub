@@ -1,0 +1,7 @@
+{
+  "session_id": "demo-coding-session",
+  "route": "coding",
+  "task": "Write a small Python function that returns the nth Fibonacci number.",
+  "context": "Prefer readable code and include a short explanation.",
+  "max_tokens": 800
+}

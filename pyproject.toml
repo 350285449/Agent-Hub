@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-hub"
+version = "0.1.0"
+description = "Local routing hub for agent-style LLM requests with provider failover."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Agent Hub" }]
+dependencies = []
+
+[project.scripts]
+agent-hub = "agent_hub.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agent_hub*"]
