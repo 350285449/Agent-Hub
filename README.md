@@ -52,6 +52,36 @@ Health check:
 Invoke-RestMethod http://127.0.0.1:8787/health
 ```
 
+## VS Code Extension
+
+The repo includes a VS Code extension in `vscode-extension/` so you can use
+Agent-Hub from the Command Palette and editor context menu.
+
+Run it directly from the GitHub clone:
+
+```powershell
+python -m agent_hub doctor
+code vscode-extension
+```
+
+In the `vscode-extension` window, press `F5` to launch an Extension Development
+Host. In that new VS Code window, open this repository folder and use:
+
+- `Agent Hub: Start Server`
+- `Agent Hub: Show Status`
+- `Agent Hub: Ask Agent`
+- `Agent Hub: Explain Selection`
+- `Agent Hub: Explain Current File`
+
+The extension uses the same local server and config as the CLI. By default it
+starts `python -m agent_hub --config agent-hub.config.json serve --watch-inbox`
+from the opened workspace. Settings are available under `Agent Hub`, including
+`agentHub.serverUrl`, `agentHub.pythonPath`, `agentHub.configPath`,
+`agentHub.route`, `agentHub.maxTokens`, and `agentHub.autoStart`.
+
+See [vscode-extension/README.md](vscode-extension/README.md) for the full
+GitHub setup guide.
+
 Native request:
 
 ```powershell

@@ -1,0 +1,108 @@
+{
+  "name": "agent-hub-vscode",
+  "displayName": "Agent Hub",
+  "description": "Use the local Agent-Hub workspace agent from VS Code.",
+  "version": "0.1.0",
+  "publisher": "agent-hub",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:agentHub.startServer",
+    "onCommand:agentHub.stopServer",
+    "onCommand:agentHub.status",
+    "onCommand:agentHub.ask",
+    "onCommand:agentHub.explainSelection",
+    "onCommand:agentHub.explainFile",
+    "onCommand:agentHub.openOutput"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "check": "node --check extension.js"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentHub.startServer",
+        "title": "Agent Hub: Start Server"
+      },
+      {
+        "command": "agentHub.stopServer",
+        "title": "Agent Hub: Stop Server"
+      },
+      {
+        "command": "agentHub.status",
+        "title": "Agent Hub: Show Status"
+      },
+      {
+        "command": "agentHub.ask",
+        "title": "Agent Hub: Ask Agent"
+      },
+      {
+        "command": "agentHub.explainSelection",
+        "title": "Agent Hub: Explain Selection"
+      },
+      {
+        "command": "agentHub.explainFile",
+        "title": "Agent Hub: Explain Current File"
+      },
+      {
+        "command": "agentHub.openOutput",
+        "title": "Agent Hub: Open Output"
+      }
+    ],
+    "configuration": {
+      "title": "Agent Hub",
+      "properties": {
+        "agentHub.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8787",
+          "description": "Agent-Hub server URL."
+        },
+        "agentHub.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python executable used to start Agent-Hub."
+        },
+        "agentHub.configPath": {
+          "type": "string",
+          "default": "agent-hub.config.json",
+          "description": "Path to Agent-Hub config, relative to the workspace root unless absolute."
+        },
+        "agentHub.route": {
+          "type": "string",
+          "default": "coding",
+          "description": "Default Agent-Hub route used by VS Code commands."
+        },
+        "agentHub.maxTokens": {
+          "type": "number",
+          "default": 1200,
+          "description": "Maximum output tokens for VS Code agent requests."
+        },
+        "agentHub.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the local Agent-Hub server automatically when sending a request and the server is offline."
+        }
+      }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "agentHub.explainSelection",
+          "when": "editorHasSelection",
+          "group": "navigation@9"
+        },
+        {
+          "command": "agentHub.explainFile",
+          "group": "navigation@10"
+        }
+      ]
+    }
+  }
+}

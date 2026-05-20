@@ -1,0 +1,8 @@
+.vscode/**
+.vscode-test/**
+node_modules/**
+out/**
+src/**
+*.vsix
+*.log
+README.local.md
