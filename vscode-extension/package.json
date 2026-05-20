@@ -1,10 +1,11 @@
 {
   "name": "agent-hub-vscode",
-  "displayName": "Agent Hub",
-  "description": "Use the local Agent-Hub workspace agent from VS Code.",
-  "version": "0.1.0",
+  "displayName": "Local Agent Hub",
+  "description": "Run a local-first AI coding agent and research helper from VS Code.",
+  "version": "0.2.0",
   "publisher": "agent-hub",
   "license": "MIT",
+  "icon": "assets/agent-hub-icon.png",
   "keywords": [
     "ai",
     "agent",
@@ -23,6 +24,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onCommand:agentHub.chat",
     "onCommand:agentHub.startServer",
     "onCommand:agentHub.stopServer",
     "onCommand:agentHub.status",
@@ -44,6 +46,10 @@
   },
   "contributes": {
     "commands": [
+      {
+        "command": "agentHub.chat",
+        "title": "Agent Hub: Open Codex Chat"
+      },
       {
         "command": "agentHub.startServer",
         "title": "Agent Hub: Start Server"
@@ -92,7 +98,7 @@
         "agentHub.pythonPath": {
           "type": "string",
           "default": "python",
-          "description": "Python executable used to start Agent-Hub."
+          "description": "Python executable used to start Agent-Hub. When left as python, the extension uses the workspace .venv first if it exists."
         },
         "agentHub.configPath": {
           "type": "string",

@@ -104,6 +104,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Respect config free_only=false. By default this command forces free_only=true.",
     )
 
+    chat_parser = subparsers.add_parser("chat", help="Open an interactive Codex-style workspace chat.")
+    chat_parser.add_argument("--route", default="local-agent", help="Route to use for chat turns.")
+    chat_parser.add_argument("--session-id", help="Reuse an existing chat session id.")
+    chat_parser.add_argument("--max-steps", type=int, default=20, help="Maximum agent tool steps per turn.")
+    chat_parser.add_argument(
+        "--allow-shell-tools",
+        action="store_true",
+        help="Allow the chat agent to run local shell commands.",
+    )
+    chat_parser.add_argument(
+        "--allow-cloud",
+        action="store_true",
+        help="Respect config free_only=false. By default chat forces free_only=true.",
+    )
+    chat_parser.add_argument(
+        "--no-agent",
+        action="store_true",
+        help="Use a single routed model call instead of the workspace agent loop.",
+    )
+
     route_parser = subparsers.add_parser("route", help="Route one JSON file and print the result.")
     route_parser.add_argument("path")
     route_parser.add_argument(
@@ -192,6 +212,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         print(json.dumps(response.to_native_dict(), indent=2, ensure_ascii=False))
         return 0
+    if command == "chat":
+        if not args.allow_cloud:
+            config.free_only = True
+        return _chat(config, args)
     if command == "route":
         payload = json.loads(Path(args.path).read_text(encoding="utf-8"))
         request = request_from_payload(payload, api_shape=args.api_shape)
@@ -208,6 +232,80 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     parser.error(f"Unknown command {command!r}")
     return 2
+
+
+def _chat(config: Any, args: argparse.Namespace) -> int:
+    session_id = args.session_id or f"cli-chat-{uuid.uuid4().hex}"
+    route = args.route
+    router = AgentRouter(config)
+    runner = AgentRunner(config, router)
+
+    print("Agent-Hub Codex Chat")
+    print(f"Session: {session_id}")
+    print(f"Route: {route}")
+    print("Commands: /exit, /clear, /route <name>, /status")
+    print()
+
+    while True:
+        try:
+            prompt = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+
+        if not prompt:
+            continue
+        lowered = prompt.lower()
+        if lowered in {"/exit", "/quit", "exit", "quit"}:
+            return 0
+        if lowered == "/clear":
+            session_id = f"cli-chat-{uuid.uuid4().hex}"
+            print(f"Started a new session: {session_id}")
+            continue
+        if lowered == "/status":
+            print(f"Session: {session_id}")
+            print(f"Route: {route}")
+            print(f"free_only: {config.free_only}")
+            print(f"allow_shell_tools: {args.allow_shell_tools}")
+            continue
+        if lowered.startswith("/route "):
+            route = prompt.split(None, 1)[1].strip()
+            print(f"Route: {route}")
+            continue
+
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "mode": "route" if args.no_agent else "agent",
+            "route": route,
+            "task": _codex_chat_task(prompt),
+            "use_session_history": True,
+            "allow_shell_tools": args.allow_shell_tools,
+            "agent_max_steps": args.max_steps,
+            "workspace_dir": str(config.workspace_dir),
+            "metadata": {"source": "cli-chat"},
+        }
+        request = request_from_payload(payload)
+        try:
+            response = router.route(request) if args.no_agent else runner.run(request)
+        except RouterError as exc:
+            _print_route_error(exc)
+            print()
+            continue
+
+        print()
+        print(f"codex> {response.text}")
+        print()
+
+
+def _codex_chat_task(prompt: str) -> str:
+    return "\n".join(
+        [
+            "Chat with the user as a careful Codex-style local coding assistant.",
+            "Be conversational and concise. Use workspace tools when inspection or edits are useful.",
+            "",
+            prompt,
+        ]
+    )
 
 
 def _wants_agent_mode(payload: dict) -> bool:

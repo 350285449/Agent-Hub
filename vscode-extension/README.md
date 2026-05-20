@@ -5,7 +5,13 @@ This extension connects VS Code to the local Agent-Hub server in this repo.
 ## Run From This GitHub Repo
 
 1. Open the repository root in VS Code.
-2. Make sure the Python package works:
+2. Install the Python package and starter config:
+
+   ```powershell
+   .\install.ps1
+   ```
+
+   Or, if you do not want the helper script, make sure the Python package works:
 
    ```powershell
    python -m agent_hub doctor
@@ -17,6 +23,7 @@ This extension connects VS Code to the local Agent-Hub server in this repo.
 5. In the Extension Development Host, open the Agent-Hub repository folder.
 6. Run commands from the Command Palette:
 
+   - `Agent Hub: Open Codex Chat`
    - `Agent Hub: Start Server`
    - `Agent Hub: Show Status`
    - `Agent Hub: Ask Agent`
@@ -31,7 +38,7 @@ from your workspace folder when `agentHub.autoStart` is enabled.
 ## Settings
 
 - `agentHub.serverUrl`: Agent-Hub URL. Default: `http://127.0.0.1:8787`
-- `agentHub.pythonPath`: Python executable. Default: `python`
+- `agentHub.pythonPath`: Python executable. Default: `python`; auto-detects workspace `.venv` first.
 - `agentHub.configPath`: config file path. Default: `agent-hub.config.json`
 - `agentHub.route`: route sent to Agent-Hub. Default: `coding`
 - `agentHub.codingAgentRoute`: route used by `Agent Hub: Run Local Coding Agent`. Default: `local-agent`
@@ -54,7 +61,14 @@ depending on your `agent-hub.config.json`.
 `free_only` remains enabled by default, so cloud providers in the example config
 stay skipped unless you intentionally enable them later.
 
-`Agent Hub: Run Local Coding Agent` is the Codex-like path. It uses the
+`Agent Hub: Open Codex Chat` is the easiest Codex-like path. It opens a real
+chat view, reuses one session for conversation history, can include the current
+selection, and auto-starts the local Agent-Hub server when `agentHub.autoStart`
+is enabled.
+It needs one local OpenAI-compatible model online, such as Ollama or LM Studio,
+unless you intentionally opt in to a cloud provider.
+
+`Agent Hub: Run Local Coding Agent` is the one-shot Codex-like path. It uses the
 `local-agent` route, which points only at free local OpenAI-compatible model
 servers such as Ollama, LM Studio, LocalAI, vLLM, or your configured
 `custom-local` endpoint. It gives the agent workspace tools for listing,

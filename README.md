@@ -24,6 +24,25 @@ through API keys or local OpenAI-compatible servers.
 
 ## Quick Start
 
+Fresh clone on Windows:
+
+```powershell
+.\install.ps1
+.\start-agent-hub.ps1
+```
+
+Then open a second terminal for an interactive Codex-style chat:
+
+```powershell
+.\.venv\Scripts\agent-hub.exe chat --allow-shell-tools
+```
+
+Or use the VS Code extension command `Agent Hub: Open Codex Chat`.
+Codex chat needs one local OpenAI-compatible model online, such as Ollama or
+LM Studio, unless you opt in to a cloud provider.
+
+Manual start without installing into a virtual environment:
+
 ```powershell
 python -m agent_hub serve --watch-inbox
 ```
@@ -82,6 +101,7 @@ code vscode-extension
 In the `vscode-extension` window, press `F5` to launch an Extension Development
 Host. In that new VS Code window, open this repository folder and use:
 
+- `Agent Hub: Open Codex Chat`
 - `Agent Hub: Start Server`
 - `Agent Hub: Show Status`
 - `Agent Hub: Ask Agent`
@@ -185,6 +205,12 @@ Agent` in VS Code or:
 
 ```powershell
 python -m agent_hub agent --allow-shell-tools "inspect the repo and fix the failing tests"
+```
+
+For an ongoing chat session that keeps conversation history, use:
+
+```powershell
+python -m agent_hub chat --allow-shell-tools
 ```
 
 The dedicated `local-agent` route uses only free local model endpoints, so

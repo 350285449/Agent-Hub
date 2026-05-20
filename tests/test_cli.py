@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_hub.cli import main
 
@@ -91,6 +92,37 @@ class CliTests(unittest.TestCase):
             self.assertEqual(chatgpt["model"], "gpt-test")
             cloud_route = next(route for route in data["routes"] if route["name"] == "cloud-agent")
             self.assertEqual(cloud_route["agents"][0], "chatgpt")
+
+    def test_chat_runs_one_turn_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "state_dir": str(Path(tmp) / "state"),
+                        "default_route": ["echo"],
+                        "routes": [{"name": "local-agent", "agents": ["echo"]}],
+                        "agents": [
+                            {
+                                "name": "echo",
+                                "provider": "echo",
+                                "model": "local-echo",
+                                "free": True,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+
+            with patch("builtins.input", side_effect=["hello", "/exit"]), redirect_stdout(buffer):
+                code = main(["--config", str(path), "chat"])
+
+            self.assertEqual(code, 0)
+            output = buffer.getvalue()
+            self.assertIn("Agent-Hub Codex Chat", output)
+            self.assertIn("codex>", output)
 
 
 if __name__ == "__main__":
