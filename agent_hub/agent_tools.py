@@ -13,6 +13,7 @@ from .models import HubRequest
 SKIPPED_DIRS = {".agent-hub", ".git", ".hg", ".svn", ".venv", "__pycache__", "node_modules"}
 MAX_FILE_CHARS = 80_000
 MAX_TOOL_OUTPUT_CHARS = 20_000
+MAX_REPLACE_CHARS = 200_000
 
 
 class ToolError(Exception):
@@ -36,23 +37,28 @@ class AgentToolbox:
 
     def instructions(self) -> str:
         tools = [
-            "list_files: list files under a workspace path.",
-            "read_file: read a UTF-8 text file.",
-            "search_files: search text files for a query.",
-            "write_file: create, overwrite, or append a UTF-8 text file.",
+            'list_files args: {"path":".","pattern":"*","recursive":true,"limit":200}',
+            'read_file args: {"path":"README.md","start_line":1,"line_count":200}',
+            'search_files args: {"query":"needle","path":".","pattern":"*.py","limit":50}',
+            'write_file args: {"path":"file.txt","content":"full file content","append":false}',
+            'replace_in_file args: {"path":"file.txt","old":"exact text","new":"replacement","expected_replacements":1}',
         ]
         if self.allow_shell:
-            tools.append("run_command: run a shell command from the workspace.")
+            tools.append('run_command args: {"command":"python -m unittest","cwd":".","timeout_seconds":120}')
         else:
             tools.append("run_command: unavailable unless allow_shell_tools is true.")
 
         return "\n".join(
             [
-                "You are an autonomous local workspace agent.",
-                "Use tools when you need to inspect or change files. Do not invent file contents you have not inspected.",
+                "You are an autonomous local coding agent running inside the user's workspace.",
+                "Work like a careful repository agent: inspect before editing, keep changes scoped, and verify when possible.",
+                "Use tools for file inspection and edits. Do not invent file contents you have not inspected.",
+                "Prefer replace_in_file for targeted edits. Use write_file only when creating a file or rewriting a file you have read.",
+                "If shell tools are enabled, run focused checks after meaningful code changes.",
+                "Never read or write outside the workspace root.",
                 "Reply with exactly one JSON object and no Markdown.",
                 'To use a tool: {"action":"tool","tool":"read_file","args":{"path":"README.md"}}',
-                'When finished: {"action":"final","answer":"your final answer"}',
+                'When finished: {"action":"final","answer":"brief summary, changed files, and verification"}',
                 f"Workspace root: {self.root}",
                 "Available tools:",
                 *[f"- {tool}" for tool in tools],
@@ -70,6 +76,8 @@ class AgentToolbox:
                 result = self._search_files(args)
             elif name == "write_file":
                 result = self._write_file(args)
+            elif name == "replace_in_file":
+                result = self._replace_in_file(args)
             elif name == "run_command":
                 result = self._run_command(args)
             else:
@@ -105,14 +113,29 @@ class AgentToolbox:
             raise ToolError(f"Not a file: {self._relative(path)}")
         max_chars = _positive_int(args.get("max_chars"), default=MAX_FILE_CHARS, maximum=MAX_FILE_CHARS)
         text = path.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines(keepends=True)
+        total_lines = len(lines)
+        start_line = _positive_int(args.get("start_line"), default=1, maximum=max(1, total_lines))
+        line_count_value = args.get("line_count")
+        if line_count_value is not None:
+            line_count = _positive_int(line_count_value, default=200, maximum=5000)
+            selected = lines[start_line - 1 : start_line - 1 + line_count]
+            text = "".join(selected)
+        else:
+            selected = lines[start_line - 1 :]
+            text = "".join(selected)
         truncated = len(text) > max_chars
         if truncated:
             text = text[:max_chars]
+        returned_lines = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
         return {
             "path": self._relative(path),
             "content": text,
             "truncated": truncated,
             "chars": len(text),
+            "start_line": start_line,
+            "end_line": min(total_lines, start_line + max(0, returned_lines - 1)),
+            "total_lines": total_lines,
         }
 
     def _search_files(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -169,6 +192,36 @@ class AgentToolbox:
         else:
             path.write_text(content, encoding="utf-8")
         return {"path": self._relative(path), "chars": len(content), "append": append}
+
+    def _replace_in_file(self, args: dict[str, Any]) -> dict[str, Any]:
+        path = self._resolve_required_path(args, "path")
+        if not path.is_file():
+            raise ToolError(f"Not a file: {self._relative(path)}")
+        old = args.get("old")
+        new = args.get("new")
+        if not isinstance(old, str) or not old:
+            raise ToolError("replace_in_file requires non-empty old text")
+        if not isinstance(new, str):
+            raise ToolError("replace_in_file requires string new text")
+        if len(old) > MAX_REPLACE_CHARS or len(new) > MAX_REPLACE_CHARS:
+            raise ToolError("replace_in_file replacement is too large")
+
+        expected = args.get("expected_replacements", 1)
+        expected_count = _positive_int(expected, default=1, maximum=100)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        actual_count = text.count(old)
+        if actual_count != expected_count:
+            raise ToolError(
+                f"Expected {expected_count} replacement(s), found {actual_count}. "
+                "Read the file and provide a more exact old string."
+            )
+        updated = text.replace(old, new, expected_count)
+        path.write_text(updated, encoding="utf-8")
+        return {
+            "path": self._relative(path),
+            "replacements": expected_count,
+            "chars": len(updated),
+        }
 
     def _run_command(self, args: dict[str, Any]) -> dict[str, Any]:
         if not self.allow_shell:

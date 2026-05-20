@@ -1,8 +1,7 @@
 .vscode/**
 .vscode-test/**
 node_modules/**
-out/**
-src/**
 *.vsix
-*.log
-README.local.md
+npm-debug.log
+yarn.lock
+pnpm-lock.yaml

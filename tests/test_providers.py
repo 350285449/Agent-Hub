@@ -5,7 +5,13 @@ from unittest.mock import patch
 
 from agent_hub.config import AgentConfig
 from agent_hub.models import HubRequest
-from agent_hub.providers import GeminiProvider, create_provider, _provider_error_from_http
+from agent_hub.providers import (
+    GeminiProvider,
+    LocalResearchProvider,
+    create_provider,
+    _join_url,
+    _provider_error_from_http,
+)
 
 
 class ProviderTests(unittest.TestCase):
@@ -24,6 +30,12 @@ class ProviderTests(unittest.TestCase):
         )
 
         self.assertFalse(error.retryable)
+
+    def test_openai_compatible_base_url_may_include_v1(self) -> None:
+        self.assertEqual(
+            _join_url("http://127.0.0.1:11434/v1", "/v1/chat/completions"),
+            "http://127.0.0.1:11434/v1/chat/completions",
+        )
 
     def test_provider_aliases_are_accepted(self) -> None:
         self.assertEqual(
@@ -49,6 +61,16 @@ class ProviderTests(unittest.TestCase):
                 AgentConfig(name="gemini", provider="gemini", model="model")
             ).__class__.__name__,
             "GeminiProvider",
+        )
+        self.assertEqual(
+            create_provider(
+                AgentConfig(
+                    name="local-research",
+                    provider="local-research",
+                    model="local-extractive-research",
+                )
+            ).__class__.__name__,
+            "LocalResearchProvider",
         )
 
     def test_gemini_provider_translates_request_and_response(self) -> None:
@@ -95,6 +117,38 @@ class ProviderTests(unittest.TestCase):
                 "/v1beta/models/gemini-test:generateContent"
             )
         )
+
+    def test_local_research_provider_builds_cited_answer(self) -> None:
+        agent = AgentConfig(
+            name="local-research",
+            provider="local-research",
+            model="local-extractive-research",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "latest AI news"}],
+            raw={"query": "AI news", "max_sources": 1},
+        )
+
+        with (
+            patch("agent_hub.providers._search_with_duckduckgo") as search,
+            patch("agent_hub.providers._get_url_text") as get_url_text,
+        ):
+            search.return_value = [
+                {"title": "AI source", "url": "https://example.com/a", "snippet": ""}
+            ]
+            get_url_text.return_value = (
+                "text/html",
+                "<html><body><p>AI news today focuses on local models and open tooling.</p></body></html>",
+            )
+            result = LocalResearchProvider(agent).complete(request)
+
+        self.assertIn("Local research for: AI news", result.text)
+        self.assertIn("AI news today", result.text)
+        self.assertEqual(result.citations, ["https://example.com/a"])
+        self.assertEqual(result.search_results[0]["title"], "AI source")
+        search.assert_called_once()
+        get_url_text.assert_called_once()
 
 
 if __name__ == "__main__":

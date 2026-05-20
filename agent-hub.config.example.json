@@ -10,15 +10,45 @@
   "allow_shell_tools": false,
   "free_only": true,
   "include_raw_responses": false,
-  "default_route": ["custom-local", "echo"],
+  "expose_routing_details": false,
+  "default_route": ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
   "routes": [
     {
       "name": "coding",
       "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
-      "agents": ["custom-local", "echo"]
+      "agents": ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+    },
+    {
+      "name": "local-agent",
+      "keywords": ["agent", "workspace", "edit", "implement"],
+      "agents": ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai"]
+    },
+    {
+      "name": "hybrid-agent",
+      "keywords": [],
+      "agents": ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "chatgpt", "claude", "gemini"]
+    },
+    {
+      "name": "cloud-agent",
+      "keywords": [],
+      "agents": ["chatgpt", "claude", "gemini", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai"]
+    },
+    {
+      "name": "research",
+      "keywords": ["research", "search", "latest", "sources", "web", "news"],
+      "agents": ["local-research", "custom-local", "echo"]
     }
   ],
   "agents": [
+    {
+      "name": "local-research",
+      "provider": "local-research",
+      "model": "local-extractive-research",
+      "free": true,
+      "context_window": 1000000,
+      "timeout_seconds": 20,
+      "cooldown_seconds": 5
+    },
     {
       "name": "custom-local",
       "provider": "openai-compatible",
@@ -29,6 +59,61 @@
       "context_window": 8192,
       "timeout_seconds": 120,
       "cooldown_seconds": 20
+    },
+    {
+      "name": "ollama-qwen-coder",
+      "provider": "openai-compatible",
+      "model": "qwen2.5-coder:7b",
+      "base_url": "http://127.0.0.1:11434",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 32768,
+      "timeout_seconds": 30,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "ollama-qwen3",
+      "provider": "openai-compatible",
+      "model": "qwen3:8b",
+      "base_url": "http://127.0.0.1:11434",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 32768,
+      "timeout_seconds": 30,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "lm-studio",
+      "provider": "openai-compatible",
+      "model": "local-model",
+      "base_url": "http://127.0.0.1:1234",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 32768,
+      "timeout_seconds": 30,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "localai",
+      "provider": "openai-compatible",
+      "model": "llama-3.2-1b-instruct:q4_k_m",
+      "base_url": "http://127.0.0.1:8080",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 8192,
+      "timeout_seconds": 30,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "vllm",
+      "provider": "openai-compatible",
+      "model": "local-model",
+      "base_url": "http://127.0.0.1:8000",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 8192,
+      "timeout_seconds": 30,
+      "cooldown_seconds": 10
     },
     {
       "name": "echo",

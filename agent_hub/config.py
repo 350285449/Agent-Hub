@@ -65,6 +65,7 @@ class HubConfig:
     routes: list[RouteRule] = field(default_factory=list)
     agents: dict[str, AgentConfig] = field(default_factory=dict)
     include_raw_responses: bool = False
+    expose_routing_details: bool = False
 
     def ensure_dirs(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -92,6 +93,15 @@ def free_local_config() -> HubConfig:
     local_timeout = _env_float("AGENT_HUB_LOCAL_TIMEOUT_SECONDS", 15.0)
 
     agents = {
+        "local-research": AgentConfig(
+            name="local-research",
+            provider="local-research",
+            model="local-extractive-research",
+            free=True,
+            timeout_seconds=20.0,
+            cooldown_seconds=5.0,
+            context_window=1_000_000,
+        ),
         "custom-local": AgentConfig(
             name="custom-local",
             provider="openai-compatible",
@@ -101,6 +111,61 @@ def free_local_config() -> HubConfig:
             timeout_seconds=local_timeout,
             max_tokens=local_max_tokens,
             cooldown_seconds=20.0,
+            context_window=local_context_window,
+        ),
+        "ollama-qwen-coder": AgentConfig(
+            name="ollama-qwen-coder",
+            provider="openai-compatible",
+            model=os.environ.get("AGENT_HUB_OLLAMA_CODER_MODEL", "qwen2.5-coder:7b"),
+            base_url=os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+            free=True,
+            timeout_seconds=30.0,
+            max_tokens=4096,
+            cooldown_seconds=10.0,
+            context_window=32_768,
+        ),
+        "ollama-qwen3": AgentConfig(
+            name="ollama-qwen3",
+            provider="openai-compatible",
+            model=os.environ.get("AGENT_HUB_OLLAMA_GENERAL_MODEL", "qwen3:8b"),
+            base_url=os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+            free=True,
+            timeout_seconds=30.0,
+            max_tokens=4096,
+            cooldown_seconds=10.0,
+            context_window=32_768,
+        ),
+        "lm-studio": AgentConfig(
+            name="lm-studio",
+            provider="openai-compatible",
+            model=os.environ.get("AGENT_HUB_LM_STUDIO_MODEL", "local-model"),
+            base_url=os.environ.get("AGENT_HUB_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234"),
+            free=True,
+            timeout_seconds=30.0,
+            max_tokens=4096,
+            cooldown_seconds=10.0,
+            context_window=32_768,
+        ),
+        "localai": AgentConfig(
+            name="localai",
+            provider="openai-compatible",
+            model=os.environ.get("AGENT_HUB_LOCALAI_MODEL", "llama-3.2-1b-instruct:q4_k_m"),
+            base_url=os.environ.get("AGENT_HUB_LOCALAI_BASE_URL", "http://127.0.0.1:8080"),
+            free=True,
+            timeout_seconds=30.0,
+            max_tokens=4096,
+            cooldown_seconds=10.0,
+            context_window=8192,
+        ),
+        "vllm": AgentConfig(
+            name="vllm",
+            provider="openai-compatible",
+            model=os.environ.get("AGENT_HUB_VLLM_MODEL", local_model),
+            base_url=os.environ.get("AGENT_HUB_VLLM_BASE_URL", "http://127.0.0.1:8000"),
+            free=True,
+            timeout_seconds=30.0,
+            max_tokens=4096,
+            cooldown_seconds=10.0,
             context_window=local_context_window,
         ),
         "echo": AgentConfig(
@@ -117,16 +182,45 @@ def free_local_config() -> HubConfig:
         agent_max_steps=8,
         allow_shell_tools=False,
         free_only=True,
-        default_route=["custom-local", "echo"],
+        default_route=[*free_local_agent_names(), "echo"],
         routes=[
             RouteRule(
                 name="coding",
                 keywords=["code", "bug", "fix", "refactor", "test", "repo"],
-                agents=["custom-local", "echo"],
+                agents=[*free_local_agent_names(), "echo"],
+            ),
+            RouteRule(
+                name="local-agent",
+                keywords=["agent", "workspace", "edit", "implement"],
+                agents=free_local_agent_names(),
+            ),
+            RouteRule(
+                name="hybrid-agent",
+                keywords=[],
+                agents=[*free_local_agent_names(), "chatgpt", "claude", "gemini"],
+            ),
+            RouteRule(
+                name="cloud-agent",
+                keywords=[],
+                agents=["chatgpt", "claude", "gemini", *free_local_agent_names()],
+            ),
+            RouteRule(
+                name="research",
+                keywords=["research", "search", "latest", "sources", "web", "news"],
+                agents=["local-research", "custom-local", "echo"],
             )
         ],
         agents=agents,
+        expose_routing_details=False,
     )
+
+
+def free_local_agent_names() -> list[str]:
+    return ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai"]
+
+
+def cloud_agent_names() -> list[str]:
+    return ["chatgpt", "claude", "gemini"]
 
 
 def config_from_dict(raw: dict[str, Any]) -> HubConfig:
@@ -171,6 +265,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         routes=routes,
         agents=agents,
         include_raw_responses=bool(raw.get("include_raw_responses", False)),
+        expose_routing_details=bool(raw.get("expose_routing_details", False)),
     )
 
 
@@ -180,6 +275,8 @@ def is_free_agent(agent: AgentConfig) -> bool:
 
     provider = agent.provider.lower()
     if provider == "echo":
+        return True
+    if normalize_provider(provider) == "local-research":
         return True
     if normalize_provider(provider) != "openai-compatible":
         return False
@@ -194,6 +291,8 @@ def normalize_provider(provider: str) -> str:
         return "anthropic"
     if lowered in {"google", "google-gemini", "generative-language"}:
         return "gemini"
+    if lowered in {"local-research", "research", "local-web", "web-local"}:
+        return "local-research"
     if lowered in {"gemma", "gema", "local", "custom", "custom-local", "local-openai"}:
         return "openai-compatible"
     return lowered
@@ -212,6 +311,7 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "allow_shell_tools": config.allow_shell_tools,
         "free_only": config.free_only,
         "include_raw_responses": config.include_raw_responses,
+        "expose_routing_details": config.expose_routing_details,
         "default_route": config.default_route,
         "routes": [
             {

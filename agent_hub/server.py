@@ -113,16 +113,15 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             else:
                 response = self.server.router.route(request)
         except RouterError as exc:
-            self._send_json(
-                {
-                    "error": {
-                        "message": str(exc),
-                        "type": "agent_hub_route_error",
-                    },
-                    "failover": [event.to_dict() for event in exc.failover],
+            error_body: dict[str, Any] = {
+                "error": {
+                    "message": str(exc),
+                    "type": "agent_hub_route_error",
                 },
-                status=503,
-            )
+            }
+            if self.server.config.expose_routing_details:
+                error_body["failover"] = [event.to_dict() for event in exc.failover]
+            self._send_json(error_body, status=503)
             return
 
         if request.stream and response_shape == "openai-chat":
@@ -132,13 +131,26 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_anthropic_stream(response)
             return
         if response_shape == "openai-chat":
-            self._send_json(openai_chat_response(response))
+            self._send_json(
+                openai_chat_response(
+                    response,
+                    include_routing_details=self.server.config.expose_routing_details,
+                )
+            )
             return
         if response_shape == "anthropic-messages":
-            self._send_json(anthropic_message_response(response))
+            self._send_json(
+                anthropic_message_response(
+                    response,
+                    include_routing_details=self.server.config.expose_routing_details,
+                )
+            )
             return
         self._send_json(
-            response.to_native_dict(include_raw=self.server.config.include_raw_responses)
+            response.to_native_dict(
+                include_raw=self.server.config.include_raw_responses,
+                include_routing_details=self.server.config.expose_routing_details,
+            )
         )
 
     def _read_json(self) -> dict[str, Any]:
@@ -170,7 +182,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        for event in openai_stream_events(response):
+        for event in openai_stream_events(
+            response,
+            include_routing_details=self.server.config.expose_routing_details,
+        ):
             data = event if isinstance(event, str) else json.dumps(event, ensure_ascii=False)
             self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
         self.wfile.flush()
@@ -180,7 +195,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        for name, event in anthropic_stream_events(response):
+        for name, event in anthropic_stream_events(
+            response,
+            include_routing_details=self.server.config.expose_routing_details,
+        ):
             self.wfile.write(f"event: {name}\n".encode("utf-8"))
             self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
         self.wfile.flush()

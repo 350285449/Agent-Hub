@@ -5,6 +5,16 @@
   "version": "0.1.0",
   "publisher": "agent-hub",
   "license": "MIT",
+  "keywords": [
+    "ai",
+    "agent",
+    "local-ai",
+    "ollama",
+    "coding-agent"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
   "engines": {
     "vscode": "^1.88.0"
   },
@@ -17,13 +27,20 @@
     "onCommand:agentHub.stopServer",
     "onCommand:agentHub.status",
     "onCommand:agentHub.ask",
+    "onCommand:agentHub.codeAgent",
+    "onCommand:agentHub.research",
     "onCommand:agentHub.explainSelection",
     "onCommand:agentHub.explainFile",
     "onCommand:agentHub.openOutput"
   ],
   "main": "./extension.js",
   "scripts": {
-    "check": "node --check extension.js"
+    "check": "node --check extension.js",
+    "package": "npx @vscode/vsce package --allow-missing-repository",
+    "publish": "npx @vscode/vsce publish --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.9.1"
   },
   "contributes": {
     "commands": [
@@ -42,6 +59,14 @@
       {
         "command": "agentHub.ask",
         "title": "Agent Hub: Ask Agent"
+      },
+      {
+        "command": "agentHub.codeAgent",
+        "title": "Agent Hub: Run Local Coding Agent"
+      },
+      {
+        "command": "agentHub.research",
+        "title": "Agent Hub: Research Web"
       },
       {
         "command": "agentHub.explainSelection",
@@ -78,6 +103,36 @@
           "type": "string",
           "default": "coding",
           "description": "Default Agent-Hub route used by VS Code commands."
+        },
+        "agentHub.researchRoute": {
+          "type": "string",
+          "default": "research",
+          "description": "Agent-Hub route used by the Research Web command."
+        },
+        "agentHub.codingAgentRoute": {
+          "type": "string",
+          "default": "local-agent",
+          "description": "Agent-Hub route used by the Run Local Coding Agent command."
+        },
+        "agentHub.agentProviderMode": {
+          "type": "string",
+          "enum": [
+            "local",
+            "hybrid",
+            "cloud"
+          ],
+          "default": "local",
+          "description": "Provider mode for the local coding agent. Local uses only local models; hybrid tries local then enabled cloud providers; cloud tries enabled cloud providers first."
+        },
+        "agentHub.agentMaxSteps": {
+          "type": "number",
+          "default": 20,
+          "description": "Maximum tool steps for local agent requests."
+        },
+        "agentHub.allowShellTools": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the local coding agent command to run shell commands in the workspace."
         },
         "agentHub.maxTokens": {
           "type": "number",

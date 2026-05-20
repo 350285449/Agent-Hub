@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_hub.agent_tools import AgentToolbox
 from agent_hub.agent_runner import AgentRunner
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.models import HubRequest, ProviderResult
@@ -57,6 +58,8 @@ class AgentRunnerTests(unittest.TestCase):
             steps = response.raw["agent_hub"]["steps"]
             self.assertEqual(steps[0]["tool"], "read_file")
             self.assertIn("hello from a local file", steps[0]["result"]["result"]["content"])
+            self.assertNotIn("agent_hub", response.to_native_dict())
+            self.assertIn("agent_hub", response.to_native_dict(include_routing_details=True))
 
     def test_file_tools_reject_paths_outside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,6 +107,43 @@ class AgentRunnerTests(unittest.TestCase):
             result = response.raw["agent_hub"]["steps"][0]["result"]
             self.assertFalse(result["ok"])
             self.assertIn("escapes workspace", result["error"])
+
+    def test_replace_in_file_requires_exact_replacement_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app.py"
+            target.write_text("print('old')\n", encoding="utf-8")
+            config = HubConfig(workspace_dir=root)
+            toolbox = AgentToolbox(
+                config,
+                HubRequest(session_id="agent", messages=[]),
+            )
+
+            result = toolbox.run(
+                "replace_in_file",
+                {
+                    "path": "app.py",
+                    "old": "print('old')",
+                    "new": "print('new')",
+                    "expected_replacements": 1,
+                },
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "print('new')\n")
+
+            failed = toolbox.run(
+                "replace_in_file",
+                {
+                    "path": "app.py",
+                    "old": "missing",
+                    "new": "x",
+                    "expected_replacements": 1,
+                },
+            )
+
+            self.assertFalse(failed["ok"])
+            self.assertIn("Expected 1 replacement", failed["error"])
 
 
 if __name__ == "__main__":

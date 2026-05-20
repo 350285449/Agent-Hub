@@ -70,6 +70,19 @@ class AgentRouter:
             tried_any = True
             try:
                 result = self.provider_factory(agent).complete(effective_request)
+                if _token_limit_finish_reason(result.finish_reason) and agent != candidates[-1]:
+                    failover.append(
+                        FailoverEvent(
+                            agent=agent.name,
+                            provider=agent.provider,
+                            model=agent.model,
+                            reason=(
+                                "Agent stopped because it hit a token limit; "
+                                "retrying with the next configured agent"
+                            ),
+                        )
+                    )
+                    continue
                 response = self._response_from_result(
                     request_id=request_id,
                     request=effective_request,
@@ -162,11 +175,16 @@ class AgentRouter:
             agent=agent.name,
             provider=agent.provider,
             model=result.model or agent.model,
+            public_model=_public_model_name(request),
             text=result.text,
             usage=result.usage,
             raw=result.raw,
             finish_reason=result.finish_reason,
             failover=list(failover),
+            citations=result.citations,
+            search_results=result.search_results,
+            images=result.images,
+            related_questions=result.related_questions,
         )
 
     def _is_on_cooldown(self, agent_name: str) -> bool:
@@ -226,3 +244,19 @@ def _non_negative_int(value: object, default: int) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return default
+
+
+def _public_model_name(request: HubRequest) -> str:
+    raw_model = request.raw.get("model") if isinstance(request.raw, dict) else None
+    if isinstance(raw_model, str) and raw_model.strip():
+        return raw_model.strip()
+    if request.route:
+        return request.route
+    return "agent-hub-local"
+
+
+def _token_limit_finish_reason(reason: str | None) -> bool:
+    if not reason:
+        return False
+    normalized = reason.lower()
+    return normalized in {"length", "max_tokens", "max_output_tokens", "token_limit"}

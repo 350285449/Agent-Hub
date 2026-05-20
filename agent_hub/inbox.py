@@ -53,7 +53,12 @@ class InboxProcessor:
                 response = self.agent_runner.run(request)
             else:
                 response = self.router.route(request)
-            body = _shape_response(response_shape, response, self.config.include_raw_responses)
+            body = _shape_response(
+                response_shape,
+                response,
+                self.config.include_raw_responses,
+                self.config.expose_routing_details,
+            )
             output_path = self.config.outbox_dir / f"{path.stem}.response.json"
             output_path.write_text(
                 json.dumps(body, indent=2, ensure_ascii=False),
@@ -61,7 +66,7 @@ class InboxProcessor:
             )
         except (RouterError, ValueError, json.JSONDecodeError) as exc:
             body = {"error": str(exc)}
-            if isinstance(exc, RouterError):
+            if isinstance(exc, RouterError) and self.config.expose_routing_details:
                 body["failover"] = [event.to_dict() for event in exc.failover]
             output_path = self.config.outbox_dir / f"{path.stem}.error.json"
             output_path.write_text(
@@ -81,13 +86,21 @@ def _normalized_shape(value: Any) -> str:
     return "native"
 
 
-def _shape_response(response_shape: Any, response: Any, include_raw: bool) -> dict[str, Any]:
+def _shape_response(
+    response_shape: Any,
+    response: Any,
+    include_raw: bool,
+    include_routing_details: bool,
+) -> dict[str, Any]:
     shape = _normalized_shape(response_shape)
     if shape == "openai-chat":
-        return openai_chat_response(response)
+        return openai_chat_response(response, include_routing_details=include_routing_details)
     if shape == "anthropic-messages":
-        return anthropic_message_response(response)
-    return response.to_native_dict(include_raw=include_raw)
+        return anthropic_message_response(response, include_routing_details=include_routing_details)
+    return response.to_native_dict(
+        include_raw=include_raw,
+        include_routing_details=include_routing_details,
+    )
 
 
 def _wants_agent_mode(payload: dict[str, Any]) -> bool:

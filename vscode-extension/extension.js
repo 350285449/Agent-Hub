@@ -18,6 +18,8 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.stopServer", stopServer),
     vscode.commands.registerCommand("agentHub.status", showStatus),
     vscode.commands.registerCommand("agentHub.ask", askAgent),
+    vscode.commands.registerCommand("agentHub.codeAgent", runCodingAgent),
+    vscode.commands.registerCommand("agentHub.research", researchWeb),
     vscode.commands.registerCommand("agentHub.explainSelection", explainSelection),
     vscode.commands.registerCommand("agentHub.explainFile", explainFile),
     vscode.commands.registerCommand("agentHub.openOutput", () => output.show())
@@ -130,6 +132,63 @@ async function askAgent() {
   await sendAgentRequest({ task, context: editorContext({ preferSelection: true }) });
 }
 
+async function runCodingAgent() {
+  const task = await vscode.window.showInputBox({
+    title: "Run Local Coding Agent",
+    prompt: "What should the local agent change or investigate in this workspace?",
+    ignoreFocusOut: true
+  });
+  if (!task) {
+    return;
+  }
+  const config = settings();
+  const workspace = workspaceRoot();
+  const route = codingAgentRoute(config);
+  await sendAgentRequest({
+    task: [
+      "Work as a local coding agent in this workspace.",
+      "Inspect files before editing, keep changes scoped, and verify if possible.",
+      "",
+      task
+    ].join("\n"),
+    context: selectedEditorContext(),
+    route,
+    agentMode: true,
+    extra: {
+      allow_shell_tools: config.allowShellTools,
+      agent_max_steps: config.agentMaxSteps,
+      workspace_dir: workspace || "."
+    }
+  });
+}
+
+async function researchWeb() {
+  const query = await vscode.window.showInputBox({
+    title: "Research with Agent Hub",
+    prompt: "What should Agent Hub research?",
+    ignoreFocusOut: true
+  });
+  if (!query) {
+    return;
+  }
+  const config = settings();
+  await sendAgentRequest({
+    task: [
+      "Answer this as a concise web research assistant.",
+      "Use current sources, cite key claims, and include links when available.",
+      "",
+      query
+    ].join("\n"),
+    context: selectedEditorContext(),
+    route: config.researchRoute,
+    agentMode: false,
+    extra: {
+      query,
+      max_sources: 5
+    }
+  });
+}
+
 async function explainSelection() {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.selection.isEmpty) {
@@ -155,7 +214,7 @@ async function explainFile() {
   });
 }
 
-async function sendAgentRequest({ task, context }) {
+async function sendAgentRequest({ task, context, route, agentMode = true, extra = {} }) {
   const config = settings();
   if (!(await isServerOnline())) {
     if (config.autoStart) {
@@ -168,9 +227,10 @@ async function sendAgentRequest({ task, context }) {
   }
 
   const body = {
+    ...extra,
     session_id: `vscode-${Date.now()}`,
-    mode: "agent",
-    route: config.route,
+    mode: agentMode ? "agent" : "route",
+    route: route || config.route,
     task,
     context,
     max_tokens: config.maxTokens,
@@ -183,10 +243,12 @@ async function sendAgentRequest({ task, context }) {
   output.appendLine("");
   output.appendLine(`> ${task}`);
   try {
-    const response = await requestJson("POST", "/v1/agent", body);
+    const response = await requestJson("POST", agentMode ? "/v1/agent" : "/v1/route", body);
     const text = response && response.message ? response.message.content : JSON.stringify(response, null, 2);
     output.appendLine("");
     output.appendLine(text || "(empty response)");
+    appendAgentTrace(response);
+    appendResearchMetadata(response);
     output.appendLine("");
     if (Array.isArray(response.failover) && response.failover.length) {
       output.appendLine("Failover:");
@@ -211,6 +273,14 @@ function editorContext({ preferSelection }) {
   return contextForDocument(editor.document, text);
 }
 
+function selectedEditorContext() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.selection.isEmpty) {
+    return "";
+  }
+  return contextForDocument(editor.document, editor.document.getText(editor.selection));
+}
+
 function contextForDocument(document, text) {
   const relative = vscode.workspace.asRelativePath(document.uri, false);
   const language = document.languageId || "plaintext";
@@ -229,9 +299,95 @@ function settings() {
     pythonPath: config.get("pythonPath", "python"),
     configPath: config.get("configPath", "agent-hub.config.json"),
     route: config.get("route", "coding"),
+    researchRoute: config.get("researchRoute", "research"),
+    codingAgentRoute: config.get("codingAgentRoute", "local-agent"),
+    agentProviderMode: config.get("agentProviderMode", "local"),
+    agentMaxSteps: config.get("agentMaxSteps", 20),
+    allowShellTools: config.get("allowShellTools", true),
     maxTokens: config.get("maxTokens", 1200),
     autoStart: config.get("autoStart", true)
   };
+}
+
+function codingAgentRoute(config) {
+  if (config.agentProviderMode === "cloud") {
+    return "cloud-agent";
+  }
+  if (config.agentProviderMode === "hybrid") {
+    return "hybrid-agent";
+  }
+  return config.codingAgentRoute || "local-agent";
+}
+
+function appendAgentTrace(response) {
+  const metadata = response && response.agent_hub;
+  if (!metadata || !Array.isArray(metadata.steps) || !metadata.steps.length) {
+    return;
+  }
+  output.appendLine("");
+  output.appendLine("Tools:");
+  for (const step of metadata.steps) {
+    if (!step || typeof step !== "object") {
+      continue;
+    }
+    const tool = step.tool || "unknown";
+    const result = step.result || {};
+    const status = result.ok === false ? "failed" : "ok";
+    output.appendLine(`- ${step.step || "?"}: ${tool} (${status})`);
+    if (result.ok === false && result.error) {
+      output.appendLine(`  ${result.error}`);
+    }
+  }
+}
+
+function appendResearchMetadata(response) {
+  if (!response || typeof response !== "object") {
+    return;
+  }
+  const sources = sourceLines(response);
+  if (sources.length) {
+    output.appendLine("");
+    output.appendLine("Sources:");
+    for (const line of sources) {
+      output.appendLine(line);
+    }
+  }
+  if (Array.isArray(response.related_questions) && response.related_questions.length) {
+    output.appendLine("");
+    output.appendLine("Related questions:");
+    for (const question of response.related_questions) {
+      if (typeof question === "string" && question.trim()) {
+        output.appendLine(`- ${question}`);
+      }
+    }
+  }
+}
+
+function sourceLines(response) {
+  const seen = new Set();
+  const lines = [];
+  if (Array.isArray(response.search_results)) {
+    for (const result of response.search_results) {
+      if (!result || typeof result !== "object" || !result.url || seen.has(result.url)) {
+        continue;
+      }
+      seen.add(result.url);
+      const title = typeof result.title === "string" && result.title.trim()
+        ? result.title.trim()
+        : result.url;
+      lines.push(`- ${title}: ${result.url}`);
+    }
+  }
+  if (Array.isArray(response.citations)) {
+    for (const url of response.citations) {
+      if (typeof url !== "string" || !url.trim() || seen.has(url)) {
+        continue;
+      }
+      seen.add(url);
+      lines.push(`- ${url}`);
+    }
+  }
+  return lines;
 }
 
 function workspaceRoot() {

@@ -48,23 +48,52 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(request.messages[0]["role"], "system")
         self.assertEqual(request.messages[1]["role"], "user")
 
-    def test_response_shapes_include_agent_metadata(self) -> None:
+    def test_response_shapes_hide_routing_details_by_default(self) -> None:
         response = HubResponse(
             request_id="hub-1",
             session_id="s1",
             agent="openai",
             provider="openai",
-            model="model",
+            model="internal-model",
+            public_model="stable-alias",
             text="hello",
+            citations=["https://example.com/source"],
+            search_results=[{"title": "Source", "url": "https://example.com/source"}],
         )
 
         openai = openai_chat_response(response)
         anthropic = anthropic_message_response(response)
+        native = response.to_native_dict()
 
         self.assertEqual(openai["choices"][0]["message"]["content"], "hello")
-        self.assertEqual(openai["agent_hub"]["agent"], "openai")
+        self.assertEqual(openai["model"], "stable-alias")
+        self.assertNotIn("agent_hub", openai)
+        self.assertEqual(openai["citations"], ["https://example.com/source"])
         self.assertEqual(anthropic["content"][0]["text"], "hello")
-        self.assertEqual(anthropic["agent_hub"]["session_id"], "s1")
+        self.assertEqual(anthropic["model"], "stable-alias")
+        self.assertNotIn("agent_hub", anthropic)
+        self.assertEqual(native["model"], "stable-alias")
+        self.assertNotIn("agent", native)
+        self.assertNotIn("failover", native)
+        self.assertEqual(native["search_results"][0]["title"], "Source")
+
+    def test_response_shapes_can_include_routing_details_for_debugging(self) -> None:
+        response = HubResponse(
+            request_id="hub-1",
+            session_id="s1",
+            agent="openai",
+            provider="openai",
+            model="internal-model",
+            public_model="stable-alias",
+            text="hello",
+        )
+
+        openai = openai_chat_response(response, include_routing_details=True)
+        native = response.to_native_dict(include_routing_details=True)
+
+        self.assertEqual(openai["agent_hub"]["agent"], "openai")
+        self.assertEqual(native["agent"]["model"], "internal-model")
+        self.assertIn("failover", native)
 
 
 if __name__ == "__main__":

@@ -23,9 +23,12 @@ class CliTests(unittest.TestCase):
             data = json.loads(path.read_text(encoding="utf-8"))
             names = {agent["name"] for agent in data["agents"]}
             self.assertIn("custom-local", names)
+            self.assertIn("local-research", names)
             self.assertIn("chatgpt", names)
             self.assertIn("gemini", names)
             self.assertIn("claude", names)
+            research = next(route for route in data["routes"] if route["name"] == "research")
+            self.assertEqual(research["agents"][0], "local-research")
 
     def test_agents_command_prints_configured_agents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -41,6 +44,53 @@ class CliTests(unittest.TestCase):
             output = buffer.getvalue()
             self.assertIn("custom-local", output)
             self.assertIn("allowed", output)
+
+    def test_agent_command_reports_route_errors_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "default_route": [],
+                        "routes": [{"name": "local-agent", "agents": ["missing"]}],
+                        "agents": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(["--config", str(path), "agent", "do work"])
+
+            self.assertEqual(code, 1)
+            self.assertIn("Agent-Hub route failed", buffer.getvalue())
+
+    def test_enable_provider_opts_in_to_cloud_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "enable-provider",
+                        "openai",
+                        "--model",
+                        "gpt-test",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertFalse(data["free_only"])
+            chatgpt = next(agent for agent in data["agents"] if agent["name"] == "chatgpt")
+            self.assertTrue(chatgpt["enabled"])
+            self.assertEqual(chatgpt["model"], "gpt-test")
+            cloud_route = next(route for route in data["routes"] if route["name"] == "cloud-agent")
+            self.assertEqual(cloud_route["agents"][0], "chatgpt")
 
 
 if __name__ == "__main__":

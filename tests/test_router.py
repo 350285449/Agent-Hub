@@ -223,6 +223,62 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(response.failover[0].agent, "tiny")
             self.assertIn("context window is too small", response.failover[0].reason)
 
+    def test_token_limit_finish_reason_fails_over_to_next_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                default_route=["small", "large"],
+                agents={
+                    "small": AgentConfig(
+                        name="small",
+                        provider="openai-compatible",
+                        model="small-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                    "large": AgentConfig(
+                        name="large",
+                        provider="openai-compatible",
+                        model="large-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                },
+            )
+
+            class TokenLimitProvider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    if self.agent.name == "small":
+                        return ProviderResult(
+                            text="partial",
+                            model=self.agent.model,
+                            finish_reason="length",
+                        )
+                    return ProviderResult(
+                        text="complete",
+                        model=self.agent.model,
+                        finish_reason="stop",
+                    )
+
+            response = AgentRouter(config, provider_factory=TokenLimitProvider).route(
+                HubRequest(
+                    session_id="abc",
+                    route="local-agent",
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+            )
+
+            self.assertEqual(calls, ["small", "large"])
+            self.assertEqual(response.text, "complete")
+            self.assertEqual(response.failover[0].agent, "small")
+            self.assertIn("token limit", response.failover[0].reason)
+            public = response.to_native_dict()
+            self.assertEqual(public["model"], "local-agent")
+            self.assertNotIn("failover", public)
+
     def test_route_errors_when_no_agent_has_enough_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(

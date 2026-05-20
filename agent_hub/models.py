@@ -36,6 +36,10 @@ class ProviderResult:
     raw: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, Any] = field(default_factory=dict)
     finish_reason: str | None = None
+    citations: list[str] = field(default_factory=list)
+    search_results: list[dict[str, Any]] = field(default_factory=list)
+    images: list[dict[str, Any]] = field(default_factory=list)
+    related_questions: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -68,29 +72,51 @@ class HubResponse:
     provider: str
     model: str
     text: str
+    public_model: str | None = None
     usage: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
     finish_reason: str | None = None
     failover: list[FailoverEvent] = field(default_factory=list)
+    citations: list[str] = field(default_factory=list)
+    search_results: list[dict[str, Any]] = field(default_factory=list)
+    images: list[dict[str, Any]] = field(default_factory=list)
+    related_questions: list[str] = field(default_factory=list)
 
-    def to_native_dict(self, include_raw: bool = False) -> dict[str, Any]:
+    def to_native_dict(
+        self,
+        include_raw: bool = False,
+        include_routing_details: bool = False,
+    ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "id": self.request_id,
             "object": "agent_hub.response",
             "session_id": self.session_id,
-            "agent": {
-                "name": self.agent,
-                "provider": self.provider,
-                "model": self.model,
-            },
+            "model": self.public_model or self.model,
             "message": {
                 "role": "assistant",
                 "content": self.text,
             },
             "finish_reason": self.finish_reason,
             "usage": self.usage,
-            "failover": [event.to_dict() for event in self.failover],
         }
+        if include_routing_details:
+            data["agent"] = {
+                "name": self.agent,
+                "provider": self.provider,
+                "model": self.model,
+            }
+            data["failover"] = [event.to_dict() for event in self.failover]
+            agent_metadata = self.raw.get("agent_hub")
+            if isinstance(agent_metadata, dict):
+                data["agent_hub"] = agent_metadata
         if include_raw:
             data["raw"] = self.raw
+        if self.citations:
+            data["citations"] = self.citations
+        if self.search_results:
+            data["search_results"] = self.search_results
+        if self.images:
+            data["images"] = self.images
+        if self.related_questions:
+            data["related_questions"] = self.related_questions
         return data

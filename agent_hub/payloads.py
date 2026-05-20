@@ -111,13 +111,17 @@ def request_from_anthropic_messages(payload: dict[str, Any]) -> HubRequest:
     )
 
 
-def openai_chat_response(response: HubResponse) -> dict[str, Any]:
+def openai_chat_response(
+    response: HubResponse,
+    include_routing_details: bool = False,
+) -> dict[str, Any]:
     created = int(time.time())
-    return {
+    model = response.public_model or response.model
+    data: dict[str, Any] = {
         "id": f"chatcmpl-{response.request_id}",
         "object": "chat.completion",
         "created": created,
-        "model": response.model,
+        "model": model,
         "choices": [
             {
                 "index": 0,
@@ -129,12 +133,19 @@ def openai_chat_response(response: HubResponse) -> dict[str, Any]:
             }
         ],
         "usage": response.usage,
-        "agent_hub": _hub_metadata(response),
     }
+    if include_routing_details:
+        data["agent_hub"] = _hub_metadata(response)
+    _add_research_metadata(data, response)
+    return data
 
 
-def anthropic_message_response(response: HubResponse) -> dict[str, Any]:
-    return {
+def anthropic_message_response(
+    response: HubResponse,
+    include_routing_details: bool = False,
+) -> dict[str, Any]:
+    model = response.public_model or response.model
+    data: dict[str, Any] = {
         "id": f"msg_{response.request_id}",
         "type": "message",
         "role": "assistant",
@@ -144,37 +155,48 @@ def anthropic_message_response(response: HubResponse) -> dict[str, Any]:
                 "text": response.text,
             }
         ],
-        "model": response.model,
+        "model": model,
         "stop_reason": _anthropic_stop_reason(response.finish_reason),
         "stop_sequence": None,
         "usage": response.usage,
-        "agent_hub": _hub_metadata(response),
     }
+    if include_routing_details:
+        data["agent_hub"] = _hub_metadata(response)
+        _add_research_metadata(data["agent_hub"], response)
+    else:
+        _add_research_metadata(data, response)
+    return data
 
 
-def openai_stream_events(response: HubResponse) -> list[dict[str, Any] | str]:
+def openai_stream_events(
+    response: HubResponse,
+    include_routing_details: bool = False,
+) -> list[dict[str, Any] | str]:
     created = int(time.time())
     chunk_id = f"chatcmpl-{response.request_id}"
+    model = response.public_model or response.model
+    first_event: dict[str, Any] = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": response.text},
+                "finish_reason": None,
+            }
+        ],
+    }
+    if include_routing_details:
+        first_event["agent_hub"] = _hub_metadata(response)
     return [
+        first_event,
         {
             "id": chunk_id,
             "object": "chat.completion.chunk",
             "created": created,
-            "model": response.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": response.text},
-                    "finish_reason": None,
-                }
-            ],
-            "agent_hub": _hub_metadata(response),
-        },
-        {
-            "id": chunk_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": response.model,
+            "model": model,
             "choices": [
                 {
                     "index": 0,
@@ -187,8 +209,14 @@ def openai_stream_events(response: HubResponse) -> list[dict[str, Any] | str]:
     ]
 
 
-def anthropic_stream_events(response: HubResponse) -> list[tuple[str, dict[str, Any]]]:
-    message = anthropic_message_response(response)
+def anthropic_stream_events(
+    response: HubResponse,
+    include_routing_details: bool = False,
+) -> list[tuple[str, dict[str, Any]]]:
+    message = anthropic_message_response(
+        response,
+        include_routing_details=include_routing_details,
+    )
     return [
         ("message_start", {"type": "message_start", "message": message}),
         (
@@ -227,6 +255,17 @@ def _hub_metadata(response: HubResponse) -> dict[str, Any]:
         "provider": response.provider,
         "failover": [event.to_dict() for event in response.failover],
     }
+
+
+def _add_research_metadata(data: dict[str, Any], response: HubResponse) -> None:
+    if response.citations:
+        data["citations"] = response.citations
+    if response.search_results:
+        data["search_results"] = response.search_results
+    if response.images:
+        data["images"] = response.images
+    if response.related_questions:
+        data["related_questions"] = response.related_questions
 
 
 def _session_id(*sources: dict[str, Any]) -> str:
