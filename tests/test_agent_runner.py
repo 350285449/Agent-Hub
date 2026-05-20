@@ -166,6 +166,53 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertEqual(steps[0]["tool"], "read_file")
             self.assertIn("# Demo", steps[0]["result"]["result"]["content"])
 
+    def test_agent_loop_reprompts_unknown_json_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            seen_messages: list[list[dict]] = []
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    seen_messages.append(request.messages)
+                    if len(seen_messages) == 1:
+                        return ProviderResult(
+                            text='{"action":"initial_greeting"}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text='{"action":"final","answer":"Recovered after correction."}',
+                        model=self.agent.model,
+                    )
+
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "add comments where necessary"}],
+                )
+            )
+
+            self.assertEqual(response.text, "Recovered after correction.")
+            self.assertEqual(len(seen_messages), 2)
+            self.assertIn("Invalid Agent Hub JSON response", seen_messages[1][-1]["content"])
+            self.assertIn("unknown action 'initial_greeting'", seen_messages[1][-1]["content"])
+
     def test_file_tools_reject_paths_outside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

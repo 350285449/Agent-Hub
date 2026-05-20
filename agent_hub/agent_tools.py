@@ -57,6 +57,7 @@ class AgentToolbox:
                 "If shell tools are enabled, run focused checks after meaningful code changes.",
                 "Never read or write outside the workspace root.",
                 "Reply with exactly one JSON object and no Markdown.",
+                'Valid actions are only "tool" and "final"; do not invent other action names.',
                 'To use a tool: {"action":"tool","tool":"read_file","args":{"path":"README.md"}}',
                 'When finished: {"action":"final","answer":"brief summary, changed files, and verification"}',
                 f"Workspace root: {self.root}",

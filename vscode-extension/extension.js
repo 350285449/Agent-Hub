@@ -154,6 +154,7 @@ function participantTask(command, prompt, chatContext) {
     "Inspect workspace files before making claims about code.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
     "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
+    "For direct replies, use the final action; never invent other action names.",
     "When edits are needed, keep them scoped and verify when practical.",
     "Be concise, direct, and include file paths for code changes."
   ];
@@ -462,6 +463,7 @@ function codexChatTask(text) {
     "Be conversational and concise. Use workspace tools when inspection or edits are useful.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
     "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
+    "For direct replies, use the final action; never invent other action names.",
     "",
     text
   ].join("\n");
@@ -1220,6 +1222,7 @@ async function runCodingAgent() {
       "Inspect files before editing, keep changes scoped, and verify if possible.",
       "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
       "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
+      "For direct replies, use the final action; never invent other action names.",
       "",
       task
     ].join("\n"),

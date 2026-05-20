@@ -302,6 +302,7 @@ def _codex_chat_task(prompt: str) -> str:
         [
             "Chat with the user as a careful Codex-style local coding assistant.",
             "Be conversational and concise. Use workspace tools when inspection or edits are useful.",
+            "For direct replies, use the final action; never invent other action names.",
             "",
             prompt,
         ]

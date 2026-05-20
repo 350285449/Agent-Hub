@@ -79,6 +79,11 @@ class AgentRunner:
                 self._record_final(request, final)
                 return final
 
+            if command["action"] == "invalid":
+                messages.append({"role": "assistant", "content": response.text})
+                messages.append(_invalid_response_message(command))
+                continue
+
             final = self._with_agent_metadata(
                 response,
                 request=request,
@@ -192,6 +197,7 @@ def _command_from_response(response: HubResponse) -> dict[str, Any]:
         tool = data.get("tool") or data.get("name")
         if tool:
             return _tool_command(str(tool), data.get("args", data.get("arguments", {})))
+        return {"action": "invalid", "reason": "tool action is missing a tool name"}
 
     if action in TOOL_ACTIONS:
         return _tool_command(action, data.get("args", data.get("arguments", {})))
@@ -199,7 +205,29 @@ def _command_from_response(response: HubResponse) -> dict[str, Any]:
     if action == "final" or "final" in data or "answer" in data:
         return {"action": "final", "answer": data.get("answer", data.get("final", ""))}
 
-    return {"action": "text"}
+    return {"action": "invalid", "reason": _invalid_json_reason(data, action)}
+
+
+def _invalid_response_message(command: dict[str, Any]) -> dict[str, str]:
+    reason = str(command.get("reason") or "response did not match the Agent Hub protocol")
+    tools = ", ".join(sorted(TOOL_ACTIONS))
+    return {
+        "role": "user",
+        "content": (
+            f"Invalid Agent Hub JSON response: {reason}.\n\n"
+            "Continue with exactly one JSON object and no Markdown. "
+            'Use {"action":"tool","tool":"read_file","args":{"path":"README.md"}} '
+            'to inspect files, or {"action":"final","answer":"..."} for the final answer. '
+            f"Valid tool names are: {tools}."
+        ),
+    }
+
+
+def _invalid_json_reason(data: dict[str, Any], action: str) -> str:
+    if action:
+        return f"unknown action {action!r}"
+    keys = ", ".join(sorted(str(key) for key in data))
+    return f"missing action field; keys present: {keys}" if keys else "empty JSON object"
 
 
 def _tool_command(tool: str, args: Any) -> dict[str, Any]:
