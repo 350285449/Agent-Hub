@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Local Agent Hub",
   "description": "Run a local-first AI coding agent and research helper from VS Code.",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
