@@ -110,6 +110,62 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertEqual(steps[0]["tool"], "read_file")
             self.assertIn("# Demo", steps[0]["result"]["result"]["content"])
 
+    def test_agent_loop_recovers_malformed_tool_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text("# Demo\n\nNeeds comments.\n", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    if any("Tool result for read_file" in message.get("content", "") for message in request.messages):
+                        return ProviderResult(
+                            text='{"action":"final","answer":"I recovered the tool call."}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text=(
+                            "```json\n"
+                            "{\n"
+                            '  "action": "tool",\n'
+                            '  "tool": "read_file",\n'
+                            '  "args": {\n'
+                            '    "path": README.md\n'
+                            "  }\n"
+                            "}\n"
+                            "```"
+                        ),
+                        model=self.agent.model,
+                    )
+
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "create comments where necessary"}],
+                )
+            )
+
+            self.assertEqual(response.text, "I recovered the tool call.")
+            steps = response.raw["agent_hub"]["steps"]
+            self.assertEqual(steps[0]["tool"], "read_file")
+            self.assertIn("# Demo", steps[0]["result"]["result"]["content"])
+
     def test_file_tools_reject_paths_outside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

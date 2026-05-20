@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.6
+
+- Tightened VS Code agent prompts to request raw JSON tool calls with quoted string arguments.
+- Pairs with Agent Hub's malformed tool-call recovery for local models.
+
 ## 0.3.5
 
 - Improved VS Code agent prompts so local models use Agent Hub file tools instead of showing tool-call JSON.

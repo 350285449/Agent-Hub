@@ -184,7 +184,8 @@ def _command_from_response(response: HubResponse) -> dict[str, Any]:
 
     data = _json_from_text(response.text)
     if not isinstance(data, dict):
-        return {"action": "text"}
+        recovered = _malformed_tool_command_from_text(response.text)
+        return recovered or {"action": "text"}
 
     action = str(data.get("action", "")).lower()
     if action == "tool" or "tool" in data:
@@ -266,6 +267,84 @@ def _json_from_text(text: str) -> Any:
         return json.loads(match.group(0))
     except json.JSONDecodeError:
         return None
+
+
+def _malformed_tool_command_from_text(text: str) -> dict[str, Any] | None:
+    stripped = _strip_markdown_fence(text)
+    action = _string_field(stripped, "action")
+    tool = _string_field(stripped, "tool") or (action if action in TOOL_ACTIONS else "")
+    if action != "tool" and action not in TOOL_ACTIONS and not tool:
+        return None
+    if tool not in TOOL_ACTIONS:
+        return None
+
+    args_text = _object_field(stripped, "args") or _object_field(stripped, "arguments") or ""
+    args: dict[str, Any] = {}
+    path = _string_or_bare_field(args_text, "path")
+    if path:
+        args["path"] = path
+    query = _string_or_bare_field(args_text, "query")
+    if query:
+        args["query"] = query
+    command = _string_or_bare_field(args_text, "command")
+    if command:
+        args["command"] = command
+    content = _string_field(args_text, "content")
+    if content:
+        args["content"] = content
+    old = _string_field(args_text, "old")
+    if old:
+        args["old"] = old
+    new = _string_field(args_text, "new")
+    if new:
+        args["new"] = new
+
+    for key in ("start_line", "line_count", "limit", "expected_replacements", "timeout_seconds"):
+        value = _int_field(args_text, key)
+        if value is not None:
+            args[key] = value
+    for key in ("recursive", "append", "case_sensitive"):
+        value = _bool_field(args_text, key)
+        if value is not None:
+            args[key] = value
+
+    return {"action": "tool", "tool": tool, "args": args}
+
+
+def _strip_markdown_fence(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped
+
+
+def _string_field(text: str, key: str) -> str:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]*)"', text)
+    return match.group(1) if match else ""
+
+
+def _string_or_bare_field(text: str, key: str) -> str:
+    quoted = _string_field(text, key)
+    if quoted:
+        return quoted
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*([^,\n\r}}]+)', text)
+    return match.group(1).strip().strip("\"'") if match else ""
+
+
+def _object_field(text: str, key: str) -> str:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*\{{(?P<body>.*?)\}}', text, flags=re.DOTALL)
+    return match.group("body") if match else ""
+
+
+def _int_field(text: str, key: str) -> int | None:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*(-?\d+)', text)
+    return int(match.group(1)) if match else None
+
+
+def _bool_field(text: str, key: str) -> bool | None:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*(true|false)', text, flags=re.IGNORECASE)
+    return match.group(1).lower() == "true" if match else None
 
 
 def _request_int(request: HubRequest, key: str, default: int) -> int:

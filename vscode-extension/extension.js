@@ -153,6 +153,7 @@ function participantTask(command, prompt, chatContext) {
     "You are Agent Hub, a practical local coding agent inside VS Code.",
     "Inspect workspace files before making claims about code.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
+    "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
     "When edits are needed, keep them scoped and verify when practical.",
     "Be concise, direct, and include file paths for code changes."
   ];
@@ -460,6 +461,7 @@ function codexChatTask(text) {
     "Chat with the user as Agent Hub, a careful local workspace agent.",
     "Be conversational and concise. Use workspace tools when inspection or edits are useful.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
+    "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
     "",
     text
   ].join("\n");
@@ -1217,6 +1219,7 @@ async function runCodingAgent() {
       "Work as a local coding agent in this workspace.",
       "Inspect files before editing, keep changes scoped, and verify if possible.",
       "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
+      "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
       "",
       task
     ].join("\n"),
