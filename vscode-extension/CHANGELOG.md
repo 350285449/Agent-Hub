@@ -14,3 +14,4 @@
 ## 0.2.0
 
 - Added `Agent Hub: Open Codex Chat` with session history, optional selection context, and auto-start support.
+- Updated the extension icon and Codex Chat header with the Agent Hub logo.

@@ -39,17 +39,21 @@ function openChat(context) {
     return;
   }
 
+  const assetsRoot = vscode.Uri.file(path.join(context.extensionPath, "assets"));
+  const logoUri = vscode.Uri.file(path.join(context.extensionPath, "assets", "agent-hub-icon.png"));
   chatPanel = vscode.window.createWebviewPanel(
     "agentHubCodexChat",
     "Agent Hub Codex Chat",
     vscode.ViewColumn.Beside,
     {
       enableScripts: true,
-      retainContextWhenHidden: true
+      retainContextWhenHidden: true,
+      localResourceRoots: [assetsRoot]
     }
   );
 
-  chatPanel.webview.html = chatHtml();
+  chatPanel.iconPath = logoUri;
+  chatPanel.webview.html = chatHtml(chatPanel.webview, logoUri);
   chatPanel.onDidDispose(() => {
     chatPanel = null;
   });
@@ -187,13 +191,14 @@ function agentToolSteps(response) {
     });
 }
 
-function chatHtml() {
+function chatHtml(webview, logoPath) {
   const nonce = getNonce();
+  const logoSrc = webview.asWebviewUri(logoPath);
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource}; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Agent Hub Codex Chat</title>
   <style nonce="${nonce}">
@@ -236,6 +241,21 @@ function chatHtml() {
       gap: 12px;
       padding: 12px 14px;
       border-bottom: 1px solid var(--border);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .logo {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      object-fit: cover;
+      flex: 0 0 auto;
     }
 
     h1 {
@@ -380,7 +400,10 @@ function chatHtml() {
 <body>
   <div class="shell">
     <header>
-      <h1>Codex Chat</h1>
+      <div class="brand">
+        <img class="logo" src="${logoSrc}" alt="Agent Hub logo">
+        <h1>Codex Chat</h1>
+      </div>
       <div class="status" id="status">Checking Agent Hub...</div>
     </header>
     <main class="transcript" id="transcript" aria-live="polite"></main>
