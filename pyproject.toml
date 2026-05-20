@@ -16,3 +16,4 @@ agent-hub = "agent_hub.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["agent_hub*"]
+https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan#h_8dd84c836b

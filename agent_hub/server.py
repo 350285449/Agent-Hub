@@ -4,6 +4,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from .agent_runner import AgentRunner
 from .config import HubConfig
 from .payloads import (
     anthropic_message_response,
@@ -20,6 +21,7 @@ class AgentHubHTTPServer(ThreadingHTTPServer):
         super().__init__(server_address, AgentHubHandler)
         self.config = config
         self.router = AgentRouter(config)
+        self.agent_runner = AgentRunner(config, self.router)
 
 
 class AgentHubHandler(BaseHTTPRequestHandler):
@@ -27,7 +29,18 @@ class AgentHubHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            self._send_json({"status": "ok", "agents": list(self.server.config.agents)})
+            self._send_json(
+                {
+                    "status": "ok",
+                    "agents": [
+                        name
+                        for name, agent in self.server.config.agents.items()
+                        if agent.enabled
+                    ],
+                    "configured_agents": list(self.server.config.agents),
+                    "free_only": self.server.config.free_only,
+                }
+            )
             return
         if self.path == "/v1/models":
             self._send_json(
@@ -55,7 +68,15 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=400)
             return
 
-        if self.path in {"/agent", "/v1/agent", "/v1/route"}:
+        if self.path in {"/agent", "/v1/agent"}:
+            self._handle_payload(
+                payload,
+                api_shape="native",
+                response_shape="native",
+                agent_mode_default=True,
+            )
+            return
+        if self.path == "/v1/route":
             self._handle_payload(payload, api_shape="native", response_shape="native")
             return
         if self.path == "/v1/chat/completions":
@@ -83,10 +104,14 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         payload: dict[str, Any],
         api_shape: str,
         response_shape: str,
+        agent_mode_default: bool = False,
     ) -> None:
         request = request_from_payload(payload, api_shape=api_shape)
         try:
-            response = self.server.router.route(request)
+            if _wants_agent_mode(payload, default=agent_mode_default):
+                response = self.server.agent_runner.run(request)
+            else:
+                response = self.server.router.route(request)
         except RouterError as exc:
             self._send_json(
                 {
@@ -172,3 +197,15 @@ def serve(config: HubConfig) -> None:
         print("\nStopping Agent Hub")
     finally:
         server.server_close()
+
+
+def _wants_agent_mode(payload: dict[str, Any], default: bool = False) -> bool:
+    hub_options = payload.get("agent_hub")
+    if isinstance(hub_options, dict) and "agent_mode" in hub_options:
+        return bool(hub_options["agent_mode"])
+    if "agent_mode" in payload:
+        return bool(payload["agent_mode"])
+    mode = payload.get("mode")
+    if isinstance(mode, str) and mode.lower() == "agent":
+        return True
+    return default

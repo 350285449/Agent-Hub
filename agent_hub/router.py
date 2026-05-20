@@ -5,9 +5,9 @@ import uuid
 from dataclasses import replace
 from collections.abc import Callable
 
-from .config import AgentConfig, HubConfig
+from .config import AgentConfig, HubConfig, is_free_agent
 from .models import FailoverEvent, HubRequest, HubResponse, ProviderResult
-from .payloads import request_text
+from .payloads import content_to_text, request_text
 from .providers import Provider, ProviderError, create_provider
 from .session_store import SessionStore
 
@@ -54,6 +54,19 @@ class AgentRouter:
                 )
                 continue
 
+            skip_reason = self._preflight_skip_reason(agent, effective_request)
+            if skip_reason:
+                failover.append(
+                    FailoverEvent(
+                        agent=agent.name,
+                        provider=agent.provider,
+                        model=agent.model,
+                        reason=skip_reason,
+                        retryable=False,
+                    )
+                )
+                continue
+
             tried_any = True
             try:
                 result = self.provider_factory(agent).complete(effective_request)
@@ -64,7 +77,8 @@ class AgentRouter:
                     result=result,
                     failover=failover,
                 )
-                self.session_store.record_turn(effective_request, response)
+                if effective_request.record_session:
+                    self.session_store.record_turn(effective_request, response)
                 return response
             except ProviderError as exc:
                 failover.append(
@@ -83,8 +97,13 @@ class AgentRouter:
                 raise RouterError(str(exc), failover=failover) from exc
 
         if not tried_any:
-            self._cooldowns.clear()
-            return self.route(request)
+            if failover and all(
+                event.reason.startswith("Agent is in temporary cooldown") for event in failover
+            ):
+                self._cooldowns.clear()
+                return self.route(request)
+            reason = failover[-1].reason if failover else "No agent produced a response"
+            raise RouterError(reason, failover=failover)
 
         reason = failover[-1].reason if failover else "No agent produced a response"
         raise RouterError(reason, failover=failover)
@@ -153,6 +172,28 @@ class AgentRouter:
     def _is_on_cooldown(self, agent_name: str) -> bool:
         return self._cooldowns.get(agent_name, 0) > time.time()
 
+    def _preflight_skip_reason(self, agent: AgentConfig, request: HubRequest) -> str | None:
+        if self.config.free_only and not is_free_agent(agent):
+            return (
+                "Agent provider is disabled because free_only is enabled; "
+                "only echo and local/private openai-compatible agents are allowed"
+            )
+
+        if agent.context_window is None:
+            return None
+
+        input_tokens = estimate_input_tokens(request)
+        output_tokens = expected_output_tokens(request, agent)
+        required_tokens = input_tokens + output_tokens
+        if required_tokens > agent.context_window:
+            return (
+                "Agent context window is too small: "
+                f"needs about {required_tokens} tokens "
+                f"({input_tokens} input + {output_tokens} output), "
+                f"has {agent.context_window}"
+            )
+        return None
+
 
 def _is_prefix(prefix: list[dict], messages: list[dict]) -> bool:
     if len(prefix) > len(messages):
@@ -161,3 +202,27 @@ def _is_prefix(prefix: list[dict], messages: list[dict]) -> bool:
         left.get("role") == right.get("role") and left.get("content") == right.get("content")
         for left, right in zip(prefix, messages, strict=False)
     )
+
+
+def estimate_input_tokens(request: HubRequest) -> int:
+    total = 0
+    for message in request.messages:
+        role = str(message.get("role", "user"))
+        content = content_to_text(message.get("content"))
+        total += max(1, (len(role) + len(content) + 3) // 4) + 4
+    return max(1, total)
+
+
+def expected_output_tokens(request: HubRequest, agent: AgentConfig) -> int:
+    if request.max_tokens is not None:
+        return _non_negative_int(request.max_tokens, default=4096)
+    if agent.max_tokens is not None:
+        return _non_negative_int(agent.max_tokens, default=4096)
+    return 4096
+
+
+def _non_negative_int(value: object, default: int) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default

@@ -5,39 +5,78 @@
   "inbox_dir": ".agent-hub/inbox",
   "outbox_dir": ".agent-hub/outbox",
   "archive_dir": ".agent-hub/archive",
+  "workspace_dir": ".",
+  "agent_max_steps": 8,
+  "allow_shell_tools": false,
+  "free_only": true,
   "include_raw_responses": false,
-  "default_route": ["claude-coder", "openai-coder", "local-coder"],
+  "default_route": ["custom-local", "echo"],
   "routes": [
     {
       "name": "coding",
       "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
-      "agents": ["claude-coder", "openai-coder", "local-coder"]
+      "agents": ["custom-local", "echo"]
     }
   ],
   "agents": [
     {
-      "name": "claude-coder",
-      "provider": "anthropic",
-      "model": "claude-sonnet-4-5-20250929",
-      "api_key_env": "ANTHROPIC_API_KEY",
-      "max_tokens": 4096,
-      "cooldown_seconds": 300
-    },
-    {
-      "name": "openai-coder",
-      "provider": "openai",
-      "model": "gpt-5.2",
-      "api_key_env": "OPENAI_API_KEY",
-      "max_tokens": 4096,
-      "cooldown_seconds": 300
-    },
-    {
-      "name": "local-coder",
+      "name": "custom-local",
       "provider": "openai-compatible",
       "model": "local-model",
-      "base_url": "http://127.0.0.1:1234",
+      "base_url": "http://127.0.0.1:8000",
+      "free": true,
       "max_tokens": 4096,
-      "cooldown_seconds": 60
+      "context_window": 8192,
+      "timeout_seconds": 120,
+      "cooldown_seconds": 20
+    },
+    {
+      "name": "echo",
+      "provider": "echo",
+      "model": "local-echo",
+      "free": true,
+      "context_window": 1000000,
+      "cooldown_seconds": 1
+    },
+    {
+      "name": "gemma-local",
+      "provider": "gemma",
+      "model": "your-gemma-model",
+      "base_url": "http://127.0.0.1:8000",
+      "enabled": false,
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 8192
+    },
+    {
+      "name": "chatgpt",
+      "provider": "chatgpt",
+      "model": "your-openai-model",
+      "api_key_env": "OPENAI_API_KEY",
+      "enabled": false,
+      "free": false,
+      "max_tokens": 4096,
+      "context_window": 128000
+    },
+    {
+      "name": "gemini",
+      "provider": "gemini",
+      "model": "your-gemini-model",
+      "api_key_env": "GEMINI_API_KEY",
+      "enabled": false,
+      "free": false,
+      "max_tokens": 4096,
+      "context_window": 1000000
+    },
+    {
+      "name": "claude",
+      "provider": "claude",
+      "model": "your-claude-model",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "enabled": false,
+      "free": false,
+      "max_tokens": 4096,
+      "context_window": 200000
     }
   ]
 }

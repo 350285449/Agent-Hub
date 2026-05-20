@@ -21,6 +21,7 @@ class HubRequest:
     temperature: float | None = None
     stream: bool = False
     use_session_history: bool = False
+    record_session: bool = True
     api_shape: str = "native"
     raw: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)

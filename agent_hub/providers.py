@@ -5,14 +5,15 @@ import socket
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from urllib.parse import quote
 from typing import Any, Protocol
 
-from .config import AgentConfig
+from .config import AgentConfig, normalize_provider
 from .models import HubRequest, ProviderResult
 from .payloads import content_to_text
 
 
-FAILOVER_STATUSES = {401, 402, 403, 408, 409, 429}
+FAILOVER_STATUSES = {401, 402, 403, 404, 408, 409, 429}
 FAILOVER_TEXT_MARKERS = (
     "rate limit",
     "rate_limit",
@@ -77,7 +78,7 @@ class OpenAIChatProvider:
 
     def complete(self, request: HubRequest) -> ProviderResult:
         api_key = self.agent.resolved_api_key
-        if not api_key and self.agent.provider == "openai":
+        if not api_key and normalize_provider(self.agent.provider) == "openai":
             raise ProviderError(
                 f"{self.agent.name} is missing API key env {self.agent.api_key_env}",
                 retryable=True,
@@ -232,12 +233,101 @@ class AnthropicMessagesProvider:
         return payload
 
 
+class GeminiProvider:
+    def __init__(self, agent: AgentConfig) -> None:
+        self.agent = agent
+
+    def complete(self, request: HubRequest) -> ProviderResult:
+        api_key = self.agent.resolved_api_key
+        if not api_key:
+            raise ProviderError(
+                f"{self.agent.name} is missing API key env {self.agent.api_key_env}",
+                retryable=True,
+            )
+
+        raw = _post_json(
+            url=self._url(),
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+                **self.agent.headers,
+            },
+            payload=self._payload(request),
+            timeout=self.agent.timeout_seconds,
+        )
+        candidate = (raw.get("candidates") or [{}])[0]
+        content = candidate.get("content") or {}
+        return ProviderResult(
+            text=content_to_text(content.get("parts")),
+            model=self.agent.model,
+            raw=raw,
+            usage=dict(raw.get("usageMetadata") or {}),
+            finish_reason=candidate.get("finishReason"),
+        )
+
+    def _url(self) -> str:
+        base_url = self.agent.base_url or "https://generativelanguage.googleapis.com"
+        model = self.agent.model
+        model_path = model if model.startswith("models/") else f"models/{model}"
+        return _join_url(base_url, f"/v1beta/{quote(model_path, safe='/')}:generateContent")
+
+    def _payload(self, request: HubRequest) -> dict[str, Any]:
+        payload = _copy_allowed(
+            request.raw,
+            {
+                "cachedContent",
+                "safetySettings",
+                "tools",
+                "toolConfig",
+            },
+        )
+        generation_config = dict(
+            request.raw.get("generationConfig")
+            or request.raw.get("generation_config")
+            or {}
+        )
+        system_parts: list[str] = []
+        contents: list[dict[str, Any]] = []
+        for message in request.messages:
+            role = message.get("role", "user")
+            text = content_to_text(message.get("content"))
+            if role in {"system", "developer"}:
+                if text:
+                    system_parts.append(text)
+            elif role == "assistant":
+                contents.append({"role": "model", "parts": [{"text": text}]})
+            elif role == "tool":
+                contents.append({"role": "user", "parts": [{"text": f"Tool result:\n{text}"}]})
+            else:
+                contents.append({"role": "user", "parts": [{"text": text}]})
+
+        if not contents:
+            contents.append({"role": "user", "parts": [{"text": ""}]})
+
+        if request.temperature is not None:
+            generation_config["temperature"] = request.temperature
+        max_tokens = request.max_tokens or self.agent.max_tokens
+        if max_tokens is not None:
+            generation_config["maxOutputTokens"] = max_tokens
+
+        payload["contents"] = contents
+        if generation_config:
+            payload["generationConfig"] = generation_config
+        if system_parts:
+            payload["systemInstruction"] = {
+                "parts": [{"text": "\n\n".join(system_parts)}],
+            }
+        return payload
+
+
 def create_provider(agent: AgentConfig) -> Provider:
-    provider = agent.provider.lower()
-    if provider in {"openai", "openai-chat", "openai-compatible"}:
+    provider = normalize_provider(agent.provider)
+    if provider in {"openai", "openai-compatible"}:
         return OpenAIChatProvider(agent)
-    if provider in {"anthropic", "claude"}:
+    if provider == "anthropic":
         return AnthropicMessagesProvider(agent)
+    if provider == "gemini":
+        return GeminiProvider(agent)
     if provider == "echo":
         return EchoProvider(agent)
     raise ProviderError(f"Unsupported provider {agent.provider!r}", retryable=False)

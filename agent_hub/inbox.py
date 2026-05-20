@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .agent_runner import AgentRunner
 from .config import HubConfig
 from .payloads import (
     anthropic_message_response,
@@ -18,6 +19,7 @@ class InboxProcessor:
     def __init__(self, config: HubConfig, router: AgentRouter | None = None) -> None:
         self.config = config
         self.router = router or AgentRouter(config)
+        self.agent_runner = AgentRunner(config, self.router)
         self.config.ensure_dirs()
 
     def watch(self, interval_seconds: float = 1.0) -> None:
@@ -47,7 +49,10 @@ class InboxProcessor:
             api_shape = payload.get("api_shape") or payload.get("target_api") or "native"
             response_shape = payload.get("response_shape") or api_shape
             request = request_from_payload(payload, api_shape=_normalized_shape(api_shape))
-            response = self.router.route(request)
+            if _wants_agent_mode(payload):
+                response = self.agent_runner.run(request)
+            else:
+                response = self.router.route(request)
             body = _shape_response(response_shape, response, self.config.include_raw_responses)
             output_path = self.config.outbox_dir / f"{path.stem}.response.json"
             output_path.write_text(
@@ -83,3 +88,13 @@ def _shape_response(response_shape: Any, response: Any, include_raw: bool) -> di
     if shape == "anthropic-messages":
         return anthropic_message_response(response)
     return response.to_native_dict(include_raw=include_raw)
+
+
+def _wants_agent_mode(payload: dict[str, Any]) -> bool:
+    hub_options = payload.get("agent_hub")
+    if isinstance(hub_options, dict) and "agent_mode" in hub_options:
+        return bool(hub_options["agent_mode"])
+    if "agent_mode" in payload:
+        return bool(payload["agent_mode"])
+    mode = payload.get("mode")
+    return isinstance(mode, str) and mode.lower() == "agent"

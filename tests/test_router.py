@@ -55,8 +55,9 @@ class RouterTests(unittest.TestCase):
                 agents={
                     "openai": AgentConfig(
                         name="openai",
-                        provider="openai",
+                        provider="openai-compatible",
                         model="openai-test",
+                        base_url="http://127.0.0.1:9999",
                     )
                 },
             )
@@ -143,6 +144,113 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(response.agent, "openai")
             self.assertEqual(calls, ["claude", "openai"])
 
+    def test_free_only_skips_paid_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                default_route=["paid", "local"],
+                agents={
+                    "paid": AgentConfig(
+                        name="paid",
+                        provider="openai",
+                        model="paid-test",
+                    ),
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                },
+            )
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+
+            response = router.route(
+                HubRequest(
+                    session_id="abc",
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+            )
+
+            self.assertEqual(calls, ["local"])
+            self.assertEqual(response.agent, "local")
+            self.assertEqual(response.failover[0].agent, "paid")
+            self.assertIn("free_only", response.failover[0].reason)
+
+    def test_agent_without_enough_context_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                default_route=["tiny", "large"],
+                agents={
+                    "tiny": AgentConfig(
+                        name="tiny",
+                        provider="openai-compatible",
+                        model="tiny-test",
+                        base_url="http://127.0.0.1:9999",
+                        max_tokens=200,
+                        context_window=210,
+                    ),
+                    "large": AgentConfig(
+                        name="large",
+                        provider="openai-compatible",
+                        model="large-test",
+                        base_url="http://127.0.0.1:9999",
+                        max_tokens=200,
+                        context_window=1000,
+                    ),
+                },
+            )
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+
+            response = router.route(
+                HubRequest(
+                    session_id="abc",
+                    messages=[{"role": "user", "content": "x" * 100}],
+                )
+            )
+
+            self.assertEqual(calls, ["large"])
+            self.assertEqual(response.agent, "large")
+            self.assertEqual(response.failover[0].agent, "tiny")
+            self.assertIn("context window is too small", response.failover[0].reason)
+
+    def test_route_errors_when_no_agent_has_enough_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp),
+                default_route=["tiny"],
+                agents={
+                    "tiny": AgentConfig(
+                        name="tiny",
+                        provider="openai-compatible",
+                        model="tiny-test",
+                        base_url="http://127.0.0.1:9999",
+                        max_tokens=200,
+                        context_window=210,
+                    )
+                },
+            )
+            router = AgentRouter(config, provider_factory=lambda agent: _FakeProvider(agent, []))
+
+            with self.assertRaises(RouterError) as error:
+                router.route(
+                    HubRequest(
+                        session_id="abc",
+                        messages=[{"role": "user", "content": "x" * 100}],
+                    )
+                )
+
+            self.assertIn("context window is too small", str(error.exception))
+
 
 def _config(path: Path) -> HubConfig:
     return HubConfig(
@@ -158,13 +266,15 @@ def _config(path: Path) -> HubConfig:
         agents={
             "claude": AgentConfig(
                 name="claude",
-                provider="anthropic",
+                provider="openai-compatible",
                 model="claude-test",
+                base_url="http://127.0.0.1:9999",
             ),
             "openai": AgentConfig(
                 name="openai",
-                provider="openai",
+                provider="openai-compatible",
                 model="openai-test",
+                base_url="http://127.0.0.1:9999",
             ),
         },
     )
