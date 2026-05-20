@@ -1,0 +1,72 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "state_dir": ".agent-hub/state",
+  "inbox_dir": ".agent-hub/inbox",
+  "outbox_dir": ".agent-hub/outbox",
+  "archive_dir": ".agent-hub/archive",
+  "workspace_dir": ".",
+  "agent_max_steps": 8,
+  "allow_shell_tools": false,
+  "free_only": true,
+  "include_raw_responses": false,
+  "expose_routing_details": true,
+  "default_route": ["ollama-qwen-coder", "echo"],
+  "routes": [
+    {
+      "name": "coding",
+      "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
+      "agents": ["ollama-qwen-coder", "echo"]
+    },
+    {
+      "name": "local-agent",
+      "keywords": ["agent", "workspace", "edit", "implement"],
+      "agents": ["ollama-qwen-coder", "echo"]
+    },
+    {
+      "name": "hybrid-agent",
+      "keywords": [],
+      "agents": ["ollama-qwen-coder", "echo"]
+    },
+    {
+      "name": "cloud-agent",
+      "keywords": [],
+      "agents": ["ollama-qwen-coder", "echo"]
+    },
+    {
+      "name": "research",
+      "keywords": ["research", "search", "latest", "sources", "web", "news"],
+      "agents": ["local-research", "echo"]
+    }
+  ],
+  "agents": [
+    {
+      "name": "local-research",
+      "provider": "local-research",
+      "model": "local-extractive-research",
+      "free": true,
+      "context_window": 1000000,
+      "timeout_seconds": 20,
+      "cooldown_seconds": 5
+    },
+    {
+      "name": "ollama-qwen-coder",
+      "provider": "openai-compatible",
+      "model": "qwen2.5-coder:7b",
+      "base_url": "http://127.0.0.1:11434",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 32768,
+      "timeout_seconds": 300,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "echo",
+      "provider": "echo",
+      "model": "local-echo",
+      "free": true,
+      "context_window": 1000000,
+      "cooldown_seconds": 1
+    }
+  ]
+}

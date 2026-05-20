@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Local Agent Hub",
   "description": "Run a local-first AI coding agent and research helper from VS Code.",
-  "version": "0.2.0",
+  "version": "0.3.5",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
@@ -24,6 +24,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onChatParticipant:agent-hub.agent-hub-vscode.agenthub",
     "onCommand:agentHub.chat",
     "onCommand:agentHub.startServer",
     "onCommand:agentHub.stopServer",
@@ -45,10 +46,33 @@
     "@vscode/vsce": "^3.9.1"
   },
   "contributes": {
+    "chatParticipants": [
+      {
+        "id": "agent-hub.agent-hub-vscode.agenthub",
+        "name": "agenthub",
+        "fullName": "Agent Hub",
+        "description": "Run a local workspace agent",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "agent",
+            "description": "Inspect or change the current workspace"
+          },
+          {
+            "name": "explain",
+            "description": "Explain the current selection or file"
+          },
+          {
+            "name": "research",
+            "description": "Research the web with local synthesis"
+          }
+        ]
+      }
+    ],
     "commands": [
       {
         "command": "agentHub.chat",
-        "title": "Agent Hub: Open Codex Chat"
+        "title": "Agent Hub: Open Chat"
       },
       {
         "command": "agentHub.startServer",

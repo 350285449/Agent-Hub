@@ -8,12 +8,17 @@ const https = require("https");
 const path = require("path");
 
 let serverProcess = null;
+let modelPullProcess = null;
 let output;
 let chatPanel = null;
+const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
+const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 
 function activate(context) {
   output = vscode.window.createOutputChannel("Agent Hub");
   context.subscriptions.push(output);
+
+  registerChatParticipant(context);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("agentHub.chat", () => openChat(context)),
@@ -29,6 +34,215 @@ function activate(context) {
   );
 }
 
+function registerChatParticipant(context) {
+  if (!vscode.chat || typeof vscode.chat.createChatParticipant !== "function") {
+    output.appendLine("VS Code Chat Participant API is unavailable in this VS Code version.");
+    return;
+  }
+
+  const participant = vscode.chat.createChatParticipant(
+    CHAT_PARTICIPANT_ID,
+    async (request, chatContext, stream, token) => handleParticipantRequest(request, chatContext, stream, token)
+  );
+  participant.iconPath = vscode.Uri.file(path.join(context.extensionPath, "assets", "agent-hub-icon.png"));
+
+  if (typeof participant.followupProvider !== "undefined") {
+    participant.followupProvider = {
+      provideFollowups() {
+        return [
+          { prompt: "Inspect this workspace and suggest the next useful improvement", label: "Inspect workspace" },
+          { prompt: "/explain Explain the current selection or open file", label: "Explain code" },
+          { prompt: "/research Find current context for this problem", label: "Research" }
+        ];
+      }
+    };
+  }
+
+  context.subscriptions.push(participant);
+}
+
+async function handleParticipantRequest(request, chatContext, stream, token) {
+  const prompt = (request && typeof request.prompt === "string" ? request.prompt : "").trim();
+  if (!prompt) {
+    stream.markdown("Tell Agent Hub what to inspect, explain, research, or change.");
+    return {};
+  }
+
+  const config = settings();
+  const workspace = workspaceRoot();
+  const command = request.command || "agent";
+  const agentMode = command !== "research";
+  const route = command === "research" ? config.researchRoute : codingAgentRoute(config);
+  const context = participantContext(command, request);
+  const task = participantTask(command, prompt, chatContext);
+
+  stream.progress("Checking Agent Hub server...");
+  if (!(await ensureServerReady())) {
+    stream.markdown("Agent Hub is not running. Start it with `Agent Hub: Start Server` and try again.");
+    return { metadata: { command, ok: false } };
+  }
+  if (token && token.isCancellationRequested) {
+    return { metadata: { command, cancelled: true } };
+  }
+
+  const body = {
+    session_id: "vscode-agenthub-chat",
+    mode: agentMode ? "agent" : "route",
+    route,
+    task,
+    context,
+    use_session_history: true,
+    max_tokens: config.maxTokens,
+    metadata: {
+      source: "vscode-chat-participant",
+      command
+    }
+  };
+
+  if (agentMode) {
+    body.allow_shell_tools = config.allowShellTools;
+    body.agent_max_steps = config.agentMaxSteps;
+    body.workspace_dir = workspace || ".";
+  } else {
+    body.query = prompt;
+    body.max_sources = 5;
+  }
+
+  output.appendLine("");
+  output.appendLine(`[Agent Hub Chat /${command}] ${prompt}`);
+
+  try {
+    stream.progress(command === "research" ? "Researching..." : "Running the workspace agent...");
+    const response = await requestJson("POST", agentMode ? "/v1/agent" : "/v1/route", body);
+    const reply = responseText(response) || "(empty response)";
+    output.appendLine(reply);
+    appendAgentTrace(response);
+    appendResearchMetadata(response);
+
+    stream.markdown(reply);
+    const tools = agentToolSteps(response);
+    const sources = sourceLines(response);
+    if (tools.length) {
+      stream.markdown(toolSummaryMarkdown(tools));
+    }
+    if (sources.length) {
+      stream.markdown(sourceSummaryMarkdown(sources));
+    }
+    if (stream.button) {
+      stream.button({ command: "agentHub.openOutput", title: "Open Agent Hub Output" });
+    }
+
+    return {
+      metadata: {
+        command,
+        ok: true,
+        tools: tools.length,
+        sources: sources.length
+      }
+    };
+  } catch (error) {
+    output.appendLine(`Agent Hub chat participant failed: ${error.message}`);
+    stream.markdown(formatAgentHubError(error));
+    return { metadata: { command, ok: false, error: error.message } };
+  }
+}
+
+function participantTask(command, prompt, chatContext) {
+  const history = participantHistory(chatContext);
+  const base = [
+    "You are Agent Hub, a practical local coding agent inside VS Code.",
+    "Inspect workspace files before making claims about code.",
+    "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
+    "When edits are needed, keep them scoped and verify when practical.",
+    "Be concise, direct, and include file paths for code changes."
+  ];
+
+  if (command === "explain") {
+    base.push("Explain the selected code or current file clearly, including purpose and important details.");
+  } else if (command === "research") {
+    base.push("Answer as a concise research assistant. Use current sources and include citations when available.");
+  } else {
+    base.push("Act as an autonomous workspace agent for this request.");
+  }
+
+  if (history) {
+    base.push("", "Recent chat history:", history);
+  }
+
+  base.push("", prompt);
+  return base.join("\n");
+}
+
+function participantContext(command, request) {
+  const selected = selectedEditorContext();
+  if (selected) {
+    return selected;
+  }
+  if (command === "explain") {
+    const editor = vscode.window.activeTextEditor;
+    if (editor) {
+      return contextForDocument(editor.document, editor.document.getText());
+    }
+  }
+  return participantReferences(request);
+}
+
+function participantHistory(chatContext) {
+  if (!chatContext || !Array.isArray(chatContext.history)) {
+    return "";
+  }
+  return chatContext.history
+    .slice(-6)
+    .map((turn) => {
+      if (turn && typeof turn.prompt === "string") {
+        return `User: ${turn.prompt}`;
+      }
+      if (turn && Array.isArray(turn.response)) {
+        const response = Array.isArray(turn.response)
+          ? turn.response.map((part) => part && part.value ? String(part.value) : "").join("")
+          : "";
+        return response ? `Agent Hub: ${response}` : "";
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function participantReferences(request) {
+  if (!request || !Array.isArray(request.references) || !request.references.length) {
+    return "";
+  }
+  return request.references
+    .map((reference) => {
+      if (!reference || !reference.value) {
+        return "";
+      }
+      const value = reference.value;
+      if (value instanceof vscode.Uri) {
+        return `Reference: ${vscode.workspace.asRelativePath(value, false)}`;
+      }
+      if (typeof value === "string") {
+        return value;
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function toolSummaryMarkdown(tools) {
+  const lines = tools.map((tool) => {
+    const status = tool.ok ? "ok" : "failed";
+    return `- #${tool.step} ${tool.tool} (${status})${tool.error ? `: ${tool.error}` : ""}`;
+  });
+  return ["", "<details><summary>Tools</summary>", "", ...lines, "", "</details>"].join("\n");
+}
+
+function sourceSummaryMarkdown(sources) {
+  return ["", "<details><summary>Sources</summary>", "", ...sources, "", "</details>"].join("\n");
+}
+
 function deactivate() {
   stopServerProcess();
 }
@@ -42,8 +256,8 @@ function openChat(context) {
   const assetsRoot = vscode.Uri.file(path.join(context.extensionPath, "assets"));
   const logoUri = vscode.Uri.file(path.join(context.extensionPath, "assets", "agent-hub-icon.png"));
   chatPanel = vscode.window.createWebviewPanel(
-    "agentHubCodexChat",
-    "Agent Hub Codex Chat",
+    "agentHubChat",
+    "Agent Hub",
     vscode.ViewColumn.Beside,
     {
       enableScripts: true,
@@ -90,8 +304,92 @@ async function handleChatMessage(panel, message) {
     return;
   }
 
+  if (message.type === "pullModel") {
+    await pullDefaultModel(panel);
+    return;
+  }
+
   if (message.type === "send") {
     await sendChatTurn(panel, message);
+  }
+}
+
+async function pullDefaultModel(panel) {
+  const model = modelToPull();
+  if (modelPullProcess) {
+    panel.webview.postMessage({
+      type: "modelPullStatus",
+      running: true,
+      text: `Already pulling a model. Check the Agent Hub output.`
+    });
+    output.show(true);
+    return;
+  }
+
+  panel.webview.postMessage({
+    type: "modelPullStatus",
+    running: true,
+    text: `Pulling ${model} with Ollama...`
+  });
+  output.show(true);
+  output.appendLine("");
+  output.appendLine(`Pulling Ollama model: ${model}`);
+
+  modelPullProcess = cp.spawn("ollama", ["pull", model], {
+    cwd: workspaceRoot() || undefined,
+    shell: false
+  });
+
+  modelPullProcess.stdout.on("data", (data) => output.append(data.toString()));
+  modelPullProcess.stderr.on("data", (data) => output.append(data.toString()));
+  modelPullProcess.on("error", (error) => {
+    output.appendLine(`Failed to pull Ollama model: ${error.message}`);
+    modelPullProcess = null;
+    panel.webview.postMessage({
+      type: "modelPullStatus",
+      running: false,
+      text: `Could not run Ollama: ${error.message}`
+    });
+  });
+  modelPullProcess.on("exit", (code) => {
+    output.appendLine(`Ollama pull exited with code ${code}.`);
+    modelPullProcess = null;
+    panel.webview.postMessage({
+      type: "modelPullStatus",
+      running: false,
+      text: code === 0
+        ? `${model} is ready. Try your request again.`
+        : `Model pull failed with exit code ${code}. Check the Agent Hub output.`
+    });
+  });
+}
+
+function modelToPull() {
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    return DEFAULT_OLLAMA_MODEL;
+  }
+  const config = settings();
+  const configPath = resolveConfigPath(config.configPath, workspace);
+  try {
+    if (!fs.existsSync(configPath)) {
+      return DEFAULT_OLLAMA_MODEL;
+    }
+    const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    if (!raw || !Array.isArray(raw.agents)) {
+      return DEFAULT_OLLAMA_MODEL;
+    }
+    const ollamaAgent = raw.agents.find((agent) => (
+      agent &&
+      typeof agent === "object" &&
+      typeof agent.base_url === "string" &&
+      agent.base_url.includes("127.0.0.1:11434") &&
+      typeof agent.model === "string" &&
+      agent.model.trim()
+    ));
+    return ollamaAgent ? ollamaAgent.model.trim() : DEFAULT_OLLAMA_MODEL;
+  } catch (_error) {
+    return DEFAULT_OLLAMA_MODEL;
   }
 }
 
@@ -128,12 +426,12 @@ async function sendChatTurn(panel, message) {
     agent_max_steps: config.agentMaxSteps,
     workspace_dir: workspace || ".",
     metadata: {
-      source: "vscode-codex-chat"
+      source: "vscode-agent-hub-chat"
     }
   };
 
   output.appendLine("");
-  output.appendLine(`[Codex Chat] ${text}`);
+  output.appendLine(`[Agent Hub Chat] ${text}`);
   try {
     const response = await requestJson("POST", "/v1/agent", body);
     const reply = responseText(response);
@@ -148,19 +446,20 @@ async function sendChatTurn(panel, message) {
       sources: sourceLines(response)
     });
   } catch (error) {
-    output.appendLine(`Codex chat failed: ${error.message}`);
+    output.appendLine(`Agent Hub chat failed: ${error.message}`);
     panel.webview.postMessage({
       type: "chatError",
       requestId,
-      text: error.message
+      text: formatAgentHubError(error)
     });
   }
 }
 
 function codexChatTask(text) {
   return [
-    "Chat with the user as a careful Codex-style local coding assistant.",
+    "Chat with the user as Agent Hub, a careful local workspace agent.",
     "Be conversational and concise. Use workspace tools when inspection or edits are useful.",
+    "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
     "",
     text
   ].join("\n");
@@ -169,6 +468,12 @@ function codexChatTask(text) {
 function responseText(response) {
   if (response && response.message && typeof response.message.content === "string") {
     return response.message.content;
+  }
+  if (response && typeof response.text === "string") {
+    return response.text;
+  }
+  if (response && typeof response.content === "string") {
+    return response.content;
   }
   return response ? JSON.stringify(response, null, 2) : "";
 }
@@ -200,7 +505,7 @@ function chatHtml(webview, logoPath) {
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource}; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Agent Hub Codex Chat</title>
+  <title>Agent Hub</title>
   <style nonce="${nonce}">
     :root {
       color-scheme: light dark;
@@ -402,17 +707,18 @@ function chatHtml(webview, logoPath) {
     <header>
       <div class="brand">
         <img class="logo" src="${logoSrc}" alt="Agent Hub logo">
-        <h1>Codex Chat</h1>
+        <h1>Agent Hub</h1>
       </div>
       <div class="status" id="status">Checking Agent Hub...</div>
     </header>
     <main class="transcript" id="transcript" aria-live="polite"></main>
     <form id="form">
-      <textarea id="prompt" placeholder="Ask Codex to inspect, explain, or change this workspace"></textarea>
+      <textarea id="prompt" placeholder="Ask Agent Hub to inspect, explain, or change this workspace"></textarea>
       <div class="actions">
         <div class="left">
           <label><input id="includeSelection" type="checkbox"> Include selection</label>
           <button class="secondary" id="startServer" type="button">Start Server</button>
+          <button class="secondary" id="pullModel" type="button">Pull Model</button>
           <button class="secondary" id="checkStatus" type="button">Status</button>
           <button class="secondary" id="clear" type="button">Clear</button>
         </div>
@@ -430,12 +736,35 @@ function chatHtml(webview, logoPath) {
     const send = document.getElementById("send");
     const status = document.getElementById("status");
     const includeSelection = document.getElementById("includeSelection");
+    const pullModel = document.getElementById("pullModel");
     const pending = new Map();
     let sessionId = "vscode-chat-" + Date.now().toString(36);
+    let workingTimer = null;
+    let workingStarted = 0;
 
     function setBusy(value) {
       prompt.disabled = value;
       send.disabled = value;
+      if (!value && workingTimer) {
+        clearInterval(workingTimer);
+        workingTimer = null;
+      }
+    }
+
+    function startWorkingStatus() {
+      workingStarted = Date.now();
+      if (workingTimer) {
+        clearInterval(workingTimer);
+      }
+      const update = () => {
+        const seconds = Math.max(0, Math.floor((Date.now() - workingStarted) / 1000));
+        const minutes = Math.floor(seconds / 60);
+        const remainder = seconds % 60;
+        const elapsed = minutes ? minutes + "m " + remainder + "s" : seconds + "s";
+        status.textContent = "Agent Hub is working... " + elapsed;
+      };
+      update();
+      workingTimer = setInterval(update, 1000);
     }
 
     function appendMessage(role, text, options = {}) {
@@ -444,7 +773,7 @@ function chatHtml(webview, logoPath) {
 
       const roleLabel = document.createElement("div");
       roleLabel.className = "role";
-      roleLabel.textContent = role === "user" ? "You" : "Codex";
+      roleLabel.textContent = role === "user" ? "You" : "Agent Hub";
 
       const bubble = document.createElement("div");
       bubble.className = "bubble";
@@ -490,7 +819,7 @@ function chatHtml(webview, logoPath) {
       pending.set(requestId, true);
       prompt.value = "";
       setBusy(true);
-      status.textContent = "Codex is working...";
+      startWorkingStatus();
       vscode.postMessage({
         type: "send",
         requestId,
@@ -503,6 +832,12 @@ function chatHtml(webview, logoPath) {
     document.getElementById("startServer").addEventListener("click", () => {
       status.textContent = "Starting Agent Hub...";
       vscode.postMessage({ type: "startServer" });
+    });
+
+    pullModel.addEventListener("click", () => {
+      status.textContent = "Pulling model...";
+      pullModel.disabled = true;
+      vscode.postMessage({ type: "pullModel" });
     });
 
     document.getElementById("checkStatus").addEventListener("click", () => {
@@ -527,7 +862,15 @@ function chatHtml(webview, logoPath) {
         return;
       }
       if (message.type === "typing") {
-        status.textContent = "Codex is working...";
+        startWorkingStatus();
+        return;
+      }
+      if (message.type === "modelPullStatus") {
+        status.textContent = message.text;
+        pullModel.disabled = !!message.running;
+        if (!message.running && message.text) {
+          appendMessage("assistant", message.text);
+        }
         return;
       }
       if (message.type === "chatResponse") {
@@ -551,7 +894,8 @@ function chatHtml(webview, logoPath) {
     });
 
     prompt.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
         form.requestSubmit();
       }
     });
@@ -573,15 +917,6 @@ function getNonce() {
 }
 
 async function startServer() {
-  if (await isServerOnline()) {
-    vscode.window.showInformationMessage("Agent Hub is already running.");
-    return;
-  }
-  if (serverProcess) {
-    vscode.window.showInformationMessage("Agent Hub is starting.");
-    return;
-  }
-
   const workspace = workspaceRoot();
   if (!workspace) {
     vscode.window.showErrorMessage("Open a workspace folder before starting Agent Hub.");
@@ -589,6 +924,21 @@ async function startServer() {
   }
 
   const config = settings();
+  const configChanged = await ensureLocalConfig(config, workspace);
+
+  if (await isServerOnline()) {
+    if (configChanged) {
+      vscode.window.showWarningMessage("Agent Hub config was repaired. Restart Agent Hub to use the repaired config.");
+    } else {
+      vscode.window.showInformationMessage("Agent Hub is already running.");
+    }
+    return;
+  }
+  if (serverProcess) {
+    vscode.window.showInformationMessage("Agent Hub is starting.");
+    return;
+  }
+
   const args = [
     "-m",
     "agent_hub",
@@ -630,6 +980,182 @@ async function startServer() {
     output.show();
     vscode.window.showWarningMessage("Agent Hub did not respond yet. Check the Agent Hub output.");
   }
+}
+
+async function ensureLocalConfig(config, workspace) {
+  const configPath = resolveConfigPath(config.configPath, workspace);
+  if (fs.existsSync(configPath)) {
+    return repairGeneratedLocalConfig(configPath);
+  }
+
+  const ollamaModels = await detectOllamaModels();
+  const selectedModel = chooseOllamaModel(ollamaModels) || DEFAULT_OLLAMA_MODEL;
+  const data = localConfigForOllamaModel(selectedModel);
+  fs.writeFileSync(configPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+  output.appendLine(`Created Agent Hub config at ${configPath}.`);
+  output.appendLine(`Configured local-agent to use Ollama model: ${selectedModel}`);
+  return true;
+}
+
+async function repairGeneratedLocalConfig(configPath) {
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  } catch (error) {
+    output.appendLine(`Could not inspect Agent Hub config for repair: ${error.message}`);
+    return false;
+  }
+
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.agents) || !Array.isArray(raw.routes)) {
+    return false;
+  }
+
+  const ollamaModels = await detectOllamaModels();
+  const selectedModel = chooseOllamaModel(ollamaModels);
+  if (!selectedModel) {
+    return false;
+  }
+
+  const hasOfflineDefaults = raw.agents.some((agent) => (
+    agent &&
+    typeof agent === "object" &&
+    ["custom-local", "lm-studio", "localai", "vllm"].includes(agent.name)
+  ));
+  if (!hasOfflineDefaults) {
+    return false;
+  }
+
+  const repaired = localConfigForOllamaModel(selectedModel);
+  fs.writeFileSync(configPath, `${JSON.stringify(repaired, null, 2)}\n`, "utf8");
+  output.appendLine(`Repaired Agent Hub config at ${configPath}.`);
+  output.appendLine(`Removed offline default fallback providers and kept Ollama model: ${selectedModel}`);
+  return true;
+}
+
+function localConfigForOllamaModel(model) {
+  return {
+    host: "127.0.0.1",
+    port: 8787,
+    state_dir: ".agent-hub/state",
+    inbox_dir: ".agent-hub/inbox",
+    outbox_dir: ".agent-hub/outbox",
+    archive_dir: ".agent-hub/archive",
+    workspace_dir: ".",
+    agent_max_steps: 8,
+    allow_shell_tools: false,
+    free_only: true,
+    include_raw_responses: false,
+    expose_routing_details: true,
+    default_route: ["ollama-local", "echo"],
+    routes: [
+      {
+        name: "coding",
+        keywords: ["code", "bug", "fix", "refactor", "test", "repo"],
+        agents: ["ollama-local", "echo"]
+      },
+      {
+        name: "local-agent",
+        keywords: ["agent", "workspace", "edit", "implement"],
+        agents: ["ollama-local", "echo"]
+      },
+      {
+        name: "hybrid-agent",
+        keywords: [],
+        agents: ["ollama-local", "echo"]
+      },
+      {
+        name: "cloud-agent",
+        keywords: [],
+        agents: ["ollama-local", "echo"]
+      },
+      {
+        name: "research",
+        keywords: ["research", "search", "latest", "sources", "web", "news"],
+        agents: ["local-research", "echo"]
+      }
+    ],
+    agents: [
+      {
+        name: "local-research",
+        provider: "local-research",
+        model: "local-extractive-research",
+        free: true,
+        context_window: 1000000,
+        timeout_seconds: 20,
+        cooldown_seconds: 5
+      },
+      {
+        name: "ollama-local",
+        provider: "openai-compatible",
+        model,
+        base_url: "http://127.0.0.1:11434",
+        free: true,
+        max_tokens: 4096,
+        context_window: 32768,
+        timeout_seconds: 300,
+        cooldown_seconds: 10
+      },
+      {
+        name: "echo",
+        provider: "echo",
+        model: "local-echo",
+        free: true,
+        context_window: 1000000,
+        cooldown_seconds: 1
+      }
+    ]
+  };
+}
+
+async function detectOllamaModels() {
+  try {
+    const { stdout } = await execFile("ollama", ["list"], { timeout: 10000 });
+    return parseOllamaList(stdout);
+  } catch (error) {
+    output.appendLine(`Could not detect Ollama models: ${error.message}`);
+    return [];
+  }
+}
+
+function parseOllamaList(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .slice(1)
+    .map((line) => line.trim().split(/\s+/)[0])
+    .filter((name) => name && name !== "NAME");
+}
+
+function chooseOllamaModel(models) {
+  const available = Array.isArray(models) ? models.filter(Boolean) : [];
+  const preferences = [
+    /qwen2\.5-coder/i,
+    /qwen.*coder/i,
+    /codellama/i,
+    /deepseek.*coder/i,
+    /qwen/i,
+    /llama/i,
+    /mistral/i
+  ];
+  for (const pattern of preferences) {
+    const match = available.find((model) => pattern.test(model));
+    if (match) {
+      return match;
+    }
+  }
+  return available[0] || "";
+}
+
+function execFile(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    cp.execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
 }
 
 function stopServer() {
@@ -690,6 +1216,7 @@ async function runCodingAgent() {
     task: [
       "Work as a local coding agent in this workspace.",
       "Inspect files before editing, keep changes scoped, and verify if possible.",
+      "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
       "",
       task
     ].join("\n"),
@@ -781,7 +1308,7 @@ async function sendAgentRequest({ task, context, route, agentMode = true, extra 
   output.appendLine(`> ${task}`);
   try {
     const response = await requestJson("POST", agentMode ? "/v1/agent" : "/v1/route", body);
-    const text = response && response.message ? response.message.content : JSON.stringify(response, null, 2);
+    const text = responseText(response);
     output.appendLine("");
     output.appendLine(text || "(empty response)");
     appendAgentTrace(response);
@@ -795,8 +1322,41 @@ async function sendAgentRequest({ task, context, route, agentMode = true, extra 
     }
   } catch (error) {
     output.appendLine(`Agent request failed: ${error.message}`);
-    vscode.window.showErrorMessage(`Agent Hub request failed: ${error.message}`);
+    vscode.window.showErrorMessage(formatAgentHubError(error));
   }
+}
+
+function formatAgentHubError(error) {
+  const raw = error && error.message ? String(error.message) : String(error || "Unknown error");
+  const details = error && Array.isArray(error.failover) ? error.failover : [];
+  const lines = [];
+
+  if (raw.includes("WinError 10061") || raw.includes("actively refused") || raw.trim() === "Network error:") {
+    lines.push(
+      "Agent Hub is running, but no usable local model backend answered.",
+      "",
+      "Ollama is installed on this machine, but it currently has no models pulled.",
+      "Run this in a terminal, then try again:",
+      "",
+      "ollama pull qwen2.5-coder:7b"
+    );
+  } else {
+    lines.push(`Agent Hub request failed: ${raw}`);
+  }
+
+  if (details.length) {
+    lines.push("", "Provider attempts:");
+    for (const event of details) {
+      if (!event || typeof event !== "object") {
+        continue;
+      }
+      const agent = event.agent || "unknown";
+      const reason = event.reason || "failed";
+      lines.push(`- ${agent}: ${reason}`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 async function ensureServerReady() {
@@ -1009,7 +1569,7 @@ function requestJson(method, pathname, body) {
           "Content-Type": "application/json",
           "Content-Length": data ? Buffer.byteLength(data) : 0
         },
-        timeout: 120000
+        timeout: 600000
       },
       (response) => {
         const chunks = [];
@@ -1027,7 +1587,11 @@ function requestJson(method, pathname, body) {
             const message = parsed.error && parsed.error.message
               ? parsed.error.message
               : text || `HTTP ${response.statusCode}`;
-            reject(new Error(message));
+            const error = new Error(message);
+            if (Array.isArray(parsed.failover)) {
+              error.failover = parsed.failover;
+            }
+            reject(error);
             return;
           }
           resolve(parsed);

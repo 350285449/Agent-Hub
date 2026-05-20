@@ -61,6 +61,55 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertNotIn("agent_hub", response.to_native_dict())
             self.assertIn("agent_hub", response.to_native_dict(include_routing_details=True))
 
+    def test_agent_loop_accepts_tool_name_as_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text("# Demo\n\nNeeds comments.\n", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    if any("Tool result for read_file" in message.get("content", "") for message in request.messages):
+                        return ProviderResult(
+                            text='{"action":"final","answer":"I inspected README.md."}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text=(
+                            '{"action":"read_file","args":'
+                            '{"path":"README.md","start_line":1,"line_count":200}}'
+                        ),
+                        model=self.agent.model,
+                    )
+
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "add comments where necessary"}],
+                )
+            )
+
+            self.assertEqual(response.text, "I inspected README.md.")
+            steps = response.raw["agent_hub"]["steps"]
+            self.assertEqual(steps[0]["tool"], "read_file")
+            self.assertIn("# Demo", steps[0]["result"]["result"]["content"])
+
     def test_file_tools_reject_paths_outside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

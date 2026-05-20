@@ -12,6 +12,16 @@ from .models import FailoverEvent, HubRequest, HubResponse
 from .router import AgentRouter
 
 
+TOOL_ACTIONS = {
+    "list_files",
+    "read_file",
+    "search_files",
+    "write_file",
+    "replace_in_file",
+    "run_command",
+}
+
+
 class AgentRunner:
     def __init__(self, config: HubConfig, router: AgentRouter | None = None) -> None:
         self.config = config
@@ -180,18 +190,24 @@ def _command_from_response(response: HubResponse) -> dict[str, Any]:
     if action == "tool" or "tool" in data:
         tool = data.get("tool") or data.get("name")
         if tool:
-            args = data.get("args", data.get("arguments", {}))
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {"input": args}
-            return {"action": "tool", "tool": tool, "args": args if isinstance(args, dict) else {}}
+            return _tool_command(str(tool), data.get("args", data.get("arguments", {})))
+
+    if action in TOOL_ACTIONS:
+        return _tool_command(action, data.get("args", data.get("arguments", {})))
 
     if action == "final" or "final" in data or "answer" in data:
         return {"action": "final", "answer": data.get("answer", data.get("final", ""))}
 
     return {"action": "text"}
+
+
+def _tool_command(tool: str, args: Any) -> dict[str, Any]:
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            args = {"input": args}
+    return {"action": "tool", "tool": tool, "args": args if isinstance(args, dict) else {}}
 
 
 def _openai_tool_call(raw: dict[str, Any]) -> dict[str, Any] | None:

@@ -17,7 +17,7 @@ to your local Agent-Hub server.
    ```powershell
    cd vscode-extension
    npm run package
-   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.2.0.vsix --force
+   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.3.5.vsix --force
    ```
 
 4. Reload VS Code.
@@ -25,7 +25,8 @@ to your local Agent-Hub server.
 
 ## Commands
 
-- `Agent Hub: Open Codex Chat`
+- `@agenthub` in the VS Code Chat view
+- `Agent Hub: Open Chat`
 - `Agent Hub: Start Server`
 - `Agent Hub: Show Status`
 - `Agent Hub: Ask Agent`
