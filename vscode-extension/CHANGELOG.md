@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.2
+
+- Changes Claude, Gemini, and ChatGPT from vendor API defaults into local OpenAI-compatible aliases.
+- Uses a detected LM Studio model for those aliases when LM Studio is running; otherwise defaults to Ollama models.
+- Pulls all default Ollama alias models from the chat UI.
+
+## 0.4.1
+
+- Added preliminary `cloud` provider-mode routing for Claude, Gemini, and ChatGPT agent names.
+- Changed the VS Code default provider mode to `cloud` with local model fallback.
+- Kept LM Studio and Ollama as fallback providers in generated workspace configs.
+
+## 0.4.0
+
+- Added LM Studio detection for generated workspace configs.
+- Creates local routes from detected LM Studio and Ollama models instead of hardcoding Ollama only.
+- Changed `agentHub.pythonPath` default to `auto` and tries common Python 3.11+ launchers before failing.
+- Renamed the chat button to `Pull Ollama Model` so LM Studio users are not sent down the wrong setup path.
+
+## 0.3.9
+
+- Bundles the Agent Hub Python backend into packaged VSIX builds.
+- Starts the server with the bundled backend on `PYTHONPATH`, so a fresh workspace no longer needs `agent_hub` preinstalled.
+- Repairs invalid local config JSON by backing it up and writing strict JSON.
+- Improves missing Ollama/Python backend startup messages.
+
+## 0.3.8
+
+- Updated the extension package to version `0.3.8`.
+- Continued support for local shell tool execution and agent integration.
+
 ## 0.3.6
 
 - Tightened VS Code agent prompts to request raw JSON tool calls with quoted string arguments.

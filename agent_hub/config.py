@@ -59,7 +59,7 @@ class HubConfig:
     archive_dir: Path = Path(".agent-hub/archive")
     workspace_dir: Path = Path(".")
     agent_max_steps: int = 8
-    allow_shell_tools: bool = False
+    allow_shell_tools: bool = True
     free_only: bool = True
     default_route: list[str] = field(default_factory=list)
     routes: list[RouteRule] = field(default_factory=list)
@@ -84,13 +84,17 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> HubConfig:
 
 
 def free_local_config() -> HubConfig:
-    """No-key config that prefers the user's own local OpenAI-compatible server."""
+    """Cloud-style local aliases backed by Ollama or another OpenAI-compatible server."""
 
     local_model = os.environ.get("AGENT_HUB_LOCAL_MODEL", "local-model")
     local_base_url = os.environ.get("AGENT_HUB_LOCAL_BASE_URL", "http://127.0.0.1:8000")
     local_max_tokens = _env_int("AGENT_HUB_LOCAL_MAX_TOKENS", 4096)
     local_context_window = _env_int("AGENT_HUB_LOCAL_CONTEXT_WINDOW", 8192)
     local_timeout = _env_float("AGENT_HUB_LOCAL_TIMEOUT_SECONDS", 15.0)
+    cloud_alias_base_url = os.environ.get(
+        "AGENT_HUB_CLOUD_ALIAS_BASE_URL",
+        os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+    )
 
     agents = {
         "local-research": AgentConfig(
@@ -168,6 +172,39 @@ def free_local_config() -> HubConfig:
             cooldown_seconds=10.0,
             context_window=local_context_window,
         ),
+        "claude": AgentConfig(
+            name="claude",
+            provider="openai-compatible",
+            model=os.environ.get("AGENT_HUB_CLAUDE_LOCAL_MODEL", "qwen2.5-coder:7b"),
+            base_url=os.environ.get("AGENT_HUB_CLAUDE_LOCAL_BASE_URL", cloud_alias_base_url),
+            free=True,
+            timeout_seconds=120.0,
+            max_tokens=4096,
+            cooldown_seconds=30.0,
+            context_window=32_768,
+        ),
+        "gemini": AgentConfig(
+            name="gemini",
+            provider="openai-compatible",
+            model=os.environ.get("AGENT_HUB_GEMINI_LOCAL_MODEL", "gemma3:4b"),
+            base_url=os.environ.get("AGENT_HUB_GEMINI_LOCAL_BASE_URL", cloud_alias_base_url),
+            free=True,
+            timeout_seconds=120.0,
+            max_tokens=4096,
+            cooldown_seconds=30.0,
+            context_window=128_000,
+        ),
+        "chatgpt": AgentConfig(
+            name="chatgpt",
+            provider="openai-compatible",
+            model=os.environ.get("AGENT_HUB_CHATGPT_LOCAL_MODEL", "llama3.2"),
+            base_url=os.environ.get("AGENT_HUB_CHATGPT_LOCAL_BASE_URL", cloud_alias_base_url),
+            free=True,
+            timeout_seconds=120.0,
+            max_tokens=4096,
+            cooldown_seconds=30.0,
+            context_window=128_000,
+        ),
         "echo": AgentConfig(
             name="echo",
             provider="echo",
@@ -180,14 +217,14 @@ def free_local_config() -> HubConfig:
     return HubConfig(
         workspace_dir=Path("."),
         agent_max_steps=8,
-        allow_shell_tools=False,
+        allow_shell_tools=True,
         free_only=True,
-        default_route=[*free_local_agent_names(), "echo"],
+        default_route=[*cloud_agent_names(), *free_local_agent_names(), "echo"],
         routes=[
             RouteRule(
                 name="coding",
                 keywords=["code", "bug", "fix", "refactor", "test", "repo"],
-                agents=[*free_local_agent_names(), "echo"],
+                agents=[*cloud_agent_names(), *free_local_agent_names(), "echo"],
             ),
             RouteRule(
                 name="local-agent",
@@ -197,17 +234,17 @@ def free_local_config() -> HubConfig:
             RouteRule(
                 name="hybrid-agent",
                 keywords=[],
-                agents=[*free_local_agent_names(), "chatgpt", "claude", "gemini"],
+                agents=[*cloud_agent_names(), *free_local_agent_names(), "echo"],
             ),
             RouteRule(
                 name="cloud-agent",
                 keywords=[],
-                agents=["chatgpt", "claude", "gemini", *free_local_agent_names()],
+                agents=[*cloud_agent_names(), *free_local_agent_names(), "echo"],
             ),
             RouteRule(
                 name="research",
                 keywords=["research", "search", "latest", "sources", "web", "news"],
-                agents=["local-research", "custom-local", "echo"],
+                agents=["local-research", *cloud_agent_names(), "echo"],
             )
         ],
         agents=agents,
@@ -220,7 +257,7 @@ def free_local_agent_names() -> list[str]:
 
 
 def cloud_agent_names() -> list[str]:
-    return ["chatgpt", "claude", "gemini"]
+    return ["claude", "gemini", "chatgpt"]
 
 
 def config_from_dict(raw: dict[str, Any]) -> HubConfig:
@@ -259,7 +296,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         archive_dir=Path(raw.get("archive_dir", ".agent-hub/archive")),
         workspace_dir=Path(raw.get("workspace_dir", ".")),
         agent_max_steps=int(raw.get("agent_max_steps", 8)),
-        allow_shell_tools=bool(raw.get("allow_shell_tools", False)),
+        allow_shell_tools=bool(raw.get("allow_shell_tools", True)),
         free_only=bool(raw.get("free_only", True)),
         default_route=list(raw.get("default_route", agents.keys())),
         routes=routes,
@@ -385,3 +422,4 @@ def _env_float(name: str, default: float) -> float:
         return float(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
+

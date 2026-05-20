@@ -17,22 +17,51 @@ class ConfigTests(unittest.TestCase):
     def test_free_local_config_uses_custom_local_agent(self) -> None:
         config = free_local_config()
 
-        self.assertEqual(config.default_route, [*free_local_agent_names(), "echo"])
+        self.assertEqual(config.default_route, [*cloud_agent_names(), *free_local_agent_names(), "echo"])
         self.assertEqual(free_local_agent_names()[0], "ollama-qwen-coder")
         self.assertLess(
             free_local_agent_names().index("ollama-qwen3"),
             free_local_agent_names().index("custom-local"),
         )
-        self.assertEqual(cloud_agent_names(), ["chatgpt", "claude", "gemini"])
+        self.assertEqual(cloud_agent_names(), ["claude", "gemini", "chatgpt"])
         self.assertIn("custom-local", config.agents)
         self.assertEqual(
             set(config.agents),
-            {"local-research", *free_local_agent_names(), "echo"},
+            {"local-research", *cloud_agent_names(), *free_local_agent_names(), "echo"},
         )
         self.assertTrue(config.free_only)
+        self.assertTrue(config.allow_shell_tools)
         self.assertTrue(is_free_agent(config.agents["local-research"]))
+        self.assertTrue(is_free_agent(config.agents["claude"]))
+        self.assertTrue(is_free_agent(config.agents["gemini"]))
+        self.assertTrue(is_free_agent(config.agents["chatgpt"]))
+        self.assertEqual(config.agents["claude"].provider, "openai-compatible")
+        self.assertEqual(config.agents["gemini"].provider, "openai-compatible")
+        self.assertEqual(config.agents["chatgpt"].provider, "openai-compatible")
+        self.assertEqual(config.agents["claude"].model, "qwen2.5-coder:7b")
+        self.assertEqual(config.agents["gemini"].model, "gemma3:4b")
+        self.assertEqual(config.agents["chatgpt"].model, "llama3.2")
         self.assertTrue(is_free_agent(config.agents["custom-local"]))
         self.assertTrue(is_free_agent(config.agents["ollama-qwen-coder"]))
+
+    def test_cloud_style_aliases_can_be_configured_from_environment(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "AGENT_HUB_CLOUD_ALIAS_BASE_URL": "http://127.0.0.1:1234",
+                "AGENT_HUB_CLAUDE_LOCAL_MODEL": "lmstudio-loaded-model",
+                "AGENT_HUB_GEMINI_LOCAL_MODEL": "gemma-custom",
+                "AGENT_HUB_CHATGPT_LOCAL_MODEL": "llama-custom",
+            },
+        ):
+            config = free_local_config()
+
+        self.assertEqual(config.agents["claude"].base_url, "http://127.0.0.1:1234")
+        self.assertEqual(config.agents["gemini"].base_url, "http://127.0.0.1:1234")
+        self.assertEqual(config.agents["chatgpt"].base_url, "http://127.0.0.1:1234")
+        self.assertEqual(config.agents["claude"].model, "lmstudio-loaded-model")
+        self.assertEqual(config.agents["gemini"].model, "gemma-custom")
+        self.assertEqual(config.agents["chatgpt"].model, "llama-custom")
 
     def test_custom_local_agent_can_be_configured_from_environment(self) -> None:
         with patch.dict(

@@ -1,8 +1,8 @@
 {
   "name": "agent-hub-vscode",
   "displayName": "Local Agent Hub",
-  "description": "Run a local-first AI coding agent and research helper from VS Code.",
-  "version": "0.3.7",
+  "description": "Run local Claude/Gemini/ChatGPT-style coding agents from VS Code.",
+  "version": "0.4.2",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
@@ -39,8 +39,9 @@
   "main": "./extension.js",
   "scripts": {
     "check": "node --check extension.js",
-    "package": "npx @vscode/vsce package --allow-missing-repository",
-    "publish": "npx @vscode/vsce publish --allow-missing-repository"
+    "prepare-backend": "node scripts/prepare-backend.js",
+    "package": "npm run prepare-backend && npx @vscode/vsce package --allow-missing-repository",
+    "publish": "npm run prepare-backend && npx @vscode/vsce publish --allow-missing-repository"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.9.1"
@@ -51,7 +52,7 @@
         "id": "agent-hub.agent-hub-vscode.agenthub",
         "name": "agenthub",
         "fullName": "Agent Hub",
-        "description": "Run a local workspace agent",
+        "description": "Run local Claude/Gemini/ChatGPT-style workspace agents",
         "isSticky": true,
         "commands": [
           {
@@ -92,7 +93,7 @@
       },
       {
         "command": "agentHub.codeAgent",
-        "title": "Agent Hub: Run Local Coding Agent"
+        "title": "Agent Hub: Run Coding Agent"
       },
       {
         "command": "agentHub.research",
@@ -121,8 +122,8 @@
         },
         "agentHub.pythonPath": {
           "type": "string",
-          "default": "python",
-          "description": "Python executable used to start Agent-Hub. When left as python, the extension uses the workspace .venv first if it exists."
+          "default": "auto",
+          "description": "Python executable used to start Agent-Hub. Use auto to try workspace .venv, Python Launcher, python, and python3 until a Python 3.11+ runtime is found."
         },
         "agentHub.configPath": {
           "type": "string",
@@ -142,7 +143,7 @@
         "agentHub.codingAgentRoute": {
           "type": "string",
           "default": "local-agent",
-          "description": "Agent-Hub route used by the Run Local Coding Agent command."
+          "description": "Agent-Hub route used when provider mode is local."
         },
         "agentHub.agentProviderMode": {
           "type": "string",
@@ -151,18 +152,18 @@
             "hybrid",
             "cloud"
           ],
-          "default": "local",
-          "description": "Provider mode for the local coding agent. Local uses only local models; hybrid tries local then enabled cloud providers; cloud tries enabled cloud providers first."
+          "default": "cloud",
+          "description": "Provider mode for the coding agent. Cloud uses local Claude, Gemini, and ChatGPT-style aliases first, then local fallbacks; local uses only local models."
         },
         "agentHub.agentMaxSteps": {
           "type": "number",
           "default": 20,
-          "description": "Maximum tool steps for local agent requests."
+          "description": "Maximum tool steps for agent requests."
         },
         "agentHub.allowShellTools": {
           "type": "boolean",
           "default": true,
-          "description": "Allow the local coding agent command to run shell commands in the workspace."
+          "description": "Allow the coding agent command to run shell commands in the workspace."
         },
         "agentHub.maxTokens": {
           "type": "number",

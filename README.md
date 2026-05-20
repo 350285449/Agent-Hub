@@ -5,11 +5,12 @@ requests. It accepts JSON, chooses a configured agent/model, can run a small
 tool-using agent loop, and fails over to the next agent when a provider is out
 of quota, rate limited, overloaded, or cannot handle the context size.
 
-It is local/free-only by default: if no config file exists, Agent-Hub tries your
-own OpenAI-compatible local server at `127.0.0.1:8000`, then falls back to the
-built-in `echo` provider for smoke tests. It does not automate bypassing
-free-tier limits or scraping web UIs. Add only providers you are allowed to use
-through API keys or local OpenAI-compatible servers.
+It is cloud-style and free/local by default: if no config file exists,
+Agent-Hub tries Claude, Gemini, and ChatGPT-style aliases first, but those
+aliases are backed by Ollama, LM Studio, or another OpenAI-compatible local
+server. It then falls back to local model presets and the built-in `echo`
+provider for smoke tests. It does not automate bypassing free-tier limits,
+scraping web UIs, or downloading proprietary vendor models.
 
 ## What It Runs
 
@@ -38,8 +39,9 @@ Then open a second terminal for an interactive Codex-style chat:
 ```
 
 Or use the VS Code extension command `Agent Hub: Open Codex Chat`.
-Codex chat needs one local OpenAI-compatible model online, such as Ollama or
-LM Studio, unless you opt in to a cloud provider.
+Codex chat needs one local OpenAI-compatible model online, such as Ollama or LM
+Studio. The Claude/Gemini/ChatGPT names are local aliases, not proprietary cloud
+models.
 
 Manual start without installing into a virtual environment:
 
@@ -47,8 +49,17 @@ Manual start without installing into a virtual environment:
 python -m agent_hub serve --watch-inbox
 ```
 
-That starts with the built-in custom local/free config. You can point it at your
-own server without a config file:
+That starts with the built-in cloud-style local config. You can tune the local
+alias model defaults with environment variables:
+
+```powershell
+$env:AGENT_HUB_CLAUDE_LOCAL_MODEL = "qwen2.5-coder:7b"
+$env:AGENT_HUB_GEMINI_LOCAL_MODEL = "gemma3:4b"
+$env:AGENT_HUB_CHATGPT_LOCAL_MODEL = "llama3.2"
+$env:AGENT_HUB_CLOUD_ALIAS_BASE_URL = "http://127.0.0.1:11434"
+```
+
+You can also point it at your own local server without a config file:
 
 ```powershell
 $env:AGENT_HUB_LOCAL_BASE_URL = "http://127.0.0.1:8000"
@@ -66,19 +77,17 @@ python -m agent_hub agents
 python -m agent_hub local-models
 ```
 
-Cloud providers are opt-in. To enable one, choose a model ID and API key
-environment variable:
+The default local aliases use Ollama model IDs. Pull them with:
 
 ```powershell
-python -m agent_hub enable-provider openai --model your-openai-model
-python -m agent_hub enable-provider claude --model your-claude-model
-python -m agent_hub enable-provider gemini --model your-gemini-model
+ollama pull qwen2.5-coder:7b
+ollama pull gemma3:4b
+ollama pull llama3.2
 ```
 
-That sets `free_only` to `false`, enables the selected provider, and adds it to
-the `cloud-agent` route. In VS Code, set `agentHub.agentProviderMode` to
-`hybrid` to try local models first, or `cloud` to try enabled cloud providers
-first. Leave it as `local` for fully local/free behavior.
+In VS Code, `agentHub.agentProviderMode` defaults to `cloud`, which means
+Claude/Gemini/ChatGPT-style local aliases first. Set it to `local` for direct
+LM Studio/Ollama fallback routes only.
 
 Health check:
 
@@ -105,15 +114,17 @@ Host. In that new VS Code window, open this repository folder and use:
 - `Agent Hub: Start Server`
 - `Agent Hub: Show Status`
 - `Agent Hub: Ask Agent`
-- `Agent Hub: Run Local Coding Agent`
+- `Agent Hub: Run Coding Agent`
 - `Agent Hub: Research Web`
 - `Agent Hub: Explain Selection`
 - `Agent Hub: Explain Current File`
 
-The extension uses the same local server and config as the CLI. By default it
-starts `python -m agent_hub --config agent-hub.config.json serve --watch-inbox`
-from the opened workspace. Settings are available under `Agent Hub`, including
-`agentHub.serverUrl`, `agentHub.pythonPath`, `agentHub.configPath`,
+The extension uses the same local server and config as the CLI. Packaged VSIX
+builds include the Agent Hub Python backend and start
+`python -m agent_hub --config agent-hub.config.json serve --watch-inbox` from
+the opened workspace. Settings are available under `Agent Hub`, including
+`agentHub.serverUrl`, `agentHub.pythonPath` (`auto` tries common Python 3.11+
+launchers), `agentHub.configPath`,
 `agentHub.route`, `agentHub.codingAgentRoute`, `agentHub.researchRoute`,
 `agentHub.agentMaxSteps`, `agentHub.allowShellTools`, `agentHub.maxTokens`, and
 `agentHub.autoStart`.
@@ -162,11 +173,11 @@ Get-Content .agent-hub/outbox/task.response.json
 ```
 
 The same request context is sent to each candidate agent in order. While
-`free_only` is enabled, Agent-Hub only uses `echo` and local/private
-`openai-compatible` agents. Paid API providers such as `openai` and `anthropic`
-are skipped before any network call. If your custom local endpoint is not
-running, a local model is missing, or the request does not fit that model's
-configured token window, Agent-Hub records that event and retries with `echo`.
+`free_only` is enabled, Agent-Hub only uses agents marked `free`, `echo`, and
+local/private `openai-compatible` agents. The default Claude, Gemini, and
+ChatGPT entries are local `openai-compatible` aliases. If a local endpoint is
+offline, a model is missing, or the request does not fit that model's configured
+token window, Agent-Hub records that event and retries the next agent.
 
 Native JSON requests keep session history by default when `session_id` is
 reused. OpenAI- and Anthropic-compatible requests only use stored session history
@@ -199,9 +210,8 @@ Available tools:
 - `replace_in_file`
 - `run_command`, disabled unless `allow_shell_tools` is `true`
 
-For a Codex-like local coding workflow, run a local OpenAI-compatible model at
-the configured `custom-local.base_url`, then use `Agent Hub: Run Local Coding
-Agent` in VS Code or:
+For a Codex-like coding workflow, run a local OpenAI-compatible model through
+Ollama or LM Studio, then use `Agent Hub: Run Coding Agent` in VS Code or:
 
 ```powershell
 python -m agent_hub agent --allow-shell-tools "inspect the repo and fix the failing tests"
@@ -213,10 +223,10 @@ For an ongoing chat session that keeps conversation history, use:
 python -m agent_hub chat --allow-shell-tools
 ```
 
-The dedicated `local-agent` route uses only free local model endpoints, so
-coding-agent requests do not fall back to the `echo` smoke-test provider. The
-CLI agent command also forces `free_only=true` unless you explicitly pass
-`--allow-cloud`.
+The dedicated `local-agent` route uses only free local model endpoints. The
+`cloud-agent` route tries Claude, Gemini, and ChatGPT-style local aliases first,
+then direct local fallback. The CLI agent command also forces `free_only=true`
+unless you explicitly pass `--allow-cloud`.
 
 Agent-Hub includes free local model presets for:
 
@@ -240,8 +250,10 @@ python -m agent_hub local-models
 python -m agent_hub agent --allow-shell-tools "inspect this repo"
 ```
 
-For LM Studio, start its local server and load a model, then set
-`AGENT_HUB_LM_STUDIO_MODEL` to the model ID shown by `agent-hub local-models`.
+For LM Studio, start its local server and load a model. The VS Code extension
+detects the loaded model automatically when it creates or repairs
+`agent-hub.config.json`; for CLI-only use, set `AGENT_HUB_LM_STUDIO_MODEL` to
+the model ID shown by `agent-hub local-models`.
 
 ## Config
 
@@ -254,15 +266,15 @@ snippets, and return citations without a paid API key.
 {
   "workspace_dir": ".",
   "agent_max_steps": 8,
-  "allow_shell_tools": false,
+  "allow_shell_tools": true,
   "free_only": true,
   "expose_routing_details": false,
-  "default_route": ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
+  "default_route": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
   "routes": [
     {
       "name": "coding",
       "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
-      "agents": ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "local-agent",
@@ -272,17 +284,17 @@ snippets, and return citations without a paid API key.
     {
       "name": "hybrid-agent",
       "keywords": [],
-      "agents": ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "chatgpt", "claude", "gemini"]
+      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "cloud-agent",
       "keywords": [],
-      "agents": ["chatgpt", "claude", "gemini", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai"]
+      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "research",
       "keywords": ["research", "search", "latest", "sources", "web", "news"],
-      "agents": ["local-research", "custom-local", "echo"]
+      "agents": ["local-research", "claude", "gemini", "chatgpt", "echo"]
     }
   ]
 }
@@ -307,15 +319,20 @@ Supported providers:
 - `local-research` for free local extractive web research with citations and
   search results, using no cloud LLM or paid API
 - `gemma` as a friendly alias for a local OpenAI-compatible Gemma/Gemma-like agent
-- `chatgpt` or `openai` for OpenAI Chat Completions, skipped while `free_only` is true unless marked `free`
-- `gemini` or `google` for Gemini `generateContent`, skipped while `free_only` is true unless marked `free`
-- `claude` or `anthropic` for Claude Messages API, skipped while `free_only` is true unless marked `free`
+- `chatgpt`, `gemini`, and `claude` in the default config are local
+  `openai-compatible` aliases backed by Ollama, LM Studio, or another local
+  server
+- `openai`, `google`, and `anthropic` API providers are optional advanced
+  integrations you can add explicitly; paid providers are skipped while
+  `free_only` is true unless marked `free`
 - `echo` for local smoke tests without API keys
 
-Cloud agents stay disabled in the example config. To use one later, set the
-right `api_key_env`, replace the model placeholder, set `enabled` to `true`, and
-either disable `free_only` or explicitly mark that agent as `free` if your usage
-is genuinely free.
+The default Claude/Gemini/ChatGPT agents do not use vendor API keys. To point
+all three aliases at LM Studio, start LM Studio's local server and let the VS
+Code extension repair/create the config, or set their `base_url` values to
+`http://127.0.0.1:1234`. To use the real hosted APIs later, add explicit API
+provider entries with `agent-hub enable-provider` and use `--paid` when you want
+`free_only=false`.
 
 For cited research answers in VS Code, run `Agent Hub: Research Web`. The
 `local-research` agent is enabled by default, marked free, and returns top-level
@@ -332,13 +349,14 @@ or hosted agent service.
   response, so clients that require true token streaming may still need adapter work.
 - Tool schemas are forwarded for OpenAI-compatible requests. Cross-provider tool
   translation is intentionally conservative because vendor tool formats differ.
-- Model IDs in the example config are placeholders you should replace with models
-  your local servers actually expose.
-- Agent file tools are constrained to `workspace_dir`. Shell command execution is
-  opt-in because it runs with the permissions of the Agent-Hub process.
+- Local model IDs in the example config are placeholders you should replace with
+  models your local servers actually expose.
+- Agent file tools are constrained to `workspace_dir`. Shell command execution
+  runs with the permissions of the Agent-Hub process, so disable
+  `allow_shell_tools` when you want a read/write-only workspace agent.
 
-API references checked while building this:
+Local model references:
 
-- OpenAI Chat Completions: https://platform.openai.com/docs/api-reference/chat/create-chat-completion
-- Anthropic Messages: https://docs.anthropic.com/en/api/messages-examples
-- Gemini generateContent: https://ai.google.dev/api/generate-content
+- Ollama qwen2.5-coder: https://ollama.com/library/qwen2.5-coder
+- Ollama Gemma 3: https://ollama.com/library/gemma3
+- Ollama Llama 3.2: https://ollama.com/library/llama3.2

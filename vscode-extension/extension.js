@@ -11,10 +11,18 @@ let serverProcess = null;
 let modelPullProcess = null;
 let output;
 let chatPanel = null;
+let extensionContext = null;
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
+const DEFAULT_LM_STUDIO_MODEL = "local-model";
+const DEFAULT_CLAUDE_MODEL = "qwen2.5-coder:7b";
+const DEFAULT_GEMINI_MODEL = "gemma3:4b";
+const DEFAULT_CHATGPT_MODEL = "llama3.2";
+const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
+const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
 
 function activate(context) {
+  extensionContext = context;
   output = vscode.window.createOutputChannel("Agent Hub");
   context.subscriptions.push(output);
 
@@ -150,7 +158,7 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
 function participantTask(command, prompt, chatContext) {
   const history = participantHistory(chatContext);
   const base = [
-    "You are Agent Hub, a practical local coding agent inside VS Code.",
+    "You are Agent Hub, a practical local-first coding agent inside VS Code.",
     "Inspect workspace files before making claims about code.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
     "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
@@ -317,7 +325,7 @@ async function handleChatMessage(panel, message) {
 }
 
 async function pullDefaultModel(panel) {
-  const model = modelToPull();
+  const models = modelsToPull();
   if (modelPullProcess) {
     panel.webview.postMessage({
       type: "modelPullStatus",
@@ -331,68 +339,101 @@ async function pullDefaultModel(panel) {
   panel.webview.postMessage({
     type: "modelPullStatus",
     running: true,
-    text: `Pulling ${model} with Ollama...`
+    text: `Pulling ${models.join(", ")} with Ollama...`
   });
   output.show(true);
   output.appendLine("");
-  output.appendLine(`Pulling Ollama model: ${model}`);
+  output.appendLine(`Pulling Ollama models: ${models.join(", ")}`);
 
-  modelPullProcess = cp.spawn("ollama", ["pull", model], {
-    cwd: workspaceRoot() || undefined,
-    shell: false
-  });
-
-  modelPullProcess.stdout.on("data", (data) => output.append(data.toString()));
-  modelPullProcess.stderr.on("data", (data) => output.append(data.toString()));
-  modelPullProcess.on("error", (error) => {
-    output.appendLine(`Failed to pull Ollama model: ${error.message}`);
-    modelPullProcess = null;
+  try {
+    for (const model of models) {
+      panel.webview.postMessage({
+        type: "modelPullStatus",
+        running: true,
+        text: `Pulling ${model} with Ollama...`
+      });
+      await pullOllamaModel(model);
+    }
     panel.webview.postMessage({
       type: "modelPullStatus",
       running: false,
-      text: `Could not run Ollama: ${error.message}`
+      text: `${models.join(", ")} ready. Try your request again.`
     });
-  });
-  modelPullProcess.on("exit", (code) => {
-    output.appendLine(`Ollama pull exited with code ${code}.`);
-    modelPullProcess = null;
+  } catch (error) {
+    const message = formatOllamaError(error);
+    output.appendLine(message);
     panel.webview.postMessage({
       type: "modelPullStatus",
       running: false,
-      text: code === 0
-        ? `${model} is ready. Try your request again.`
-        : `Model pull failed with exit code ${code}. Check the Agent Hub output.`
+      text: message
+    });
+    vscode.window.showWarningMessage(message);
+  } finally {
+    modelPullProcess = null;
+  }
+}
+
+function pullOllamaModel(model) {
+  return new Promise((resolve, reject) => {
+    output.appendLine(`Pulling Ollama model: ${model}`);
+    modelPullProcess = cp.spawn("ollama", ["pull", model], {
+      cwd: workspaceRoot() || undefined,
+      shell: false
+    });
+    modelPullProcess.stdout.on("data", (data) => output.append(data.toString()));
+    modelPullProcess.stderr.on("data", (data) => output.append(data.toString()));
+    modelPullProcess.on("error", (error) => {
+      output.appendLine(`Failed to pull Ollama model: ${error.message}`);
+      reject(error);
+    });
+    modelPullProcess.on("exit", (code) => {
+      output.appendLine(`Ollama pull ${model} exited with code ${code}.`);
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`Model pull failed with exit code ${code}. Check the Agent Hub output.`));
+      }
     });
   });
 }
 
-function modelToPull() {
+function modelsToPull() {
   const workspace = workspaceRoot();
   if (!workspace) {
-    return DEFAULT_OLLAMA_MODEL;
+    return defaultOllamaAliasModels();
   }
   const config = settings();
   const configPath = resolveConfigPath(config.configPath, workspace);
   try {
     if (!fs.existsSync(configPath)) {
-      return DEFAULT_OLLAMA_MODEL;
+      return defaultOllamaAliasModels();
     }
-    const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const raw = parseJsonConfigText(fs.readFileSync(configPath, "utf8")).value;
     if (!raw || !Array.isArray(raw.agents)) {
-      return DEFAULT_OLLAMA_MODEL;
+      return defaultOllamaAliasModels();
     }
-    const ollamaAgent = raw.agents.find((agent) => (
-      agent &&
-      typeof agent === "object" &&
-      typeof agent.base_url === "string" &&
-      agent.base_url.includes("127.0.0.1:11434") &&
-      typeof agent.model === "string" &&
-      agent.model.trim()
-    ));
-    return ollamaAgent ? ollamaAgent.model.trim() : DEFAULT_OLLAMA_MODEL;
+    const models = raw.agents
+      .filter((agent) => (
+        agent &&
+        typeof agent === "object" &&
+        typeof agent.base_url === "string" &&
+        agent.base_url.includes(new URL(OLLAMA_BASE_URL).host) &&
+        typeof agent.model === "string" &&
+        agent.model.trim()
+      ))
+      .map((agent) => agent.model.trim());
+    return uniqueModels(models.length ? models : defaultOllamaAliasModels());
   } catch (_error) {
-    return DEFAULT_OLLAMA_MODEL;
+    return defaultOllamaAliasModels();
   }
+}
+
+function defaultOllamaAliasModels() {
+  return uniqueModels([DEFAULT_CLAUDE_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_CHATGPT_MODEL]);
+}
+
+function uniqueModels(models) {
+  return Array.from(new Set(models.filter(Boolean)));
 }
 
 async function sendChatTurn(panel, message) {
@@ -459,7 +500,7 @@ async function sendChatTurn(panel, message) {
 
 function codexChatTask(text) {
   return [
-    "Chat with the user as Agent Hub, a careful local workspace agent.",
+    "Chat with the user as Agent Hub, a careful local-first workspace agent.",
     "Be conversational and concise. Use workspace tools when inspection or edits are useful.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
     "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
@@ -722,7 +763,7 @@ function chatHtml(webview, logoPath) {
         <div class="left">
           <label><input id="includeSelection" type="checkbox"> Include selection</label>
           <button class="secondary" id="startServer" type="button">Start Server</button>
-          <button class="secondary" id="pullModel" type="button">Pull Model</button>
+          <button class="secondary" id="pullModel" type="button">Pull Ollama Models</button>
           <button class="secondary" id="checkStatus" type="button">Status</button>
           <button class="secondary" id="clear" type="button">Clear</button>
         </div>
@@ -839,7 +880,7 @@ function chatHtml(webview, logoPath) {
     });
 
     pullModel.addEventListener("click", () => {
-      status.textContent = "Pulling model...";
+      status.textContent = "Pulling Ollama models...";
       pullModel.disabled = true;
       vscode.postMessage({ type: "pullModel" });
     });
@@ -943,6 +984,11 @@ async function startServer() {
     return;
   }
 
+  const launch = serverLaunchEnvironment(workspace);
+  if (!(await ensurePythonBackend(config, workspace, launch))) {
+    return;
+  }
+
   const args = [
     "-m",
     "agent_hub",
@@ -959,10 +1005,12 @@ async function startServer() {
     args.push("--port", url.port);
   }
 
-  output.appendLine(`Starting Agent Hub: ${config.pythonPath} ${args.join(" ")}`);
-  serverProcess = cp.spawn(config.pythonPath, args, {
+  const pythonArgs = [...launch.pythonArgs, ...args];
+  output.appendLine(`Starting Agent Hub: ${launch.pythonLabel} ${args.join(" ")}`);
+  serverProcess = cp.spawn(launch.pythonCommand, pythonArgs, {
     cwd: workspace,
-    shell: false
+    shell: false,
+    env: launch.env
   });
 
   serverProcess.stdout.on("data", (data) => output.append(data.toString()));
@@ -986,57 +1034,375 @@ async function startServer() {
   }
 }
 
+function serverLaunchEnvironment(workspace) {
+  const env = { ...process.env };
+  const backendRoot = backendSourceRoot(workspace);
+  if (backendRoot) {
+    prependEnvPath(env, "PYTHONPATH", backendRoot);
+  }
+  return {
+    env,
+    backendRoot,
+    pythonCommand: "",
+    pythonArgs: [],
+    pythonLabel: ""
+  };
+}
+
+async function ensurePythonBackend(config, workspace, launch) {
+  const script = [
+    "import sys",
+    "assert sys.version_info >= (3, 11), 'Agent Hub requires Python 3.11 or newer'",
+    "import agent_hub",
+    "print(sys.executable)",
+    "print(getattr(agent_hub, '__file__', 'agent_hub'))"
+  ].join("; ");
+
+  const candidates = pythonCandidates(config.pythonPath, workspace);
+  const failures = [];
+  try {
+    for (const candidate of candidates) {
+      try {
+        const { stdout } = await execFile(candidate.command, [...candidate.args, "-c", script], {
+          cwd: workspace,
+          env: launch.env,
+          timeout: 10000
+        });
+        const lines = String(stdout || "").trim().split(/\r?\n/).filter(Boolean);
+        launch.pythonCommand = candidate.command;
+        launch.pythonArgs = candidate.args;
+        launch.pythonLabel = candidate.label;
+        if (launch.backendRoot) {
+          output.appendLine(`Using Agent Hub backend source: ${launch.backendRoot}`);
+        }
+        if (lines[0]) {
+          output.appendLine(`Using Python: ${lines[0]}`);
+        }
+        if (lines[1]) {
+          output.appendLine(`Agent Hub Python backend import: ${lines[1]}`);
+        }
+        if (candidate.notice) {
+          output.appendLine(candidate.notice);
+        }
+        return true;
+      } catch (error) {
+        failures.push({ candidate, error });
+      }
+    }
+    throw new Error("No usable Python 3.11+ executable could import Agent Hub.");
+  } catch (error) {
+    const details = formatPythonBackendError(error, config, launch, failures);
+    output.appendLine(details.detail);
+    output.show();
+    vscode.window.showErrorMessage(details.summary);
+    return false;
+  }
+}
+
+function pythonCandidates(value, workspace) {
+  const raw = String(value || "").trim();
+  const configured = raw && !["auto", "python"].includes(raw.toLowerCase()) ? raw : "";
+  const candidates = [];
+
+  if (configured) {
+    const parsed = parsePythonCommand(configured);
+    candidates.push({
+      ...parsed,
+      label: commandLabel(parsed.command, parsed.args),
+      notice: ""
+    });
+  }
+
+  if (workspace) {
+    candidates.push(
+      {
+        command: path.join(workspace, ".venv", "Scripts", "python.exe"),
+        args: [],
+        label: ".venv\\Scripts\\python.exe",
+        notice: configured ? `Configured Python was not usable; using workspace .venv instead.` : ""
+      },
+      {
+        command: path.join(workspace, ".venv", "bin", "python"),
+        args: [],
+        label: ".venv/bin/python",
+        notice: configured ? `Configured Python was not usable; using workspace .venv instead.` : ""
+      }
+    );
+  }
+
+  if (process.platform === "win32") {
+    candidates.push(
+      { command: "py", args: ["-3.14"], label: "py -3.14", notice: configured ? `Configured Python was not usable; using Python Launcher instead.` : "" },
+      { command: "py", args: ["-3.13"], label: "py -3.13", notice: configured ? `Configured Python was not usable; using Python Launcher instead.` : "" },
+      { command: "py", args: ["-3.12"], label: "py -3.12", notice: configured ? `Configured Python was not usable; using Python Launcher instead.` : "" },
+      { command: "py", args: ["-3.11"], label: "py -3.11", notice: configured ? `Configured Python was not usable; using Python Launcher instead.` : "" },
+      { command: "py", args: ["-3"], label: "py -3", notice: configured ? `Configured Python was not usable; using Python Launcher instead.` : "" }
+    );
+  }
+
+  candidates.push(
+    { command: "python", args: [], label: "python", notice: configured ? `Configured Python was not usable; using python on PATH instead.` : "" },
+    { command: "python3", args: [], label: "python3", notice: configured ? `Configured Python was not usable; using python3 on PATH instead.` : "" }
+  );
+
+  return dedupePythonCandidates(candidates);
+}
+
+function parsePythonCommand(value) {
+  if (fs.existsSync(value)) {
+    return { command: value, args: [] };
+  }
+  const parts = splitCommandLine(value);
+  if (!parts.length) {
+    return { command: "python", args: [] };
+  }
+  return { command: parts[0], args: parts.slice(1) };
+}
+
+function splitCommandLine(value) {
+  const parts = [];
+  const pattern = /"([^"]+)"|'([^']+)'|(\S+)/g;
+  let match;
+  while ((match = pattern.exec(value)) !== null) {
+    parts.push(match[1] || match[2] || match[3]);
+  }
+  return parts;
+}
+
+function dedupePythonCandidates(candidates) {
+  const seen = new Set();
+  const result = [];
+  for (const candidate of candidates) {
+    const key = `${candidate.command}\0${candidate.args.join("\0")}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(candidate);
+  }
+  return result;
+}
+
+function commandLabel(command, args) {
+  return [command, ...(args || [])].join(" ");
+}
+
+function formatPythonBackendError(error, config, launch, failures = []) {
+  const raw = error && error.message ? String(error.message) : String(error || "Unknown error");
+  const firstUsefulFailure = failures.find((failure) => {
+    const message = failure.error && failure.error.message ? String(failure.error.message) : "";
+    const stderr = failure.error && failure.error.stderr ? String(failure.error.stderr) : "";
+    return message.includes("No module named agent_hub") || stderr.includes("No module named agent_hub");
+  });
+  const hasMissingPython = failures.length && failures.every((failure) => failure.error && failure.error.code === "ENOENT");
+  if ((error && error.code === "ENOENT") || hasMissingPython) {
+    return {
+      summary: "Agent Hub could not find Python 3.11+. Install Python or set agentHub.pythonPath.",
+      detail: [
+        `Python backend check failed: ${raw}`,
+        "",
+        "Agent Hub tried common Python launchers and requires Python 3.11 or newer.",
+        "Set VS Code setting agentHub.pythonPath to auto, python, py -3.12, or a full python.exe path."
+      ].join("\n")
+    };
+  }
+
+  if (firstUsefulFailure || raw.includes("No module named agent_hub")) {
+    const sourceLine = launch.backendRoot
+      ? `Bundled backend source was found at: ${launch.backendRoot}`
+      : "No bundled backend source was found in this extension package.";
+    return {
+      summary: "Agent Hub Python backend is missing. Rebuild/install the latest VSIX or run install.ps1.",
+      detail: [
+        "Python backend check failed: No module named agent_hub",
+        sourceLine,
+        `Configured Python setting: ${config.pythonPath}`,
+        "",
+        "For a packaged extension, rebuild with: cd vscode-extension; npm run package",
+        "For a local repo checkout, run: .\\install.ps1"
+      ].join("\n")
+    };
+  }
+
+  return {
+    summary: "Agent Hub Python backend check failed. See the Agent Hub output.",
+    detail: [
+      `Python backend check failed: ${raw}`,
+      launch.backendRoot ? `Backend source: ${launch.backendRoot}` : "",
+      pythonFailureSummary(failures)
+    ].filter(Boolean).join("\n")
+  };
+}
+
+function pythonFailureSummary(failures) {
+  if (!failures.length) {
+    return "";
+  }
+  const lines = ["Python candidates tried:"];
+  for (const failure of failures.slice(0, 8)) {
+    const message = failure.error && failure.error.stderr
+      ? String(failure.error.stderr).trim()
+      : (failure.error && failure.error.message ? String(failure.error.message) : "failed");
+    lines.push(`- ${failure.candidate.label}: ${message.split(/\r?\n/)[0]}`);
+  }
+  if (failures.length > 8) {
+    lines.push(`- ${failures.length - 8} more candidates omitted`);
+  }
+  return lines.join("\n");
+}
+
+function backendSourceRoot(workspace) {
+  const candidates = [];
+  if (extensionContext && extensionContext.extensionPath) {
+    candidates.push(path.join(extensionContext.extensionPath, "backend"));
+  }
+  candidates.push(path.join(__dirname, "backend"));
+  candidates.push(path.resolve(__dirname, ".."));
+  if (workspace) {
+    candidates.push(workspace);
+  }
+
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const resolved = path.resolve(candidate);
+    if (seen.has(resolved)) {
+      continue;
+    }
+    seen.add(resolved);
+    if (isAgentHubBackendRoot(resolved)) {
+      return resolved;
+    }
+  }
+  return "";
+}
+
+function isAgentHubBackendRoot(candidate) {
+  return fs.existsSync(path.join(candidate, "agent_hub", "__main__.py"));
+}
+
+function prependEnvPath(env, name, value) {
+  const existing = env[name];
+  env[name] = existing ? `${value}${path.delimiter}${existing}` : value;
+}
+
 async function ensureLocalConfig(config, workspace) {
   const configPath = resolveConfigPath(config.configPath, workspace);
   if (fs.existsSync(configPath)) {
     return repairGeneratedLocalConfig(configPath);
   }
 
-  const ollamaModels = await detectOllamaModels();
-  const selectedModel = chooseOllamaModel(ollamaModels) || DEFAULT_OLLAMA_MODEL;
-  const data = localConfigForOllamaModel(selectedModel);
+  const sources = await detectLocalModelSources();
+  const selectedSources = sources.length ? sources : fallbackLocalModelSources();
+  const data = localConfigForLocalModels(selectedSources);
   fs.writeFileSync(configPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   output.appendLine(`Created Agent Hub config at ${configPath}.`);
-  output.appendLine(`Configured local-agent to use Ollama model: ${selectedModel}`);
+  output.appendLine(`Configured cloud-style aliases to use: ${describeCloudSources(selectedSources)}`);
+  output.appendLine(`Configured local fallback to use: ${describeLocalSources(selectedSources)}`);
+  if (!sources.length) {
+    output.appendLine("No local model server was detected yet; start LM Studio or Ollama and restart Agent Hub to repair the config to the loaded model.");
+  }
   return true;
 }
 
 async function repairGeneratedLocalConfig(configPath) {
   let raw;
+  let usedLenientParser = false;
   try {
-    raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const parsed = parseJsonConfigText(fs.readFileSync(configPath, "utf8"));
+    raw = parsed.value;
+    usedLenientParser = parsed.usedLenientParser;
   } catch (error) {
     output.appendLine(`Could not inspect Agent Hub config for repair: ${error.message}`);
-    return false;
+    const sources = await detectLocalModelSources();
+    const selectedSources = sources.length ? sources : fallbackLocalModelSources();
+    const backupPath = backupConfigFile(configPath);
+    fs.writeFileSync(configPath, `${JSON.stringify(localConfigForLocalModels(selectedSources), null, 2)}\n`, "utf8");
+    output.appendLine(`Backed up unreadable Agent Hub config to ${backupPath}.`);
+    output.appendLine(`Created a fresh local Agent Hub config at ${configPath}.`);
+    output.appendLine(`Configured cloud-style aliases to use: ${describeCloudSources(selectedSources)}`);
+    output.appendLine(`Configured local fallback to use: ${describeLocalSources(selectedSources)}`);
+    return true;
   }
 
   if (!raw || typeof raw !== "object" || !Array.isArray(raw.agents) || !Array.isArray(raw.routes)) {
     return false;
   }
 
-  const ollamaModels = await detectOllamaModels();
-  const selectedModel = chooseOllamaModel(ollamaModels);
-  if (!selectedModel) {
-    return false;
-  }
-
   const hasOfflineDefaults = raw.agents.some((agent) => (
     agent &&
     typeof agent === "object" &&
-    ["custom-local", "lm-studio", "localai", "vllm"].includes(agent.name)
+    ["custom-local", "localai", "vllm"].includes(agent.name)
   ));
-  if (!hasOfflineDefaults) {
-    return false;
+  const hasGeneratedLocalConfig = raw.agents.some((agent) => (
+    agent &&
+    typeof agent === "object" &&
+    ["ollama-local", "lm-studio"].includes(agent.name)
+  ));
+  const hasPlaceholderLocalModel = raw.agents.some((agent) => (
+    agent &&
+    typeof agent === "object" &&
+    ["lm-studio", "custom-local", "vllm"].includes(agent.name) &&
+    agent.model === "local-model"
+  ));
+
+  const sources = await detectLocalModelSources();
+  const shouldRepairGeneratedConfig = hasOfflineDefaults || hasGeneratedLocalConfig || hasPlaceholderLocalModel;
+  if (shouldRepairGeneratedConfig) {
+    const selectedSources = sources.length ? sources : configuredLocalSources(raw);
+    const backupPath = backupConfigFile(configPath);
+    const repaired = localConfigForLocalModels(selectedSources);
+    fs.writeFileSync(configPath, `${JSON.stringify(repaired, null, 2)}\n`, "utf8");
+    output.appendLine(`Repaired Agent Hub config at ${configPath}.`);
+    output.appendLine(`Original config was backed up to ${backupPath}.`);
+    output.appendLine(`Configured cloud-style aliases to use: ${describeCloudSources(selectedSources)}`);
+    output.appendLine(`Configured local fallback to use: ${describeLocalSources(selectedSources)}`);
+    return true;
   }
 
-  const repaired = localConfigForOllamaModel(selectedModel);
-  fs.writeFileSync(configPath, `${JSON.stringify(repaired, null, 2)}\n`, "utf8");
-  output.appendLine(`Repaired Agent Hub config at ${configPath}.`);
-  output.appendLine(`Removed offline default fallback providers and kept Ollama model: ${selectedModel}`);
-  return true;
+  if (usedLenientParser) {
+    const backupPath = backupConfigFile(configPath);
+    fs.writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+    output.appendLine(`Normalized Agent Hub config as strict JSON at ${configPath}.`);
+    output.appendLine(`Original config was backed up to ${backupPath}.`);
+    return true;
+  }
+  return false;
 }
 
-function localConfigForOllamaModel(model) {
+function configuredLocalSources(raw) {
+  const agents = raw && Array.isArray(raw.agents) ? raw.agents : [];
+  const sources = [];
+  const lmStudio = agents.find((agent) => (
+    agent &&
+    typeof agent === "object" &&
+    agent.name === "lm-studio" &&
+    typeof agent.model === "string" &&
+    agent.model.trim()
+  ));
+  if (lmStudio) {
+    const model = lmStudio.model.trim();
+    sources.push(lmStudioSource(model, model !== DEFAULT_LM_STUDIO_MODEL));
+  }
+  const ollama = agents.find((agent) => (
+    agent &&
+    typeof agent === "object" &&
+    ["ollama-local", "ollama-qwen-coder", "ollama-qwen3"].includes(agent.name) &&
+    typeof agent.model === "string" &&
+    agent.model.trim()
+  ));
+  if (ollama) {
+    const model = ollama.model.trim();
+    sources.push(ollamaSource(model, model !== DEFAULT_OLLAMA_MODEL));
+  }
+  return sources.length ? sources : fallbackLocalModelSources();
+}
+
+function localConfigForLocalModels(sources) {
+  const localSources = sources.length ? sources : fallbackLocalModelSources();
+  const cloudSources = cloudModelSources(localSources);
+  const cloudAgents = cloudSources.map((source) => source.name);
+  const localAgents = localSources.map((source) => source.name);
+  const routeAgents = [...cloudAgents, ...localAgents, "echo"];
   return {
     host: "127.0.0.1",
     port: 8787,
@@ -1050,32 +1416,32 @@ function localConfigForOllamaModel(model) {
     free_only: true,
     include_raw_responses: false,
     expose_routing_details: true,
-    default_route: ["ollama-local", "echo"],
+    default_route: routeAgents,
     routes: [
       {
         name: "coding",
         keywords: ["code", "bug", "fix", "refactor", "test", "repo"],
-        agents: ["ollama-local", "echo"]
+        agents: routeAgents
       },
       {
         name: "local-agent",
         keywords: ["agent", "workspace", "edit", "implement"],
-        agents: ["ollama-local", "echo"]
+        agents: localAgents
       },
       {
         name: "hybrid-agent",
         keywords: [],
-        agents: ["ollama-local", "echo"]
+        agents: routeAgents
       },
       {
         name: "cloud-agent",
         keywords: [],
-        agents: ["ollama-local", "echo"]
+        agents: routeAgents
       },
       {
         name: "research",
         keywords: ["research", "search", "latest", "sources", "web", "news"],
-        agents: ["local-research", "echo"]
+        agents: ["local-research", ...cloudAgents, "echo"]
       }
     ],
     agents: [
@@ -1088,17 +1454,8 @@ function localConfigForOllamaModel(model) {
         timeout_seconds: 20,
         cooldown_seconds: 5
       },
-      {
-        name: "ollama-local",
-        provider: "openai-compatible",
-        model,
-        base_url: "http://127.0.0.1:11434",
-        free: true,
-        max_tokens: 4096,
-        context_window: 32768,
-        timeout_seconds: 300,
-        cooldown_seconds: 10
-      },
+      ...cloudSources.map((source) => cloudModelAgentConfig(source)),
+      ...localSources.map((source) => localModelAgentConfig(source)),
       {
         name: "echo",
         provider: "echo",
@@ -1111,12 +1468,166 @@ function localConfigForOllamaModel(model) {
   };
 }
 
+function cloudModelSources(localSources = []) {
+  const lmStudio = localSources.find((source) => source.name === "lm-studio" && source.detected !== false);
+  const baseUrl = lmStudio ? lmStudio.baseUrl : OLLAMA_BASE_URL;
+  const sharedLmStudioModel = lmStudio ? lmStudio.model : "";
+  return [
+    {
+      name: "claude",
+      label: "Claude",
+      provider: "openai-compatible",
+      model: process.env.AGENT_HUB_CLAUDE_LOCAL_MODEL || sharedLmStudioModel || DEFAULT_CLAUDE_MODEL,
+      baseUrl: process.env.AGENT_HUB_CLAUDE_LOCAL_BASE_URL || baseUrl,
+      contextWindow: lmStudio ? 32768 : 32768
+    },
+    {
+      name: "gemini",
+      label: "Gemini",
+      provider: "openai-compatible",
+      model: process.env.AGENT_HUB_GEMINI_LOCAL_MODEL || sharedLmStudioModel || DEFAULT_GEMINI_MODEL,
+      baseUrl: process.env.AGENT_HUB_GEMINI_LOCAL_BASE_URL || baseUrl,
+      contextWindow: lmStudio ? 32768 : 128000
+    },
+    {
+      name: "chatgpt",
+      label: "ChatGPT",
+      provider: "openai-compatible",
+      model: process.env.AGENT_HUB_CHATGPT_LOCAL_MODEL || sharedLmStudioModel || DEFAULT_CHATGPT_MODEL,
+      baseUrl: process.env.AGENT_HUB_CHATGPT_LOCAL_BASE_URL || baseUrl,
+      contextWindow: 128000
+    }
+  ];
+}
+
+function cloudModelAgentConfig(source) {
+  return {
+    name: source.name,
+    provider: source.provider,
+    model: source.model,
+    base_url: source.baseUrl,
+    enabled: true,
+    free: true,
+    max_tokens: 4096,
+    context_window: source.contextWindow,
+    timeout_seconds: 120,
+    cooldown_seconds: 30
+  };
+}
+
+function localModelAgentConfig(source) {
+  return {
+    name: source.name,
+    provider: "openai-compatible",
+    model: source.model,
+    base_url: source.baseUrl,
+    free: true,
+    max_tokens: 4096,
+    context_window: source.contextWindow || 32768,
+    timeout_seconds: source.timeoutSeconds || 300,
+    cooldown_seconds: source.cooldownSeconds || 10
+  };
+}
+
+async function detectLocalModelSources() {
+  const [lmStudioModels, ollamaModels] = await Promise.all([
+    detectLmStudioModels(),
+    detectOllamaModels()
+  ]);
+  const sources = [];
+  const lmStudioModel = chooseLmStudioModel(lmStudioModels);
+  if (lmStudioModel) {
+    sources.push(lmStudioSource(lmStudioModel));
+  }
+  const ollamaModel = chooseOllamaModel(ollamaModels);
+  if (ollamaModel) {
+    sources.push(ollamaSource(ollamaModel));
+  }
+  return sources;
+}
+
+function fallbackLocalModelSources() {
+  return [
+    lmStudioSource(DEFAULT_LM_STUDIO_MODEL, false),
+    ollamaSource(DEFAULT_OLLAMA_MODEL, false)
+  ];
+}
+
+function lmStudioSource(model, detected = true) {
+  return {
+    name: "lm-studio",
+    label: "LM Studio",
+    model,
+    baseUrl: LM_STUDIO_BASE_URL,
+    contextWindow: 32768,
+    timeoutSeconds: 300,
+    cooldownSeconds: 10,
+    detected
+  };
+}
+
+function ollamaSource(model, detected = true) {
+  return {
+    name: "ollama-local",
+    label: "Ollama",
+    model,
+    baseUrl: OLLAMA_BASE_URL,
+    contextWindow: 32768,
+    timeoutSeconds: 300,
+    cooldownSeconds: 10,
+    detected
+  };
+}
+
+function describeLocalSources(sources) {
+  return sources
+    .map((source) => `${source.label} (${source.model})`)
+    .join(", ");
+}
+
+function describeCloudSources(localSources = []) {
+  return cloudModelSources(localSources)
+    .map((source) => `${source.label} (${source.model})`)
+    .join(", ");
+}
+
+async function detectLmStudioModels() {
+  try {
+    return await detectOpenAiCompatibleModels(LM_STUDIO_BASE_URL);
+  } catch (error) {
+    output.appendLine(`Could not detect LM Studio models: ${formatLocalServerError(error)}`);
+    return [];
+  }
+}
+
+async function detectOpenAiCompatibleModels(baseUrl) {
+  const payload = await requestExternalJson(openAiModelsUrl(baseUrl), 5000);
+  const data = Array.isArray(payload.data) ? payload.data : [];
+  return data
+    .map((item) => {
+      if (typeof item === "string") {
+        return item;
+      }
+      if (item && typeof item.id === "string") {
+        return item.id;
+      }
+      return "";
+    })
+    .filter(Boolean);
+}
+
+function openAiModelsUrl(baseUrl) {
+  const base = new URL(baseUrl);
+  base.pathname = `${base.pathname.replace(/\/+$/, "")}/v1/models`;
+  return base.toString();
+}
+
 async function detectOllamaModels() {
   try {
     const { stdout } = await execFile("ollama", ["list"], { timeout: 10000 });
     return parseOllamaList(stdout);
   } catch (error) {
-    output.appendLine(`Could not detect Ollama models: ${error.message}`);
+    output.appendLine(`Could not detect Ollama models: ${formatOllamaError(error)}`);
     return [];
   }
 }
@@ -1147,6 +1658,201 @@ function chooseOllamaModel(models) {
     }
   }
   return available[0] || "";
+}
+
+function chooseLmStudioModel(models) {
+  const available = Array.isArray(models) ? models.filter(Boolean) : [];
+  const preferences = [
+    /coder/i,
+    /qwen/i,
+    /deepseek/i,
+    /llama/i,
+    /mistral/i,
+    /gemma/i
+  ];
+  for (const pattern of preferences) {
+    const match = available.find((model) => pattern.test(model));
+    if (match) {
+      return match;
+    }
+  }
+  return available[0] || "";
+}
+
+function parseJsonConfigText(text) {
+  const source = String(text || "").replace(/^\uFEFF/, "");
+  try {
+    return { value: JSON.parse(source), usedLenientParser: false };
+  } catch (strictError) {
+    const normalized = stripTrailingJsonCommas(stripJsonComments(source));
+    try {
+      return { value: JSON.parse(normalized), usedLenientParser: true };
+    } catch (lenientError) {
+      throw new Error(`${strictError.message}; lenient repair also failed: ${lenientError.message}`);
+    }
+  }
+}
+
+function stripJsonComments(text) {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+
+    if (inString) {
+      result += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      result += char;
+      continue;
+    }
+
+    if (char === "/" && next === "/") {
+      index += 2;
+      while (index < text.length && !["\r", "\n"].includes(text[index])) {
+        index += 1;
+      }
+      if (index < text.length) {
+        result += text[index];
+      }
+      continue;
+    }
+
+    if (char === "/" && next === "*") {
+      index += 2;
+      while (index < text.length) {
+        if (text[index] === "*" && text[index + 1] === "/") {
+          index += 1;
+          break;
+        }
+        if (["\r", "\n"].includes(text[index])) {
+          result += text[index];
+        }
+        index += 1;
+      }
+      continue;
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
+function stripTrailingJsonCommas(text) {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      result += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      result += char;
+      continue;
+    }
+
+    if (char === ",") {
+      let lookahead = index + 1;
+      while (lookahead < text.length && /\s/.test(text[lookahead])) {
+        lookahead += 1;
+      }
+      if (text[lookahead] === "}" || text[lookahead] === "]") {
+        continue;
+      }
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
+function backupConfigFile(configPath) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = `${configPath}.${stamp}.bak`;
+  fs.copyFileSync(configPath, backupPath);
+  return backupPath;
+}
+
+function formatOllamaError(error) {
+  const raw = error && error.message ? String(error.message) : String(error || "Unknown error");
+  if (error && error.code === "ENOENT") {
+    return "Ollama was not found on PATH. Install Ollama, restart VS Code, then run the pull again.";
+  }
+  return `Could not run Ollama: ${raw}`;
+}
+
+function formatLocalServerError(error) {
+  const raw = error && error.message ? String(error.message) : String(error || "Unknown error");
+  if (raw.includes("ECONNREFUSED") || raw.includes("connect ETIMEDOUT")) {
+    return "server is not running";
+  }
+  return raw;
+}
+
+function requestExternalJson(urlString, timeoutMs) {
+  const url = new URL(urlString);
+  const client = url.protocol === "https:" ? https : http;
+
+  return new Promise((resolve, reject) => {
+    const request = client.request(
+      url,
+      {
+        method: "GET",
+        timeout: timeoutMs
+      },
+      (response) => {
+        let text = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          text += chunk;
+        });
+        response.on("end", () => {
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            reject(new Error(text || `HTTP ${response.statusCode}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(text || "{}"));
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    );
+    request.on("timeout", () => {
+      request.destroy(new Error("Request timed out"));
+    });
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 function execFile(command, args, options = {}) {
@@ -1206,8 +1912,8 @@ async function askAgent() {
 
 async function runCodingAgent() {
   const task = await vscode.window.showInputBox({
-    title: "Run Local Coding Agent",
-    prompt: "What should the local agent change or investigate in this workspace?",
+    title: "Run Coding Agent",
+    prompt: "What should the agent change or investigate in this workspace?",
     ignoreFocusOut: true
   });
   if (!task) {
@@ -1218,7 +1924,7 @@ async function runCodingAgent() {
   const route = codingAgentRoute(config);
   await sendAgentRequest({
     task: [
-      "Work as a local coding agent in this workspace.",
+      "Work as a coding agent in this workspace.",
       "Inspect files before editing, keep changes scoped, and verify if possible.",
       "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
       "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
@@ -1341,8 +2047,8 @@ function formatAgentHubError(error) {
     lines.push(
       "Agent Hub is running, but no usable local model backend answered.",
       "",
-      "Ollama is installed on this machine, but it currently has no models pulled.",
-      "Run this in a terminal, then try again:",
+      "Start LM Studio's local server with a loaded model, or install Ollama and pull a model.",
+      "For Ollama, run this in a terminal, then try again:",
       "",
       "ollama pull qwen2.5-coder:7b"
     );
@@ -1410,37 +2116,17 @@ function settings() {
   const config = vscode.workspace.getConfiguration("agentHub");
   return {
     serverUrl: config.get("serverUrl", "http://127.0.0.1:8787").replace(/\/+$/, ""),
-    pythonPath: resolvePythonPath(config.get("pythonPath", "python")),
+    pythonPath: config.get("pythonPath", "auto"),
     configPath: config.get("configPath", "agent-hub.config.json"),
     route: config.get("route", "coding"),
     researchRoute: config.get("researchRoute", "research"),
     codingAgentRoute: config.get("codingAgentRoute", "local-agent"),
-    agentProviderMode: config.get("agentProviderMode", "local"),
+    agentProviderMode: config.get("agentProviderMode", "cloud"),
     agentMaxSteps: config.get("agentMaxSteps", 20),
     allowShellTools: config.get("allowShellTools", true),
     maxTokens: config.get("maxTokens", 1200),
     autoStart: config.get("autoStart", true)
   };
-}
-
-function resolvePythonPath(value) {
-  if (value && value !== "python") {
-    return value;
-  }
-  const workspace = workspaceRoot();
-  if (!workspace) {
-    return value || "python";
-  }
-  const candidates = [
-    path.join(workspace, ".venv", "Scripts", "python.exe"),
-    path.join(workspace, ".venv", "bin", "python")
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return value || "python";
 }
 
 function codingAgentRoute(config) {

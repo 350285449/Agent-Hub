@@ -7,16 +7,16 @@
   "archive_dir": ".agent-hub/archive",
   "workspace_dir": ".",
   "agent_max_steps": 8,
-  "allow_shell_tools": false,
+  "allow_shell_tools": true,
   "free_only": true,
   "include_raw_responses": false,
   "expose_routing_details": false,
-  "default_route": ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
+  "default_route": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
   "routes": [
     {
       "name": "coding",
       "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
-      "agents": ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "local-agent",
@@ -26,17 +26,17 @@
     {
       "name": "hybrid-agent",
       "keywords": [],
-      "agents": ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "chatgpt", "claude", "gemini"]
+      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "cloud-agent",
       "keywords": [],
-      "agents": ["chatgpt", "claude", "gemini", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai"]
+      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "research",
       "keywords": ["research", "search", "latest", "sources", "web", "news"],
-      "agents": ["local-research", "custom-local", "echo"]
+      "agents": ["local-research", "claude", "gemini", "chatgpt", "echo"]
     }
   ],
   "agents": [
@@ -48,6 +48,42 @@
       "context_window": 1000000,
       "timeout_seconds": 20,
       "cooldown_seconds": 5
+    },
+    {
+      "name": "claude",
+      "provider": "openai-compatible",
+      "model": "qwen2.5-coder:7b",
+      "base_url": "http://127.0.0.1:11434",
+      "enabled": true,
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 32768,
+      "timeout_seconds": 120,
+      "cooldown_seconds": 30
+    },
+    {
+      "name": "gemini",
+      "provider": "openai-compatible",
+      "model": "gemma3:4b",
+      "base_url": "http://127.0.0.1:11434",
+      "enabled": true,
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 128000,
+      "timeout_seconds": 120,
+      "cooldown_seconds": 30
+    },
+    {
+      "name": "chatgpt",
+      "provider": "openai-compatible",
+      "model": "llama3.2",
+      "base_url": "http://127.0.0.1:11434",
+      "enabled": true,
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 128000,
+      "timeout_seconds": 120,
+      "cooldown_seconds": 30
     },
     {
       "name": "custom-local",
@@ -132,36 +168,6 @@
       "free": true,
       "max_tokens": 4096,
       "context_window": 8192
-    },
-    {
-      "name": "chatgpt",
-      "provider": "chatgpt",
-      "model": "your-openai-model",
-      "api_key_env": "OPENAI_API_KEY",
-      "enabled": false,
-      "free": false,
-      "max_tokens": 4096,
-      "context_window": 128000
-    },
-    {
-      "name": "gemini",
-      "provider": "gemini",
-      "model": "your-gemini-model",
-      "api_key_env": "GEMINI_API_KEY",
-      "enabled": false,
-      "free": false,
-      "max_tokens": 4096,
-      "context_window": 1000000
-    },
-    {
-      "name": "claude",
-      "provider": "claude",
-      "model": "your-claude-model",
-      "api_key_env": "ANTHROPIC_API_KEY",
-      "enabled": false,
-      "free": false,
-      "max_tokens": 4096,
-      "context_window": 200000
     }
   ]
 }

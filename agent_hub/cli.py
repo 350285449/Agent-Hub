@@ -40,7 +40,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     init_parser.add_argument(
         "--with-cloud-examples",
         action="store_true",
-        help="Also add disabled ChatGPT, Gemini, Claude, and Gemma examples.",
+        help="Also add optional provider examples that are not part of the default local aliases.",
     )
 
     agents_parser = subparsers.add_parser("agents", help="List configured agents and routing status.")
@@ -57,7 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     enable_provider_parser = subparsers.add_parser(
         "enable-provider",
-        help="Opt in to a cloud provider in the config file.",
+        help="Enable or update a cloud provider in the config file.",
     )
     enable_provider_parser.add_argument(
         "provider",
@@ -74,6 +74,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--api-key-env",
         help="Environment variable that contains the provider API key.",
     )
+    enable_provider_parser.add_argument(
+        "--paid",
+        action="store_true",
+        help="Mark this provider as paid and disable free_only for the config.",
+    )
 
     serve_parser = subparsers.add_parser("serve", help="Run the local HTTP hub.")
     serve_parser.add_argument("--host", help="Override configured host.")
@@ -89,9 +94,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     subparsers.add_parser("once", help="Process the JSON inbox once.")
 
-    agent_parser = subparsers.add_parser("agent", help="Run the local workspace coding agent.")
-    agent_parser.add_argument("task", nargs="+", help="Task for the local agent.")
-    agent_parser.add_argument("--route", default="local-agent", help="Route to use for agent model calls.")
+    agent_parser = subparsers.add_parser("agent", help="Run the workspace coding agent.")
+    agent_parser.add_argument("task", nargs="+", help="Task for the agent.")
+    agent_parser.add_argument("--route", default="cloud-agent", help="Route to use for agent model calls.")
     agent_parser.add_argument("--max-steps", type=int, default=20, help="Maximum agent tool steps.")
     agent_parser.add_argument(
         "--allow-shell-tools",
@@ -105,7 +110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     chat_parser = subparsers.add_parser("chat", help="Open an interactive Codex-style workspace chat.")
-    chat_parser.add_argument("--route", default="local-agent", help="Route to use for chat turns.")
+    chat_parser.add_argument("--route", default="cloud-agent", help="Route to use for chat turns.")
     chat_parser.add_argument("--session-id", help="Reuse an existing chat session id.")
     chat_parser.add_argument("--max-steps", type=int, default=20, help="Maximum agent tool steps per turn.")
     chat_parser.add_argument(
@@ -148,6 +153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=args.model,
             route=args.route,
             api_key_env=args.api_key_env,
+            paid=args.paid,
         )
 
     config = load_config(args.config)
@@ -201,9 +207,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "mode": "agent",
             "route": args.route,
             "task": " ".join(args.task),
-            "allow_shell_tools": args.allow_shell_tools,
             "agent_max_steps": args.max_steps,
         }
+        if args.allow_shell_tools:
+            payload["allow_shell_tools"] = True
         request = request_from_payload(payload)
         try:
             response = AgentRunner(config, AgentRouter(config)).run(request)
@@ -279,11 +286,12 @@ def _chat(config: Any, args: argparse.Namespace) -> int:
             "route": route,
             "task": _codex_chat_task(prompt),
             "use_session_history": True,
-            "allow_shell_tools": args.allow_shell_tools,
             "agent_max_steps": args.max_steps,
             "workspace_dir": str(config.workspace_dir),
             "metadata": {"source": "cli-chat"},
         }
+        if args.allow_shell_tools:
+            payload["allow_shell_tools"] = True
         request = request_from_payload(payload)
         try:
             response = router.route(request) if args.no_agent else runner.run(request)
@@ -300,7 +308,7 @@ def _chat(config: Any, args: argparse.Namespace) -> int:
 def _codex_chat_task(prompt: str) -> str:
     return "\n".join(
         [
-            "Chat with the user as a careful Codex-style local coding assistant.",
+            "Chat with the user as a careful Codex-style coding assistant.",
             "Be conversational and concise. Use workspace tools when inspection or edits are useful.",
             "For direct replies, use the final action; never invent other action names.",
             "",
@@ -326,6 +334,7 @@ def _enable_cloud_provider(
     model: str,
     route: str,
     api_key_env: str | None,
+    paid: bool = False,
 ) -> int:
     config_path = Path(path)
     if config_path.exists():
@@ -335,9 +344,10 @@ def _enable_cloud_provider(
             return 1
     else:
         data = config_to_dict(free_local_config())
-        data["agents"].extend(_cloud_example_agents())
+        _merge_agent_examples(data, _cloud_example_agents())
 
-    data["free_only"] = False
+    if paid:
+        data["free_only"] = False
     _ensure_cloud_routes(data)
 
     agent_name, provider_name, default_env = _cloud_provider_defaults(provider)
@@ -354,7 +364,7 @@ def _enable_cloud_provider(
         agent = {
             "name": agent_name,
             "provider": provider_name,
-            "free": False,
+            "free": not paid,
             "max_tokens": 4096,
         }
         agents.append(agent)
@@ -364,7 +374,7 @@ def _enable_cloud_provider(
             "provider": provider_name,
             "model": model,
             "enabled": True,
-            "free": False,
+            "free": not paid,
             "api_key_env": api_key_env or default_env,
         }
     )
@@ -373,6 +383,8 @@ def _enable_cloud_provider(
     config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Enabled {agent_name} on route {route} in {config_path}.")
     print(f"Set {agent['api_key_env']} before starting Agent-Hub.")
+    if not paid:
+        print("Provider is marked free=true, so it remains eligible while free_only is enabled.")
     print("Restart the Agent-Hub server if it is already running.")
     return 0
 
@@ -394,12 +406,12 @@ def _ensure_cloud_routes(data: dict[str, Any]) -> None:
     _ensure_route(
         routes,
         "hybrid-agent",
-        [*free_local_agent_names(), *cloud_agent_names()],
+        [*cloud_agent_names(), *free_local_agent_names(), "echo"],
     )
     _ensure_route(
         routes,
         "cloud-agent",
-        [*cloud_agent_names(), *free_local_agent_names()],
+        [*cloud_agent_names(), *free_local_agent_names(), "echo"],
     )
 
 
@@ -449,10 +461,10 @@ def _init_config(path: str, force: bool = False, with_cloud_examples: bool = Fal
 
     data = config_to_dict(free_local_config())
     if with_cloud_examples:
-        data["agents"].extend(_cloud_example_agents())
+        _merge_agent_examples(data, _cloud_example_agents())
     config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Wrote {config_path}")
-    print("Edit custom-local.base_url/model, then run: agent-hub doctor")
+    print("Pull the Ollama alias models or start LM Studio with a loaded model, then run: agent-hub doctor")
     return 0
 
 
@@ -461,9 +473,9 @@ def _cloud_example_agents() -> list[dict[str, Any]]:
         {
             "name": "chatgpt",
             "provider": "chatgpt",
-            "model": "your-openai-model",
-            "enabled": False,
-            "free": False,
+            "model": "gpt-4o-mini",
+            "enabled": True,
+            "free": True,
             "api_key_env": "OPENAI_API_KEY",
             "max_tokens": 4096,
             "context_window": 128000,
@@ -471,9 +483,9 @@ def _cloud_example_agents() -> list[dict[str, Any]]:
         {
             "name": "gemini",
             "provider": "gemini",
-            "model": "your-gemini-model",
-            "enabled": False,
-            "free": False,
+            "model": "gemini-2.0-flash",
+            "enabled": True,
+            "free": True,
             "api_key_env": "GEMINI_API_KEY",
             "max_tokens": 4096,
             "context_window": 1000000,
@@ -481,9 +493,9 @@ def _cloud_example_agents() -> list[dict[str, Any]]:
         {
             "name": "claude",
             "provider": "claude",
-            "model": "your-claude-model",
-            "enabled": False,
-            "free": False,
+            "model": "claude-3-5-haiku-latest",
+            "enabled": True,
+            "free": True,
             "api_key_env": "ANTHROPIC_API_KEY",
             "max_tokens": 4096,
             "context_window": 200000,
@@ -499,6 +511,21 @@ def _cloud_example_agents() -> list[dict[str, Any]]:
             "context_window": 8192,
         },
     ]
+
+
+def _merge_agent_examples(data: dict[str, Any], examples: list[dict[str, Any]]) -> None:
+    agents = data.setdefault("agents", [])
+    if not isinstance(agents, list):
+        data["agents"] = agents = []
+    existing = {
+        item.get("name")
+        for item in agents
+        if isinstance(item, dict)
+    }
+    for example in examples:
+        if example.get("name") not in existing:
+            agents.append(example)
+            existing.add(example.get("name"))
 
 
 def _agent_rows(config: Any) -> list[dict[str, Any]]:
@@ -548,7 +575,7 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
         if row["allowed"] and row["status"] in {"ready", "configured"}
     ]
     if config.free_only:
-        warnings.append("free_only is enabled; cloud providers run only if you mark an agent free=true.")
+        warnings.append("free_only is enabled; paid providers are skipped unless an agent is marked free=true.")
     if not usable:
         warnings.append("No enabled ready agents are currently available.")
     for row in rows:

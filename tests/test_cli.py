@@ -86,9 +86,10 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             data = json.loads(path.read_text(encoding="utf-8"))
-            self.assertFalse(data["free_only"])
+            self.assertTrue(data["free_only"])
             chatgpt = next(agent for agent in data["agents"] if agent["name"] == "chatgpt")
             self.assertTrue(chatgpt["enabled"])
+            self.assertTrue(chatgpt["free"])
             self.assertEqual(chatgpt["model"], "gpt-test")
             cloud_route = next(route for route in data["routes"] if route["name"] == "cloud-agent")
             self.assertEqual(cloud_route["agents"][0], "chatgpt")

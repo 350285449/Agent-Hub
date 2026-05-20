@@ -194,7 +194,7 @@ class AgentRouter:
         if self.config.free_only and not is_free_agent(agent):
             return (
                 "Agent provider is disabled because free_only is enabled; "
-                "only echo and local/private openai-compatible agents are allowed"
+                "only agents marked free, echo, and local/private openai-compatible agents are allowed"
             )
 
         if agent.context_window is None:
