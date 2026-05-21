@@ -31,6 +31,20 @@ Fresh clone on Windows:
 .\start-agent-hub.ps1
 ```
 
+Install the VS Code extension from this checkout:
+
+```powershell
+.\install-extension.ps1
+```
+
+On macOS or Linux:
+
+```sh
+sh ./install-extension.sh
+```
+
+The extension installer needs Node.js 20 or newer and a VS Code-compatible CLI.
+
 Then open a second terminal for an interactive Codex-style chat:
 
 ```powershell
@@ -97,15 +111,16 @@ Invoke-RestMethod http://127.0.0.1:8787/health
 The repo includes a VS Code extension in `vscode-extension/` so you can use
 Agent-Hub from the Command Palette and editor context menu.
 
-Run it directly from the GitHub clone:
+Install it from the GitHub clone:
 
 ```powershell
-python -m agent_hub doctor
-code vscode-extension
+.\install-extension.ps1
 ```
 
-In the `vscode-extension` window, press `F5` to launch an Extension Development
-Host. In that new VS Code window, open this repository folder and use:
+The installer packages the extension, bundles the Python backend, finds the
+`code`/`code-insiders`/`codium` CLI, installs the VSIX with `--force`, and warns
+if Python 3.11+ is missing. It needs Node.js 20 or newer to build the VSIX.
+After installing, reload VS Code, open any workspace, and use:
 
 - `Agent Hub: Open Chat`
 - `Agent Hub: Start Server`

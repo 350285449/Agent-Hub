@@ -30,6 +30,7 @@ try {
     Write-Host ""
     Write-Host "Ready. Start the server with: .\start-agent-hub.ps1"
     Write-Host "Or chat in this terminal with: .\.venv\Scripts\agent-hub.exe chat --allow-shell-tools"
+    Write-Host "To install the VS Code extension from this checkout: .\install-extension.ps1"
 }
 finally {
     Pop-Location

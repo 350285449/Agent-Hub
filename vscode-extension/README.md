@@ -5,14 +5,18 @@ through either hosted cloud control agents or local LM Studio/Ollama control.
 
 ## Quick Start
 
-1. Install Python 3.11 or newer.
+1. Install Node.js 20 or newer and Python 3.11 or newer.
 2. Set a cloud provider API key, or start LM Studio with a loaded model, or install Ollama.
-3. Package and install the extension:
+3. Package and install the extension from the repository root:
 
    ```powershell
-   cd vscode-extension
-   npm run package
-   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.15.vsix --force
+   .\install-extension.ps1
+   ```
+
+   On macOS or Linux:
+
+   ```sh
+   sh ./install-extension.sh
    ```
 
 4. Reload VS Code.
@@ -87,9 +91,9 @@ To test the extension from source:
 2. Press `F5` to launch an Extension Development Host.
 3. In the new VS Code window, open the Agent-Hub repository folder.
 
-To package the extension:
+To package and install from inside `vscode-extension`:
 
 ```powershell
 cd vscode-extension
-npm run package
+npm run install-extension
 ```

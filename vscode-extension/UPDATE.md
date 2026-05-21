@@ -36,20 +36,26 @@ This update file records the next VS Code extension release and the key change s
 - If Ollama is running with a coder model, the Local control route uses it; LM Studio remains a local fallback.
 - The chat UI can save provider API keys into VS Code secret storage and inject them into Agent Hub on startup.
 - The chat UI scans LM Studio and Ollama for installed local models before offering Ollama install choices with approximate storage sizes.
+- A one-command installer now packages the VSIX, detects the VS Code CLI, installs the extension, and warns when Python 3.11+ is missing.
 
 ## Packaging
 
-To build the extension package:
+To package and install the extension from the repository root:
 
 ```powershell
-cd vscode-extension
-npm install
-npm run package
+.\install-extension.ps1
 ```
 
-The resulting `.vsix` can be installed locally or published with `npm run publish`.
+On macOS or Linux:
+
+```sh
+sh ./install-extension.sh
+```
+
+To build only, run `node vscode-extension/scripts/install-extension.js --package-only`.
+The resulting `.vsix` can be published with `npm run publish` from `vscode-extension`.
 
 ## Notes
 
 - The current `package.json` version is `0.4.15`.
-- If you want this release to be published, run `npm run package` and install/publish the resulting `0.4.15` VSIX.
+- If you want this release to be published, run `npm run package` from `vscode-extension` and publish the resulting `0.4.15` VSIX.

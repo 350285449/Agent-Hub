@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Adds a one-command cross-platform installer for packaging and installing the VS Code extension from a checkout.
+- Detects VS Code, VS Code Insiders, or VSCodium CLI paths and warns when Python 3.11+ is missing.
+
 ## 0.4.15
 
 - Adds an API Keys panel that stores OpenAI, Anthropic, and Gemini keys in VS Code secret storage.

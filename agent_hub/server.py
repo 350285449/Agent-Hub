@@ -40,6 +40,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     server: AgentHubHTTPServer
 
     def do_GET(self) -> None:
+        if self.path in {"/", ""}:
+            self._send_html(self._root_html())
+            return
         if self.path == "/health":
             self._send_json(
                 {
@@ -259,6 +262,96 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_html(self, html: str, status: int = 200) -> None:
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _root_html(self) -> str:
+        config = self.server.config
+        enabled_agents = [
+            name
+            for name, agent in config.agents.items()
+            if agent.enabled
+        ]
+        agents = ", ".join(enabled_agents) or "none"
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Hub</title>
+  <style>
+    body {{
+      margin: 0;
+      padding: 32px;
+      color: #e8e8e8;
+      background: #151515;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }}
+    main {{
+      max-width: 760px;
+      margin: 0 auto;
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: 28px;
+    }}
+    .status {{
+      display: inline-block;
+      margin: 8px 0 20px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      color: #122313;
+      background: #8ee99a;
+      font-weight: 600;
+    }}
+    dl {{
+      display: grid;
+      grid-template-columns: 150px 1fr;
+      gap: 8px 14px;
+      margin: 20px 0;
+    }}
+    dt {{
+      color: #aaa;
+    }}
+    dd {{
+      margin: 0;
+    }}
+    a {{
+      color: #8ab4ff;
+    }}
+    code {{
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: #252525;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Agent Hub</h1>
+    <div class="status">Running</div>
+    <p>This is the local Agent Hub backend. Use the VS Code extension chat for the UI, or call the HTTP endpoints directly.</p>
+    <dl>
+      <dt>Version</dt><dd>{BACKEND_VERSION}</dd>
+      <dt>Workspace</dt><dd><code>{config.workspace_dir}</code></dd>
+      <dt>Shell tools</dt><dd>{str(config.allow_shell_tools).lower()}</dd>
+      <dt>Free only</dt><dd>{str(config.free_only).lower()}</dd>
+      <dt>Agents</dt><dd>{agents}</dd>
+    </dl>
+    <p>
+      <a href="/health">Health JSON</a> ·
+      <a href="/v1/models">Models JSON</a>
+    </p>
+  </main>
+</body>
+</html>"""
 
     def _send_openai_stream(self, response: Any) -> None:
         self.send_response(200)
