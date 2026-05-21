@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Local Agent Hub",
   "description": "Run Codex/Claude-style local coding agents through LM Studio or Ollama from VS Code.",
-  "version": "0.4.8",
+  "version": "0.4.10",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",

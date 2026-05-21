@@ -16,6 +16,16 @@ from .payloads import (
 from .router import AgentRouter, RouterError
 
 
+BACKEND_VERSION = "0.2.1"
+BACKEND_FEATURES = {
+    "native_agent_streaming": True,
+    "agent_progress_v2": True,
+    "active_file_context_resolution": True,
+    "current_folder_context": True,
+    "workspace_shell_commands": True,
+}
+
+
 class AgentHubHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], config: HubConfig) -> None:
         super().__init__(server_address, AgentHubHandler)
@@ -32,10 +42,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "status": "ok",
-                    "version": "0.2.0",
-                    "features": {
-                        "native_agent_streaming": True,
-                    },
+                    "version": BACKEND_VERSION,
+                    "features": BACKEND_FEATURES,
                     "agents": [
                         name
                         for name, agent in self.server.config.agents.items()

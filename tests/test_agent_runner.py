@@ -536,6 +536,100 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertEqual(replaced["result"]["path"], "agent_hub/config.py")
             self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 2\n")
 
+    def test_file_tools_prefer_current_file_context_for_bare_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "agent_hub").mkdir()
+            (root / "vscode-extension" / "backend" / "agent_hub").mkdir(parents=True)
+            direct_target = root / "config.py"
+            root_target = root / "agent_hub" / "config.py"
+            context_target = root / "vscode-extension" / "backend" / "agent_hub" / "config.py"
+            direct_target.write_text("VALUE = 100\n", encoding="utf-8")
+            root_target.write_text("VALUE = 1\n", encoding="utf-8")
+            context_target.write_text("VALUE = 10\n", encoding="utf-8")
+            config = HubConfig(workspace_dir=root)
+            toolbox = AgentToolbox(
+                config,
+                HubRequest(
+                    session_id="agent",
+                    messages=[],
+                    context=(
+                        "Current file: vscode-extension/backend/agent_hub/config.py\n"
+                        "Language: python"
+                    ),
+                ),
+            )
+
+            result = toolbox.run("read_file", {"path": "config.py"})
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["result"]["path"], "vscode-extension/backend/agent_hub/config.py")
+            self.assertIn("VALUE = 10", result["result"]["content"])
+
+            replaced = toolbox.run(
+                "replace_in_file",
+                {
+                    "path": "config.py",
+                    "old": "VALUE = 10",
+                    "new": "VALUE = 11",
+                    "expected_replacements": 1,
+                },
+            )
+
+            self.assertTrue(replaced["ok"])
+            self.assertEqual(replaced["result"]["path"], "vscode-extension/backend/agent_hub/config.py")
+            self.assertEqual(context_target.read_text(encoding="utf-8"), "VALUE = 11\n")
+            self.assertEqual(direct_target.read_text(encoding="utf-8"), "VALUE = 100\n")
+            self.assertEqual(root_target.read_text(encoding="utf-8"), "VALUE = 1\n")
+
+    def test_file_tools_prefer_current_folder_context_for_bare_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a").mkdir()
+            (root / "b").mkdir()
+            (root / "a" / "config.py").write_text("A = 1\n", encoding="utf-8")
+            target = root / "b" / "config.py"
+            target.write_text("B = 1\n", encoding="utf-8")
+            config = HubConfig(workspace_dir=root)
+            toolbox = AgentToolbox(
+                config,
+                HubRequest(
+                    session_id="agent",
+                    messages=[],
+                    context="Current folder: b\nLanguage: python",
+                ),
+            )
+
+            result = toolbox.run("read_file", {"path": "config.py"})
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["result"]["path"], "b/config.py")
+            self.assertIn("B = 1", result["result"]["content"])
+
+    def test_run_command_defaults_to_current_folder_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / "tools"
+            folder.mkdir()
+            config = HubConfig(workspace_dir=root)
+            toolbox = AgentToolbox(
+                config,
+                HubRequest(
+                    session_id="agent",
+                    messages=[],
+                    context="Current folder: tools",
+                ),
+            )
+
+            result = toolbox.run(
+                "run_command",
+                {"command": "python -c \"import pathlib; print(pathlib.Path.cwd().name)\""},
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["result"]["cwd"], "tools")
+            self.assertIn("tools", result["result"]["stdout"])
+
     def test_file_tools_report_ambiguous_bare_filename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

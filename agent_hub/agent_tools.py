@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ MAX_FILE_CHARS = 80_000
 MAX_TOOL_OUTPUT_CHARS = 20_000
 MAX_REPLACE_CHARS = 200_000
 MAX_PATH_HINTS = 10
+MAX_COMMAND_TIMEOUT_SECONDS = 600
 
 
 class ToolError(Exception):
@@ -45,7 +47,7 @@ class AgentToolbox:
             'replace_in_file args: {"path":"file.txt","old":"exact text","new":"replacement","expected_replacements":1}',
         ]
         if self.allow_shell:
-            tools.append('run_command args: {"command":"python -m unittest","cwd":".","timeout_seconds":120}')
+            tools.append('run_command args: {"command":"python -m unittest","cwd":".","timeout_seconds":300}')
         else:
             tools.append("run_command: unavailable unless allow_shell_tools is true.")
 
@@ -55,7 +57,8 @@ class AgentToolbox:
                 "Work like a careful repository agent: inspect before editing, keep changes scoped, and verify when possible.",
                 "Use tools for file inspection and edits. Do not invent file contents you have not inspected.",
                 "Prefer replace_in_file for targeted edits. Use write_file only when creating a file or rewriting a file you have read.",
-                "If shell tools are enabled, run focused checks after meaningful code changes.",
+                "If shell tools are enabled, use run_command freely for fast inspection, builds, tests, and requested commands.",
+                "When the request is about the open file or folder, prefer the Current file and Current folder paths from context.",
                 "Never read or write outside the workspace root.",
                 "Reply with exactly one JSON object and no Markdown.",
                 'Valid actions are only "tool" and "final"; do not invent other action names.',
@@ -232,10 +235,14 @@ class AgentToolbox:
         if not isinstance(command, str) or not command.strip():
             raise ToolError("run_command requires a command string")
 
-        cwd = self._resolve(args.get("cwd", "."))
+        cwd = self._resolve_command_cwd(args.get("cwd"))
         if not cwd.is_dir():
             raise ToolError(f"Command cwd is not a directory: {self._relative(cwd)}")
-        timeout = _positive_int(args.get("timeout_seconds"), default=30, maximum=120)
+        timeout = _positive_int(
+            args.get("timeout_seconds"),
+            default=60,
+            maximum=MAX_COMMAND_TIMEOUT_SECONDS,
+        )
         completed = subprocess.run(
             command,
             shell=True,
@@ -278,6 +285,10 @@ class AgentToolbox:
 
     def _resolve_existing(self, value: Any) -> Path:
         raw = str(value or ".")
+        if _is_bare_filename(raw):
+            context_match = self._context_workspace_match(raw)
+            if context_match:
+                return context_match
         resolved = self._resolve(raw)
         if resolved.exists():
             return resolved
@@ -286,6 +297,68 @@ class AgentToolbox:
             if match:
                 return match
         return resolved
+
+    def _context_workspace_match(self, raw: str) -> Path | None:
+        needle = raw.casefold()
+        for path in self._request_context_paths():
+            if path.name.casefold() == needle and path.exists():
+                return path
+        for directory in self._request_context_dirs():
+            path = directory / raw
+            if path.name.casefold() == needle and path.exists():
+                return path
+        return None
+
+    def _request_context_paths(self) -> list[Path]:
+        return self._request_context_entries(("Current file", "File", "Reference"))
+
+    def _request_context_dirs(self) -> list[Path]:
+        directories = self._request_context_entries(("Current folder", "Folder"))
+        for path in self._request_context_paths():
+            parent = path.parent
+            if parent not in directories:
+                directories.append(parent)
+        return directories
+
+    def _request_context_entries(self, labels: tuple[str, ...]) -> list[Path]:
+        texts: list[str] = []
+        if self.request.context:
+            texts.append(str(self.request.context))
+        for message in self.request.messages:
+            content = message.get("content")
+            if isinstance(content, str):
+                texts.append(content)
+
+        paths: list[Path] = []
+        seen: set[Path] = set()
+        label_pattern = "|".join(re.escape(label) for label in labels)
+        for text in texts:
+            for line in text.splitlines():
+                match = re.match(
+                    rf"\s*(?:{label_pattern}):\s*(.+?)\s*$",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+                if not match:
+                    continue
+                raw_path = match.group(1).strip().strip("\"'")
+                if not raw_path:
+                    continue
+                try:
+                    path = self._resolve(raw_path)
+                except ToolError:
+                    continue
+                if path not in seen:
+                    seen.add(path)
+                    paths.append(path)
+        return paths
+
+    def _resolve_command_cwd(self, value: Any) -> Path:
+        if value is None:
+            for directory in self._request_context_dirs():
+                if directory.is_dir():
+                    return directory
+        return self._resolve("." if value is None else value)
 
     def _unique_workspace_match(self, raw: str) -> Path | None:
         needle = raw.casefold()

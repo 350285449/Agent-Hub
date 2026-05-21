@@ -66,7 +66,7 @@ class AgentRunner:
             _emit(
                 event_sink,
                 "model_request",
-                message=f"Step {step_number}: asking the model for the next action.",
+                message=f"Step {step_number}: planning the next workspace action.",
                 step=step_number,
             )
             step_request = replace(
@@ -310,7 +310,7 @@ def _model_response_message(
 ) -> str:
     action = command.get("action")
     if action == "tool":
-        return f"Step {step_number}: {response.agent} asked to run {command.get('tool', 'a tool')}."
+        return f"Step {step_number}: {response.agent} selected {command.get('tool', 'a tool')}."
     if action == "final":
         return f"Step {step_number}: {response.agent} returned a final answer."
     if action == "invalid":

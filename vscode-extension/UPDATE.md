@@ -2,8 +2,8 @@
 
 ## Next release
 
-- Target version: `0.4.8`
-- Purpose: publish live connection diagnostics and stale-server repair to the VS Code Marketplace
+- Target version: `0.4.10`
+- Purpose: publish stale-backend restart, active-folder context, and faster shell-first workspace-agent behavior
 
 ## Summary
 
@@ -20,6 +20,11 @@ This update file records the next VS Code extension release and the key change s
 - Generated workspace configs enable `allow_shell_tools` by default.
 - Chat now reports server, shell-tool, and local model-backend connection status before asking the model.
 - Stale pre-streaming Agent Hub servers are detected and restarted when possible.
+- Bare filename tool calls such as `config.py` now prefer the active editor path from request context.
+- Workspace-agent progress now says it is planning and selecting tools instead of asking the model for the next action.
+- Already-running backend servers that lack the current feature flags are restarted automatically.
+- Agent requests include the current folder path and the files in that folder.
+- Shell command use is called out directly in the agent prompt, and backend command timeouts can run longer local jobs.
 - The extension package now stages the Agent Hub Python backend into the VSIX.
 - Startup uses the bundled backend when available and auto-detects a usable Python 3.11+ runtime.
 - Config repair now writes Ollama/local models before Claude/Gemini/ChatGPT-style fallbacks.
@@ -40,5 +45,5 @@ The resulting `.vsix` can be installed locally or published with `npm run publis
 
 ## Notes
 
-- The current `package.json` version is `0.4.8`.
-- If you want this release to be published, run `npm run package` and install/publish the resulting `0.4.8` VSIX.
+- The current `package.json` version is `0.4.10`.
+- If you want this release to be published, run `npm run package` and install/publish the resulting `0.4.10` VSIX.

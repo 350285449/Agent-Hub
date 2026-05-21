@@ -13,7 +13,7 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let lastActiveTextEditor = null;
-const EXTENSION_VERSION = "0.4.8";
+const EXTENSION_VERSION = "0.4.10";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
@@ -23,6 +23,13 @@ const DEFAULT_GEMINI_MODEL = "gemma3:4b";
 const DEFAULT_CHATGPT_MODEL = "llama3.2";
 const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
+const REQUIRED_BACKEND_FEATURES = [
+  "native_agent_streaming",
+  "agent_progress_v2",
+  "active_file_context_resolution",
+  "current_folder_context",
+  "workspace_shell_commands"
+];
 
 function activate(context) {
   extensionContext = context;
@@ -180,7 +187,9 @@ function participantTask(command, prompt, chatContext) {
     "You are Agent Hub, a practical local-first coding agent inside VS Code.",
     "Inspect workspace files before making claims about code.",
     "Use the current file path from context when the user refers to an open file by basename.",
+    "Use the current folder path and file list from context when the request is about the open folder.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
+    "Shell tools are enabled for agent requests; use run_command for fast inspection, tests, builds, and commands the user asks you to run.",
     "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
     "For direct replies, use the final action; never invent other action names.",
     "When edits are needed, keep them scoped and verify when practical.",
@@ -481,19 +490,19 @@ async function sendChatTurn(panel, message) {
   const config = settings();
   const health = await serverHealth();
   postChatProgress(panel, requestId, serverConnectionSummary(health, config));
-  if (!serverSupportsNativeStreaming(health)) {
-    output.appendLine("Connected Agent Hub server does not report native streaming support. Restarting the stale server.");
+  if (!serverSupportsRequiredBackend(health)) {
+    output.appendLine(`Connected Agent Hub server is missing backend features: ${missingBackendFeatures(health).join(", ")}. Restarting.`);
     postChatProgress(panel, requestId, "Connected server is an older Agent Hub build; restarting to load the bundled backend...");
     await restartAgentHubServerForUpdate(health);
-    if (!(await waitForStreamingServer(7000))) {
+    if (!(await waitForRequiredBackend(7000))) {
       panel.webview.postMessage({
         type: "chatError",
         requestId,
         text: [
-          "Agent Hub is online, but it is an older server that cannot stream live progress.",
+          "Agent Hub is online, but it is an older server that is missing the current agent backend features.",
           "",
           "Use Agent Hub: Stop Server, then Agent Hub: Start Server, or close the old terminal/process using port 8787.",
-          "After restart, the chat should show server, route, and tool-step progress instead of sitting at Starting..."
+          "After restart, bare filenames should prefer the active file/folder and the progress wording should match this extension."
         ].join("\n")
       });
       return;
@@ -570,7 +579,9 @@ function codexChatTask(text) {
     "Chat with the user as Agent Hub, a careful local-first workspace agent.",
     "Be conversational and concise. Use workspace tools when inspection or edits are useful.",
     "Use the current file path from context when the user refers to an open file by basename.",
+    "Use the current folder path and file list from context when the request is about the open folder.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
+    "Shell tools are enabled for agent requests; use run_command for fast inspection, tests, builds, and commands the user asks you to run.",
     "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
     "For direct replies, use the final action; never invent other action names.",
     "",
@@ -2113,7 +2124,9 @@ async function runCodingAgent() {
     task: [
       "Work as a coding agent in this workspace.",
       "Inspect files before editing, keep changes scoped, and verify if possible.",
+      "Use the current file, current folder, and folder file list from context before searching broadly.",
       "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
+      "Shell tools are enabled for agent requests; use run_command for fast inspection, tests, builds, and commands the user asks you to run.",
       "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
       "For direct replies, use the final action; never invent other action names.",
       "",
@@ -2260,13 +2273,18 @@ function formatAgentHubError(error) {
 
 async function ensureServerReady() {
   const config = settings();
-  if (await isServerOnline()) {
+  const health = await serverHealth();
+  if (serverSupportsRequiredBackend(health)) {
     return true;
+  }
+  if (health) {
+    await restartAgentHubServerForUpdate(health);
+    return serverSupportsRequiredBackend(await serverHealth());
   }
   if (config.autoStart) {
     await startServer();
   }
-  return isServerOnline();
+  return serverSupportsRequiredBackend(await serverHealth());
 }
 
 async function serverHealth() {
@@ -2286,6 +2304,17 @@ function serverSupportsNativeStreaming(health) {
   );
 }
 
+function missingBackendFeatures(health) {
+  const features = health && health.features && typeof health.features === "object"
+    ? health.features
+    : {};
+  return REQUIRED_BACKEND_FEATURES.filter((feature) => features[feature] !== true);
+}
+
+function serverSupportsRequiredBackend(health) {
+  return !!(health && missingBackendFeatures(health).length === 0);
+}
+
 function serverConnectionSummary(health, config) {
   if (!health) {
     return `Connected to ${config.serverUrl}, but health details were unavailable.`;
@@ -2294,17 +2323,20 @@ function serverConnectionSummary(health, config) {
     ? health.agents.join(", ")
     : "none reported";
   const streaming = serverSupportsNativeStreaming(health) ? "streaming ready" : "old backend, no live stream";
+  const backend = serverSupportsRequiredBackend(health)
+    ? `backend ${health.version || "current"}`
+    : `old backend missing ${missingBackendFeatures(health).join(", ")}`;
   const shellTools = health.allow_shell_tools === undefined
     ? (config.allowShellTools ? "enabled by request" : "disabled by request")
     : (health.allow_shell_tools ? "enabled" : "disabled in config");
-  return `Connected to Agent Hub at ${config.serverUrl}: ${streaming}; shell tools ${shellTools}; agents: ${agents}.`;
+  return `Connected to Agent Hub at ${config.serverUrl}: ${streaming}; ${backend}; shell tools ${shellTools}; agents: ${agents}.`;
 }
 
-async function waitForStreamingServer(timeoutMs) {
+async function waitForRequiredBackend(timeoutMs) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const health = await serverHealth();
-    if (serverSupportsNativeStreaming(health)) {
+    if (serverSupportsRequiredBackend(health)) {
       return true;
     }
     await delay(300);
@@ -2316,7 +2348,7 @@ async function restartAgentHubServerForUpdate(health) {
   stopServerProcess();
   await delay(500);
   if (await isServerOnline()) {
-    const stillStale = !serverSupportsNativeStreaming(health || await serverHealth());
+    const stillStale = !serverSupportsRequiredBackend(health || await serverHealth());
     if (stillStale) {
       await stopAgentHubServerOnConfiguredPort();
       await delay(800);
@@ -2450,10 +2482,12 @@ function contextForDocument(document, text) {
   const language = document.languageId || "plaintext";
   return [
     `File: ${relative}`,
+    `Current folder: ${documentFolderRelativePath(document)}`,
     `Language: ${language}`,
+    currentFolderFilesContext(document),
     "",
     text
-  ].join("\n");
+  ].filter((part) => part !== "").join("\n");
 }
 
 function documentReferenceContext(document) {
@@ -2461,12 +2495,58 @@ function documentReferenceContext(document) {
   const language = document.languageId || "plaintext";
   return [
     `Current file: ${relative}`,
-    `Language: ${language}`
-  ].join("\n");
+    `Current folder: ${documentFolderRelativePath(document)}`,
+    `Language: ${language}`,
+    currentFolderFilesContext(document)
+  ].filter((part) => part !== "").join("\n");
 }
 
 function documentRelativePath(document) {
   return vscode.workspace.asRelativePath(document.uri, false);
+}
+
+function documentFolderRelativePath(document) {
+  if (!document || !document.uri || document.uri.scheme !== "file") {
+    return ".";
+  }
+  const folderPath = path.dirname(document.uri.fsPath);
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+  if (!workspaceFolder) {
+    return path.basename(folderPath) || ".";
+  }
+  return normalizeRelativePath(path.relative(workspaceFolder.uri.fsPath, folderPath)) || ".";
+}
+
+function currentFolderFilesContext(document) {
+  if (!document || !document.uri || document.uri.scheme !== "file") {
+    return "";
+  }
+  const folderPath = path.dirname(document.uri.fsPath);
+  let entries;
+  try {
+    entries = fs.readdirSync(folderPath, { withFileTypes: true });
+  } catch (_error) {
+    return "";
+  }
+  const visible = entries
+    .filter((entry) => ![".git", ".agent-hub", "node_modules", "__pycache__"].includes(entry.name))
+    .sort((left, right) => {
+      if (left.isDirectory() !== right.isDirectory()) {
+        return left.isDirectory() ? -1 : 1;
+      }
+      return left.name.localeCompare(right.name);
+    })
+    .slice(0, 80)
+    .map((entry) => `- ${entry.name}${entry.isDirectory() ? "/" : ""}`);
+  if (!visible.length) {
+    return "Current folder files: none";
+  }
+  const omitted = entries.length > visible.length ? `\n- ... ${entries.length - visible.length} more` : "";
+  return `Current folder files:\n${visible.join("\n")}${omitted}`;
+}
+
+function normalizeRelativePath(value) {
+  return String(value || "").replace(/\\/g, "/");
 }
 
 function currentTextEditor() {

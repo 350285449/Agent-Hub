@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.10
+
+- Restarts already-running backend servers that lack the active-file resolver and current-folder feature flags.
+- Sends the active editor's current folder and folder file list with agent requests.
+- Makes shell command access clearer in agent prompts and allows longer local command timeouts.
+
+## 0.4.9
+
+- Prefers the active editor path from request context when resolving bare filenames such as `config.py`.
+- Prevents ambiguous basename tool failures from bouncing the agent through extra model steps.
+- Updates workspace-agent progress wording to describe Agent Hub planning and tool selection more directly.
+
 ## 0.4.8
 
 - Detects stale pre-streaming Agent Hub servers and restarts them when possible.
