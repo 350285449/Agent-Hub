@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
-from .agent_tools import AgentToolbox, tool_result_message
+from .agent_tools import AgentToolbox, agent_tool_definitions, tool_result_message
 from .config import HubConfig
 from .models import FailoverEvent, HubRequest, HubResponse
 from .router import AgentRouter
@@ -75,6 +75,7 @@ class AgentRunner:
                 stream=False,
                 use_session_history=False,
                 record_session=False,
+                raw=_agent_step_raw(request, toolbox),
             )
             response = self.router.route(step_request)
             last_response = response
@@ -148,6 +149,9 @@ class AgentRunner:
                     ok=result.get("ok") is not False,
                     result=_progress_tool_result(tool_name, result),
                 )
+                edit_event = _workspace_edit_event(step_number, tool_name, result)
+                if edit_event:
+                    _emit(event_sink, "workspace_edit", **edit_event)
                 fast_final_text = _fast_tool_final_text(tool_name, result, request)
                 if fast_final_text:
                     _emit(
@@ -321,6 +325,37 @@ def _emit(event_sink: AgentEventSink | None, event_type: str, **data: Any) -> No
         return
 
 
+def _agent_step_raw(request: HubRequest, toolbox: AgentToolbox) -> dict[str, Any]:
+    raw = dict(request.raw or {})
+    raw["agent_hub_tools"] = agent_tool_definitions(toolbox.allow_shell)
+    return raw
+
+
+def _workspace_edit_event(
+    step_number: int,
+    tool_name: str,
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    if result.get("ok") is False or tool_name not in {"write_file", "replace_in_file"}:
+        return None
+    payload = result.get("result")
+    if not isinstance(payload, dict):
+        return None
+    path = _short_value(payload.get("path"))
+    if not path:
+        return None
+    action = "appended" if tool_name == "write_file" and payload.get("append") else "wrote"
+    if tool_name == "replace_in_file":
+        action = "updated"
+    return {
+        "message": f"Step {step_number}: workspace file {action}: {path}.",
+        "step": step_number,
+        "tool": tool_name,
+        "path": path,
+        "action": action,
+    }
+
+
 def _model_response_message(
     step_number: int,
     response: HubResponse,
@@ -488,7 +523,11 @@ def _short_value(value: Any, maximum: int = 120) -> str:
 
 
 def _command_from_response(response: HubResponse) -> dict[str, Any]:
-    tool_call = _openai_tool_call(response.raw) or _anthropic_tool_call(response.raw)
+    tool_call = (
+        _openai_tool_call(response.raw)
+        or _anthropic_tool_call(response.raw)
+        or _gemini_tool_call(response.raw)
+    )
     if tool_call:
         return _validate_tool_command(tool_call)
 
@@ -651,6 +690,29 @@ def _anthropic_tool_call(raw: dict[str, Any]) -> dict[str, Any] | None:
             continue
         name = item.get("name")
         args = item.get("input", {})
+        if isinstance(name, str):
+            return {"action": "tool", "tool": name, "args": args if isinstance(args, dict) else {}}
+    return None
+
+
+def _gemini_tool_call(raw: dict[str, Any]) -> dict[str, Any] | None:
+    candidates = raw.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    content = candidates[0].get("content") if isinstance(candidates[0], dict) else None
+    if not isinstance(content, dict):
+        return None
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return None
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        function_call = part.get("functionCall") or part.get("function_call")
+        if not isinstance(function_call, dict):
+            continue
+        name = function_call.get("name")
+        args = function_call.get("args", {})
         if isinstance(name, str):
             return {"action": "tool", "tool": name, "args": args if isinstance(args, dict) else {}}
     return None

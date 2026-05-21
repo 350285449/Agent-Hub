@@ -381,7 +381,10 @@ def _enable_cloud_provider(
 
     _move_agent_to_front(data, route, agent_name)
     if route in {"cloud-agent", "hybrid-agent"}:
-        data["cloud_control_selection"] = {"route_mode": "api-key"}
+        data["cloud_control_selection"] = {
+            "route_mode": "api-key",
+            "api_key_models_enabled": True,
+        }
     config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Enabled {agent_name} on route {route} in {config_path}.")
     print(f"Set {agent['api_key_env']} before starting Agent-Hub.")
@@ -464,7 +467,10 @@ def _init_config(path: str, force: bool = False, with_cloud_examples: bool = Fal
         return 1
 
     data = config_to_dict(free_local_config())
-    data["cloud_control_selection"] = {"route_mode": "ollama-cloud"}
+    data["cloud_control_selection"] = {
+        "route_mode": "ollama-cloud",
+        "api_key_models_enabled": False,
+    }
     if with_cloud_examples:
         _merge_agent_examples(data, _cloud_example_agents())
     config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -479,7 +485,7 @@ def _cloud_example_agents() -> list[dict[str, Any]]:
             "name": "chatgpt",
             "provider": "chatgpt",
             "model": "gpt-4o-mini",
-            "enabled": True,
+            "enabled": False,
             "free": True,
             "api_key_env": "OPENAI_API_KEY",
             "max_tokens": 4096,
@@ -489,7 +495,7 @@ def _cloud_example_agents() -> list[dict[str, Any]]:
             "name": "gemini",
             "provider": "gemini",
             "model": "gemini-2.0-flash",
-            "enabled": True,
+            "enabled": False,
             "free": True,
             "api_key_env": "GEMINI_API_KEY",
             "max_tokens": 4096,
@@ -499,7 +505,7 @@ def _cloud_example_agents() -> list[dict[str, Any]]:
             "name": "claude",
             "provider": "claude",
             "model": "claude-3-5-haiku-latest",
-            "enabled": True,
+            "enabled": False,
             "free": True,
             "api_key_env": "ANTHROPIC_API_KEY",
             "max_tokens": 4096,

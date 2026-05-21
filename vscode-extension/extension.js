@@ -107,7 +107,9 @@ const API_KEY_SECRETS = [
 ];
 const REQUIRED_BACKEND_FEATURES = [
   "native_agent_streaming",
+  "native_agent_tool_schemas",
   "agent_progress_v2",
+  "workspace_edit_events",
   "active_file_context_resolution",
   "current_folder_context",
   "workspace_shell_commands",
@@ -603,6 +605,7 @@ function normalizeChatSettingsInput(value) {
     },
     cloudSettings: {
       cloudRouteMode: normalizeCloudRouteMode(input.cloudRouteMode || "ollama-cloud"),
+      apiKeyModelsEnabled: !!input.apiKeyModelsEnabled,
       codexModel: cleanSettingString(input.codexModel, DEFAULT_CODEX_MODEL),
       claudeModel: cleanSettingString(input.claudeModel, DEFAULT_CLAUDE_MODEL),
       geminiModel: cleanSettingString(input.geminiModel, DEFAULT_GEMINI_MODEL),
@@ -649,6 +652,7 @@ function normalizeCloudRouteMode(value) {
 function cloudModelSettingsPayload(config) {
   const fallback = {
     cloudRouteMode: "ollama-cloud",
+    apiKeyModelsEnabled: false,
     codexModel: DEFAULT_CODEX_MODEL,
     claudeModel: DEFAULT_CLAUDE_MODEL,
     geminiModel: DEFAULT_GEMINI_MODEL,
@@ -671,6 +675,7 @@ function cloudModelSettingsPayload(config) {
     }
     return {
       cloudRouteMode: configCloudRouteMode(raw),
+      apiKeyModelsEnabled: apiKeyModelsEnabledFromConfig(raw),
       codexModel: modelForAgent(raw, "codex", DEFAULT_CODEX_MODEL),
       claudeModel: modelForAgent(raw, "claude", DEFAULT_CLAUDE_MODEL),
       geminiModel: modelForAgent(raw, "gemini", DEFAULT_GEMINI_MODEL),
@@ -688,6 +693,21 @@ function modelForAgent(data, name, fallback) {
   return agent && typeof agent.model === "string" && agent.model.trim()
     ? agent.model.trim()
     : fallback;
+}
+
+function apiKeyModelsEnabledFromConfig(data) {
+  const selection = data && data.cloud_control_selection;
+  if (selection && typeof selection === "object" && typeof selection.api_key_models_enabled === "boolean") {
+    return selection.api_key_models_enabled;
+  }
+  return Array.isArray(data && data.agents)
+    ? data.agents.some((item) => (
+      item &&
+      typeof item === "object" &&
+      HOSTED_CLOUD_AGENT_NAMES.includes(item.name) &&
+      item.enabled === true
+    ))
+    : false;
 }
 
 async function apiKeyStatusRows() {
@@ -1547,6 +1567,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
             <div class="settings-row">
               <label class="settings-check"><input id="settingAllowShellTools" type="checkbox"> Allow shell tools</label>
               <label class="settings-check"><input id="settingAutoStart" type="checkbox"> Auto-start server</label>
+              <label class="settings-check"><input id="settingApiKeyModelsEnabled" type="checkbox"> Enable API-key models</label>
             </div>
             <div class="settings-actions">
               <button id="saveSettings" type="button">Save Settings</button>
@@ -1635,6 +1656,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       claudeModel: document.getElementById("settingClaudeModel"),
       geminiModel: document.getElementById("settingGeminiModel"),
       chatgptModel: document.getElementById("settingChatgptModel"),
+      apiKeyModelsEnabled: document.getElementById("settingApiKeyModelsEnabled"),
       allowShellTools: document.getElementById("settingAllowShellTools"),
       autoStart: document.getElementById("settingAutoStart")
     };
@@ -1691,6 +1713,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       settingInputs.claudeModel.value = next.claudeModel || "";
       settingInputs.geminiModel.value = next.geminiModel || "";
       settingInputs.chatgptModel.value = next.chatgptModel || "";
+      settingInputs.apiKeyModelsEnabled.checked = !!next.apiKeyModelsEnabled;
       settingInputs.allowShellTools.checked = !!next.allowShellTools;
       settingInputs.autoStart.checked = !!next.autoStart;
       if (messageText !== undefined) {
@@ -1714,6 +1737,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
         claudeModel: settingInputs.claudeModel.value,
         geminiModel: settingInputs.geminiModel.value,
         chatgptModel: settingInputs.chatgptModel.value,
+        apiKeyModelsEnabled: settingInputs.apiKeyModelsEnabled.checked,
         allowShellTools: settingInputs.allowShellTools.checked,
         autoStart: settingInputs.autoStart.checked
       };
@@ -2568,6 +2592,7 @@ function selectedLocalSources(raw) {
 function cloudModelSettingsFromConfig(raw) {
   return {
     cloudRouteMode: configCloudRouteMode(raw),
+    apiKeyModelsEnabled: apiKeyModelsEnabledFromConfig(raw),
     codexModel: modelForAgent(raw, "codex", DEFAULT_CODEX_MODEL),
     claudeModel: modelForAgent(raw, "claude", DEFAULT_CLAUDE_MODEL),
     geminiModel: modelForAgent(raw, "gemini", DEFAULT_GEMINI_MODEL),
@@ -2637,14 +2662,16 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings) {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     const sources = await detectLocalModelSources();
     data = localConfigForLocalModels(sources.length ? sources : fallbackLocalModelSources(), {
-      cloudRouteMode: cloudSettings.cloudRouteMode
+      cloudRouteMode: cloudSettings.cloudRouteMode,
+      cloudSettings
     });
   }
 
   data.agents = Array.isArray(data.agents) ? data.agents : [];
   data.routes = Array.isArray(data.routes) ? data.routes : [];
   data.cloud_control_selection = {
-    route_mode: normalizeCloudRouteMode(cloudSettings.cloudRouteMode)
+    route_mode: normalizeCloudRouteMode(cloudSettings.cloudRouteMode),
+    api_key_models_enabled: !!cloudSettings.apiKeyModelsEnabled
   };
 
   for (const source of cloudModelSources(cloudSettings)) {
@@ -2758,9 +2785,11 @@ function ollamaCloudAgentNames(data) {
 }
 
 function hostedCloudAgentNames(data) {
-  const existing = agentNameSet(data);
-  const names = HOSTED_CLOUD_AGENT_NAMES.filter((name) => existing.has(name));
-  return names.length ? names : HOSTED_CLOUD_AGENT_NAMES;
+  const agents = Array.isArray(data && data.agents) ? data.agents : [];
+  return HOSTED_CLOUD_AGENT_NAMES.filter((name) => {
+    const agent = agents.find((item) => item && typeof item === "object" && item.name === name);
+    return agent && agent.enabled === true;
+  });
 }
 
 function agentNameSet(data) {
@@ -2835,7 +2864,9 @@ function localConfigForLocalModels(sources, options = {}) {
   const ollamaCloudSources = ollamaCloudModelSources();
   const cloudSources = cloudModelSources(options.cloudSettings || {});
   const ollamaCloudAgents = ollamaCloudSources.map((source) => source.name);
-  const cloudAgents = cloudSources.map((source) => source.name);
+  const cloudAgents = cloudSources
+    .filter((source) => source.enabled)
+    .map((source) => source.name);
   const localAgents = localSources.map((source) => source.name);
   const cloudRouteMode = normalizeCloudRouteMode(options.cloudRouteMode || "ollama-cloud");
   const cloudRouteAgents = uniqueAgentNames(
@@ -2858,7 +2889,8 @@ function localConfigForLocalModels(sources, options = {}) {
     include_raw_responses: false,
     expose_routing_details: true,
     cloud_control_selection: {
-      route_mode: cloudRouteMode
+      route_mode: cloudRouteMode,
+      api_key_models_enabled: !!options.cloudSettings?.apiKeyModelsEnabled
     },
     default_route: hybridAgents,
     routes: [
@@ -2885,7 +2917,7 @@ function localConfigForLocalModels(sources, options = {}) {
       {
         name: "research",
         keywords: ["research", "search", "latest", "sources", "web", "news"],
-        agents: ["local-research", ...cloudAgents, "echo"]
+        agents: ["local-research", ...cloudRouteAgents.filter((name) => name !== "echo"), "echo"]
       }
     ],
     agents: [
@@ -2919,6 +2951,7 @@ function cloudModelSources(settings = {}) {
       name: "codex",
       label: "Codex",
       provider: "openai",
+      enabled: !!settings.apiKeyModelsEnabled,
       model: cleanSettingString(settings.codexModel, process.env.AGENT_HUB_CODEX_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CODEX_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CODEX_API_KEY_ENV || "OPENAI_API_KEY",
       baseUrl: process.env.AGENT_HUB_CODEX_BASE_URL || process.env.OPENAI_BASE_URL || "",
@@ -2928,6 +2961,7 @@ function cloudModelSources(settings = {}) {
       name: "claude",
       label: "Claude",
       provider: "anthropic",
+      enabled: !!settings.apiKeyModelsEnabled,
       model: cleanSettingString(settings.claudeModel, process.env.AGENT_HUB_CLAUDE_MODEL || DEFAULT_CLAUDE_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CLAUDE_API_KEY_ENV || "ANTHROPIC_API_KEY",
       baseUrl: process.env.AGENT_HUB_CLAUDE_BASE_URL || "",
@@ -2937,6 +2971,7 @@ function cloudModelSources(settings = {}) {
       name: "gemini",
       label: "Gemini",
       provider: "gemini",
+      enabled: !!settings.apiKeyModelsEnabled,
       model: cleanSettingString(settings.geminiModel, process.env.AGENT_HUB_GEMINI_MODEL || DEFAULT_GEMINI_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_GEMINI_API_KEY_ENV || "GEMINI_API_KEY",
       baseUrl: process.env.AGENT_HUB_GEMINI_BASE_URL || "",
@@ -2946,6 +2981,7 @@ function cloudModelSources(settings = {}) {
       name: "chatgpt",
       label: "ChatGPT",
       provider: "openai",
+      enabled: !!settings.apiKeyModelsEnabled,
       model: cleanSettingString(settings.chatgptModel, process.env.AGENT_HUB_CHATGPT_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CHATGPT_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CHATGPT_API_KEY_ENV || "OPENAI_API_KEY",
       baseUrl: process.env.AGENT_HUB_CHATGPT_BASE_URL || process.env.OPENAI_BASE_URL || "",
@@ -2983,7 +3019,7 @@ function cloudModelAgentConfig(source) {
     name: source.name,
     provider: source.provider,
     model: source.model,
-    enabled: true,
+    enabled: !!source.enabled,
     free: true,
     api_key_env: source.apiKeyEnv,
     max_tokens: 4096,
@@ -3085,7 +3121,7 @@ function describeCloudSources(localSources = fallbackLocalModelSources()) {
   const ollamaCloud = ollamaCloudModelSources()
     .map((source) => `${source.label} (${source.model})`);
   const apiKey = cloudModelSources()
-    .map((source) => `${source.label} (${source.model}, ${source.apiKeyEnv})`);
+    .map((source) => `${source.label} (${source.model}, ${source.apiKeyEnv}, disabled until enabled in settings)`);
   return [...ollamaCloud, ...apiKey]
     .join(", ");
 }

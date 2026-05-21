@@ -155,7 +155,7 @@
             "cloud"
           ],
           "default": "cloud",
-          "description": "Control agent provider mode. Cloud uses hosted providers, hybrid tries cloud then local fallbacks, and local uses direct LM Studio/Ollama routes."
+          "description": "Control agent provider mode. Cloud uses the configured cloud-agent route, hybrid tries that route then local fallbacks, and local uses direct LM Studio/Ollama routes."
         },
         "agentHub.agentMaxSteps": {
           "type": "number",

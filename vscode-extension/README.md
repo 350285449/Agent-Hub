@@ -41,9 +41,14 @@ still use `.\install.ps1` if you want a local editable `.venv`.
 When `agentHub.autoStart` is enabled, the extension starts the local server for
 you before sending a request.
 
-The chat header includes a `Settings` menu for provider mode, the Cloud route
-priority, API-key model names, server settings, local model selection, API keys,
-and server actions.
+Workspace-agent turns can modify files while the live run is in progress. Agent
+Hub exposes file tools to compatible models, applies `write_file` and
+`replace_in_file` directly to the workspace, and streams a progress event when a
+file edit lands on disk.
+
+The chat header includes a `Settings` menu for provider mode, API-key model
+enablement, the Cloud route priority, model names, server settings, local model
+selection, API keys, and server actions.
 
 ## Common Settings
 
@@ -67,8 +72,9 @@ weights:
 - `nemotron-3-super:cloud`
 - `gemma4:31b-cloud`
 
-Open the chat `Settings` menu and set `Cloud route` to `API-key models first`
-when you want hosted providers to lead the route:
+Hosted API-key providers are disabled by default. Open the chat `Settings` menu
+and enable `API-key models` when you want these providers available; set `Cloud
+route` to `API-key models first` when you also want them to lead the route:
 
 - `codex` and `chatgpt` -> OpenAI via `OPENAI_API_KEY`
 - `claude` -> Anthropic via `ANTHROPIC_API_KEY`
@@ -76,7 +82,8 @@ when you want hosted providers to lead the route:
 
 Use the model-name fields in `Settings` to change the hosted model IDs, then
 save API keys in VS Code secret storage. Restart Agent Hub from that menu after
-saving keys so the Python server receives the updated environment variables.
+saving settings or keys so the Python server receives the updated config and
+environment variables.
 
 Choose Local in the chat panel, or set `agentHub.agentProviderMode` to `local`,
 to use direct local model routes. Use the chat panel's `Choose Local Model`

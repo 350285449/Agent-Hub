@@ -120,6 +120,50 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertTrue(tool_finished["ok"])
             self.assertEqual(tool_finished["result"]["path"], "note.txt")
 
+    def test_agent_loop_sends_native_workspace_tool_definitions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seen_tools: list[list[dict]] = []
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                allow_shell_tools=True,
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    seen_tools.append(list(request.raw.get("agent_hub_tools", [])))
+                    return ProviderResult(
+                        text='{"action":"final","answer":"Tool schemas are present."}',
+                        model=self.agent.model,
+                    )
+
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Edit files"}],
+                )
+            )
+
+            self.assertEqual(response.text, "Tool schemas are present.")
+            tool_names = {tool["name"] for tool in seen_tools[0]}
+            self.assertIn("write_file", tool_names)
+            self.assertIn("replace_in_file", tool_names)
+            self.assertIn("run_command", tool_names)
+
     def test_agent_loop_accepts_tool_name_as_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -217,6 +261,67 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertIn("Wrote created.txt", response.text)
             self.assertEqual(response.raw["agent_hub"]["steps"][0]["tool"], "write_file")
             self.assertIn("Agent completed after the local file edit.", [event.get("message") for event in events])
+            edit_event = next(event for event in events if event["type"] == "workspace_edit")
+            self.assertEqual(edit_event["path"], "created.txt")
+            self.assertEqual(edit_event["action"], "wrote")
+
+    def test_agent_loop_accepts_gemini_function_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["gemini"],
+                agents={
+                    "gemini": AgentConfig(
+                        name="gemini",
+                        provider="gemini",
+                        model="gemini-test",
+                        api_key="key",
+                        free=True,
+                    )
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    return ProviderResult(
+                        text="",
+                        model=self.agent.model,
+                        raw={
+                            "candidates": [
+                                {
+                                    "content": {
+                                        "parts": [
+                                            {
+                                                "functionCall": {
+                                                    "name": "write_file",
+                                                    "args": {
+                                                        "path": "gemini.txt",
+                                                        "content": "hello from gemini\n",
+                                                    },
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        },
+                    )
+
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Create gemini.txt"}],
+                )
+            )
+
+            self.assertEqual((root / "gemini.txt").read_text(encoding="utf-8"), "hello from gemini\n")
+            self.assertIn("Wrote gemini.txt", response.text)
 
     def test_agent_loop_can_disable_fast_write_finalize(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

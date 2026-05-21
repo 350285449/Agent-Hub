@@ -18,9 +18,107 @@ MAX_REPLACE_CHARS = 200_000
 MAX_PATH_HINTS = 10
 MAX_COMMAND_TIMEOUT_SECONDS = 600
 
+AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "name": "list_files",
+        "description": "List files or directories inside the workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative path."},
+                "pattern": {"type": "string", "description": "Glob pattern to match."},
+                "recursive": {"type": "boolean", "description": "Search subdirectories."},
+                "limit": {"type": "integer", "description": "Maximum number of entries."},
+            },
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Read a UTF-8 text file from the workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative file path."},
+                "start_line": {"type": "integer", "description": "First 1-based line to read."},
+                "line_count": {"type": "integer", "description": "Maximum lines to read."},
+                "max_chars": {"type": "integer", "description": "Maximum characters to return."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "search_files",
+        "description": "Search workspace text files for a literal query.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Literal text to search for."},
+                "path": {"type": "string", "description": "Workspace-relative file or folder."},
+                "pattern": {"type": "string", "description": "Glob pattern to search."},
+                "case_sensitive": {"type": "boolean", "description": "Use case-sensitive matching."},
+                "limit": {"type": "integer", "description": "Maximum number of matches."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": "Create, overwrite, or append to a workspace text file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative file path."},
+                "content": {"type": "string", "description": "Content to write."},
+                "append": {"type": "boolean", "description": "Append instead of overwriting."},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "replace_in_file",
+        "description": "Replace exact text in a workspace text file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative file path."},
+                "old": {"type": "string", "description": "Exact text to replace."},
+                "new": {"type": "string", "description": "Replacement text."},
+                "expected_replacements": {
+                    "type": "integer",
+                    "description": "Expected number of replacements, usually 1.",
+                },
+            },
+            "required": ["path", "old", "new"],
+        },
+    },
+]
+
+RUN_COMMAND_TOOL_DEFINITION: dict[str, Any] = {
+    "name": "run_command",
+    "description": "Run a shell command inside the workspace.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "Shell command to run."},
+            "cwd": {"type": "string", "description": "Workspace-relative working directory."},
+            "timeout_seconds": {"type": "integer", "description": "Timeout in seconds."},
+        },
+        "required": ["command"],
+    },
+}
+
 
 class ToolError(Exception):
     pass
+
+
+def agent_tool_definitions(allow_shell: bool) -> list[dict[str, Any]]:
+    """Common workspace tool definitions converted by each provider."""
+
+    tools = [*AGENT_TOOL_DEFINITIONS]
+    if allow_shell:
+        tools.append(RUN_COMMAND_TOOL_DEFINITION)
+    return tools
 
 
 @dataclass(slots=True)

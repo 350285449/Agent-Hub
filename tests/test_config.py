@@ -23,6 +23,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(free_local_agent_names()[0], "ollama-qwen-coder")
         self.assertEqual(default_agent_names()[0], "ollama-kimi-cloud")
         self.assertEqual(default_agent_names()[1], "ollama-glm-cloud")
+        self.assertNotIn("codex", default_agent_names())
         self.assertLess(
             free_local_agent_names().index("ollama-qwen3"),
             free_local_agent_names().index("custom-local"),
@@ -46,6 +47,10 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(is_free_agent(config.agents["claude"]))
         self.assertTrue(is_free_agent(config.agents["gemini"]))
         self.assertTrue(is_free_agent(config.agents["chatgpt"]))
+        self.assertFalse(config.agents["codex"].enabled)
+        self.assertFalse(config.agents["claude"].enabled)
+        self.assertFalse(config.agents["gemini"].enabled)
+        self.assertFalse(config.agents["chatgpt"].enabled)
         self.assertEqual(config.agents["codex"].provider, "openai")
         self.assertEqual(config.agents["claude"].provider, "anthropic")
         self.assertEqual(config.agents["gemini"].provider, "gemini")
@@ -56,7 +61,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.agents["chatgpt"].model, "gpt-4o-mini")
         self.assertIsNone(config.agents["codex"].base_url)
         cloud_route = next(route for route in config.routes if route.name == "cloud-agent")
-        self.assertEqual(cloud_route.agents, [*ollama_cloud_agent_names(), *cloud_agent_names(), "echo"])
+        self.assertEqual(cloud_route.agents, [*ollama_cloud_agent_names(), "echo"])
+        research_route = next(route for route in config.routes if route.name == "research")
+        self.assertEqual(research_route.agents, ["local-research", *ollama_cloud_agent_names(), "echo"])
         local_route = next(route for route in config.routes if route.name == "local-agent")
         self.assertEqual(local_route.agents, free_local_agent_names())
         self.assertEqual(config.agents["ollama-kimi-cloud"].model, "kimi-k2.6:cloud")

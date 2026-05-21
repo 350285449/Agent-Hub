@@ -6,6 +6,7 @@ from unittest.mock import patch
 from agent_hub.config import AgentConfig
 from agent_hub.models import HubRequest
 from agent_hub.providers import (
+    OpenAIChatProvider,
     GeminiProvider,
     LocalResearchProvider,
     create_provider,
@@ -117,6 +118,80 @@ class ProviderTests(unittest.TestCase):
                 "/v1beta/models/gemini-test:generateContent"
             )
         )
+
+    def test_openai_provider_translates_agent_hub_tools(self) -> None:
+        agent = AgentConfig(
+            name="ollama",
+            provider="openai-compatible",
+            model="tool-test",
+            base_url="http://127.0.0.1:11434",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "Read a file"}],
+            raw={
+                "agent_hub_tools": [
+                    {
+                        "name": "read_file",
+                        "description": "Read a workspace file.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    }
+                ]
+            },
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.return_value = {
+                "choices": [{"message": {"content": "Done"}, "finish_reason": "stop"}],
+                "usage": {},
+            }
+            OpenAIChatProvider(agent).complete(request)
+
+        payload = post_json.call_args.kwargs["payload"]
+        self.assertEqual(payload["tools"][0]["type"], "function")
+        self.assertEqual(payload["tools"][0]["function"]["name"], "read_file")
+        self.assertEqual(payload["tool_choice"], "auto")
+
+    def test_gemini_provider_translates_agent_hub_tools(self) -> None:
+        agent = AgentConfig(
+            name="gemini",
+            provider="gemini",
+            model="gemini-test",
+            api_key="key",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "Read a file"}],
+            raw={
+                "agent_hub_tools": [
+                    {
+                        "name": "read_file",
+                        "description": "Read a workspace file.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    }
+                ]
+            },
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.return_value = {
+                "candidates": [{"content": {"parts": [{"text": "Done"}]}}],
+                "usageMetadata": {},
+            }
+            GeminiProvider(agent).complete(request)
+
+        declaration = post_json.call_args.kwargs["payload"]["tools"][0]["functionDeclarations"][0]
+        self.assertEqual(declaration["name"], "read_file")
+        self.assertEqual(declaration["parameters"]["type"], "OBJECT")
+        self.assertEqual(declaration["parameters"]["properties"]["path"]["type"], "STRING")
 
     def test_local_research_provider_builds_cited_answer(self) -> None:
         agent = AgentConfig(

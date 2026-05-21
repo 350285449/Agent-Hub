@@ -29,6 +29,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("chatgpt", names)
             self.assertIn("gemini", names)
             self.assertIn("claude", names)
+            self.assertFalse(data["cloud_control_selection"]["api_key_models_enabled"])
             research = next(route for route in data["routes"] if route["name"] == "research")
             self.assertEqual(research["agents"][0], "local-research")
 
@@ -88,6 +89,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertTrue(data["free_only"])
+            self.assertTrue(data["cloud_control_selection"]["api_key_models_enabled"])
             codex = next(agent for agent in data["agents"] if agent["name"] == "codex")
             self.assertTrue(codex["enabled"])
             self.assertTrue(codex["free"])

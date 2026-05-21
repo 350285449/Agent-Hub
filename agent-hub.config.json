@@ -12,7 +12,8 @@
   "include_raw_responses": false,
   "expose_routing_details": true,
   "cloud_control_selection": {
-    "route_mode": "ollama-cloud"
+    "route_mode": "ollama-cloud",
+    "api_key_models_enabled": false
   },
   "default_route": [
     "ollama-kimi-cloud",
@@ -20,10 +21,6 @@
     "ollama-qwen-cloud",
     "ollama-nemotron-cloud",
     "ollama-gemma-cloud",
-    "codex",
-    "claude",
-    "gemini",
-    "chatgpt",
     "echo"
   ],
   "routes": [
@@ -43,10 +40,6 @@
         "ollama-qwen-cloud",
         "ollama-nemotron-cloud",
         "ollama-gemma-cloud",
-        "codex",
-        "claude",
-        "gemini",
-        "chatgpt",
         "echo"
       ]
     },
@@ -72,10 +65,6 @@
         "ollama-qwen-cloud",
         "ollama-nemotron-cloud",
         "ollama-gemma-cloud",
-        "codex",
-        "claude",
-        "gemini",
-        "chatgpt",
         "echo"
       ]
     },
@@ -88,10 +77,6 @@
         "ollama-qwen-cloud",
         "ollama-nemotron-cloud",
         "ollama-gemma-cloud",
-        "codex",
-        "claude",
-        "gemini",
-        "chatgpt",
         "echo"
       ]
     },
@@ -112,10 +97,6 @@
         "ollama-qwen-cloud",
         "ollama-nemotron-cloud",
         "ollama-gemma-cloud",
-        "codex",
-        "claude",
-        "gemini",
-        "chatgpt",
         "echo"
       ]
     }
@@ -189,7 +170,7 @@
       "name": "codex",
       "provider": "openai",
       "model": "gpt-4o-mini",
-      "enabled": true,
+      "enabled": false,
       "free": true,
       "api_key_env": "OPENAI_API_KEY",
       "max_tokens": 4096,
@@ -201,7 +182,7 @@
       "name": "claude",
       "provider": "anthropic",
       "model": "claude-3-5-haiku-latest",
-      "enabled": true,
+      "enabled": false,
       "free": true,
       "api_key_env": "ANTHROPIC_API_KEY",
       "max_tokens": 4096,
@@ -213,7 +194,7 @@
       "name": "gemini",
       "provider": "gemini",
       "model": "gemini-2.0-flash",
-      "enabled": true,
+      "enabled": false,
       "free": true,
       "api_key_env": "GEMINI_API_KEY",
       "max_tokens": 4096,
@@ -225,7 +206,7 @@
       "name": "chatgpt",
       "provider": "openai",
       "model": "gpt-4o-mini",
-      "enabled": true,
+      "enabled": false,
       "free": true,
       "api_key_env": "OPENAI_API_KEY",
       "max_tokens": 4096,

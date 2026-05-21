@@ -138,6 +138,10 @@ class OpenAIChatProvider:
                 "user",
             },
         )
+        agent_tools = _agent_hub_tool_specs(request)
+        if agent_tools:
+            payload["tools"] = _openai_tool_specs(agent_tools)
+            payload.setdefault("tool_choice", "auto")
         payload["model"] = self.agent.model
         payload["messages"] = request.messages
         if request.max_tokens is not None:
@@ -302,6 +306,9 @@ class AnthropicMessagesProvider:
                 "top_p",
             },
         )
+        agent_tools = _agent_hub_tool_specs(request)
+        if agent_tools:
+            payload["tools"] = _anthropic_tool_specs(agent_tools)
         system_parts: list[str] = []
         messages: list[dict[str, Any]] = []
         for message in request.messages:
@@ -382,6 +389,9 @@ class GeminiProvider:
                 "toolConfig",
             },
         )
+        agent_tools = _agent_hub_tool_specs(request)
+        if agent_tools:
+            payload["tools"] = _gemini_tool_specs(agent_tools)
         generation_config = dict(
             request.raw.get("generationConfig")
             or request.raw.get("generation_config")
@@ -419,6 +429,85 @@ class GeminiProvider:
                 "parts": [{"text": "\n\n".join(system_parts)}],
             }
         return payload
+
+
+def _agent_hub_tool_specs(request: HubRequest) -> list[dict[str, Any]]:
+    tools = request.raw.get("agent_hub_tools") if isinstance(request.raw, dict) else None
+    if not isinstance(tools, list):
+        return []
+    specs: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name")
+        parameters = tool.get("parameters")
+        if isinstance(name, str) and isinstance(parameters, dict):
+            specs.append(
+                {
+                    "name": name,
+                    "description": str(tool.get("description") or ""),
+                    "parameters": parameters,
+                }
+            )
+    return specs
+
+
+def _openai_tool_specs(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool["parameters"],
+            },
+        }
+        for tool in tools
+    ]
+
+
+def _anthropic_tool_specs(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": tool["name"],
+            "description": tool.get("description", ""),
+            "input_schema": tool["parameters"],
+        }
+        for tool in tools
+    ]
+
+
+def _gemini_tool_specs(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "functionDeclarations": [
+                {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": _gemini_schema(tool["parameters"]),
+                }
+                for tool in tools
+            ]
+        }
+    ]
+
+
+def _gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    converted: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "type" and isinstance(value, str):
+            converted[key] = value.upper()
+        elif key == "properties" and isinstance(value, dict):
+            converted[key] = {
+                str(name): _gemini_schema(prop)
+                for name, prop in value.items()
+                if isinstance(prop, dict)
+            }
+        elif key == "items" and isinstance(value, dict):
+            converted[key] = _gemini_schema(value)
+        elif key in {"required", "description", "enum", "nullable"}:
+            converted[key] = value
+    return converted
 
 
 def create_provider(agent: AgentConfig) -> Provider:

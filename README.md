@@ -243,12 +243,13 @@ python -m agent_hub chat --allow-shell-tools
 ```
 
 The dedicated `local-agent` route uses only direct free local model endpoints.
-The default `cloud-agent` route uses Ollama cloud model IDs first, then hosted
-providers such as OpenAI, Anthropic, and Gemini. Set the VS Code chat `Cloud
-route` option to `API-key models first`, or run `agent-hub enable-provider`, to
-move hosted providers to the front. Local LM Studio/Ollama models are only on the
-Local route unless you add them yourself. The CLI agent command also forces
-`free_only=true` unless you explicitly pass `--allow-cloud`.
+The default `cloud-agent` route uses Ollama cloud model IDs and keeps hosted
+providers such as OpenAI, Anthropic, and Gemini disabled until you opt in. Enable
+API-key models in the VS Code chat `Settings` menu, or run `agent-hub
+enable-provider`, to add hosted providers back to that route. Local LM
+Studio/Ollama models are only on the Local route unless you add them yourself.
+The CLI agent command also forces `free_only=true` unless you explicitly pass
+`--allow-cloud`.
 
 Agent-Hub includes free local model presets for:
 
@@ -294,6 +295,12 @@ models while the built-in research route can run a free local research pass:
 search public web results, fetch pages from this machine, extract useful
 snippets, and return citations without a paid API key.
 
+Workspace-agent requests can edit files live. The backend exposes native tool
+schemas for `read_file`, `write_file`, `replace_in_file`, `search_files`,
+`list_files`, and, when enabled, `run_command`; compatible models can call those
+tools directly, and write/replace tools update files on disk as soon as the tool
+step runs. The `echo` provider remains diagnostic only and cannot edit files.
+
 ```json
 {
   "workspace_dir": ".",
@@ -301,13 +308,13 @@ snippets, and return citations without a paid API key.
   "allow_shell_tools": true,
   "free_only": true,
   "expose_routing_details": false,
-  "cloud_control_selection": {"route_mode": "ollama-cloud"},
-  "default_route": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "codex", "claude", "gemini", "chatgpt", "echo"],
+  "cloud_control_selection": {"route_mode": "ollama-cloud", "api_key_models_enabled": false},
+  "default_route": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "echo"],
   "routes": [
     {
       "name": "coding",
       "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
-      "agents": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "codex", "claude", "gemini", "chatgpt", "echo"]
+      "agents": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "echo"]
     },
     {
       "name": "local-agent",
@@ -317,17 +324,17 @@ snippets, and return citations without a paid API key.
     {
       "name": "hybrid-agent",
       "keywords": [],
-      "agents": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "codex", "claude", "gemini", "chatgpt", "echo"]
+      "agents": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "echo"]
     },
     {
       "name": "cloud-agent",
       "keywords": [],
-      "agents": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "codex", "claude", "gemini", "chatgpt", "echo"]
+      "agents": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "echo"]
     },
     {
       "name": "research",
       "keywords": ["research", "search", "latest", "sources", "web", "news"],
-      "agents": ["local-research", "ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "codex", "claude", "gemini", "chatgpt", "echo"]
+      "agents": ["local-research", "ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "echo"]
     }
   ]
 }
@@ -357,15 +364,17 @@ Supported providers:
   through the Ollama server API without downloading or running local weights
 - `codex`, `claude`, `gemini`, and `chatgpt` are hosted control providers using
   `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`; fresh configs keep
-  them behind Ollama cloud models until you choose API-key models first
+  them disabled until you turn on API-key models in the VS Code Settings menu or
+  run `agent-hub enable-provider`
 - `openai`, `google`, and `anthropic` API providers can be added or changed
   with `agent-hub enable-provider`; paid providers are skipped while
   `free_only` is true unless marked `free`
 - `echo` for local smoke tests without API keys
 
-To avoid hosted model calls entirely, use the `local-agent` route or set the VS
-Code control mode to Local. To use hosted providers first, set the VS Code chat
-`Cloud route` option to `API-key models first` or run `agent-hub
+To avoid hosted model calls entirely, keep `Enable API-key models` off in the VS
+Code Settings menu, use the `local-agent` route, or set the VS Code control mode
+to Local. To use hosted providers, enable API-key models and optionally set the
+`Cloud route` option to `API-key models first`, or run `agent-hub
 enable-provider`, then restart the Agent-Hub server.
 
 For cited research answers in VS Code, run `Agent Hub: Research Web`. The
