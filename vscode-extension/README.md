@@ -12,7 +12,7 @@ through either hosted cloud control agents or local LM Studio/Ollama control.
    ```powershell
    cd vscode-extension
    npm run package
-   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.14.vsix --force
+   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.15.vsix --force
    ```
 
 4. Reload VS Code.
@@ -55,10 +55,16 @@ hosted providers:
 - `claude` -> Anthropic via `ANTHROPIC_API_KEY`
 - `gemini` -> Google Gemini via `GEMINI_API_KEY`
 
+Open the chat panel's **API Keys** section to save provider keys in VS Code
+secret storage. Restart Agent Hub from that panel after saving keys so the
+Python server receives the updated environment variables.
+
 Choose Local in the chat panel, or set `agentHub.agentProviderMode` to `local`,
-to use direct local model routes. Use the chat panel's `Pull Local Control
-Model` button to pull the default Ollama control model, `qwen2.5-coder:7b`.
-`hybrid` tries cloud providers first and then local fallbacks.
+to use direct local model routes. Use the chat panel's `Choose Local Model`
+button to scan LM Studio and Ollama, pick an installed local model, or pull a
+recommended Ollama model. When no local models are found, the install menu shows
+each model's approximate storage size before pulling it. `hybrid` tries cloud
+providers first and then local fallbacks.
 
 Ollama's Launch page shows integrations such as Claude Code, Codex App, Hermes
 Agent, and OpenClaw. They are not model IDs; Agent Hub uses the models reported

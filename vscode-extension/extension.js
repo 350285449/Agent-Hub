@@ -13,7 +13,7 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let lastActiveTextEditor = null;
-const EXTENSION_VERSION = "0.4.14";
+const EXTENSION_VERSION = "0.4.15";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
@@ -24,6 +24,52 @@ const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
 const DEFAULT_CHATGPT_MODEL = DEFAULT_OPENAI_MODEL;
 const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
+const OLLAMA_INSTALL_OPTIONS = [
+  {
+    model: DEFAULT_OLLAMA_MODEL,
+    label: "Qwen2.5 Coder 7B",
+    size: "about 4.7 GB",
+    detail: "Balanced local coding model for Agent Hub."
+  },
+  {
+    model: "qwen3:8b",
+    label: "Qwen3 8B",
+    size: "about 5.2 GB",
+    detail: "General chat and coding fallback."
+  },
+  {
+    model: "llama3.2:3b",
+    label: "Llama 3.2 3B",
+    size: "about 2.0 GB",
+    detail: "Small, quick local model for lighter machines."
+  },
+  {
+    model: "gemma3:4b",
+    label: "Gemma 3 4B",
+    size: "about 3.3 GB",
+    detail: "Compact general local model."
+  }
+];
+const API_KEY_SECRETS = [
+  {
+    id: "openai",
+    label: "OpenAI / Codex",
+    env: "OPENAI_API_KEY",
+    secret: "agentHub.openaiApiKey"
+  },
+  {
+    id: "anthropic",
+    label: "Claude",
+    env: "ANTHROPIC_API_KEY",
+    secret: "agentHub.anthropicApiKey"
+  },
+  {
+    id: "gemini",
+    label: "Gemini",
+    env: "GEMINI_API_KEY",
+    secret: "agentHub.geminiApiKey"
+  }
+];
 const REQUIRED_BACKEND_FEATURES = [
   "native_agent_streaming",
   "agent_progress_v2",
@@ -336,6 +382,7 @@ async function handleChatMessage(panel, message) {
       online,
       text: online ? "Agent Hub is online" : "Agent Hub is offline"
     });
+    await postApiKeyStatus(panel);
     return;
   }
 
@@ -350,8 +397,23 @@ async function handleChatMessage(panel, message) {
     return;
   }
 
-  if (message.type === "pullModel") {
-    await pullDefaultModel(panel, { useLocalControl: !!message.useLocalControl });
+  if (message.type === "restartServer") {
+    await restartServerFromWebview(panel);
+    return;
+  }
+
+  if (message.type === "saveApiKeys") {
+    await saveApiKeysFromWebview(panel, message.keys);
+    return;
+  }
+
+  if (message.type === "clearApiKeys") {
+    await clearApiKeysFromWebview(panel);
+    return;
+  }
+
+  if (message.type === "chooseLocalModel") {
+    await chooseLocalModel(panel);
     return;
   }
 
@@ -360,13 +422,121 @@ async function handleChatMessage(panel, message) {
   }
 }
 
-async function pullDefaultModel(panel, options = {}) {
-  const models = modelsToPull();
+async function saveApiKeysFromWebview(panel, keys) {
+  if (!extensionContext || !extensionContext.secrets) {
+    await postApiKeyStatus(panel, "VS Code secret storage is unavailable.");
+    return;
+  }
+
+  const values = keys && typeof keys === "object" ? keys : {};
+  const saved = [];
+  for (const spec of API_KEY_SECRETS) {
+    const value = typeof values[spec.id] === "string" ? values[spec.id].trim() : "";
+    if (!value) {
+      continue;
+    }
+    await extensionContext.secrets.store(spec.secret, value);
+    saved.push(spec.label);
+  }
+
+  if (!saved.length) {
+    await postApiKeyStatus(panel, "No new keys entered.");
+    return;
+  }
+
+  const online = await isServerOnline();
+  const suffix = serverProcess
+    ? " Restart Agent Hub to use the updated keys."
+    : (online
+      ? " Restart the running server to use the saved keys."
+      : " Start Agent Hub to use the saved keys.");
+  await postApiKeyStatus(panel, `Saved ${saved.join(", ")}.${suffix}`, { clearInputs: true });
+}
+
+async function clearApiKeysFromWebview(panel) {
+  if (!extensionContext || !extensionContext.secrets) {
+    await postApiKeyStatus(panel, "VS Code secret storage is unavailable.");
+    return;
+  }
+
+  for (const spec of API_KEY_SECRETS) {
+    await extensionContext.secrets.delete(spec.secret);
+  }
+  await postApiKeyStatus(panel, "Saved API keys cleared.", { clearInputs: true });
+}
+
+async function postApiKeyStatus(panel, text = "", options = {}) {
+  if (!panel || !panel.webview) {
+    return;
+  }
+  panel.webview.postMessage({
+    type: "apiKeyStatus",
+    text,
+    clearInputs: !!options.clearInputs,
+    keys: await apiKeyStatusRows()
+  });
+}
+
+async function apiKeyStatusRows() {
+  const rows = [];
+  for (const spec of API_KEY_SECRETS) {
+    const saved = extensionContext && extensionContext.secrets
+      ? !!(await extensionContext.secrets.get(spec.secret))
+      : false;
+    rows.push({
+      id: spec.id,
+      label: spec.label,
+      env: spec.env,
+      saved
+    });
+  }
+  return rows;
+}
+
+async function restartServerFromWebview(panel) {
+  if (serverProcess) {
+    panel.webview.postMessage({
+      type: "serverStatus",
+      online: false,
+      text: "Restarting Agent Hub..."
+    });
+    stopServerProcess();
+    if (!(await waitForServerOffline(3000))) {
+      await stopAgentHubServerOnConfiguredPort();
+      await waitForServerOffline(3000);
+    }
+    await startServer();
+    const online = await isServerOnline();
+    panel.webview.postMessage({
+      type: "serverStatus",
+      online,
+      text: online ? "Agent Hub restarted" : "Agent Hub did not respond after restart"
+    });
+    return;
+  }
+
+  if (await isServerOnline()) {
+    const text = "Agent Hub is running outside this VS Code window. Stop it, then start it here to use saved API keys.";
+    vscode.window.showWarningMessage(text);
+    panel.webview.postMessage({ type: "serverStatus", online: true, text });
+    return;
+  }
+
+  await startServer();
+  const online = await isServerOnline();
+  panel.webview.postMessage({
+    type: "serverStatus",
+    online,
+    text: online ? "Agent Hub started" : "Agent Hub did not respond after start"
+  });
+}
+
+async function chooseLocalModel(panel) {
   if (modelPullProcess) {
     panel.webview.postMessage({
       type: "modelPullStatus",
       running: true,
-      text: `Already pulling a model. Check the Agent Hub output.`
+      text: "Already pulling a model. Check the Agent Hub output."
     });
     output.show(true);
     return;
@@ -375,27 +545,92 @@ async function pullDefaultModel(panel, options = {}) {
   panel.webview.postMessage({
     type: "modelPullStatus",
     running: true,
-    text: `Pulling ${models.join(", ")} with Ollama...`
+    text: "Scanning LM Studio and Ollama for local models..."
   });
-  output.show(true);
-  output.appendLine("");
-  output.appendLine(`Pulling Ollama models: ${models.join(", ")}`);
 
-  try {
-    for (const model of models) {
+  const installed = await localModelQuickPickItems();
+  if (installed.length) {
+    const picked = await vscode.window.showQuickPick(installed, {
+      title: "Choose Local Agent Hub Model",
+      placeHolder: "Use an installed LM Studio or Ollama model for Local control"
+    });
+    if (!picked) {
       panel.webview.postMessage({
         type: "modelPullStatus",
-        running: true,
-        text: `Pulling ${model} with Ollama...`
+        running: false,
+        text: "Local model selection cancelled."
       });
-      await pullOllamaModel(model);
+      return;
     }
-    const localControlSuffix = options.useLocalControl ? " Local control is selected for this chat." : "";
+    await saveLocalModelChoice(panel, picked.source);
+    return;
+  }
+
+  const installPicked = await vscode.window.showQuickPick(ollamaInstallQuickPickItems(), {
+    title: "Install Local Ollama Model",
+    placeHolder: "No local LM Studio/Ollama models were found. Choose a model to pull."
+  });
+  if (!installPicked) {
     panel.webview.postMessage({
       type: "modelPullStatus",
       running: false,
-      providerMode: options.useLocalControl ? "local" : undefined,
-      text: `${models.join(", ")} ready.${localControlSuffix} Try your request again.`
+      text: "No local model selected."
+    });
+    return;
+  }
+
+  await installOllamaModelChoice(panel, installPicked.option);
+}
+
+async function localModelQuickPickItems() {
+  const [lmStudioModels, ollamaInfos] = await Promise.all([
+    detectLmStudioModels(),
+    detectOllamaModelInfos()
+  ]);
+  const items = [];
+  for (const model of lmStudioModels) {
+    items.push({
+      label: `LM Studio: ${model}`,
+      description: "loaded local server",
+      detail: "Use the model currently exposed by LM Studio on 127.0.0.1:1234.",
+      source: lmStudioSource(model)
+    });
+  }
+  for (const info of ollamaInfos) {
+    const size = info.size ? `, ${info.size}` : "";
+    items.push({
+      label: `Ollama: ${info.name}`,
+      description: `installed${size}`,
+      detail: "Use this Ollama model on 127.0.0.1:11434.",
+      source: ollamaSource(info.name)
+    });
+  }
+  return items;
+}
+
+function ollamaInstallQuickPickItems() {
+  return OLLAMA_INSTALL_OPTIONS.map((option) => ({
+    label: option.label,
+    description: `${option.model}, ${option.size}`,
+    detail: option.detail,
+    option
+  }));
+}
+
+async function installOllamaModelChoice(panel, option) {
+  panel.webview.postMessage({
+    type: "modelPullStatus",
+    running: true,
+    text: `Pulling ${option.model} with Ollama (${option.size})...`
+  });
+  output.show(true);
+  output.appendLine("");
+  output.appendLine(`Pulling Ollama model: ${option.model} (${option.size})`);
+
+  try {
+    await pullOllamaModel(option.model);
+    await saveLocalModelChoice(panel, ollamaSource(option.model), {
+      prefix: `${option.model} installed and selected for local control.`
     });
   } catch (error) {
     const message = formatOllamaError(error);
@@ -408,6 +643,45 @@ async function pullDefaultModel(panel, options = {}) {
     vscode.window.showWarningMessage(message);
   } finally {
     modelPullProcess = null;
+  }
+}
+
+async function saveLocalModelChoice(panel, source, options = {}) {
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    panel.webview.postMessage({
+      type: "modelPullStatus",
+      running: false,
+      text: "Open a workspace folder before selecting a local model."
+    });
+    return;
+  }
+
+  try {
+    const config = settings();
+    const configPath = resolveConfigPath(config.configPath, workspace);
+    const changed = applyLocalModelSelectionToConfig(configPath, source);
+    const restartNote = serverProcess
+      ? " Restart Agent Hub to use it."
+      : ((await isServerOnline())
+        ? " Restart the running server to use it."
+        : " Start Agent Hub to use it.");
+    const base = options.prefix || `Selected ${source.label} model ${source.model} for local control.`;
+    const suffix = changed ? restartNote : " The config already used this model.";
+    panel.webview.postMessage({
+      type: "modelPullStatus",
+      running: false,
+      providerMode: "local",
+      text: `${base}${suffix}`
+    });
+  } catch (error) {
+    const message = `Could not save local model selection: ${error.message}`;
+    output.appendLine(message);
+    panel.webview.postMessage({
+      type: "modelPullStatus",
+      running: false,
+      text: message
+    });
   }
 }
 
@@ -433,45 +707,6 @@ function pullOllamaModel(model) {
       }
     });
   });
-}
-
-function modelsToPull() {
-  const workspace = workspaceRoot();
-  if (!workspace) {
-    return defaultOllamaAliasModels();
-  }
-  const config = settings();
-  const configPath = resolveConfigPath(config.configPath, workspace);
-  try {
-    if (!fs.existsSync(configPath)) {
-      return defaultOllamaAliasModels();
-    }
-    const raw = parseJsonConfigText(fs.readFileSync(configPath, "utf8")).value;
-    if (!raw || !Array.isArray(raw.agents)) {
-      return defaultOllamaAliasModels();
-    }
-    const models = raw.agents
-      .filter((agent) => (
-        agent &&
-        typeof agent === "object" &&
-        typeof agent.base_url === "string" &&
-        agent.base_url.includes(new URL(OLLAMA_BASE_URL).host) &&
-        typeof agent.model === "string" &&
-        agent.model.trim()
-      ))
-      .map((agent) => agent.model.trim());
-    return uniqueModels(models.length ? models : defaultOllamaAliasModels());
-  } catch (_error) {
-    return defaultOllamaAliasModels();
-  }
-}
-
-function defaultOllamaAliasModels() {
-  return uniqueModels([DEFAULT_OLLAMA_MODEL]);
-}
-
-function uniqueModels(models) {
-  return Array.from(new Set(models.filter(Boolean)));
 }
 
 async function sendChatTurn(panel, message) {
@@ -819,6 +1054,17 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
       font: inherit;
     }
 
+    input[type="password"] {
+      width: 100%;
+      min-width: 0;
+      border: 1px solid var(--input-border);
+      border-radius: 6px;
+      padding: 6px 8px;
+      color: var(--vscode-input-foreground);
+      background: var(--input);
+      font: inherit;
+    }
+
     button {
       border: 0;
       border-radius: 6px;
@@ -857,6 +1103,53 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
       font-size: 12px;
       user-select: none;
     }
+
+    .key-panel {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+
+    .key-panel summary {
+      cursor: pointer;
+      color: var(--vscode-foreground);
+      font-weight: 600;
+    }
+
+    .key-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(150px, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .key-field {
+      display: grid;
+      align-items: stretch;
+      gap: 5px;
+      color: var(--vscode-foreground);
+      font-size: 12px;
+    }
+
+    .key-state,
+    .key-message {
+      min-height: 16px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .key-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+
+    @media (max-width: 720px) {
+      .key-grid {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
 <body>
@@ -870,6 +1163,32 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
     </header>
     <main class="transcript" id="transcript" aria-live="polite"></main>
     <form id="form">
+      <details class="key-panel" id="apiKeyPanel">
+        <summary>API Keys</summary>
+        <div class="key-grid">
+          <label class="key-field">
+            <span>OpenAI / Codex</span>
+            <input id="keyOpenai" type="password" autocomplete="off" placeholder="OPENAI_API_KEY">
+            <span class="key-state" id="keyOpenaiState">Checking...</span>
+          </label>
+          <label class="key-field">
+            <span>Claude</span>
+            <input id="keyAnthropic" type="password" autocomplete="off" placeholder="ANTHROPIC_API_KEY">
+            <span class="key-state" id="keyAnthropicState">Checking...</span>
+          </label>
+          <label class="key-field">
+            <span>Gemini</span>
+            <input id="keyGemini" type="password" autocomplete="off" placeholder="GEMINI_API_KEY">
+            <span class="key-state" id="keyGeminiState">Checking...</span>
+          </label>
+        </div>
+        <div class="key-actions">
+          <button class="secondary" id="saveApiKeys" type="button">Save Keys</button>
+          <button class="secondary" id="restartServer" type="button">Restart Server</button>
+          <button class="secondary" id="clearApiKeys" type="button">Clear Saved Keys</button>
+        </div>
+        <div class="key-message" id="keyMessage"></div>
+      </details>
       <textarea id="prompt" placeholder="Ask Agent Hub to create, edit, inspect, explain, or run commands"></textarea>
       <div class="actions">
         <div class="left">
@@ -882,7 +1201,7 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
             </select>
           </label>
           <button class="secondary" id="startServer" type="button">Start Server</button>
-          <button class="secondary" id="pullModel" type="button">Pull Local Control Model</button>
+          <button class="secondary" id="pullModel" type="button">Choose Local Model</button>
           <button class="secondary" id="checkStatus" type="button">Status</button>
           <button class="secondary" id="clear" type="button">Clear</button>
         </div>
@@ -902,6 +1221,17 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
     const includeSelection = document.getElementById("includeSelection");
     const controlMode = document.getElementById("controlMode");
     const pullModel = document.getElementById("pullModel");
+    const keyInputs = {
+      openai: document.getElementById("keyOpenai"),
+      anthropic: document.getElementById("keyAnthropic"),
+      gemini: document.getElementById("keyGemini")
+    };
+    const keyStates = {
+      openai: document.getElementById("keyOpenaiState"),
+      anthropic: document.getElementById("keyAnthropicState"),
+      gemini: document.getElementById("keyGeminiState")
+    };
+    const keyMessage = document.getElementById("keyMessage");
     const pending = new Map();
     let sessionId = "vscode-chat-" + Date.now().toString(36);
     let workingTimer = null;
@@ -1019,6 +1349,24 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
       return details;
     }
 
+    function setApiKeyStatus(keys, messageText, clearInputs) {
+      if (clearInputs) {
+        for (const input of Object.values(keyInputs)) {
+          input.value = "";
+        }
+      }
+      for (const row of keys || []) {
+        const state = keyStates[row.id];
+        if (!state) {
+          continue;
+        }
+        state.textContent = row.saved ? "Saved" : "Not set";
+      }
+      if (messageText !== undefined) {
+        keyMessage.textContent = messageText || "";
+      }
+    }
+
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const text = prompt.value.trim();
@@ -1046,11 +1394,33 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
       vscode.postMessage({ type: "startServer" });
     });
 
+    document.getElementById("saveApiKeys").addEventListener("click", () => {
+      keyMessage.textContent = "Saving keys...";
+      vscode.postMessage({
+        type: "saveApiKeys",
+        keys: {
+          openai: keyInputs.openai.value,
+          anthropic: keyInputs.anthropic.value,
+          gemini: keyInputs.gemini.value
+        }
+      });
+    });
+
+    document.getElementById("restartServer").addEventListener("click", () => {
+      status.textContent = "Restarting Agent Hub...";
+      vscode.postMessage({ type: "restartServer" });
+    });
+
+    document.getElementById("clearApiKeys").addEventListener("click", () => {
+      keyMessage.textContent = "Clearing saved keys...";
+      vscode.postMessage({ type: "clearApiKeys" });
+    });
+
     pullModel.addEventListener("click", () => {
-      status.textContent = "Pulling local control model...";
+      status.textContent = "Scanning local models...";
       pullModel.disabled = true;
       controlMode.value = "local";
-      vscode.postMessage({ type: "pullModel", useLocalControl: true });
+      vscode.postMessage({ type: "chooseLocalModel" });
     });
 
     document.getElementById("checkStatus").addEventListener("click", () => {
@@ -1072,6 +1442,10 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
       }
       if (message.type === "serverStatus") {
         status.textContent = message.text;
+        return;
+      }
+      if (message.type === "apiKeyStatus") {
+        setApiKeyStatus(message.keys || [], message.text, message.clearInputs);
         return;
       }
       if (message.type === "typing") {
@@ -1164,7 +1538,7 @@ async function startServer() {
     return;
   }
 
-  const launch = serverLaunchEnvironment(workspace);
+  const launch = await serverLaunchEnvironment(workspace);
   if (!(await ensurePythonBackend(config, workspace, launch))) {
     return;
   }
@@ -1214,8 +1588,9 @@ async function startServer() {
   }
 }
 
-function serverLaunchEnvironment(workspace) {
+async function serverLaunchEnvironment(workspace) {
   const env = { ...process.env };
+  await applySavedApiKeysToEnv(env);
   const backendRoot = backendSourceRoot(workspace);
   if (backendRoot) {
     prependEnvPath(env, "PYTHONPATH", backendRoot);
@@ -1227,6 +1602,18 @@ function serverLaunchEnvironment(workspace) {
     pythonArgs: [],
     pythonLabel: ""
   };
+}
+
+async function applySavedApiKeysToEnv(env) {
+  if (!extensionContext || !extensionContext.secrets) {
+    return;
+  }
+  for (const spec of API_KEY_SECRETS) {
+    const value = await extensionContext.secrets.get(spec.secret);
+    if (value && value.trim()) {
+      env[spec.env] = value.trim();
+    }
+  }
 }
 
 async function ensurePythonBackend(config, workspace, launch) {
@@ -1551,8 +1938,14 @@ async function repairGeneratedLocalConfig(configPath) {
     hasLegacyMinimalOllamaConfig
   );
   if (shouldRepairGeneratedConfig) {
-    const selectedSources = sources.length ? sources : configuredLocalSources(raw);
+    const explicitLocalSources = selectedLocalSources(raw);
+    const selectedSources = explicitLocalSources.length
+      ? explicitLocalSources
+      : (sources.length ? sources : configuredLocalSources(raw));
     const repaired = localConfigForLocalModels(selectedSources);
+    if (explicitLocalSources.length) {
+      repaired.local_model_selection = raw.local_model_selection;
+    }
     const alreadyMatchesDetectedModels = configsEquivalent(raw, repaired);
     if (alreadyMatchesDetectedModels && !usedLenientParser) {
       return false;
@@ -1625,6 +2018,134 @@ function configuredLocalSources(raw) {
     sources.push(ollamaSource(model, model !== DEFAULT_OLLAMA_MODEL));
   }
   return sources.length ? sources : fallbackLocalModelSources();
+}
+
+function selectedLocalSources(raw) {
+  const selection = raw && raw.local_model_selection;
+  if (!selection || typeof selection !== "object" || typeof selection.model !== "string") {
+    return [];
+  }
+  const model = selection.model.trim();
+  if (!model) {
+    return [];
+  }
+  if (selection.agent === "lm-studio") {
+    return [lmStudioSource(model, true)];
+  }
+  if (["ollama-local", "ollama-qwen-coder", "ollama-qwen3"].includes(selection.agent)) {
+    return [ollamaSource(model, true)];
+  }
+  return [];
+}
+
+function localModelSelection(source) {
+  return {
+    agent: source.name,
+    provider: source.label,
+    model: source.model
+  };
+}
+
+function applyLocalModelSelectionToConfig(configPath, source) {
+  const existingText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
+  let data;
+  let backedUpExisting = false;
+  if (existingText) {
+    try {
+      data = parseJsonConfigText(existingText).value;
+    } catch (_error) {
+      const backupPath = backupConfigFile(configPath);
+      backedUpExisting = true;
+      output.appendLine(`Backed up unreadable Agent Hub config to ${backupPath}.`);
+    }
+  }
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    data = localConfigForLocalModels([source]);
+  } else {
+    data.agents = Array.isArray(data.agents) ? data.agents : [];
+    data.routes = Array.isArray(data.routes) ? data.routes : [];
+    upsertAgentConfig(data.agents, localModelAgentConfig(source));
+    ensureLocalModelRoutes(data, source.name);
+  }
+  data.local_model_selection = localModelSelection(source);
+
+  const nextText = `${JSON.stringify(data, null, 2)}\n`;
+  if (existingText && stableConfigText(existingText) === stableConfigText(nextText)) {
+    return false;
+  }
+  if (existingText && !backedUpExisting) {
+    const backupPath = backupConfigFile(configPath);
+    output.appendLine(`Backed up Agent Hub config to ${backupPath}.`);
+  }
+  fs.writeFileSync(configPath, nextText, "utf8");
+  output.appendLine(`Configured local control model: ${source.label} (${source.model}).`);
+  return true;
+}
+
+function stableConfigText(text) {
+  try {
+    return JSON.stringify(stableConfigValue(parseJsonConfigText(text).value));
+  } catch (_error) {
+    return String(text || "");
+  }
+}
+
+function upsertAgentConfig(agents, nextAgent) {
+  const index = agents.findIndex((agent) => (
+    agent &&
+    typeof agent === "object" &&
+    agent.name === nextAgent.name
+  ));
+  const normalized = { enabled: true, ...nextAgent };
+  if (index === -1) {
+    agents.push(normalized);
+    return;
+  }
+  agents[index] = {
+    ...agents[index],
+    ...normalized
+  };
+}
+
+function ensureLocalModelRoutes(data, agentName) {
+  ensureRouteContainsAgent(data.routes, "local-agent", ["agent", "workspace", "edit", "implement"], agentName, {
+    first: true
+  });
+  ensureRouteContainsAgent(data.routes, "hybrid-agent", [], agentName);
+  ensureRouteContainsAgent(data.routes, "coding", ["code", "bug", "fix", "refactor", "test", "repo"], agentName);
+  data.default_route = ensureAgentFallback(listOrEmpty(data.default_route), agentName);
+}
+
+function ensureRouteContainsAgent(routes, name, keywords, agentName, options = {}) {
+  let route = routes.find((item) => item && typeof item === "object" && item.name === name);
+  if (!route) {
+    route = { name, keywords, agents: [] };
+    routes.push(route);
+  }
+  if (!Array.isArray(route.keywords)) {
+    route.keywords = keywords;
+  }
+  route.agents = options.first
+    ? [agentName, ...listOrEmpty(route.agents).filter((item) => item !== agentName)]
+    : ensureAgentFallback(listOrEmpty(route.agents), agentName);
+}
+
+function ensureAgentFallback(names, agentName) {
+  const without = names.filter((name) => name !== agentName);
+  const echoIndex = without.indexOf("echo");
+  if (echoIndex === -1) {
+    return [...without, agentName];
+  }
+  return [
+    ...without.slice(0, echoIndex),
+    agentName,
+    ...without.slice(echoIndex)
+  ];
+}
+
+function listOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function localConfigForLocalModels(sources) {
@@ -1867,6 +2388,10 @@ function openAiModelsUrl(baseUrl) {
 }
 
 async function detectOllamaModels() {
+  return (await detectOllamaModelInfos()).map((model) => model.name);
+}
+
+async function detectOllamaModelInfos() {
   try {
     const { stdout } = await execFile("ollama", ["list"], { timeout: 10000 });
     return parseOllamaList(stdout);
@@ -1880,8 +2405,21 @@ function parseOllamaList(text) {
   return String(text || "")
     .split(/\r?\n/)
     .slice(1)
-    .map((line) => line.trim().split(/\s+/)[0])
-    .filter((name) => name && name !== "NAME");
+    .map((line) => {
+      const parts = line.trim().split(/\s+/).filter(Boolean);
+      if (!parts.length || parts[0] === "NAME") {
+        return null;
+      }
+      const size = parts.length >= 4 && /^\d+(\.\d+)?$/.test(parts[2])
+        ? `${parts[2]} ${parts[3]}`
+        : "";
+      return {
+        name: parts[0],
+        id: parts[1] || "",
+        size
+      };
+    })
+    .filter(Boolean);
 }
 
 function chooseOllamaModel(models) {
@@ -2303,7 +2841,7 @@ function formatAgentHubError(error) {
     lines.push(
       "Agent Hub tried the cloud control route, but the configured API key is missing.",
       "",
-      "Set the provider API key environment variable and restart Agent Hub, or choose Local control and pull the local model."
+      "Open the API Keys panel in Agent Hub chat, save the provider key, and restart Agent Hub. You can also choose Local control and pull the local model."
     );
   } else {
     lines.push(`Agent Hub request failed: ${raw}`);
@@ -2754,6 +3292,17 @@ async function waitForServer(timeoutMs) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (await isServerOnline()) {
+      return true;
+    }
+    await delay(300);
+  }
+  return false;
+}
+
+async function waitForServerOffline(timeoutMs) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (!(await isServerOnline())) {
       return true;
     }
     await delay(300);

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.15
+
+- Adds an API Keys panel that stores OpenAI, Anthropic, and Gemini keys in VS Code secret storage.
+- Injects saved provider keys into the Agent Hub server environment on startup.
+- Replaces the pull-only local model button with a chooser for installed LM Studio/Ollama models.
+- Shows recommended Ollama install choices with approximate storage sizes when no local model is found.
+
 ## 0.4.14
 
 - Makes hosted cloud providers the default control-agent route.

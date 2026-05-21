@@ -2,8 +2,8 @@
 
 ## Next release
 
-- Target version: `0.4.14`
-- Purpose: publish hosted cloud control by default, explicit local control selection, fast local finalization for file edits, and shell-first workspace-agent behavior
+- Target version: `0.4.15`
+- Purpose: publish hosted cloud control by default, explicit local control selection, API key management, local model selection, fast local finalization for file edits, and shell-first workspace-agent behavior
 
 ## Summary
 
@@ -34,7 +34,8 @@ This update file records the next VS Code extension release and the key change s
 - Startup uses the bundled backend when available and auto-detects a usable Python 3.11+ runtime.
 - Config repair now upgrades generated local-backed cloud aliases into hosted control providers plus explicit local routes.
 - If Ollama is running with a coder model, the Local control route uses it; LM Studio remains a local fallback.
-- The chat UI pulls the default Ollama local control model: `qwen2.5-coder:7b`.
+- The chat UI can save provider API keys into VS Code secret storage and inject them into Agent Hub on startup.
+- The chat UI scans LM Studio and Ollama for installed local models before offering Ollama install choices with approximate storage sizes.
 
 ## Packaging
 
@@ -50,5 +51,5 @@ The resulting `.vsix` can be installed locally or published with `npm run publis
 
 ## Notes
 
-- The current `package.json` version is `0.4.14`.
-- If you want this release to be published, run `npm run package` and install/publish the resulting `0.4.14` VSIX.
+- The current `package.json` version is `0.4.15`.
+- If you want this release to be published, run `npm run package` and install/publish the resulting `0.4.15` VSIX.
