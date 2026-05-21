@@ -10,13 +10,16 @@ from .payloads import (
     anthropic_message_response,
     anthropic_stream_events,
     openai_chat_response,
+    openai_response_response,
+    openai_response_stream_events,
     openai_stream_events,
     request_from_payload,
 )
 from .router import AgentRouter, RouterError
+from .team_agent_runner import TeamAgentRunner
 
 
-BACKEND_VERSION = "0.2.5"
+BACKEND_VERSION = "0.3.0"
 BACKEND_FEATURES = {
     "native_agent_streaming": True,
     "native_agent_tool_schemas": True,
@@ -27,6 +30,10 @@ BACKEND_FEATURES = {
     "workspace_shell_commands": True,
     "file_write_tools": True,
     "fast_write_finalize": True,
+    "team_agent_mode": True,
+    "transparent_openai_responses": True,
+    "openrouter_style_api_path": True,
+    "provider_presets": True,
 }
 
 
@@ -36,6 +43,7 @@ class AgentHubHTTPServer(ThreadingHTTPServer):
         self.config = config
         self.router = AgentRouter(config)
         self.agent_runner = AgentRunner(config, self.router)
+        self.team_agent_runner = TeamAgentRunner(config, self.router)
 
 
 class AgentHubHandler(BaseHTTPRequestHandler):
@@ -63,7 +71,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 }
             )
             return
-        if self.path == "/v1/models":
+        if self.path in {"/v1/models", "/api/v1/models"}:
             self._send_json(
                 {
                     "object": "list",
@@ -97,6 +105,13 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 agent_mode_default=True,
             )
             return
+        if self.path in {"/api/v1/chat/completions", "/openrouter/v1/chat/completions"}:
+            self._handle_payload(
+                payload,
+                api_shape="openai-chat",
+                response_shape="openai-chat",
+            )
+            return
         if self.path == "/v1/route":
             self._handle_payload(payload, api_shape="native", response_shape="native")
             return
@@ -105,6 +120,13 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 payload,
                 api_shape="openai-chat",
                 response_shape="openai-chat",
+            )
+            return
+        if self.path == "/v1/responses":
+            self._handle_payload(
+                payload,
+                api_shape="openai-responses",
+                response_shape="openai-responses",
             )
             return
         if self.path == "/v1/messages":
@@ -135,7 +157,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            if _wants_agent_mode(payload, default=agent_mode_default):
+            mode = _payload_mode(payload, default_agent=agent_mode_default)
+            if mode == "group-agent":
+                response = self.server.team_agent_runner.run(request)
+            elif mode == "agent":
                 response = self.server.agent_runner.run(request)
             else:
                 response = self.server.router.route(request)
@@ -157,6 +182,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         if request.stream and response_shape == "anthropic-messages":
             self._send_anthropic_stream(response)
             return
+        if request.stream and response_shape == "openai-responses":
+            self._send_openai_response_stream(response)
+            return
         if response_shape == "openai-chat":
             self._send_json(
                 openai_chat_response(
@@ -168,6 +196,14 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         if response_shape == "anthropic-messages":
             self._send_json(
                 anthropic_message_response(
+                    response,
+                    include_routing_details=self.server.config.expose_routing_details,
+                )
+            )
+            return
+        if response_shape == "openai-responses":
+            self._send_json(
+                openai_response_response(
                     response,
                     include_routing_details=self.server.config.expose_routing_details,
                 )
@@ -213,7 +249,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "message": "Opened live Agent Hub stream.",
                 },
             )
-            if agent_mode:
+            mode = _payload_mode(request.raw, default_agent=agent_mode)
+            if mode == "group-agent":
+                response = self.server.team_agent_runner.run(request, event_sink=send_progress)
+            elif mode == "agent":
                 response = self.server.agent_runner.run(request, event_sink=send_progress)
             else:
                 send_event("route_started", {"type": "route_started", "message": "Routing request."})
@@ -381,6 +420,19 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
         self.wfile.flush()
 
+    def _send_openai_response_stream(self, response: Any) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        for event in openai_response_stream_events(
+            response,
+            include_routing_details=self.server.config.expose_routing_details,
+        ):
+            data = event if isinstance(event, str) else json.dumps(event, ensure_ascii=False)
+            self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
 
 def serve(config: HubConfig) -> None:
     config.ensure_dirs()
@@ -405,3 +457,19 @@ def _wants_agent_mode(payload: dict[str, Any], default: bool = False) -> bool:
     if isinstance(mode, str) and mode.lower() == "agent":
         return True
     return default
+
+
+def _payload_mode(payload: dict[str, Any], default_agent: bool = False) -> str:
+    hub_options = payload.get("agent_hub")
+    if isinstance(hub_options, dict):
+        mode = hub_options.get("mode")
+        if isinstance(mode, str) and mode.lower() in {"agent", "group-agent", "team-agent"}:
+            return "group-agent" if mode.lower() == "team-agent" else mode.lower()
+        if bool(hub_options.get("agent_mode")):
+            return "agent"
+    mode = payload.get("mode")
+    if isinstance(mode, str) and mode.lower() in {"agent", "group-agent", "team-agent"}:
+        return "group-agent" if mode.lower() == "team-agent" else mode.lower()
+    if bool(payload.get("agent_mode")):
+        return "agent"
+    return "agent" if default_agent else "route"

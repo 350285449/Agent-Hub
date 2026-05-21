@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from collections.abc import Callable
 
-from .config import AgentConfig, HubConfig, is_free_agent
+from .config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from .models import FailoverEvent, HubRequest, HubResponse, ProviderResult
 from .payloads import content_to_text, request_text
 from .providers import Provider, ProviderError, create_provider
@@ -13,6 +13,28 @@ from .session_store import SessionStore
 
 
 ProviderFactory = Callable[[AgentConfig], Provider]
+
+
+@dataclass(slots=True)
+class ProviderHealth:
+    """Rolling in-memory health data used for provider balancing."""
+
+    success_count: int = 0
+    failure_count: int = 0
+    total_latency_seconds: float = 0.0
+    last_success_at: float = 0.0
+    last_failure_at: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
+
+    @property
+    def success_rate(self) -> float:
+        attempts = self.success_count + self.failure_count
+        return 0.5 if attempts == 0 else self.success_count / attempts
+
+    @property
+    def average_latency_seconds(self) -> float:
+        return 0.0 if self.success_count == 0 else self.total_latency_seconds / self.success_count
 
 
 class RouterError(Exception):
@@ -32,6 +54,7 @@ class AgentRouter:
         self.provider_factory = provider_factory
         self.session_store = session_store or SessionStore(config.state_dir)
         self._cooldowns: dict[str, float] = {}
+        self._health: dict[str, ProviderHealth] = {}
 
     def route(self, request: HubRequest) -> HubResponse:
         effective_request = self._with_session_history(request)
@@ -68,9 +91,12 @@ class AgentRouter:
                 continue
 
             tried_any = True
+            started = time.perf_counter()
             try:
                 result = self.provider_factory(agent).complete(effective_request)
+                latency = time.perf_counter() - started
                 if _token_limit_finish_reason(result.finish_reason) and agent != candidates[-1]:
+                    self._record_failure(agent)
                     failover.append(
                         FailoverEvent(
                             agent=agent.name,
@@ -83,6 +109,7 @@ class AgentRouter:
                         )
                     )
                     continue
+                self._record_success(agent, latency, result)
                 response = self._response_from_result(
                     request_id=request_id,
                     request=effective_request,
@@ -94,6 +121,7 @@ class AgentRouter:
                     self.session_store.record_turn(effective_request, response)
                 return response
             except ProviderError as exc:
+                self._record_failure(agent)
                 failover.append(
                     FailoverEvent(
                         agent=agent.name,
@@ -148,7 +176,9 @@ class AgentRouter:
             agent = self.config.agents.get(name)
             if agent and agent.enabled:
                 agents.append(agent)
-        return agents
+        if request.preferred_agent:
+            return agents
+        return self._balanced_agents(agents)
 
     def _route_names(self, request: HubRequest) -> list[str]:
         if request.route:
@@ -197,12 +227,32 @@ class AgentRouter:
             return
         self._cooldowns[agent_name] = time.time() + duration
 
+    def health_snapshot(self) -> dict[str, dict[str, float | int]]:
+        """Return in-memory provider health for diagnostics and tests."""
+
+        return {
+            name: {
+                "success_count": health.success_count,
+                "failure_count": health.failure_count,
+                "success_rate": round(health.success_rate, 4),
+                "average_latency_seconds": round(health.average_latency_seconds, 4),
+                "last_success_at": health.last_success_at,
+                "last_failure_at": health.last_failure_at,
+                "tokens_in": health.tokens_in,
+                "tokens_out": health.tokens_out,
+            }
+            for name, health in self._health.items()
+        }
+
     def _preflight_skip_reason(self, agent: AgentConfig, request: HubRequest) -> str | None:
         if self.config.free_only and not is_free_agent(agent):
             return (
                 "Agent provider is disabled because free_only is enabled; "
                 "only agents marked free, echo, and local/private openai-compatible agents are allowed"
             )
+
+        if _requires_missing_api_key(agent):
+            return f"Agent is missing API key env {agent.api_key_env}"
 
         if agent.context_window is None:
             return None
@@ -218,6 +268,48 @@ class AgentRouter:
                 f"has {agent.context_window}"
             )
         return None
+
+    def _balanced_agents(self, agents: list[AgentConfig]) -> list[AgentConfig]:
+        if not self.config.enable_load_balancing or len(agents) <= 1:
+            return agents
+        return [
+            agent
+            for _, agent in sorted(
+                enumerate(agents),
+                key=lambda item: (-self._routing_score(item[1]), item[0]),
+            )
+        ]
+
+    def _routing_score(self, agent: AgentConfig) -> float:
+        score = float(agent.priority or 0.0)
+        health = self._health.get(agent.name)
+        if health:
+            score += health.success_rate * 10
+            score += min(3.0, health.success_count * 0.25)
+            score -= min(6.0, health.failure_count * 0.75)
+            if health.average_latency_seconds:
+                score -= min(5.0, health.average_latency_seconds / 5)
+        if self._is_on_cooldown(agent.name):
+            score -= 100.0
+        return score
+
+    def _record_success(
+        self,
+        agent: AgentConfig,
+        latency_seconds: float,
+        result: ProviderResult,
+    ) -> None:
+        health = self._health.setdefault(agent.name, ProviderHealth())
+        health.success_count += 1
+        health.total_latency_seconds += max(0.0, latency_seconds)
+        health.last_success_at = time.time()
+        health.tokens_in += _usage_int(result.usage, "prompt_tokens", "input_tokens")
+        health.tokens_out += _usage_int(result.usage, "completion_tokens", "output_tokens")
+
+    def _record_failure(self, agent: AgentConfig) -> None:
+        health = self._health.setdefault(agent.name, ProviderHealth())
+        health.failure_count += 1
+        health.last_failure_at = time.time()
 
 
 def _is_prefix(prefix: list[dict], messages: list[dict]) -> bool:
@@ -267,3 +359,29 @@ def _token_limit_finish_reason(reason: str | None) -> bool:
         return False
     normalized = reason.lower()
     return normalized in {"length", "max_tokens", "max_output_tokens", "token_limit"}
+
+
+def _usage_int(usage: dict[str, object], *keys: str) -> int:
+    for key in keys:
+        try:
+            return max(0, int(usage.get(key, 0)))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _requires_missing_api_key(agent: AgentConfig) -> bool:
+    if not agent.api_key_env or agent.resolved_api_key:
+        return False
+    provider = normalize_provider(agent.provider)
+    if provider in {"openai", "anthropic", "gemini"}:
+        return True
+    if provider == "openai-compatible" and agent.base_url:
+        return not _is_local_or_private_agent(agent)
+    return False
+
+
+def _is_local_or_private_agent(agent: AgentConfig) -> bool:
+    from .config import _is_local_or_private_url
+
+    return _is_local_or_private_url(agent.base_url)

@@ -10,6 +10,7 @@ from agent_hub.providers import (
     GeminiProvider,
     LocalResearchProvider,
     create_provider,
+    provider_headers,
     _join_url,
     _provider_error_from_http,
 )
@@ -73,6 +74,51 @@ class ProviderTests(unittest.TestCase):
             ).__class__.__name__,
             "LocalResearchProvider",
         )
+
+    def test_openai_compatible_cloud_provider_headers_are_created(self) -> None:
+        agent = AgentConfig(
+            name="openrouter-free",
+            provider="openai-compatible",
+            provider_type="openrouter",
+            model="deepseek/deepseek-r1:free",
+            api_key="key",
+            headers={"X-Title": "Custom Hub"},
+        )
+
+        headers = provider_headers(agent, agent.resolved_api_key)
+
+        self.assertEqual(headers["Authorization"], "Bearer key")
+        self.assertEqual(headers["X-Title"], "Custom Hub")
+        self.assertIn("HTTP-Referer", headers)
+
+    def test_github_models_uses_provider_specific_chat_path(self) -> None:
+        agent = AgentConfig(
+            name="github-model",
+            provider="openai-compatible",
+            provider_type="github-models",
+            model="qwen/qwen3-coder",
+            api_key="ghp_key",
+            base_url="https://models.github.ai/inference",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.return_value = {
+                "choices": [{"message": {"content": "Done"}, "finish_reason": "stop"}],
+                "usage": {},
+            }
+            OpenAIChatProvider(agent).complete(request)
+
+        self.assertEqual(
+            post_json.call_args.kwargs["url"],
+            "https://models.github.ai/inference/chat/completions",
+        )
+        headers = post_json.call_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], "Bearer ghp_key")
+        self.assertEqual(headers["Accept"], "application/vnd.github+json")
 
     def test_gemini_provider_translates_request_and_response(self) -> None:
         agent = AgentConfig(

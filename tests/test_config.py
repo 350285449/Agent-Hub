@@ -6,6 +6,7 @@ from unittest.mock import patch
 from agent_hub.config import (
     AgentConfig,
     cloud_agent_names,
+    config_from_dict,
     default_agent_names,
     free_local_agent_names,
     free_local_config,
@@ -128,6 +129,44 @@ class ConfigTests(unittest.TestCase):
                 )
             )
         )
+
+    def test_provider_metadata_fields_parse_from_config(self) -> None:
+        config = config_from_dict(
+            {
+                "agents": [
+                    {
+                        "name": "groq-qwen",
+                        "provider": "openai-compatible",
+                        "provider_type": "groq",
+                        "model": "qwen/qwen3-32b",
+                        "base_url": "https://api.groq.com/openai/v1",
+                        "api_key_env": "GROQ_API_KEY",
+                        "free": True,
+                        "coding_score": 0.9,
+                        "reasoning_score": 0.8,
+                        "speed_score": 0.95,
+                        "supports_tools": True,
+                        "supports_json": True,
+                        "supports_streaming": True,
+                        "supports_vision": False,
+                        "supports_function_calling": True,
+                        "priority": 75,
+                        "context_window": 128000,
+                    }
+                ],
+                "routes": [{"name": "cloud-agent", "agents": ["groq-qwen"]}],
+                "default_route": ["groq-qwen"],
+                "group_roles": {"coder": "groq-qwen"},
+            }
+        )
+
+        agent = config.agents["groq-qwen"]
+        self.assertEqual(agent.provider_type, "groq")
+        self.assertEqual(normalize_provider("groq"), "openai-compatible")
+        self.assertTrue(agent.supports_tools)
+        self.assertTrue(agent.supports_function_calling)
+        self.assertEqual(agent.priority, 75)
+        self.assertEqual(config.group_roles["coder"], "groq-qwen")
 
 
 if __name__ == "__main__":

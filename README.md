@@ -17,7 +17,10 @@ proprietary vendor models.
 - Local HTTP server on `127.0.0.1:8787`
 - OpenAI-compatible endpoint: `POST /v1/chat/completions`
 - Anthropic-compatible endpoint: `POST /v1/messages`
+- OpenAI Responses-style endpoint: `POST /v1/responses`
+- OpenRouter-style compatibility path: `POST /api/v1/chat/completions`
 - Native endpoint: `POST /v1/agent`
+- Collaborative team mode: `mode="group-agent"` on `/agent` or `/v1/agent`
 - Agent workspace tools: list, read, search, and write files under `workspace_dir`
 - Free-only routing and context-window preflight checks before provider calls
 - JSON file inbox: `.agent-hub/inbox/*.json`
@@ -81,6 +84,41 @@ $env:AGENT_HUB_LOCAL_MODEL = "local-model"
 $env:AGENT_HUB_LOCAL_CONTEXT_WINDOW = "8192"
 ```
 
+## Free Cloud Provider Presets
+
+Agent-Hub includes editable, disabled-by-default presets for many free-tier or
+open cloud providers. Most use the generic `openai-compatible` adapter with
+provider metadata for `base_url`, headers, capability scores, and API key env
+vars:
+
+- Ollama Cloud, Groq, OpenRouter, Cerebras, Together, Fireworks, DeepInfra,
+  Mistral, SambaNova, NVIDIA NIM, GitHub Models, Gemini / Google AI Studio,
+  Hugging Face Inference Providers, Cloudflare Workers AI, Hyperbolic,
+  Featherless, Replicate gateways, Novita, kluster.ai gateways, Parasail, and
+  Anyscale.
+
+Useful commands:
+
+```powershell
+python -m agent_hub providers
+python -m agent_hub presets
+python -m agent_hub add-provider groq --model llama-3.3-70b-versatile --api-key-env GROQ_API_KEY --enabled
+python -m agent_hub add-free-presets
+python -m agent_hub doctor --providers
+python -m agent_hub route-test --route cloud-agent "hello"
+python -m agent_hub benchmark --route cloud-agent
+```
+
+Common env vars include `OLLAMA_API_KEY` when your Ollama setup requires it,
+`GROQ_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `CEREBRAS_API_KEY`,
+`TOGETHER_API_KEY`, `FIREWORKS_API_KEY`, `DEEPINFRA_API_KEY`,
+`MISTRAL_API_KEY`, `SAMBANOVA_API_KEY`, `NVIDIA_API_KEY`, `GITHUB_TOKEN`,
+`HUGGINGFACE_API_KEY`, and `CLOUDFLARE_API_TOKEN`.
+
+Free model IDs and quotas move around. The preset system is deliberately just
+editable config, so an unavailable model fails over or can be changed without
+breaking the hub.
+
 To customize routes, model names, token windows, or shell tools, copy and edit
 the example config:
 
@@ -89,6 +127,9 @@ python -m agent_hub init --with-cloud-examples
 python -m agent_hub doctor
 python -m agent_hub agents
 python -m agent_hub local-models
+python -m agent_hub providers
+python -m agent_hub presets
+python -m agent_hub add-free-presets
 ```
 
 The local control route can use Ollama model IDs. Pull the default with:
@@ -178,6 +219,18 @@ Anthropic-compatible clients can call:
 http://127.0.0.1:8787/v1/messages
 ```
 
+OpenAI Responses-compatible clients can call:
+
+```text
+http://127.0.0.1:8787/v1/responses
+```
+
+OpenRouter-style clients can also point at:
+
+```text
+http://127.0.0.1:8787/api/v1
+```
+
 ## JSON Inbox
 
 Drop a JSON task into `.agent-hub/inbox`:
@@ -241,6 +294,45 @@ For an ongoing chat session that keeps conversation history, use:
 ```powershell
 python -m agent_hub chat --allow-shell-tools
 ```
+
+## Group-Agent Mode
+
+`group-agent` coordinates several routed models around the same safe workspace
+tools:
+
+- Planner proposes one or more implementation plans.
+- Researcher gathers repo context with read/search/list tools.
+- Coder edits through `write_file` or `replace_in_file`.
+- Reviewer checks the trace for bugs, scope drift, and missing verification.
+- Fixer applies blocking review fixes when needed.
+- Finalizer summarizes changed files, verification, failover, and risks.
+
+Run it from the CLI:
+
+```powershell
+python -m agent_hub group-agent --allow-shell-tools --plan-candidates 3 "fix the failing tests"
+```
+
+Or through HTTP:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8787/v1/agent `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body (@{
+    mode = "group-agent"
+    route = "cloud-agent"
+    task = "inspect the repo and make the requested coding change"
+    group_agent = @{ plan_candidates = 3 }
+  } | ConvertTo-Json -Depth 5)
+```
+
+Plan voting uses a judge-style heuristic by default: it rewards requested file
+paths, scoped edits, inspection, and verification, and penalizes destructive
+rewrites, hallucinated paths, outside-root paths, and accidental duplicate-copy
+edits. You can pin roles with `group_roles` in config, or let Agent-Hub rank
+models using `coding_score`, `reasoning_score`, `speed_score`, context window,
+tool support, and priority.
 
 The dedicated `local-agent` route uses only direct free local model endpoints.
 The default `cloud-agent` route uses Ollama cloud model IDs and keeps hosted
@@ -359,16 +451,21 @@ Supported providers:
 - `local-research` for free local extractive web research with citations and
   search results, using no cloud LLM or paid API
 - `gemma` as a friendly alias for a local OpenAI-compatible Gemma/Gemma-like agent
-- `ollama-kimi-cloud`, `ollama-glm-cloud`, `ollama-qwen-cloud`,
-  `ollama-nemotron-cloud`, and `ollama-gemma-cloud` use Ollama cloud model IDs
-  through the Ollama server API without downloading or running local weights
+- `ollama-cloud`, `groq`, `openrouter`, `cerebras`, `together`, `fireworks`,
+  `deepinfra`, `mistral`, `sambanova`, `nvidia-nim`, `github-models`,
+  `google-ai-studio`, `huggingface`, `cloudflare-workers-ai`, `hyperbolic`,
+  `featherless`, `novita`, `parasail`, and `anyscale` are represented as
+  OpenAI-compatible provider types with defaults in the provider registry
+- `replicate` and `kluster` are supported as provider types for future or custom
+  OpenAI-compatible gateways; their native APIs are not treated as chat
+  completion APIs unless you set a compatible `base_url`
 - `codex`, `claude`, `gemini`, and `chatgpt` are hosted control providers using
   `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`; fresh configs keep
   them disabled until you turn on API-key models in the VS Code Settings menu or
   run `agent-hub enable-provider`
-- `openai`, `google`, and `anthropic` API providers can be added or changed
-  with `agent-hub enable-provider`; paid providers are skipped while
-  `free_only` is true unless marked `free`
+- `openai`, `google`, and `anthropic` API providers can be added or changed with
+  `agent-hub enable-provider`; broad OpenAI-compatible providers can be added
+  with `agent-hub add-provider`
 - `echo` for local smoke tests without API keys
 
 To avoid hosted model calls entirely, keep `Enable API-key models` off in the VS
@@ -391,6 +488,9 @@ or hosted agent service.
 - Native agent streaming emits live step/tool progress and a final response over
   server-sent events. Provider token streaming is still normalized into completed
   provider turns inside the agent loop.
+- Router failover detects common auth, quota, rate-limit, context, and 5xx
+  failures, applies rolling cooldowns, tracks success rates and latency, and
+  ranks eligible providers by priority plus recent health.
 - Tool schemas are forwarded for OpenAI-compatible requests. Cross-provider tool
   translation is intentionally conservative because vendor tool formats differ.
 - Local model IDs in the example config are placeholders you should replace with

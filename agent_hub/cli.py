@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import threading
 import uuid
 import urllib.error
@@ -22,8 +23,16 @@ from .config import (
 )
 from .inbox import InboxProcessor
 from .payloads import request_from_payload
+from .provider_presets import (
+    FREE_PROVIDER_PRESETS,
+    agent_dict_from_preset,
+    preset_rows,
+    provider_metadata,
+    provider_metadata_rows,
+)
 from .router import AgentRouter, RouterError
 from .server import serve
+from .team_agent_runner import TeamAgentRunner
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -48,12 +57,39 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     doctor_parser = subparsers.add_parser("doctor", help="Explain config and provider readiness.")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    doctor_parser.add_argument("--providers", action="store_true", help="Include known provider metadata.")
 
     local_models_parser = subparsers.add_parser(
         "local-models",
         help="Probe free local OpenAI-compatible model servers.",
     )
     local_models_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    providers_parser = subparsers.add_parser("providers", help="List known provider types.")
+    providers_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    presets_parser = subparsers.add_parser("presets", help="List editable free provider presets.")
+    presets_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    add_provider_parser = subparsers.add_parser(
+        "add-provider",
+        help="Add or update a provider/model agent in the config file.",
+    )
+    add_provider_parser.add_argument("provider", help="Provider type, for example groq or openrouter.")
+    add_provider_parser.add_argument("--model", required=True, help="Provider model ID to use.")
+    add_provider_parser.add_argument("--name", help="Agent name to write into the config.")
+    add_provider_parser.add_argument("--base-url", help="Override provider base URL.")
+    add_provider_parser.add_argument("--api-key-env", help="Environment variable containing the API key.")
+    add_provider_parser.add_argument("--route", default="cloud-agent", help="Route to prepend this agent to.")
+    add_provider_parser.add_argument("--enabled", action="store_true", help="Enable the agent immediately.")
+    add_provider_parser.add_argument("--paid", action="store_true", help="Mark provider free=false.")
+
+    add_presets_parser = subparsers.add_parser(
+        "add-free-presets",
+        help="Merge editable free cloud provider presets into the config.",
+    )
+    add_presets_parser.add_argument("--enable", action="store_true", help="Enable added presets immediately.")
+    add_presets_parser.add_argument("--route", default="cloud-agent", help="Route to append presets to.")
 
     enable_provider_parser = subparsers.add_parser(
         "enable-provider",
@@ -109,6 +145,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Respect config free_only=false. By default this command forces free_only=true.",
     )
 
+    group_agent_parser = subparsers.add_parser("group-agent", help="Run the collaborative team coding agent.")
+    group_agent_parser.add_argument("task", nargs="+", help="Task for the agent team.")
+    group_agent_parser.add_argument("--route", default="cloud-agent", help="Route to use for team model calls.")
+    group_agent_parser.add_argument("--plan-candidates", type=int, default=1, help="Number of planner candidates.")
+    group_agent_parser.add_argument("--max-steps", type=int, default=20, help="Maximum coder tool steps.")
+    group_agent_parser.add_argument(
+        "--allow-shell-tools",
+        action="store_true",
+        help="Allow the agent team to run local shell commands.",
+    )
+    group_agent_parser.add_argument(
+        "--allow-cloud",
+        action="store_true",
+        help="Respect config free_only=false. By default this command forces free_only=true.",
+    )
+
+    benchmark_parser = subparsers.add_parser("benchmark", help="Run a small route latency benchmark.")
+    benchmark_parser.add_argument("--route", default="cloud-agent")
+    benchmark_parser.add_argument("--prompt", default="Reply with one short sentence.")
+    benchmark_parser.add_argument("--json", action="store_true")
+
+    route_test_parser = subparsers.add_parser("route-test", help="Route a prompt and show selected provider.")
+    route_test_parser.add_argument("prompt", nargs="*", default=["hello"])
+    route_test_parser.add_argument("--route", default="cloud-agent")
+    route_test_parser.add_argument("--json", action="store_true")
+
     chat_parser = subparsers.add_parser("chat", help="Open an interactive Codex-style workspace chat.")
     chat_parser.add_argument("--route", default="cloud-agent", help="Route to use for chat turns.")
     chat_parser.add_argument("--session-id", help="Reuse an existing chat session id.")
@@ -155,6 +217,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             api_key_env=args.api_key_env,
             paid=args.paid,
         )
+    if command == "add-provider":
+        return _add_provider(
+            args.config,
+            provider_type=args.provider,
+            model=args.model,
+            name=args.name,
+            route=args.route,
+            base_url=args.base_url,
+            api_key_env=args.api_key_env,
+            enabled=args.enabled,
+            paid=args.paid,
+        )
+    if command == "add-free-presets":
+        return _add_free_presets(
+            args.config,
+            route=args.route,
+            enabled=args.enable,
+        )
 
     config = load_config(args.config)
     if getattr(args, "host", None):
@@ -172,10 +252,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if command == "doctor":
         report = _doctor_report(config, args.config)
+        if args.providers:
+            report["provider_types"] = provider_metadata_rows()
         if args.json:
             print(json.dumps(report, indent=2, ensure_ascii=False))
         else:
             _print_doctor(report)
+        return 0
+    if command == "providers":
+        rows = provider_metadata_rows()
+        if args.json:
+            print(json.dumps(rows, indent=2, ensure_ascii=False))
+        else:
+            _print_table(rows, ["provider_type", "display_name", "base_url", "api_key_env", "free"])
+        return 0
+    if command == "presets":
+        rows = preset_rows()
+        if args.json:
+            print(json.dumps(rows, indent=2, ensure_ascii=False))
+        else:
+            _print_table(rows, ["name", "provider_type", "model", "free", "enabled", "context_window"])
         return 0
     if command == "local-models":
         report = _local_models_report(config)
@@ -219,6 +315,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         print(json.dumps(response.to_native_dict(), indent=2, ensure_ascii=False))
         return 0
+    if command == "group-agent":
+        if not args.allow_cloud:
+            config.free_only = True
+        payload = {
+            "session_id": f"cli-team-{uuid.uuid4().hex}",
+            "mode": "group-agent",
+            "route": args.route,
+            "task": " ".join(args.task),
+            "agent_max_steps": args.max_steps,
+            "coder_max_steps": args.max_steps,
+            "group_agent": {"plan_candidates": args.plan_candidates},
+        }
+        if args.allow_shell_tools:
+            payload["allow_shell_tools"] = True
+        request = request_from_payload(payload)
+        try:
+            response = TeamAgentRunner(config, AgentRouter(config)).run(request)
+        except RouterError as exc:
+            _print_route_error(exc)
+            return 1
+        print(json.dumps(response.to_native_dict(include_routing_details=True), indent=2, ensure_ascii=False))
+        return 0
+    if command == "benchmark":
+        return _benchmark(config, route=args.route, prompt=args.prompt, as_json=args.json)
+    if command == "route-test":
+        return _route_test(config, route=args.route, prompt=" ".join(args.prompt), as_json=args.json)
     if command == "chat":
         if not args.allow_cloud:
             config.free_only = True
@@ -394,6 +516,77 @@ def _enable_cloud_provider(
     return 0
 
 
+def _add_provider(
+    path: str,
+    *,
+    provider_type: str,
+    model: str,
+    name: str | None,
+    route: str,
+    base_url: str | None,
+    api_key_env: str | None,
+    enabled: bool,
+    paid: bool,
+) -> int:
+    config_path = Path(path)
+    data = _load_or_default_config_dict(config_path)
+    metadata = provider_metadata(provider_type)
+    normalized_provider_type = provider_type.lower()
+    agent_name = name or _agent_name_from_provider_model(normalized_provider_type, model)
+    provider_name = metadata.provider if metadata else "openai-compatible"
+    agent = {
+        "name": agent_name,
+        "provider": provider_name,
+        "provider_type": normalized_provider_type,
+        "model": model,
+        "enabled": enabled,
+        "free": not paid,
+        "api_key_env": api_key_env or (metadata.api_key_env if metadata else None),
+        "base_url": base_url or (metadata.base_url if metadata else None),
+        "headers": dict(metadata.default_headers) if metadata else {},
+        "chat_completions_path": metadata.chat_completions_path if metadata else None,
+        "timeout_seconds": 120,
+        "max_tokens": 4096,
+        "cooldown_seconds": 120,
+        "supports_tools": metadata.supports_tools if metadata else None,
+        "supports_json": metadata.supports_json if metadata else None,
+        "supports_streaming": metadata.supports_streaming if metadata else None,
+        "supports_vision": metadata.supports_vision if metadata else None,
+        "supports_function_calling": metadata.supports_function_calling if metadata else None,
+    }
+    agent = _drop_empty(agent)
+    _upsert_agent(data, agent)
+    _ensure_cloud_routes(data)
+    _move_agent_to_front(data, route, agent_name)
+    if paid:
+        data["free_only"] = False
+    _write_config_dict(config_path, data)
+    print(f"Added {agent_name} ({provider_type}) to {config_path}.")
+    if agent.get("api_key_env"):
+        print(f"Set {agent['api_key_env']} before enabling or routing to it.")
+    if not agent.get("base_url"):
+        print("No base_url is known for this provider type; edit the config before enabling it.")
+    return 0
+
+
+def _add_free_presets(path: str, *, route: str, enabled: bool) -> int:
+    config_path = Path(path)
+    data = _load_or_default_config_dict(config_path)
+    _ensure_cloud_routes(data)
+    added: list[str] = []
+    for preset in FREE_PROVIDER_PRESETS:
+        agent = agent_dict_from_preset(preset, enabled=enabled)
+        if _upsert_agent(data, agent, replace_existing=False):
+            added.append(agent["name"])
+        _append_agent_to_route(data, route, agent["name"])
+    _write_config_dict(config_path, data)
+    print(f"Merged {len(added)} free provider preset(s) into {config_path}.")
+    if added:
+        print("Added: " + ", ".join(added))
+    print("Preset model IDs are editable; if a free model disappears, change or disable that agent.")
+    return 0
+
+
 def _cloud_provider_defaults(provider: str) -> tuple[str, str, str]:
     normalized = provider.lower()
     if normalized in {"openai", "codex"}:
@@ -403,6 +596,65 @@ def _cloud_provider_defaults(provider: str) -> tuple[str, str, str]:
     if normalized in {"claude", "anthropic"}:
         return "claude", "claude", "ANTHROPIC_API_KEY"
     return "gemini", "gemini", "GEMINI_API_KEY"
+
+
+def _load_or_default_config_dict(config_path: Path) -> dict[str, Any]:
+    if config_path.exists():
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise SystemExit(f"{config_path} does not contain a JSON object.")
+        return data
+    return config_to_dict(free_local_config())
+
+
+def _write_config_dict(config_path: Path, data: dict[str, Any]) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _upsert_agent(data: dict[str, Any], agent: dict[str, Any], *, replace_existing: bool = True) -> bool:
+    agents = data.setdefault("agents", [])
+    if not isinstance(agents, list):
+        data["agents"] = agents = []
+    for index, existing in enumerate(agents):
+        if isinstance(existing, dict) and existing.get("name") == agent.get("name"):
+            if replace_existing:
+                merged = {**existing, **agent}
+                agents[index] = _drop_empty(merged)
+            return False
+    agents.append(_drop_empty(agent))
+    return True
+
+
+def _append_agent_to_route(data: dict[str, Any], route_name: str, agent_name: str) -> None:
+    routes = data.setdefault("routes", [])
+    if not isinstance(routes, list):
+        data["routes"] = routes = []
+    route = next(
+        (item for item in routes if isinstance(item, dict) and item.get("name") == route_name),
+        None,
+    )
+    if route is None:
+        route = {"name": route_name, "keywords": [], "agents": []}
+        routes.append(route)
+    agents = route.setdefault("agents", [])
+    if not isinstance(agents, list):
+        route["agents"] = agents = []
+    if agent_name not in agents:
+        agents.append(agent_name)
+
+
+def _agent_name_from_provider_model(provider_type: str, model: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{provider_type}-{model}".lower()).strip("-")
+    return slug[:80] or provider_type
+
+
+def _drop_empty(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in data.items()
+        if value is not None and value != {} and value != []
+    }
 
 
 def _ensure_cloud_routes(data: dict[str, Any]) -> None:
@@ -473,6 +725,7 @@ def _init_config(path: str, force: bool = False, with_cloud_examples: bool = Fal
     }
     if with_cloud_examples:
         _merge_agent_examples(data, _cloud_example_agents())
+        _merge_agent_examples(data, [agent_dict_from_preset(preset) for preset in FREE_PROVIDER_PRESETS])
     config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Wrote {config_path}")
     print("Start Ollama for cloud model routing, or set provider API keys, then run: agent-hub doctor")
@@ -550,6 +803,7 @@ def _agent_rows(config: Any) -> list[dict[str, Any]]:
             {
                 "name": agent.name,
                 "provider": agent.provider,
+                "provider_type": agent.provider_type,
                 "model": agent.model,
                 "enabled": agent.enabled,
                 "free": free,
@@ -558,6 +812,10 @@ def _agent_rows(config: Any) -> list[dict[str, Any]]:
                 "status": status,
                 "base_url": agent.base_url,
                 "api_key_env": agent.api_key_env,
+                "priority": agent.priority,
+                "coding_score": agent.coding_score,
+                "reasoning_score": agent.reasoning_score,
+                "speed_score": agent.speed_score,
             }
         )
     return rows
@@ -568,7 +826,7 @@ def _agent_status(agent: Any, *, free: bool, allowed: bool, normalized: str) -> 
         return "disabled"
     if not allowed:
         return "skipped by free_only"
-    if normalized in {"openai", "anthropic", "gemini"} and not agent.resolved_api_key:
+    if agent.api_key_env and not agent.resolved_api_key and normalized in {"openai", "anthropic", "gemini", "openai-compatible"}:
         return f"missing {agent.api_key_env or 'api key'}"
     if normalized == "openai-compatible":
         if not agent.base_url:
@@ -620,6 +878,11 @@ def _print_doctor(report: dict[str, Any]) -> None:
         print("Notes:")
         for warning in report["warnings"]:
             print(f"- {warning}")
+    provider_types = report.get("provider_types")
+    if isinstance(provider_types, list) and provider_types:
+        print()
+        print("Known provider types:")
+        _print_table(provider_types, ["provider_type", "display_name", "api_key_env", "free"])
 
 
 def _local_models_report(config: Any) -> list[dict[str, Any]]:
@@ -649,6 +912,80 @@ def _local_models_report(config: Any) -> list[dict[str, Any]]:
             row["configured_model_available"] = False
         rows.append(row)
     return rows
+
+
+def _benchmark(config: HubConfig, *, route: str, prompt: str, as_json: bool) -> int:
+    router = AgentRouter(config)
+    request = request_from_payload(
+        {
+            "session_id": f"benchmark-{uuid.uuid4().hex}",
+            "route": route,
+            "task": prompt,
+            "max_tokens": 128,
+            "use_session_history": False,
+            "record_session": False,
+        }
+    )
+    try:
+        response = router.route(request)
+    except RouterError as exc:
+        _print_route_error(exc)
+        return 1
+    data = {
+        "route": route,
+        "agent": response.agent,
+        "provider": response.provider,
+        "model": response.model,
+        "usage": response.usage,
+        "health": router.health_snapshot(),
+        "failover": [event.to_dict() for event in response.failover],
+    }
+    if as_json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        print(f"Route: {route}")
+        print(f"Selected: {response.agent} ({response.provider}) model={response.model}")
+        if response.failover:
+            print("Failover:")
+            for event in response.failover:
+                print(f"- {event.agent}: {event.reason}")
+        print("Health:")
+        for name, health in data["health"].items():
+            print(
+                f"- {name}: success={health['success_count']} failure={health['failure_count']} "
+                f"avg_latency={health['average_latency_seconds']}s"
+            )
+    return 0
+
+
+def _route_test(config: HubConfig, *, route: str, prompt: str, as_json: bool) -> int:
+    router = AgentRouter(config)
+    request = request_from_payload(
+        {
+            "session_id": f"route-test-{uuid.uuid4().hex}",
+            "route": route,
+            "task": prompt,
+            "max_tokens": 256,
+            "use_session_history": False,
+            "record_session": False,
+        }
+    )
+    try:
+        response = router.route(request)
+    except RouterError as exc:
+        _print_route_error(exc)
+        return 1
+    data = response.to_native_dict(include_routing_details=True)
+    if as_json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        print(f"Selected {response.agent} ({response.provider}) model={response.model}")
+        print(response.text)
+        if response.failover:
+            print("Failover:")
+            for event in response.failover:
+                print(f"- {event.agent}: {event.reason}")
+    return 0
 
 
 def _fetch_openai_models(base_url: str, timeout: float) -> list[str]:

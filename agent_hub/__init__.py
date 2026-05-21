@@ -13,11 +13,13 @@ from .config import (
 )
 from .models import HubRequest, HubResponse, ProviderResult
 from .router import AgentRouter
+from .team_agent_runner import TeamAgentRunner
 
 __all__ = [
     "AgentConfig",
     "AgentRunner",
     "AgentRouter",
+    "TeamAgentRunner",
     "HubConfig",
     "HubRequest",
     "HubResponse",

@@ -136,17 +136,43 @@ class AgentToolbox:
         value = _request_option(self.request, "allow_shell_tools", self.config.allow_shell_tools)
         return bool(value)
 
+    @property
+    def allowed_tool_names(self) -> set[str] | None:
+        value = _request_option(self.request, "agent_hub_allowed_tools", None)
+        if value is None:
+            hub_options = self.request.raw.get("agent_hub") if isinstance(self.request.raw, dict) else None
+            value = hub_options.get("allowed_tools") if isinstance(hub_options, dict) else None
+        if not isinstance(value, list):
+            return None
+        allowed = {str(item) for item in value if isinstance(item, str)}
+        if not self.allow_shell:
+            allowed.discard("run_command")
+        return allowed
+
     def instructions(self) -> str:
-        tools = [
-            'list_files args: {"path":".","pattern":"*","recursive":true,"limit":200}',
-            'read_file args: {"path":"README.md","start_line":1,"line_count":200}',
-            'search_files args: {"query":"needle","path":".","pattern":"*.py","limit":50}',
-            'write_file args: {"path":"file.txt","content":"full file content","append":false}',
-            'replace_in_file args: {"path":"file.txt","old":"exact text","new":"replacement","expected_replacements":1}',
+        tool_examples = {
+            "list_files": 'list_files args: {"path":".","pattern":"*","recursive":true,"limit":200}',
+            "read_file": 'read_file args: {"path":"README.md","start_line":1,"line_count":200}',
+            "search_files": 'search_files args: {"query":"needle","path":".","pattern":"*.py","limit":50}',
+            "write_file": 'write_file args: {"path":"file.txt","content":"full file content","append":false}',
+            "replace_in_file": 'replace_in_file args: {"path":"file.txt","old":"exact text","new":"replacement","expected_replacements":1}',
+            "run_command": 'run_command args: {"command":"python -m unittest","cwd":".","timeout_seconds":300}',
+        }
+        allowed = self.allowed_tool_names
+        tool_order = [
+            "list_files",
+            "read_file",
+            "search_files",
+            "write_file",
+            "replace_in_file",
+            "run_command",
         ]
-        if self.allow_shell:
-            tools.append('run_command args: {"command":"python -m unittest","cwd":".","timeout_seconds":300}')
-        else:
+        tools = [
+            tool_examples[name]
+            for name in tool_order
+            if (allowed is None or name in allowed) and (name != "run_command" or self.allow_shell)
+        ]
+        if not self.allow_shell:
             tools.append("run_command: unavailable unless allow_shell_tools is true.")
 
         return "\n".join(
@@ -157,7 +183,9 @@ class AgentToolbox:
                 "When the user asks to create, edit, fix, update, or implement something, make the requested file change before your final answer.",
                 "Use write_file to create files or rewrite a file you have read. Use replace_in_file for targeted edits.",
                 "If shell tools are enabled, use run_command freely for fast inspection, builds, tests, and requested commands.",
+                "Before editing, confirm the workspace root and target path from the request, active file context, or inspected files.",
                 "When the request is about the open file or folder, prefer the Current file and Current folder paths from context.",
+                "Do not edit duplicate workspace copies such as vscode-extension/backend/... unless that path is the active file or explicitly requested.",
                 "Never read or write outside the workspace root.",
                 "Reply with exactly one JSON object and no Markdown.",
                 'Valid actions are only "tool" and "final"; do not invent other action names.',
@@ -172,6 +200,9 @@ class AgentToolbox:
     def run(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         args = args or {}
         try:
+            allowed = self.allowed_tool_names
+            if allowed is not None and name not in allowed:
+                raise ToolError(f"Tool {name!r} is not available for this agent stage")
             if name == "list_files":
                 result = self._list_files(args)
             elif name == "read_file":
@@ -282,6 +313,7 @@ class AgentToolbox:
 
     def _write_file(self, args: dict[str, Any]) -> dict[str, Any]:
         path = self._resolve_required_path(args, "path")
+        self._guard_edit_target(args.get("path"), path)
         content = args.get("content")
         if not isinstance(content, str):
             raise ToolError("write_file requires string content")
@@ -299,6 +331,7 @@ class AgentToolbox:
 
     def _replace_in_file(self, args: dict[str, Any]) -> dict[str, Any]:
         path = self._resolve_required_path(args, "path", existing=True)
+        self._guard_edit_target(args.get("path"), path)
         if not path.is_file():
             raise ToolError(f"Not a file: {self._relative(path)}")
         old = args.get("old")
@@ -459,6 +492,17 @@ class AgentToolbox:
                     return directory
         return self._resolve("." if value is None else value)
 
+    def _guard_edit_target(self, raw_value: Any, path: Path) -> None:
+        relative = self._relative(path)
+        if self._is_context_path(path) or self._request_mentions_path(raw_value, relative):
+            return
+        normalized = relative.replace("\\", "/").casefold()
+        if normalized.startswith("vscode-extension/backend/"):
+            raise ToolError(
+                "Refusing to edit vscode-extension/backend/... because that duplicate workspace "
+                "copy was not the active file or explicitly requested."
+            )
+
     def _unique_workspace_match(self, raw: str) -> Path | None:
         needle = raw.casefold()
         matches: list[Path] = []
@@ -510,6 +554,31 @@ class AgentToolbox:
         except ValueError:
             parts = path.parts
         return any(part in SKIPPED_DIRS for part in parts)
+
+    def _is_context_path(self, path: Path) -> bool:
+        return any(path == candidate for candidate in self._request_context_paths())
+
+    def _request_mentions_path(self, raw_value: Any, relative: str) -> bool:
+        raw = str(raw_value or "").replace("\\", "/").strip()
+        relative = relative.replace("\\", "/")
+        needles = {raw, relative}
+        if raw:
+            needles.add(raw.lstrip("./"))
+        needles = {needle.casefold() for needle in needles if needle}
+        if not needles:
+            return False
+
+        texts: list[str] = []
+        if self.request.task:
+            texts.append(str(self.request.task))
+        if self.request.context:
+            texts.append(str(self.request.context))
+        for message in self.request.messages:
+            content = message.get("content")
+            if isinstance(content, str):
+                texts.append(content)
+        haystack = "\n".join(texts).replace("\\", "/").casefold()
+        return any(needle in haystack for needle in needles)
 
 
 def _request_option(request: HubRequest, key: str, default: Any) -> Any:

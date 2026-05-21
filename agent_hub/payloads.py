@@ -40,6 +40,8 @@ def request_text(request: HubRequest) -> str:
 def request_from_payload(payload: dict[str, Any], api_shape: str = "native") -> HubRequest:
     if api_shape == "openai-chat":
         return request_from_openai_chat(payload)
+    if api_shape == "openai-responses":
+        return request_from_openai_responses(payload)
     if api_shape == "anthropic-messages":
         return request_from_anthropic_messages(payload)
     return request_from_native(payload)
@@ -83,6 +85,28 @@ def request_from_openai_chat(payload: dict[str, Any]) -> HubRequest:
         stream=bool(payload.get("stream", False)),
         use_session_history=bool(hub_options.get("use_session_history", False)),
         api_shape="openai-chat",
+        raw=payload,
+        metadata=metadata,
+    )
+
+
+def request_from_openai_responses(payload: dict[str, Any]) -> HubRequest:
+    metadata = dict(payload.get("metadata", {}))
+    hub_options = dict(payload.get("agent_hub", {}))
+    messages = _responses_input_messages(payload.get("input"))
+    instructions = payload.get("instructions")
+    if isinstance(instructions, str) and instructions.strip():
+        messages = [{"role": "system", "content": instructions}, *messages]
+    return HubRequest(
+        messages=messages,
+        session_id=_session_id(payload, metadata, hub_options),
+        route=hub_options.get("route") or payload.get("route"),
+        preferred_agent=hub_options.get("agent") or payload.get("agent"),
+        max_tokens=payload.get("max_output_tokens") or payload.get("max_tokens"),
+        temperature=payload.get("temperature"),
+        stream=bool(payload.get("stream", False)),
+        use_session_history=bool(hub_options.get("use_session_history", False)),
+        api_shape="openai-responses",
         raw=payload,
         metadata=metadata,
     )
@@ -168,6 +192,35 @@ def anthropic_message_response(
     return data
 
 
+def openai_response_response(
+    response: HubResponse,
+    include_routing_details: bool = False,
+) -> dict[str, Any]:
+    created = int(time.time())
+    model = response.public_model or response.model
+    output = {
+        "id": f"msg_{response.request_id}",
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": response.text}],
+    }
+    data: dict[str, Any] = {
+        "id": f"resp_{response.request_id}",
+        "object": "response",
+        "created_at": created,
+        "status": "completed",
+        "model": model,
+        "output": [output],
+        "output_text": response.text,
+        "usage": response.usage,
+    }
+    if include_routing_details:
+        data["agent_hub"] = _hub_metadata(response)
+    _add_research_metadata(data, response)
+    return data
+
+
 def openai_stream_events(
     response: HubResponse,
     include_routing_details: bool = False,
@@ -248,6 +301,28 @@ def anthropic_stream_events(
     ]
 
 
+def openai_response_stream_events(
+    response: HubResponse,
+    include_routing_details: bool = False,
+) -> list[dict[str, Any] | str]:
+    data = openai_response_response(
+        response,
+        include_routing_details=include_routing_details,
+    )
+    return [
+        {"type": "response.created", "response": {**data, "output": []}},
+        {
+            "type": "response.output_text.delta",
+            "item_id": data["output"][0]["id"],
+            "output_index": 0,
+            "content_index": 0,
+            "delta": response.text,
+        },
+        {"type": "response.completed", "response": data},
+        "[DONE]",
+    ]
+
+
 def _hub_metadata(response: HubResponse) -> dict[str, Any]:
     return {
         "session_id": response.session_id,
@@ -300,6 +375,38 @@ def _messages_from_task(task: Any, context: Any) -> list[Message]:
     if task:
         parts.append(f"Task:\n{content_to_text(task)}")
     return [{"role": "user", "content": "\n\n".join(parts)}] if parts else []
+
+
+def _responses_input_messages(value: Any) -> list[Message]:
+    if isinstance(value, str):
+        return [{"role": "user", "content": value}]
+    if isinstance(value, list):
+        messages: list[Message] = []
+        for item in value:
+            if isinstance(item, dict) and item.get("type") == "message":
+                role = item.get("role", "user")
+                messages.append({"role": role, "content": _responses_content_text(item.get("content"))})
+            elif isinstance(item, dict) and "role" in item:
+                message = dict(item)
+                message["content"] = _responses_content_text(item.get("content"))
+                messages.append(message)
+            elif isinstance(item, str):
+                messages.append({"role": "user", "content": item})
+        return messages
+    return []
+
+
+def _responses_content_text(value: Any) -> str:
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+        return "\n".join(parts)
+    return content_to_text(value)
 
 
 def _anthropic_stop_reason(reason: str | None) -> str:

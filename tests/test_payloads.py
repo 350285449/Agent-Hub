@@ -6,9 +6,12 @@ from agent_hub.models import HubResponse
 from agent_hub.payloads import (
     anthropic_message_response,
     openai_chat_response,
+    openai_response_response,
+    openai_response_stream_events,
     request_from_anthropic_messages,
     request_from_native,
     request_from_openai_chat,
+    request_from_openai_responses,
 )
 
 
@@ -47,6 +50,39 @@ class PayloadTests(unittest.TestCase):
 
         self.assertEqual(request.messages[0]["role"], "system")
         self.assertEqual(request.messages[1]["role"], "user")
+
+    def test_openai_responses_payload_and_response_shape(self) -> None:
+        request = request_from_openai_responses(
+            {
+                "instructions": "Be concise",
+                "input": "hello",
+                "agent_hub": {"route": "cloud-agent"},
+                "max_output_tokens": 123,
+            }
+        )
+
+        self.assertEqual(request.api_shape, "openai-responses")
+        self.assertEqual(request.messages[0]["role"], "system")
+        self.assertEqual(request.messages[1]["content"], "hello")
+        self.assertEqual(request.max_tokens, 123)
+        self.assertEqual(request.route, "cloud-agent")
+
+        response = HubResponse(
+            request_id="hub-1",
+            session_id="s1",
+            agent="openai",
+            provider="openai",
+            model="internal-model",
+            public_model="stable-alias",
+            text="done",
+        )
+        shaped = openai_response_response(response)
+        events = openai_response_stream_events(response)
+
+        self.assertEqual(shaped["object"], "response")
+        self.assertEqual(shaped["output_text"], "done")
+        self.assertEqual(shaped["output"][0]["content"][0]["type"], "output_text")
+        self.assertEqual(events[-1], "[DONE]")
 
     def test_response_shapes_hide_routing_details_by_default(self) -> None:
         response = HubResponse(

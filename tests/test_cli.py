@@ -100,6 +100,47 @@ class CliTests(unittest.TestCase):
             self.assertIn("ollama-kimi-cloud", cloud_route["agents"])
             self.assertNotIn("ollama-qwen-coder", cloud_route["agents"])
 
+    def test_add_provider_supports_openai_compatible_provider_types(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "add-provider",
+                        "groq",
+                        "--model",
+                        "llama-3.3-70b-versatile",
+                        "--enabled",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            agent = next(agent for agent in data["agents"] if agent["provider_type"] == "groq")
+            self.assertEqual(agent["provider"], "openai-compatible")
+            self.assertEqual(agent["api_key_env"], "GROQ_API_KEY")
+            self.assertEqual(agent["base_url"], "https://api.groq.com/openai/v1")
+            cloud_route = next(route for route in data["routes"] if route["name"] == "cloud-agent")
+            self.assertEqual(cloud_route["agents"][0], agent["name"])
+
+    def test_add_free_presets_merges_editable_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(["--config", str(path), "add-free-presets"])
+
+            self.assertEqual(code, 0)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            names = {agent["name"] for agent in data["agents"]}
+            self.assertIn("groq-qwen3-32b", names)
+            self.assertIn("openrouter-deepseek-free", names)
+
     def test_chat_runs_one_turn_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"

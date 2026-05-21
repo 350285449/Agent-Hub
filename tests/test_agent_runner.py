@@ -947,6 +947,64 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertIn("a/config.py", result["error"])
             self.assertIn("b/config.py", result["error"])
 
+    def test_file_tools_block_unrequested_duplicate_backend_copy_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "vscode-extension" / "backend" / "agent_hub" / "config.py"
+            target.parent.mkdir(parents=True)
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            config = HubConfig(workspace_dir=root)
+            toolbox = AgentToolbox(
+                config,
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Update config.py in the main backend."}],
+                ),
+            )
+
+            result = toolbox.run(
+                "replace_in_file",
+                {
+                    "path": "vscode-extension/backend/agent_hub/config.py",
+                    "old": "VALUE = 1",
+                    "new": "VALUE = 2",
+                    "expected_replacements": 1,
+                },
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("duplicate workspace copy", result["error"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 1\n")
+
+    def test_file_tools_allow_active_duplicate_backend_copy_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "vscode-extension" / "backend" / "agent_hub" / "config.py"
+            target.parent.mkdir(parents=True)
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            config = HubConfig(workspace_dir=root)
+            toolbox = AgentToolbox(
+                config,
+                HubRequest(
+                    session_id="agent",
+                    messages=[],
+                    context="Current file: vscode-extension/backend/agent_hub/config.py",
+                ),
+            )
+
+            result = toolbox.run(
+                "replace_in_file",
+                {
+                    "path": "vscode-extension/backend/agent_hub/config.py",
+                    "old": "VALUE = 1",
+                    "new": "VALUE = 2",
+                    "expected_replacements": 1,
+                },
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 2\n")
+
 
 if __name__ == "__main__":
     unittest.main()

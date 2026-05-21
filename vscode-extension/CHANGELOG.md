@@ -4,6 +4,10 @@
 
 - No changes yet.
 
+## 0.5.0
+
+- Bumps the VS Code extension version for the next Agent Hub release.
+
 ## 0.4.21
 
 - Prevents workspace-agent loops when a model repeatedly returns responses outside the Agent Hub protocol.

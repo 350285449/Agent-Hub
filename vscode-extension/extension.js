@@ -13,7 +13,7 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let lastActiveTextEditor = null;
-const EXTENSION_VERSION = "0.4.21";
+const EXTENSION_VERSION = "0.5.0";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";

@@ -374,7 +374,11 @@ def _emit(event_sink: AgentEventSink | None, event_type: str, **data: Any) -> No
 
 def _agent_step_raw(request: HubRequest, toolbox: AgentToolbox) -> dict[str, Any]:
     raw = dict(request.raw or {})
-    raw["agent_hub_tools"] = agent_tool_definitions(toolbox.allow_shell)
+    tools = agent_tool_definitions(toolbox.allow_shell)
+    allowed = toolbox.allowed_tool_names
+    if allowed is not None:
+        tools = [tool for tool in tools if tool.get("name") in allowed]
+    raw["agent_hub_tools"] = tools
     return raw
 
 

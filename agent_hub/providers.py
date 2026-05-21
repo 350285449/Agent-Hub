@@ -14,19 +14,36 @@ from typing import Any, Protocol
 from .config import AgentConfig, normalize_provider
 from .models import HubRequest, ProviderResult
 from .payloads import content_to_text
+from .provider_presets import (
+    chat_completions_path_for_agent,
+    default_headers_for_agent,
+    provider_kind_for_agent,
+)
 
 
-FAILOVER_STATUSES = {401, 402, 403, 404, 408, 409, 429}
+FAILOVER_STATUSES = {401, 402, 403, 404, 408, 409, 429, 500, 502, 503}
 FAILOVER_TEXT_MARKERS = (
+    "account limit",
     "rate limit",
     "rate_limit",
+    "rate-limit",
+    "rate limited",
+    "rate_limit_exceeded",
+    "daily limit",
     "quota",
+    "quota exceeded",
+    "exceeded your quota",
     "insufficient_quota",
     "billing",
     "credit",
+    "free tier",
+    "free-tier",
+    "tokens exhausted",
     "capacity",
     "overloaded",
+    "temporarily overloaded",
     "temporarily unavailable",
+    "try again later",
     "context length",
     "context_length",
     "too many tokens",
@@ -88,15 +105,10 @@ class OpenAIChatProvider:
             )
 
         payload = self._payload(request)
-        headers = {
-            "Content-Type": "application/json",
-            **self.agent.headers,
-        }
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        headers = provider_headers(self.agent, api_key)
 
         raw = _post_json(
-            url=_join_url(self.agent.base_url or "https://api.openai.com", "/v1/chat/completions"),
+            url=_chat_completions_url(self.agent),
             headers=headers,
             payload=payload,
             timeout=self.agent.timeout_seconds,
@@ -525,6 +537,31 @@ def create_provider(agent: AgentConfig) -> Provider:
     raise ProviderError(f"Unsupported provider {agent.provider!r}", retryable=False)
 
 
+def provider_headers(agent: AgentConfig, api_key: str | None = None) -> dict[str, str]:
+    """Build request headers with provider-specific defaults and user overrides."""
+
+    headers = {
+        "Content-Type": "application/json",
+        **default_headers_for_agent(agent),
+        **agent.headers,
+    }
+    if api_key and not _has_auth_header(headers):
+        headers["Authorization"] = f"Bearer {api_key}"
+    kind = provider_kind_for_agent(agent)
+    if kind == "github-models":
+        headers.setdefault("Accept", "application/vnd.github+json")
+    return headers
+
+
+def _has_auth_header(headers: dict[str, str]) -> bool:
+    return any(key.lower() in {"authorization", "x-api-key", "api-key"} for key in headers)
+
+
+def _chat_completions_url(agent: AgentConfig) -> str:
+    base_url = agent.base_url or "https://api.openai.com"
+    return _join_url(base_url, chat_completions_path_for_agent(agent))
+
+
 def _post_json(
     url: str,
     headers: dict[str, str],
@@ -536,7 +573,10 @@ def _post_json(
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             text = response.read().decode("utf-8")
-            return json.loads(text) if text else {}
+            data = json.loads(text) if text else {}
+            if isinstance(data, dict) and data.get("error"):
+                raise _provider_error_from_payload(data, status_code=response.status)
+            return data
     except urllib.error.HTTPError as exc:
         text = exc.read().decode("utf-8", errors="replace")
         raise _provider_error_from_http(exc.code, text) from exc
@@ -552,6 +592,17 @@ def _provider_error_from_http(status_code: int, text: str) -> ProviderError:
     retryable = (
         status_code in FAILOVER_STATUSES
         or status_code >= 500
+        or any(marker in marker_text for marker in FAILOVER_TEXT_MARKERS)
+    )
+    return ProviderError(message, status_code=status_code, retryable=retryable)
+
+
+def _provider_error_from_payload(data: dict[str, Any], status_code: int | None = None) -> ProviderError:
+    message = _extract_error_message(json.dumps(data))
+    marker_text = message.lower()
+    retryable = (
+        status_code in FAILOVER_STATUSES
+        or (status_code is not None and status_code >= 500)
         or any(marker in marker_text for marker in FAILOVER_TEXT_MARKERS)
     )
     return ProviderError(message, status_code=status_code, retryable=retryable)

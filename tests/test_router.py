@@ -45,6 +45,66 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(len(response.failover), 1)
             self.assertEqual(response.failover[0].agent, "claude")
             self.assertIn("quota", response.failover[0].reason)
+            health = router.health_snapshot()
+            self.assertEqual(health["claude"]["failure_count"], 1)
+            self.assertEqual(health["openai"]["success_count"], 1)
+
+    def test_cooldown_avoids_repeated_failed_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = _config(Path(tmp))
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+            request = HubRequest(
+                session_id="abc",
+                route="coding",
+                messages=[{"role": "user", "content": "code a parser"}],
+            )
+
+            router.route(request)
+            router.route(request)
+
+            self.assertEqual(calls, ["claude", "openai", "openai"])
+
+    def test_provider_balancing_respects_priority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                default_route=["low", "high"],
+                agents={
+                    "low": AgentConfig(
+                        name="low",
+                        provider="openai-compatible",
+                        model="low-test",
+                        base_url="http://127.0.0.1:9999",
+                        priority=1,
+                    ),
+                    "high": AgentConfig(
+                        name="high",
+                        provider="openai-compatible",
+                        model="high-test",
+                        base_url="http://127.0.0.1:9999",
+                        priority=10,
+                    ),
+                },
+            )
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+
+            response = router.route(
+                HubRequest(
+                    session_id="abc",
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+            )
+
+            self.assertEqual(calls, ["high"])
+            self.assertEqual(response.agent, "high")
 
     def test_session_history_is_replayed_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
