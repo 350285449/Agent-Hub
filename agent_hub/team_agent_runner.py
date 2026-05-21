@@ -16,7 +16,15 @@ from .router import AgentRouter, RouterError
 
 TEAM_ROLES = ("planner", "researcher", "coder", "reviewer", "fixer", "finalizer")
 READ_ONLY_TOOLS = ["list_files", "read_file", "search_files", "run_command"]
-EDIT_TOOLS = ["list_files", "read_file", "search_files", "write_file", "replace_in_file", "run_command"]
+EDIT_TOOLS = [
+    "list_files",
+    "read_file",
+    "search_files",
+    "write_file",
+    "replace_in_file",
+    "apply_patch",
+    "run_command",
+]
 
 
 class TeamAgentRunner:
@@ -224,7 +232,11 @@ class TeamAgentRunner:
                     minimum=1,
                     maximum=50,
                 ),
-                fast_write_finalize=True,
+                fast_write_finalize=_request_bool(
+                    request,
+                    "fast_write_finalize",
+                    default=self.config.fast_write_finalize,
+                ),
             ),
             event_sink=event_sink,
             shell_permission_callback=shell_permission_callback,
@@ -246,7 +258,11 @@ class TeamAgentRunner:
                 prompt=prompt,
                 allowed_tools=EDIT_TOOLS,
                 max_steps=_request_int(request, "fixer_max_steps", default=6, minimum=1, maximum=30),
-                fast_write_finalize=True,
+                fast_write_finalize=_request_bool(
+                    request,
+                    "fast_write_finalize",
+                    default=self.config.fast_write_finalize,
+                ),
             ),
             event_sink=event_sink,
             shell_permission_callback=shell_permission_callback,
@@ -613,6 +629,19 @@ def _request_int(
     except (TypeError, ValueError):
         number = default
     return max(minimum, min(number, maximum))
+
+
+def _request_bool(request: HubRequest, key: str, *, default: bool) -> bool:
+    raw = request.raw or {}
+    hub_options = raw.get("agent_hub")
+    value = hub_options.get(key) if isinstance(hub_options, dict) and key in hub_options else raw.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
 
 
 def _emit(event_sink: AgentEventSink | None, event_type: str, **data: Any) -> None:

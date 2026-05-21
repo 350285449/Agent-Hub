@@ -16,6 +16,11 @@
   "local_model_probe_timeout_seconds": 0.35,
   "quota_cooldown_seconds": 1800.0,
   "rate_limit_cooldown_seconds": 300.0,
+  "approval_mode": "auto",
+  "fast_write_finalize": false,
+  "validation_mode": "basic",
+  "validation_commands": [],
+  "auto_validate_after_edits": true,
   "include_raw_responses": false,
   "expose_routing_details": false,
   "default_route": [

@@ -31,6 +31,8 @@ BACKEND_FEATURES = {
     "workspace_shell_commands": True,
     "file_write_tools": True,
     "fast_write_finalize": True,
+    "multi_file_apply_patch": True,
+    "post_edit_validation": True,
     "team_agent_mode": True,
     "transparent_openai_responses": True,
     "openrouter_style_api_path": True,

@@ -413,13 +413,33 @@ Available tools:
 - `search_files`
 - `write_file`
 - `replace_in_file`
+- `apply_patch`, preferred for coordinated multi-file edits
 - `run_command`, disabled unless `allow_shell_tools` is `true`
+
+The agent no longer treats the first successful file edit as task completion by
+default. It keeps looping after `write_file`, `replace_in_file`, or
+`apply_patch` until the model returns a final answer or the step limit is
+reached. Set `fast_write_finalize` to `true` or pass
+`--fast-write-finalize` to keep the older one-edit-and-finish behavior.
+
+`apply_patch` accepts either a unified diff or structured changes and validates
+every target path before writing anything. If any path or replacement fails
+validation, nothing is applied. In `approval_mode: "ask"`, patch requests return
+one grouped approval payload with affected files, summary, patch preview,
+planned commands, and validation plan.
+
+After edits, Agent-Hub can validate changed code. `validation_mode: "basic"`
+runs Python syntax checks for changed `.py` files and `python -m unittest
+discover -v` when tests exist. `validation_mode: "strict"` also runs configured
+validation commands. Disable with `validation_mode: "off"` or
+`--no-auto-validate`.
 
 For a Codex-like coding workflow, run a local OpenAI-compatible model through
 Ollama or LM Studio, then use `Agent Hub: Run Coding Agent` in VS Code or:
 
 ```powershell
 python -m agent_hub agent --allow-shell-tools "inspect the repo and fix the failing tests"
+python -m agent_hub agent --validation-mode strict --validation-command "python -m unittest discover -v" "update implementation, tests, and docs"
 ```
 
 To ask before every shell command in CLI agent modes, add
@@ -527,7 +547,7 @@ snippets, and return citations without a paid API key.
 
 Workspace-agent requests can edit files live. The backend exposes native tool
 schemas for `read_file`, `write_file`, `replace_in_file`, `search_files`,
-`list_files`, and, when enabled, `run_command`; compatible models can call those
+`apply_patch`, `list_files`, and, when enabled, `run_command`; compatible models can call those
 tools directly, and write/replace tools update files on disk as soon as the tool
 step runs. The `echo` provider remains diagnostic only and cannot edit files.
 
@@ -537,6 +557,11 @@ step runs. The `echo` provider remains diagnostic only and cannot edit files.
   "agent_max_steps": 8,
   "allow_shell_tools": true,
   "shell_command_policy": "allow",
+  "approval_mode": "auto",
+  "fast_write_finalize": false,
+  "validation_mode": "basic",
+  "validation_commands": [],
+  "auto_validate_after_edits": true,
   "free_only": true,
   "auto_enable_available_providers": true,
   "auto_detect_local_models": true,

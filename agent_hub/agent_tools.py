@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import difflib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -15,6 +16,7 @@ SKIPPED_DIRS = {".agent-hub", ".git", ".hg", ".svn", ".venv", "__pycache__", "no
 MAX_FILE_CHARS = 80_000
 MAX_TOOL_OUTPUT_CHARS = 20_000
 MAX_REPLACE_CHARS = 200_000
+MAX_PATCH_CHARS = 1_000_000
 MAX_PATH_HINTS = 10
 MAX_COMMAND_TIMEOUT_SECONDS = 600
 
@@ -89,6 +91,32 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 },
             },
             "required": ["path", "old", "new"],
+        },
+    },
+    {
+        "name": "apply_patch",
+        "description": "Apply a validated multi-file patch atomically where possible.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "type": "string",
+                    "description": "Unified diff patch. Supports multiple files.",
+                },
+                "changes": {
+                    "type": "array",
+                    "description": "Structured changes as path/content or path/old/new objects.",
+                },
+                "summary": {"type": "string", "description": "Short summary of planned changes."},
+                "validation_plan": {
+                    "type": "string",
+                    "description": "Validation plan to run after applying the patch.",
+                },
+                "commands": {
+                    "type": "array",
+                    "description": "Commands the agent plans to run after applying the patch.",
+                },
+            },
         },
     },
 ]
@@ -169,6 +197,7 @@ class AgentToolbox:
             "search_files": 'search_files args: {"query":"needle","path":".","pattern":"*.py","limit":50}',
             "write_file": 'write_file args: {"path":"file.txt","content":"full file content","append":false}',
             "replace_in_file": 'replace_in_file args: {"path":"file.txt","old":"exact text","new":"replacement","expected_replacements":1}',
+            "apply_patch": 'apply_patch args: {"summary":"update implementation and tests","changes":[{"path":"file.py","old":"old","new":"new","expected_replacements":1}],"validation_plan":"py_compile and tests"}',
             "run_command": 'run_command args: {"command":"python -m unittest","cwd":".","timeout_seconds":300}',
         }
         allowed = self.allowed_tool_names
@@ -178,6 +207,7 @@ class AgentToolbox:
             "search_files",
             "write_file",
             "replace_in_file",
+            "apply_patch",
             "run_command",
         ]
         tools = [
@@ -200,6 +230,7 @@ class AgentToolbox:
                 "Use tools for file inspection, file creation, and edits. Do not invent file contents you have not inspected.",
                 "When the user asks to create, edit, fix, update, or implement something, make the requested file change before your final answer.",
                 "Use write_file to create files or rewrite a file you have read. Use replace_in_file for targeted edits.",
+                "Prefer apply_patch when a task needs multiple coordinated file changes so approval and validation can happen once.",
                 _shell_instruction(self.allow_shell, shell_policy),
                 "Before editing, confirm the workspace root and target path from the request, active file context, or inspected files.",
                 "When the request is about the open file or folder, prefer the Current file and Current folder paths from context.",
@@ -221,6 +252,25 @@ class AgentToolbox:
             allowed = self.allowed_tool_names
             if allowed is not None and name not in allowed:
                 raise ToolError(f"Tool {name!r} is not available for this agent stage")
+            
+            # Check if approval is needed
+            approval_needed = self._is_approval_needed(name, args)
+            if approval_needed and not self._approval_granted():
+                approval_mode = self._get_approval_mode()
+                if approval_mode == "readonly":
+                    return {
+                        "ok": False,
+                        "tool": name,
+                        "error": f"Tool {name} is not allowed in readonly mode."
+                    }
+                elif approval_mode in ("ask", "shell-ask"):
+                    # For shell-ask mode, we only ask for shell commands (run_command)
+                    if approval_mode == "shell-ask" and name != "run_command":
+                        # File edits are allowed automatically in shell-ask mode
+                        pass
+                    else:
+                        return self._request_approval(name, args)
+            
             if name == "list_files":
                 result = self._list_files(args)
             elif name == "read_file":
@@ -231,13 +281,175 @@ class AgentToolbox:
                 result = self._write_file(args)
             elif name == "replace_in_file":
                 result = self._replace_in_file(args)
+            elif name == "apply_patch":
+                result = self._apply_patch(args)
             elif name == "run_command":
                 result = self._run_command(args)
             else:
                 raise ToolError(f"Unknown tool {name!r}")
-            return {"ok": True, "tool": name, "result": result}
+            response = {"ok": True, "tool": name, "result": result}
+            if approval_needed and self._approval_granted():
+                response["approval_granted"] = True
+            return response
         except Exception as exc:
             return {"ok": False, "tool": name, "error": str(exc)}
+
+    def _is_approval_needed(self, name: str, args: dict[str, Any]) -> bool:
+        """Determine if a tool requires approval based on current approval mode."""
+        approval_mode = self._get_approval_mode()
+        if approval_mode == "auto":
+            return False
+        if approval_mode == "readonly":
+            # In readonly mode, we still need to know if it's mutating to block it
+            return self._is_mutating_tool(name) or self._is_unsafe_shell_command(name, args)
+        if approval_mode == "ask":
+            return self._is_mutating_tool(name) or self._is_unsafe_shell_command(name, args)
+        if approval_mode == "shell-ask":
+            # In shell-ask mode, we need approval for all shell commands
+            return name == "run_command"
+        # Fallback
+        return False
+
+    def _get_approval_mode(self) -> str:
+        value = _request_option(self.request, "approval_mode", self.config.approval_mode)
+        if value not in ("auto", "ask", "readonly", "shell-ask"):
+            value = self.config.approval_mode
+        return value
+
+    def _approval_granted(self) -> bool:
+        value = _request_option(self.request, "approval_granted", False)
+        if value is False:
+            value = _request_option(self.request, "approved", False)
+        return _truthy(value)
+
+    def _is_mutating_tool(self, name: str) -> bool:
+        return name in ("write_file", "replace_in_file", "apply_patch")
+
+    def _is_unsafe_shell_command(self, name: str, args: dict[str, Any]) -> bool:
+        if name != "run_command":
+            return False
+        command = args.get("command", "").lower()
+        # Unsafe patterns that modify files/system state
+        unsafe_patterns = [
+            # File modification/deletion
+            " rm ", " mv ", " cp ", " > ", " >> ", " dd ", " mkfs ", " fdisk ",
+            " truncate ", " shred ", " wipe ",
+            # Package managers
+            " pip install ", " npm install ", " yarn add ", " apt-get install ",
+            " yum install ", " pacman -S ", " brew install ",
+            # Git modifying commands
+            " git push ", " git commit ", " git merge ", " git rebase ",
+            " git reset ", " git checkout . ", " git clean -fdx ",
+            # Formatting tools (modify files)
+            " black ", " autopep8 ", " prettier ", " gofmt ", " rustfmt ",
+            # Other destructive
+            " chmod ", " chown ", " kill ", " pkill ", " shutdown ", " reboot ",
+            " systemctl ", " service ",""
+        ]
+        # Also consider commands that start with these (without leading space)
+        starts_with_unsafe = [
+            "rm(", "mv(", "cp(", "dd(", "mkfs(", "fdisk(",
+            "pip install", "npm install", "yarn add", "apt-get install",
+            "yum install", "pacman -S", "brew install",
+            "git push", "git commit", "git merge", "git rebase",
+            "git reset", "git checkout .", "git clean -fdx",
+            "black ", "autopep8 ", "prettier ", "gofmt ", "rustfmt ",
+            "chmod ", "chown ", "kill ", "pkill ", "shutdown ", "reboot ",
+        ]
+        for pattern in starts_with_unsafe:
+            if command.startswith(pattern):
+                return True
+        for pattern in unsafe_patterns:
+            if pattern in command:
+                return True
+        return False
+
+    def _get_affected_files(self, name: str, args: dict[str, Any]) -> list[str]:
+        if name == "write_file":
+            return [args.get("path", "")]
+        if name == "replace_in_file":
+            return [args.get("path", "")]
+        if name == "apply_patch":
+            try:
+                return [change["path"] for change in self._patch_plan(args)["changes"]]
+            except ToolError:
+                return []
+        # For run_command, we cannot know for sure; return empty
+        return []
+
+    def _get_risk_summary(self, name: str, args: dict[str, Any]) -> str:
+        if name == "write_file":
+            return f"Will overwrite or create file: {args.get('path', '')}"
+        if name == "replace_in_file":
+            return f"Will replace text in file: {args.get('path', '')}"
+        if name == "apply_patch":
+            summary = args.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                return summary.strip()
+            files = self._get_affected_files(name, args)
+            return f"Will apply a patch affecting {len(files)} file(s)."
+        if name == "run_command":
+            cmd = args.get('command', '')
+            return f"Will execute shell command: {cmd[:100]}{'...' if len(cmd) > 100 else ''}"
+        return "Unknown risk"
+
+    def _request_approval(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Return an approval required result."""
+        details = self._approval_details(name, args)
+        return {
+            "ok": False,
+            "approval_required": True,
+            "tool": name,
+            "args": args,
+            "affected_files": details["affected_files"],
+            "risk": details["summary"],
+            "summary": details["summary"],
+            "patch_preview": details["patch_preview"],
+            "commands": details["commands"],
+            "validation_plan": details["validation_plan"],
+            "message": "Approval required before applying changes.",
+        }
+
+    def _approval_details(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        commands = _string_list(args.get("commands"))
+        validation_plan = str(args.get("validation_plan") or "").strip()
+        if name == "apply_patch":
+            try:
+                plan = self._patch_plan(args)
+            except ToolError as exc:
+                return {
+                    "affected_files": [],
+                    "summary": f"Invalid patch: {exc}",
+                    "patch_preview": "",
+                    "commands": commands,
+                    "validation_plan": validation_plan,
+                }
+            return {
+                "affected_files": [change["path"] for change in plan["changes"]],
+                "summary": plan["summary"],
+                "patch_preview": plan["patch_preview"],
+                "commands": commands,
+                "validation_plan": validation_plan,
+            }
+        if name in {"write_file", "replace_in_file"}:
+            try:
+                preview = self._single_edit_preview(name, args)
+            except ToolError as exc:
+                preview = f"Invalid edit: {exc}"
+            return {
+                "affected_files": self._get_affected_files(name, args),
+                "summary": self._get_risk_summary(name, args),
+                "patch_preview": preview,
+                "commands": commands,
+                "validation_plan": validation_plan,
+            }
+        return {
+            "affected_files": [],
+            "summary": self._get_risk_summary(name, args),
+            "patch_preview": "",
+            "commands": [str(args.get("command", ""))] if name == "run_command" else commands,
+            "validation_plan": validation_plan,
+        }
 
     def _list_files(self, args: dict[str, Any]) -> dict[str, Any]:
         target = self._resolve_existing(args.get("path", "."))
@@ -328,6 +540,192 @@ class AgentToolbox:
                     if len(matches) >= limit:
                         break
         return {"query": query, "matches": matches}
+
+    def _apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
+        plan = self._patch_plan(args)
+        originals: dict[Path, str | None] = {}
+        paths = [change["absolute_path"] for change in plan["changes"]]
+        try:
+            for path in paths:
+                originals[path] = path.read_text(encoding="utf-8") if path.exists() else None
+            for change in plan["changes"]:
+                path = change["absolute_path"]
+                content = change["content"]
+                if content is None:
+                    if path.exists():
+                        path.unlink()
+                    continue
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+        except Exception as exc:
+            for path, original in originals.items():
+                try:
+                    if original is None:
+                        if path.exists():
+                            path.unlink()
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(original, encoding="utf-8")
+                except OSError:
+                    pass
+            raise ToolError(f"Patch failed and was rolled back: {exc}") from exc
+        return {
+            "paths": [change["path"] for change in plan["changes"]],
+            "changes": [
+                {
+                    "path": change["path"],
+                    "action": change["action"],
+                    "chars": 0 if change["content"] is None else len(change["content"]),
+                }
+                for change in plan["changes"]
+            ],
+            "summary": plan["summary"],
+            "patch_preview": plan["patch_preview"],
+        }
+
+    def _patch_plan(self, args: dict[str, Any]) -> dict[str, Any]:
+        summary = str(args.get("summary") or "Apply workspace patch.").strip()
+        patch_text = args.get("patch")
+        changes_arg = args.get("changes")
+        if isinstance(patch_text, str) and patch_text.strip():
+            if len(patch_text) > MAX_PATCH_CHARS:
+                raise ToolError("apply_patch patch is too large")
+            changes = self._changes_from_unified_diff(patch_text)
+            patch_preview = patch_text
+        elif isinstance(changes_arg, list) and changes_arg:
+            changes = self._changes_from_structured_patch(changes_arg)
+            patch_preview = self._structured_patch_preview(changes)
+        else:
+            raise ToolError("apply_patch requires a non-empty patch string or changes list")
+        seen: set[Path] = set()
+        for change in changes:
+            path = change["absolute_path"]
+            if path in seen:
+                raise ToolError(f"Patch contains multiple changes for {change['path']}; combine them first")
+            seen.add(path)
+        return {
+            "summary": summary,
+            "changes": changes,
+            "patch_preview": patch_preview[:MAX_PATCH_CHARS],
+        }
+
+    def _changes_from_structured_patch(self, changes_arg: list[Any]) -> list[dict[str, Any]]:
+        changes: list[dict[str, Any]] = []
+        for index, item in enumerate(changes_arg, start=1):
+            if not isinstance(item, dict):
+                raise ToolError(f"Structured patch change {index} must be an object")
+            if item.get("delete"):
+                path = self._resolve_required_path(item, "path", existing=True)
+                self._guard_edit_target(item.get("path"), path)
+                relative = self._relative(path)
+                if not path.exists():
+                    raise ToolError(f"Cannot delete missing file: {relative}")
+                changes.append({"path": relative, "absolute_path": path, "content": None, "action": "delete"})
+                continue
+            if "content" in item:
+                path = self._resolve_required_path(item, "path")
+                self._guard_edit_target(item.get("path"), path)
+                relative = self._relative(path)
+                content = item.get("content")
+                if not isinstance(content, str):
+                    raise ToolError(f"Structured patch change {index} content must be a string")
+                if len(content) > MAX_PATCH_CHARS:
+                    raise ToolError(f"Structured patch change {index} content is too large")
+                changes.append(
+                    {
+                        "path": relative,
+                        "absolute_path": path,
+                        "content": content,
+                        "action": "write",
+                    }
+                )
+                continue
+            path = self._resolve_required_path(item, "path", existing=True)
+            self._guard_edit_target(item.get("path"), path)
+            relative = self._relative(path)
+            old = item.get("old")
+            new = item.get("new")
+            if not isinstance(old, str) or not old:
+                raise ToolError(f"Structured patch change {index} requires non-empty old text")
+            if not isinstance(new, str):
+                raise ToolError(f"Structured patch change {index} requires string new text")
+            if not path.exists() or not path.is_file():
+                raise ToolError(f"Cannot replace text in missing file: {relative}")
+            expected = _positive_int(item.get("expected_replacements", 1), default=1, maximum=100)
+            text = path.read_text(encoding="utf-8", errors="replace")
+            actual = text.count(old)
+            if actual != expected:
+                raise ToolError(
+                    f"{relative}: expected {expected} replacement(s), found {actual}"
+                )
+            changes.append(
+                {
+                    "path": relative,
+                    "absolute_path": path,
+                    "content": text.replace(old, new, expected),
+                    "action": "replace",
+                }
+            )
+        return changes
+
+    def _changes_from_unified_diff(self, patch_text: str) -> list[dict[str, Any]]:
+        file_patches = _parse_unified_diff(patch_text)
+        if not file_patches:
+            raise ToolError("Unified diff did not contain any file changes")
+        changes: list[dict[str, Any]] = []
+        for file_patch in file_patches:
+            raw_path = file_patch["new_path"] if file_patch["new_path"] != "/dev/null" else file_patch["old_path"]
+            if not raw_path or raw_path == "/dev/null":
+                raise ToolError("Unified diff file path is missing")
+            path = self._resolve(raw_path)
+            self._guard_edit_target(raw_path, path)
+            relative = self._relative(path)
+            old_path = file_patch["old_path"]
+            new_path = file_patch["new_path"]
+            if old_path != "/dev/null" and (not path.exists() or not path.is_file()):
+                raise ToolError(f"Cannot patch missing file: {relative}")
+            original = "" if old_path == "/dev/null" else path.read_text(encoding="utf-8", errors="replace")
+            updated = _apply_unified_hunks(original, file_patch["hunks"], relative)
+            content = None if new_path == "/dev/null" else updated
+            changes.append(
+                {
+                    "path": relative,
+                    "absolute_path": path,
+                    "content": content,
+                    "action": "delete" if content is None else ("create" if old_path == "/dev/null" else "patch"),
+                }
+            )
+        return changes
+
+    def _structured_patch_preview(self, changes: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for change in changes:
+            path = change["absolute_path"]
+            before = "" if not path.exists() else path.read_text(encoding="utf-8", errors="replace")
+            after = "" if change["content"] is None else str(change["content"])
+            lines.extend(_simple_unified_diff(before, after, change["path"]))
+        return "".join(lines)[:MAX_PATCH_CHARS]
+
+    def _single_edit_preview(self, name: str, args: dict[str, Any]) -> str:
+        if name == "write_file":
+            path = self._resolve_required_path(args, "path")
+            before = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+            content = args.get("content")
+            if not isinstance(content, str):
+                raise ToolError("write_file requires string content")
+            after = before + content if bool(args.get("append", False)) else content
+            return "".join(_simple_unified_diff(before, after, self._relative(path)))
+        if name == "replace_in_file":
+            path = self._resolve_required_path(args, "path", existing=True)
+            before = path.read_text(encoding="utf-8", errors="replace")
+            old = args.get("old")
+            new = args.get("new")
+            if not isinstance(old, str) or not old or not isinstance(new, str):
+                raise ToolError("replace_in_file requires old and new strings")
+            expected = _positive_int(args.get("expected_replacements", 1), default=1, maximum=100)
+            after = before.replace(old, new, expected)
+            return "".join(_simple_unified_diff(before, after, self._relative(path)))
+        return ""
 
     def _write_file(self, args: dict[str, Any]) -> dict[str, Any]:
         path = self._resolve_required_path(args, "path")
@@ -629,6 +1027,110 @@ def _request_option(request: HubRequest, key: str, default: Any) -> Any:
     if isinstance(hub_options, dict) and key in hub_options:
         return hub_options[key]
     return raw.get(key, default)
+
+
+def _parse_unified_diff(patch_text: str) -> list[dict[str, Any]]:
+    lines = patch_text.splitlines(keepends=True)
+    patches: list[dict[str, Any]] = []
+    index = 0
+    current: dict[str, Any] | None = None
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("--- "):
+            if current is not None:
+                patches.append(current)
+            old_path = _diff_path(line[4:].strip())
+            index += 1
+            if index >= len(lines) or not lines[index].startswith("+++ "):
+                raise ToolError("Unified diff missing +++ path after --- path")
+            new_path = _diff_path(lines[index][4:].strip())
+            current = {"old_path": old_path, "new_path": new_path, "hunks": []}
+        elif line.startswith("@@ "):
+            if current is None:
+                raise ToolError("Unified diff hunk appeared before file header")
+            hunk_lines = [line]
+            index += 1
+            while index < len(lines) and not lines[index].startswith(("--- ", "@@ ")):
+                hunk_lines.append(lines[index])
+                index += 1
+            current["hunks"].append(hunk_lines)
+            continue
+        index += 1
+    if current is not None:
+        patches.append(current)
+    return patches
+
+
+def _diff_path(value: str) -> str:
+    path = value.split("\t", 1)[0].split(" ", 1)[0]
+    if path in {"/dev/null", "dev/null"}:
+        return "/dev/null"
+    if path.startswith("a/") or path.startswith("b/"):
+        return path[2:]
+    return path
+
+
+def _apply_unified_hunks(original: str, hunks: list[list[str]], relative: str) -> str:
+    original_lines = original.splitlines(keepends=True)
+    output: list[str] = []
+    source_index = 0
+    for hunk in hunks:
+        if not hunk:
+            continue
+        match = re.match(r"@@ -(?P<old>\d+)(?:,\d+)? \+(?P<new>\d+)(?:,\d+)? @@", hunk[0])
+        if not match:
+            raise ToolError(f"{relative}: invalid unified diff hunk header")
+        old_start = int(match.group("old"))
+        target_index = max(0, old_start - 1)
+        if target_index < source_index:
+            raise ToolError(f"{relative}: overlapping unified diff hunks")
+        output.extend(original_lines[source_index:target_index])
+        source_index = target_index
+        for line in hunk[1:]:
+            if line.startswith("\\"):
+                continue
+            marker = line[:1]
+            content = line[1:]
+            if marker == " ":
+                if source_index >= len(original_lines) or original_lines[source_index] != content:
+                    raise ToolError(f"{relative}: unified diff context does not match")
+                output.append(original_lines[source_index])
+                source_index += 1
+            elif marker == "-":
+                if source_index >= len(original_lines) or original_lines[source_index] != content:
+                    raise ToolError(f"{relative}: unified diff removal does not match")
+                source_index += 1
+            elif marker == "+":
+                output.append(content)
+            else:
+                raise ToolError(f"{relative}: invalid unified diff line {line[:20]!r}")
+    output.extend(original_lines[source_index:])
+    return "".join(output)
+
+
+def _simple_unified_diff(before: str, after: str, path: str) -> list[str]:
+    return list(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+    )
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str) and item.strip()]
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "approved"}
+    return bool(value)
 
 
 def _shell_instruction(allow_shell: bool, policy: str) -> str:

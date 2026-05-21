@@ -252,6 +252,7 @@ class AgentRunnerTests(unittest.TestCase):
                 HubRequest(
                     session_id="agent",
                     messages=[{"role": "user", "content": "Create created.txt"}],
+                    raw={"fast_write_finalize": True},
                 ),
                 event_sink=events.append,
             )
@@ -317,6 +318,7 @@ class AgentRunnerTests(unittest.TestCase):
                 HubRequest(
                     session_id="agent",
                     messages=[{"role": "user", "content": "Create gemini.txt"}],
+                    raw={"fast_write_finalize": True},
                 )
             )
 
@@ -372,6 +374,169 @@ class AgentRunnerTests(unittest.TestCase):
 
             self.assertEqual(calls, 2)
             self.assertEqual(response.text, "Model saw the write result.")
+
+    def test_agent_loop_does_not_fast_finalize_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return ProviderResult(
+                            text=(
+                                '{"action":"tool","tool":"write_file","args":'
+                                '{"path":"one.txt","content":"one\\n"}}'
+                            ),
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text=(
+                            '{"action":"tool","tool":"write_file","args":'
+                            '{"path":"two.txt","content":"two\\n"}}'
+                        )
+                        if calls == 2
+                        else '{"action":"final","answer":"Both files are done."}',
+                        model=self.agent.model,
+                    )
+
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Create one.txt and two.txt"}],
+                )
+            )
+
+            self.assertEqual(calls, 3)
+            self.assertEqual(response.text, "Both files are done.")
+            self.assertEqual((root / "one.txt").read_text(encoding="utf-8"), "one\n")
+            self.assertEqual((root / "two.txt").read_text(encoding="utf-8"), "two\n")
+
+    def test_agent_loop_validates_after_edit_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                validation_mode="basic",
+                auto_validate_after_edits=True,
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return ProviderResult(
+                            text=(
+                                '{"action":"tool","tool":"write_file","args":'
+                                '{"path":"app.py","content":"VALUE = 1\\n"}}'
+                            ),
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text='{"action":"final","answer":"Validated."}',
+                        model=self.agent.model,
+                    )
+
+            events: list[dict] = []
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Create app.py"}],
+                ),
+                event_sink=events.append,
+            )
+
+            self.assertEqual(response.text, "Validated.")
+            first_step = response.raw["agent_hub"]["steps"][0]
+            self.assertTrue(first_step["result"]["validation"]["ok"])
+            self.assertIn("validation_started", [event["type"] for event in events])
+            self.assertIn("validation_finished", [event["type"] for event in events])
+
+    def test_agent_loop_reports_validation_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                validation_mode="basic",
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return ProviderResult(
+                            text=(
+                                '{"action":"tool","tool":"write_file","args":'
+                                '{"path":"bad.py","content":"def broken(:\\n"}}'
+                            ),
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text='{"action":"final","answer":"Validation failure was reported."}',
+                        model=self.agent.model,
+                    )
+
+            events: list[dict] = []
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Create bad.py"}],
+                ),
+                event_sink=events.append,
+            )
+
+            validation = response.raw["agent_hub"]["steps"][0]["result"]["validation"]
+            self.assertFalse(validation["ok"])
+            self.assertEqual(response.text, "Validation failure was reported.")
+            self.assertIn("validation_failed", [event["type"] for event in events])
 
     def test_agent_loop_recovers_malformed_tool_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -799,6 +964,222 @@ class AgentRunnerTests(unittest.TestCase):
 
             self.assertFalse(failed["ok"])
             self.assertIn("Expected 1 replacement", failed["error"])
+
+    def test_apply_patch_can_edit_multiple_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            (root / "README.md").write_text("# Old\n", encoding="utf-8")
+            toolbox = AgentToolbox(
+                HubConfig(workspace_dir=root),
+                HubRequest(session_id="agent", messages=[]),
+            )
+
+            result = toolbox.run(
+                "apply_patch",
+                {
+                    "summary": "Update app and docs",
+                    "changes": [
+                        {
+                            "path": "app.py",
+                            "old": "VALUE = 1",
+                            "new": "VALUE = 2",
+                            "expected_replacements": 1,
+                        },
+                        {"path": "README.md", "content": "# New\n"},
+                    ],
+                },
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual((root / "app.py").read_text(encoding="utf-8"), "VALUE = 2\n")
+            self.assertEqual((root / "README.md").read_text(encoding="utf-8"), "# New\n")
+            self.assertEqual(result["result"]["paths"], ["app.py", "README.md"])
+
+    def test_apply_patch_accepts_unified_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app.py"
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            toolbox = AgentToolbox(
+                HubConfig(workspace_dir=root),
+                HubRequest(session_id="agent", messages=[]),
+            )
+
+            result = toolbox.run(
+                "apply_patch",
+                {
+                    "patch": (
+                        "--- a/app.py\n"
+                        "+++ b/app.py\n"
+                        "@@ -1 +1 @@\n"
+                        "-VALUE = 1\n"
+                        "+VALUE = 2\n"
+                    )
+                },
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 2\n")
+
+    def test_apply_patch_validates_paths_before_applying(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root.parent / f"{root.name}-outside.txt"
+            outside.write_text("outside\n", encoding="utf-8")
+            target = root / "app.py"
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            toolbox = AgentToolbox(
+                HubConfig(workspace_dir=root),
+                HubRequest(session_id="agent", messages=[]),
+            )
+
+            result = toolbox.run(
+                "apply_patch",
+                {
+                    "changes": [
+                        {"path": "app.py", "content": "VALUE = 2\n"},
+                        {"path": f"../{outside.name}", "content": "bad\n"},
+                    ]
+                },
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("escapes workspace", result["error"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 1\n")
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
+    def test_failed_apply_patch_applies_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app.py"
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            toolbox = AgentToolbox(
+                HubConfig(workspace_dir=root),
+                HubRequest(session_id="agent", messages=[]),
+            )
+
+            result = toolbox.run(
+                "apply_patch",
+                {
+                    "changes": [
+                        {"path": "app.py", "content": "VALUE = 2\n"},
+                        {
+                            "path": "missing.py",
+                            "old": "x",
+                            "new": "y",
+                            "expected_replacements": 1,
+                        },
+                    ]
+                },
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("missing file", result["error"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 1\n")
+
+    def test_apply_patch_approval_request_includes_all_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.py").write_text("A = 1\n", encoding="utf-8")
+            (root / "b.py").write_text("B = 1\n", encoding="utf-8")
+            toolbox = AgentToolbox(
+                HubConfig(workspace_dir=root, approval_mode="ask"),
+                HubRequest(session_id="agent", messages=[]),
+            )
+
+            result = toolbox.run(
+                "apply_patch",
+                {
+                    "summary": "Update two files",
+                    "changes": [
+                        {"path": "a.py", "old": "A = 1", "new": "A = 2"},
+                        {"path": "b.py", "old": "B = 1", "new": "B = 2"},
+                    ],
+                    "commands": ["python -m unittest discover -v"],
+                    "validation_plan": "Run syntax and unit tests.",
+                },
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["approval_required"])
+            self.assertEqual(result["affected_files"], ["a.py", "b.py"])
+            self.assertIn("Update two files", result["summary"])
+            self.assertIn("--- a/a.py", result["patch_preview"])
+            self.assertIn("python -m unittest", result["commands"][0])
+            self.assertEqual((root / "a.py").read_text(encoding="utf-8"), "A = 1\n")
+
+    def test_apply_patch_approval_granted_applies_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "a.py"
+            target.write_text("A = 1\n", encoding="utf-8")
+            toolbox = AgentToolbox(
+                HubConfig(workspace_dir=root, approval_mode="ask"),
+                HubRequest(
+                    session_id="agent",
+                    messages=[],
+                    raw={"agent_hub": {"approval_granted": True}},
+                ),
+            )
+
+            result = toolbox.run(
+                "apply_patch",
+                {"changes": [{"path": "a.py", "old": "A = 1", "new": "A = 2"}]},
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["approval_granted"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "A = 2\n")
+
+    def test_agent_loop_emits_patch_approval_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.py").write_text("A = 1\n", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                approval_mode="ask",
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    return ProviderResult(
+                        text=(
+                            '{"action":"tool","tool":"apply_patch","args":'
+                            '{"summary":"Update a.py","changes":['
+                            '{"path":"a.py","old":"A = 1","new":"A = 2"}],'
+                            '"validation_plan":"py_compile"}}'
+                        ),
+                        model=self.agent.model,
+                    )
+
+            events: list[dict] = []
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(session_id="agent", messages=[{"role": "user", "content": "Update a.py"}]),
+                event_sink=events.append,
+            )
+
+            event_types = [event["type"] for event in events]
+            self.assertIn("patch_preview", event_types)
+            self.assertIn("approval_required", event_types)
+            approval = next(event for event in events if event["type"] == "approval_required")
+            self.assertEqual(approval["affected_files"], ["a.py"])
+            self.assertIn("--- a/a.py", approval["patch_preview"])
+            self.assertIn("Approval required", response.text)
+            self.assertEqual((root / "a.py").read_text(encoding="utf-8"), "A = 1\n")
 
     def test_file_tools_resolve_unique_bare_filename_inside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

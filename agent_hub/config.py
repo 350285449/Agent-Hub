@@ -104,6 +104,11 @@ class HubConfig:
     local_model_probe_timeout_seconds: float = 0.35
     quota_cooldown_seconds: float = 1800.0
     rate_limit_cooldown_seconds: float = 300.0
+    approval_mode: str = "auto"
+    fast_write_finalize: bool = False
+    validation_mode: str = "basic"
+    validation_commands: list[str] = field(default_factory=list)
+    auto_validate_after_edits: bool = True
 
     default_route: list[str] = field(default_factory=list)
     routes: list[RouteRule] = field(default_factory=list)
@@ -428,6 +433,11 @@ def free_local_config() -> HubConfig:
         free_only=True,
         auto_enable_available_providers=True,
         auto_detect_local_models=True,
+        approval_mode="auto",
+        fast_write_finalize=False,
+        validation_mode="basic",
+        validation_commands=[],
+        auto_validate_after_edits=True,
         default_route=default_agent_names(),
         routes=[
             RouteRule(
@@ -565,6 +575,15 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         ),
         quota_cooldown_seconds=float(raw.get("quota_cooldown_seconds", 1800.0)),
         rate_limit_cooldown_seconds=float(raw.get("rate_limit_cooldown_seconds", 300.0)),
+        approval_mode=_normalize_approval_mode(raw.get("approval_mode", "auto")),
+        fast_write_finalize=_bool_with_default(raw.get("fast_write_finalize"), False),
+        validation_mode=_normalize_validation_mode(raw.get("validation_mode", "basic")),
+        validation_commands=[
+            str(item)
+            for item in raw.get("validation_commands", [])
+            if isinstance(item, str) and item.strip()
+        ],
+        auto_validate_after_edits=_bool_with_default(raw.get("auto_validate_after_edits"), True),
         default_route=list(raw.get("default_route", agents.keys())),
         routes=routes,
         agents=agents,
@@ -633,6 +652,11 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "local_model_probe_timeout_seconds": config.local_model_probe_timeout_seconds,
         "quota_cooldown_seconds": config.quota_cooldown_seconds,
         "rate_limit_cooldown_seconds": config.rate_limit_cooldown_seconds,
+        "approval_mode": config.approval_mode,
+        "fast_write_finalize": config.fast_write_finalize,
+        "validation_mode": config.validation_mode,
+        "validation_commands": config.validation_commands,
+        "auto_validate_after_edits": config.auto_validate_after_edits,
         "include_raw_responses": config.include_raw_responses,
         "expose_routing_details": config.expose_routing_details,
         "default_route": config.default_route,
@@ -779,6 +803,26 @@ def _normalize_shell_command_policy(value: Any) -> str:
     if text in {"deny", "disabled", "disable", "off", "false", "0"}:
         return "deny"
     return "allow"
+
+
+def _normalize_approval_mode(value: Any) -> str:
+    text = str(value or "auto").strip().lower()
+    if text in {"ask", "confirm", "prompt"}:
+        return "ask"
+    if text in {"readonly", "read-only", "read_only"}:
+        return "readonly"
+    if text in {"shell-ask", "shell_ask", "shell"}:
+        return "shell-ask"
+    return "auto"
+
+
+def _normalize_validation_mode(value: Any) -> str:
+    text = str(value or "basic").strip().lower()
+    if text in {"off", "none", "false", "0", "disabled", "disable"}:
+        return "off"
+    if text == "strict":
+        return "strict"
+    return "basic"
 
 
 def _expand_env_string(value: Any) -> Any:

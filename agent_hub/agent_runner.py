@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from .agent_tools import (
@@ -24,6 +27,7 @@ TOOL_ACTIONS = {
     "search_files",
     "write_file",
     "replace_in_file",
+    "apply_patch",
     "run_command",
 }
 
@@ -146,6 +150,83 @@ class AgentRunner:
                     args=_progress_tool_args(tool_name, args),
                 )
                 result = toolbox.run(tool_name, args)
+                if result.get("approval_required"):
+                    if result.get("patch_preview"):
+                        _emit(
+                            event_sink,
+                            "patch_preview",
+                            message="Patch preview is ready for approval.",
+                            tool=tool_name,
+                            affected_files=result.get("affected_files", []),
+                            summary=result.get("summary", ""),
+                            patch_preview=result.get("patch_preview", ""),
+                            commands=result.get("commands", []),
+                            validation_plan=result.get("validation_plan", ""),
+                        )
+                    # Record this in trace
+                    trace.append({
+                        "step": step_number,
+                        "agent": response.agent,
+                        "provider": response.provider,
+                        "model": response.model,
+                        "tool": tool_name,
+                        "args": args,
+                        "result": result,
+                    })
+                    _emit(
+                        event_sink,
+                        "approval_required",
+                        tool=tool_name,
+                        args=args,
+                        affected_files=result.get("affected_files", []),
+                        summary=result.get("summary", ""),
+                        patch_preview=result.get("patch_preview", ""),
+                        commands=result.get("commands", []),
+                        validation_plan=result.get("validation_plan", ""),
+                        risk=result.get("risk", ""),
+                        message=result.get("message", "Approval required before applying changes."),
+                    )
+                    final = self._with_agent_metadata(
+                        response,
+                        request=request,
+                        text=result.get("message", "Approval required before applying changes."),
+                        trace=trace,
+                        failover=failover,
+                        stopped=True,
+                    )
+                    self._record_final(request, final)
+                    return final
+
+                if result.get("approval_granted"):
+                    _emit(
+                        event_sink,
+                        "approval_granted",
+                        message="Approval granted; applying workspace changes.",
+                        tool=tool_name,
+                        affected_files=_changed_files_from_result(tool_name, result),
+                    )
+
+                changed_files = _changed_files_from_result(tool_name, result)
+                if changed_files:
+                    if tool_name == "apply_patch":
+                        _emit(
+                            event_sink,
+                            "multi_file_edit_applied",
+                            message=f"Applied patch to {len(changed_files)} file(s).",
+                            step=step_number,
+                            tool=tool_name,
+                            affected_files=changed_files,
+                        )
+                    validation = _validate_after_edit(
+                        request,
+                        self.config,
+                        toolbox.root,
+                        changed_files,
+                        event_sink,
+                    )
+                    if validation is not None:
+                        result["validation"] = validation
+
                 self.router.record_tool_result(response.agent, result.get("ok") is not False)
                 trace.append(
                     {
@@ -170,7 +251,7 @@ class AgentRunner:
                 edit_event = _workspace_edit_event(step_number, tool_name, result)
                 if edit_event:
                     _emit(event_sink, "workspace_edit", **edit_event)
-                fast_final_text = _fast_tool_final_text(tool_name, result, request)
+                fast_final_text = _fast_tool_final_text(tool_name, result, request, self.config)
                 if fast_final_text:
                     _emit(
                         event_sink,
@@ -404,11 +485,23 @@ def _workspace_edit_event(
     tool_name: str,
     result: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if result.get("ok") is False or tool_name not in {"write_file", "replace_in_file"}:
+    if result.get("ok") is False or tool_name not in {"write_file", "replace_in_file", "apply_patch"}:
         return None
     payload = result.get("result")
     if not isinstance(payload, dict):
         return None
+    if tool_name == "apply_patch":
+        paths = payload.get("paths")
+        if not isinstance(paths, list):
+            return None
+        return {
+            "message": f"Step {step_number}: applied patch to {len(paths)} file(s).",
+            "step": step_number,
+            "tool": tool_name,
+            "path": ", ".join(str(path) for path in paths[:5]),
+            "paths": paths,
+            "action": "patched",
+        }
     path = _short_value(payload.get("path"))
     if not path:
         return None
@@ -455,6 +548,9 @@ def _tool_finished_message(step_number: int, tool_name: str, result: dict[str, A
 def _tool_target(tool_name: str, args: dict[str, Any]) -> str:
     if tool_name in {"read_file", "write_file", "replace_in_file"}:
         return _short_value(args.get("path"))
+    if tool_name == "apply_patch":
+        summary = _short_value(args.get("summary"), maximum=160)
+        return summary or "workspace patch"
     if tool_name == "search_files":
         query = _short_value(args.get("query"))
         path = _short_value(args.get("path", "."))
@@ -477,6 +573,9 @@ def _tool_result_summary(tool_name: str, result: dict[str, Any]) -> str:
         if tool_name == "replace_in_file" and payload.get("replacements") is not None:
             return f"{path}, {payload.get('replacements')} replacement(s)"
         return path
+    if tool_name == "apply_patch":
+        paths = payload.get("paths")
+        return f"{len(paths)} file(s)" if isinstance(paths, list) else ""
     if tool_name == "search_files":
         matches = payload.get("matches")
         return f"{len(matches)} match(es)" if isinstance(matches, list) else ""
@@ -511,6 +610,16 @@ def _progress_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
             "new_chars": len(new) if isinstance(new, str) else None,
             "expected_replacements": args.get("expected_replacements", 1),
         }
+    if tool_name == "apply_patch":
+        patch = args.get("patch")
+        changes = args.get("changes")
+        return {
+            "summary": args.get("summary"),
+            "patch_chars": len(patch) if isinstance(patch, str) else None,
+            "change_count": len(changes) if isinstance(changes, list) else None,
+            "validation_plan": args.get("validation_plan"),
+            "commands": args.get("commands"),
+        }
     allowed = {
         "path",
         "pattern",
@@ -544,6 +653,7 @@ def _progress_tool_result(tool_name: str, result: dict[str, Any]) -> dict[str, A
         }
     summary_keys = {
         "path",
+        "paths",
         "replacements",
         "chars",
         "append",
@@ -552,6 +662,7 @@ def _progress_tool_result(tool_name: str, result: dict[str, Any]) -> dict[str, A
         "end_line",
         "total_lines",
         "query",
+        "summary",
     }
     summarized = {key: value for key, value in payload.items() if key in summary_keys}
     if isinstance(payload.get("files"), list):
@@ -561,8 +672,191 @@ def _progress_tool_result(tool_name: str, result: dict[str, Any]) -> dict[str, A
     return {"ok": True, **summarized}
 
 
-def _fast_tool_final_text(tool_name: str, result: dict[str, Any], request: HubRequest) -> str:
-    if not _request_bool(request, "fast_write_finalize", True):
+def _changed_files_from_result(tool_name: str, result: dict[str, Any]) -> list[str]:
+    if result.get("ok") is False or tool_name not in {"write_file", "replace_in_file", "apply_patch"}:
+        return []
+    payload = result.get("result")
+    if not isinstance(payload, dict):
+        return []
+    if tool_name == "apply_patch":
+        paths = payload.get("paths")
+        return [str(path) for path in paths if isinstance(path, str)] if isinstance(paths, list) else []
+    path = payload.get("path")
+    return [str(path)] if isinstance(path, str) and path else []
+
+
+def _validate_after_edit(
+    request: HubRequest,
+    config: HubConfig,
+    root: Path,
+    changed_files: list[str],
+    event_sink: AgentEventSink | None,
+) -> dict[str, Any] | None:
+    if not changed_files:
+        return None
+    if not _request_bool(request, "auto_validate_after_edits", config.auto_validate_after_edits):
+        return None
+    mode = _request_validation_mode(request, config)
+    if mode == "off":
+        return None
+    commands = _validation_command_plan(request, config, root, changed_files, mode)
+    if not commands:
+        return {
+            "ok": True,
+            "mode": mode,
+            "changed_files": changed_files,
+            "checks": [],
+            "message": "No validators were available for the changed files.",
+        }
+    _emit(
+        event_sink,
+        "validation_started",
+        message=f"Running {len(commands)} validation check(s).",
+        mode=mode,
+        changed_files=changed_files,
+        commands=[item["display"] for item in commands],
+    )
+    checks: list[dict[str, Any]] = []
+    for item in commands:
+        try:
+            completed = subprocess.run(
+                item["command"],
+                shell=item["shell"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=item["timeout_seconds"],
+            )
+            checks.append(
+                {
+                    "name": item["name"],
+                    "command": item["display"],
+                    "returncode": completed.returncode,
+                    "ok": completed.returncode == 0,
+                    "stdout": _short_value(completed.stdout, maximum=4000),
+                    "stderr": _short_value(completed.stderr, maximum=4000),
+                }
+            )
+        except Exception as exc:
+            checks.append(
+                {
+                    "name": item["name"],
+                    "command": item["display"],
+                    "returncode": None,
+                    "ok": False,
+                    "stdout": "",
+                    "stderr": str(exc),
+                }
+            )
+    ok = all(check["ok"] for check in checks)
+    result = {
+        "ok": ok,
+        "mode": mode,
+        "changed_files": changed_files,
+        "checks": checks,
+        "message": "Validation passed." if ok else "Validation failed.",
+    }
+    _emit(
+        event_sink,
+        "validation_finished",
+        message=result["message"],
+        ok=ok,
+        mode=mode,
+        changed_files=changed_files,
+        checks=checks,
+    )
+    if not ok:
+        _emit(
+            event_sink,
+            "validation_failed",
+            message="Validation failed after applying workspace edits.",
+            mode=mode,
+            changed_files=changed_files,
+            checks=checks,
+        )
+    return result
+
+
+def _validation_command_plan(
+    request: HubRequest,
+    config: HubConfig,
+    root: Path,
+    changed_files: list[str],
+    mode: str,
+) -> list[dict[str, Any]]:
+    commands: list[dict[str, Any]] = []
+    py_files = [
+        str((root / path).resolve())
+        for path in changed_files
+        if path.endswith(".py") and (root / path).exists()
+    ]
+    if py_files:
+        commands.append(
+            {
+                "name": "py_compile",
+                "command": [sys.executable, "-m", "py_compile", *py_files],
+                "display": "python -m py_compile " + " ".join(changed_files),
+                "shell": False,
+                "timeout_seconds": 120,
+            }
+        )
+    if _workspace_has_tests(root):
+        commands.append(
+            {
+                "name": "unittest",
+                "command": [sys.executable, "-m", "unittest", "discover", "-v"],
+                "display": "python -m unittest discover -v",
+                "shell": False,
+                "timeout_seconds": 300,
+            }
+        )
+    for command in _request_validation_commands(request, config):
+        commands.append(
+            {
+                "name": "configured",
+                "command": command,
+                "display": command,
+                "shell": True,
+                "timeout_seconds": 600 if mode == "strict" else 300,
+            }
+        )
+    return commands
+
+
+def _workspace_has_tests(root: Path) -> bool:
+    if (root / "tests").is_dir():
+        return True
+    try:
+        return any(root.glob("test*.py")) or any(root.glob("*_test.py"))
+    except OSError:
+        return False
+
+
+def _request_validation_mode(request: HubRequest, config: HubConfig) -> str:
+    value = str(_request_option(request, "validation_mode", config.validation_mode) or "basic").lower()
+    if value in {"off", "none", "false", "0"}:
+        return "off"
+    if value == "strict":
+        return "strict"
+    return "basic"
+
+
+def _request_validation_commands(request: HubRequest, config: HubConfig) -> list[str]:
+    value = _request_option(request, "validation_commands", config.validation_commands)
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if isinstance(value, list):
+        return [str(item) for item in value if isinstance(item, str) and item.strip()]
+    return []
+
+
+def _fast_tool_final_text(
+    tool_name: str,
+    result: dict[str, Any],
+    request: HubRequest,
+    config: HubConfig,
+) -> str:
+    if not _request_bool(request, "fast_write_finalize", config.fast_write_finalize):
         return ""
     if result.get("ok") is False or tool_name not in {"write_file", "replace_in_file"}:
         return ""
@@ -720,6 +1014,17 @@ def _validate_tool_command(command: dict[str, Any]) -> dict[str, Any]:
                     "action": "invalid",
                     "reason": "replace_in_file expected_replacements must be an integer",
                 }
+
+    if tool == "apply_patch":
+        patch = args.get("patch")
+        changes = args.get("changes")
+        if not (isinstance(patch, str) and patch.strip()) and not (
+            isinstance(changes, list) and changes
+        ):
+            return {
+                "action": "invalid",
+                "reason": "apply_patch requires args.patch or args.changes",
+            }
 
     return {"action": "tool", "tool": tool, "args": args}
 
@@ -895,9 +1200,7 @@ def _request_int(request: HubRequest, key: str, default: int) -> int:
 
 
 def _request_bool(request: HubRequest, key: str, default: bool) -> bool:
-    raw = request.raw or {}
-    hub_options = raw.get("agent_hub")
-    value = hub_options.get(key) if isinstance(hub_options, dict) and key in hub_options else raw.get(key)
+    value = _request_option(request, key, default)
     if value is None:
         return default
     if isinstance(value, bool):
@@ -905,6 +1208,14 @@ def _request_bool(request: HubRequest, key: str, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in {"0", "false", "no", "off"}
     return bool(value)
+
+
+def _request_option(request: HubRequest, key: str, default: Any) -> Any:
+    raw = request.raw or {}
+    hub_options = raw.get("agent_hub")
+    if isinstance(hub_options, dict) and key in hub_options:
+        return hub_options[key]
+    return raw.get(key, default)
 
 
 def _is_prefix(prefix: list[dict], messages: list[dict]) -> bool:

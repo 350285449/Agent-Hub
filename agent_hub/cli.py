@@ -168,6 +168,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     agent_parser.add_argument("task", nargs="+", help="Task for the agent.")
     agent_parser.add_argument("--route", default="cloud-agent", help="Route to use for agent model calls.")
     agent_parser.add_argument("--max-steps", type=int, default=20, help="Maximum agent tool steps.")
+    _add_agent_runtime_flags(agent_parser)
     agent_parser.add_argument(
         "--allow-shell-tools",
         action="store_true",
@@ -189,6 +190,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     group_agent_parser.add_argument("--route", default="cloud-agent", help="Route to use for team model calls.")
     group_agent_parser.add_argument("--plan-candidates", type=int, default=1, help="Number of planner candidates.")
     group_agent_parser.add_argument("--max-steps", type=int, default=20, help="Maximum coder tool steps.")
+    _add_agent_runtime_flags(group_agent_parser)
     group_agent_parser.add_argument(
         "--allow-shell-tools",
         action="store_true",
@@ -219,6 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     chat_parser.add_argument("--route", default="cloud-agent", help="Route to use for chat turns.")
     chat_parser.add_argument("--session-id", help="Reuse an existing chat session id.")
     chat_parser.add_argument("--max-steps", type=int, default=20, help="Maximum agent tool steps per turn.")
+    _add_agent_runtime_flags(chat_parser)
     chat_parser.add_argument(
         "--allow-shell-tools",
         action="store_true",
@@ -383,6 +386,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload["allow_shell_tools"] = True
         if args.confirm_shell_tools:
             payload["shell_command_policy"] = "ask"
+        _apply_agent_runtime_flags(payload, args)
         request = request_from_payload(payload)
         try:
             response = AgentRunner(config, AgentRouter(config)).run(
@@ -412,6 +416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload["allow_shell_tools"] = True
         if args.confirm_shell_tools:
             payload["shell_command_policy"] = "ask"
+        _apply_agent_runtime_flags(payload, args)
         request = request_from_payload(payload)
         try:
             response = TeamAgentRunner(config, AgentRouter(config)).run(
@@ -449,6 +454,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     parser.error(f"Unknown command {command!r}")
     return 2
+
+
+def _add_agent_runtime_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--fast-write-finalize",
+        action="store_true",
+        help="Finish immediately after the first successful file edit.",
+    )
+    parser.add_argument(
+        "--validation-mode",
+        choices=["off", "basic", "strict"],
+        help="Validation mode after agent edits.",
+    )
+    parser.add_argument(
+        "--no-auto-validate",
+        action="store_true",
+        help="Disable automatic validation after file edits.",
+    )
+    parser.add_argument(
+        "--validation-command",
+        action="append",
+        default=[],
+        help="Additional validation command to run after edits. Can be repeated.",
+    )
+
+
+def _apply_agent_runtime_flags(payload: dict[str, Any], args: argparse.Namespace) -> None:
+    if getattr(args, "fast_write_finalize", False):
+        payload["fast_write_finalize"] = True
+    if getattr(args, "validation_mode", None):
+        payload["validation_mode"] = args.validation_mode
+    if getattr(args, "no_auto_validate", False):
+        payload["auto_validate_after_edits"] = False
+    validation_commands = [
+        str(command)
+        for command in getattr(args, "validation_command", []) or []
+        if str(command).strip()
+    ]
+    if validation_commands:
+        payload["validation_commands"] = validation_commands
 
 
 def _chat(config: Any, args: argparse.Namespace) -> int:
@@ -505,6 +550,7 @@ def _chat(config: Any, args: argparse.Namespace) -> int:
             payload["allow_shell_tools"] = True
         if args.confirm_shell_tools:
             payload["shell_command_policy"] = "ask"
+        _apply_agent_runtime_flags(payload, args)
         request = request_from_payload(payload)
         try:
             response = (

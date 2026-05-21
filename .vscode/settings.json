@@ -1,0 +1,15 @@
+{
+    "agentHub.serverUrl": "http://127.0.0.1:8787",
+    "agentHub.pythonPath": "auto",
+    "agentHub.configPath": "agent-hub.config.json",
+    "agentHub.route": "coding",
+    "agentHub.researchRoute": "research",
+    "agentHub.codingAgentRoute": "local-agent",
+    "agentHub.agentProviderMode": "cloud",
+    "agentHub.agentMode": "agent",
+    "agentHub.groupPlanCandidates": 1,
+    "agentHub.agentMaxSteps": 50,
+    "agentHub.allowShellTools": true,
+    "agentHub.maxTokens": 32000,
+    "agentHub.autoStart": true
+}

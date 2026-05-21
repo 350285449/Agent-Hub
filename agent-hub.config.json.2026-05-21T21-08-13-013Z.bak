@@ -9,7 +9,6 @@
   "agent_max_steps": 8,
   "allow_shell_tools": true,
   "free_only": true,
-  "enable_load_balancing": true,
   "include_raw_responses": false,
   "expose_routing_details": true,
   "cloud_control_selection": {
@@ -116,7 +115,6 @@
     {
       "name": "ollama-kimi-cloud",
       "provider": "openai-compatible",
-      "provider_type": "ollama-cloud",
       "model": "kimi-k2.6:cloud",
       "base_url": "http://127.0.0.1:11434",
       "free": true,
@@ -128,7 +126,6 @@
     {
       "name": "ollama-glm-cloud",
       "provider": "openai-compatible",
-      "provider_type": "ollama-cloud",
       "model": "glm-5.1:cloud",
       "base_url": "http://127.0.0.1:11434",
       "free": true,
@@ -140,7 +137,6 @@
     {
       "name": "ollama-qwen-cloud",
       "provider": "openai-compatible",
-      "provider_type": "ollama-cloud",
       "model": "qwen3.5:cloud",
       "base_url": "http://127.0.0.1:11434",
       "free": true,
@@ -152,7 +148,6 @@
     {
       "name": "ollama-nemotron-cloud",
       "provider": "openai-compatible",
-      "provider_type": "ollama-cloud",
       "model": "nemotron-3-super:cloud",
       "base_url": "http://127.0.0.1:11434",
       "free": true,
@@ -164,7 +159,6 @@
     {
       "name": "ollama-gemma-cloud",
       "provider": "openai-compatible",
-      "provider_type": "ollama-cloud",
       "model": "gemma4:31b-cloud",
       "base_url": "http://127.0.0.1:11434",
       "free": true,
@@ -230,11 +224,41 @@
       "supports_streaming": true
     },
     {
+      "name": "ollama-local",
+      "provider": "openai-compatible",
+      "model": "qwen2.5-coder:7b",
+      "base_url": "http://127.0.0.1:11434",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 32768,
+      "timeout_seconds": 300,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "lm-studio",
+      "provider": "openai-compatible",
+      "model": "local-model",
+      "base_url": "http://127.0.0.1:1234",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 32768,
+      "timeout_seconds": 300,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "echo",
+      "provider": "echo",
+      "model": "local-echo",
+      "free": true,
+      "context_window": 1000000,
+      "cooldown_seconds": 1
+    },
+    {
+      "enabled": false,
       "name": "groq-qwen3-32b",
       "provider": "openai-compatible",
       "provider_type": "groq",
       "model": "qwen/qwen3-32b",
-      "enabled": false,
       "free": true,
       "api_key_env": "GROQ_API_KEY",
       "max_tokens": 4096,
@@ -251,11 +275,11 @@
       "base_url": "https://api.groq.com/openai/v1"
     },
     {
+      "enabled": false,
       "name": "openrouter-qwen-free",
       "provider": "openai-compatible",
       "provider_type": "openrouter",
       "model": "qwen/qwen3-coder:free",
-      "enabled": false,
       "free": true,
       "api_key_env": "OPENROUTER_API_KEY",
       "max_tokens": 4096,
@@ -276,11 +300,11 @@
       }
     },
     {
+      "enabled": false,
       "name": "cerebras-llama-3-3-70b",
       "provider": "openai-compatible",
       "provider_type": "cerebras",
       "model": "llama-3.3-70b",
-      "enabled": false,
       "free": true,
       "api_key_env": "CEREBRAS_API_KEY",
       "max_tokens": 4096,
@@ -296,11 +320,11 @@
       "base_url": "https://api.cerebras.ai/v1"
     },
     {
+      "enabled": false,
       "name": "mistral-small-latest",
       "provider": "openai-compatible",
       "provider_type": "mistral",
       "model": "mistral-small-latest",
-      "enabled": false,
       "free": true,
       "api_key_env": "MISTRAL_API_KEY",
       "max_tokens": 4096,
@@ -317,11 +341,11 @@
       "base_url": "https://api.mistral.ai/v1"
     },
     {
+      "enabled": false,
       "name": "github-models-qwen3-coder",
       "provider": "openai-compatible",
       "provider_type": "github-models",
       "model": "qwen/qwen3-coder-30b-a3b-instruct",
-      "enabled": false,
       "free": true,
       "api_key_env": "GITHUB_TOKEN",
       "max_tokens": 4096,
@@ -342,11 +366,11 @@
       }
     },
     {
+      "enabled": false,
       "name": "huggingface-qwen3-coder",
       "provider": "openai-compatible",
       "provider_type": "huggingface",
       "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-      "enabled": false,
       "free": true,
       "api_key_env": "HUGGINGFACE_API_KEY",
       "max_tokens": 4096,
@@ -363,11 +387,11 @@
       "base_url": "https://router.huggingface.co/v1"
     },
     {
+      "enabled": false,
       "name": "nvidia-nemotron",
       "provider": "openai-compatible",
       "provider_type": "nvidia-nim",
       "model": "nvidia/llama-3.1-nemotron-70b-instruct",
-      "enabled": false,
       "free": true,
       "api_key_env": "NVIDIA_API_KEY",
       "max_tokens": 4096,
@@ -384,11 +408,11 @@
       "base_url": "https://integrate.api.nvidia.com/v1"
     },
     {
+      "enabled": false,
       "name": "cloudflare-llama-3-1-8b",
       "provider": "openai-compatible",
       "provider_type": "cloudflare-workers-ai",
       "model": "@cf/meta/llama-3.1-8b-instruct",
-      "enabled": false,
       "free": true,
       "api_key_env": "CLOUDFLARE_API_TOKEN",
       "max_tokens": 4096,
@@ -402,38 +426,7 @@
       "supports_streaming": true,
       "priority": 40,
       "base_url": "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1"
-    },
-    {
-      "name": "ollama-local",
-      "provider": "openai-compatible",
-      "provider_type": "openai-compatible",
-      "model": "qwen2.5-coder:7b",
-      "base_url": "http://127.0.0.1:11434",
-      "free": true,
-      "max_tokens": 4096,
-      "context_window": 32768,
-      "timeout_seconds": 300,
-      "cooldown_seconds": 10
-    },
-    {
-      "name": "lm-studio",
-      "provider": "openai-compatible",
-      "provider_type": "openai-compatible",
-      "model": "local-model",
-      "base_url": "http://127.0.0.1:1234",
-      "free": true,
-      "max_tokens": 4096,
-      "context_window": 32768,
-      "timeout_seconds": 300,
-      "cooldown_seconds": 10
-    },
-    {
-      "name": "echo",
-      "provider": "echo",
-      "model": "local-echo",
-      "free": true,
-      "context_window": 1000000,
-      "cooldown_seconds": 1
     }
-  ]
+  ],
+  "enable_load_balancing": true
 }
