@@ -190,6 +190,13 @@ class AgentRouter:
     def _is_on_cooldown(self, agent_name: str) -> bool:
         return self._cooldowns.get(agent_name, 0) > time.time()
 
+    def cooldown_agent(self, agent_name: str, seconds: float | None = None) -> None:
+        agent = self.config.agents.get(agent_name)
+        duration = seconds if seconds is not None else (agent.cooldown_seconds if agent else 0)
+        if duration <= 0:
+            return
+        self._cooldowns[agent_name] = time.time() + duration
+
     def _preflight_skip_reason(self, agent: AgentConfig, request: HubRequest) -> str | None:
         if self.config.free_only and not is_free_agent(agent):
             return (

@@ -4,6 +4,12 @@
 
 - No changes yet.
 
+## 0.4.21
+
+- Prevents workspace-agent loops when a model repeatedly returns responses outside the Agent Hub protocol.
+- Fails over from an invalid protocol response to the next configured agent when one is available.
+- Removes inline comments from the bundled `config.py`.
+
 ## 0.4.20
 
 - Adds bundled backend comments that clarify Ollama cloud sign-in, endpoint routing, and echo fallback behavior.

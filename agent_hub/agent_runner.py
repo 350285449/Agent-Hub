@@ -52,6 +52,8 @@ class AgentRunner:
         trace: list[dict[str, Any]] = []
         failover: list[FailoverEvent] = []
         last_response: HubResponse | None = None
+        max_invalid_responses = _request_int(request, "agent_max_invalid_responses", 2)
+        consecutive_invalid_responses = 0
 
         _emit(
             event_sink,
@@ -118,6 +120,7 @@ class AgentRunner:
                 tool=command.get("tool"),
             )
             if command["action"] == "tool":
+                consecutive_invalid_responses = 0
                 tool_name = str(command["tool"])
                 args = command.get("args") if isinstance(command.get("args"), dict) else {}
                 _emit(
@@ -175,6 +178,7 @@ class AgentRunner:
                 continue
 
             if command["action"] == "final":
+                consecutive_invalid_responses = 0
                 _emit(
                     event_sink,
                     "agent_final",
@@ -193,17 +197,60 @@ class AgentRunner:
                 return final
 
             if command["action"] == "invalid":
+                consecutive_invalid_responses += 1
+                reason = str(command.get("reason") or "response did not match the Agent Hub protocol")
+                failover.append(
+                    FailoverEvent(
+                        agent=response.agent,
+                        provider=response.provider,
+                        model=response.model,
+                        reason=f"Invalid agent message: {reason}",
+                    )
+                )
+                self.router.cooldown_agent(response.agent)
                 _emit(
                     event_sink,
                     "invalid_response",
-                    message=f"Step {step_number}: model response did not match the agent protocol; retrying.",
+                    message=(
+                        f"Step {step_number}: model response did not match the agent protocol; "
+                        "retrying with another agent when available."
+                    ),
                     step=step_number,
-                    reason=command.get("reason"),
+                    reason=reason,
+                    agent=response.agent,
+                    provider=response.provider,
+                    model=response.model,
                 )
+                if consecutive_invalid_responses >= max_invalid_responses:
+                    text = (
+                        "Agent stopped because repeated model responses did not match "
+                        "the Agent Hub protocol.\n\n"
+                        f"Last invalid response from {response.agent}: {reason}"
+                    )
+                    _emit(
+                        event_sink,
+                        "agent_stopped",
+                        message="Agent stopped after repeated invalid model responses.",
+                        step=step_number,
+                        agent=response.agent,
+                        provider=response.provider,
+                        model=response.model,
+                    )
+                    final = self._with_agent_metadata(
+                        response,
+                        request=request,
+                        text=text,
+                        trace=trace,
+                        failover=failover,
+                        stopped=True,
+                    )
+                    self._record_final(request, final)
+                    return final
                 messages.append({"role": "assistant", "content": response.text})
                 messages.append(_invalid_response_message(command))
                 continue
 
+            consecutive_invalid_responses = 0
             _emit(
                 event_sink,
                 "agent_final",

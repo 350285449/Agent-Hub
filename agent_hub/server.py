@@ -16,7 +16,7 @@ from .payloads import (
 from .router import AgentRouter, RouterError
 
 
-BACKEND_VERSION = "0.2.4"
+BACKEND_VERSION = "0.2.5"
 BACKEND_FEATURES = {
     "native_agent_streaming": True,
     "native_agent_tool_schemas": True,

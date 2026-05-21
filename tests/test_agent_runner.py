@@ -522,6 +522,99 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertEqual(len(seen_messages), 2)
             self.assertIn("response was not a JSON object", seen_messages[1][-1]["content"])
 
+    def test_agent_loop_fails_over_after_invalid_response_when_possible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["bad", "good"],
+                agents={
+                    "bad": AgentConfig(
+                        name="bad",
+                        provider="openai-compatible",
+                        model="bad-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                    "good": AgentConfig(
+                        name="good",
+                        provider="openai-compatible",
+                        model="good-test",
+                        base_url="http://127.0.0.1:9998",
+                    ),
+                },
+            )
+            calls: list[str] = []
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    if self.agent.name == "bad":
+                        return ProviderResult(text="I can help with that.", model=self.agent.model)
+                    return ProviderResult(
+                        text='{"action":"final","answer":"Recovered with the next agent."}',
+                        model=self.agent.model,
+                    )
+
+            router = AgentRouter(config, provider_factory=Provider)
+            events: list[dict] = []
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "remove comments"}],
+                ),
+                event_sink=events.append,
+            )
+
+            self.assertEqual(response.text, "Recovered with the next agent.")
+            self.assertEqual(calls, ["bad", "good"])
+            self.assertTrue(any(event["type"] == "invalid_response" for event in events))
+            self.assertTrue(
+                any("Invalid agent message" in event.reason for event in response.failover)
+            )
+
+    def test_agent_loop_stops_after_repeated_invalid_responses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["bad"],
+                agents={
+                    "bad": AgentConfig(
+                        name="bad",
+                        provider="openai-compatible",
+                        model="bad-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    return ProviderResult(text="Still not JSON.", model=self.agent.model)
+
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "remove comments"}],
+                )
+            )
+
+            self.assertEqual(calls, 2)
+            self.assertTrue(response.raw["agent_hub"]["stopped"])
+            self.assertIn("repeated model responses", response.text)
+
     def test_agent_loop_reprompts_missing_required_tool_args(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -23,19 +23,15 @@ DEFAULT_CONFIG_PATH = Path("agent-hub.config.json")
 class AgentConfig:
     """Runtime settings for one model/provider candidate."""
 
-    # Stable identity used by route lists and user-facing routing details.
     name: str
     provider: str
     model: str
     enabled: bool = True
 
-    # Cost and credential hints. Prefer api_key_env over a literal api_key so
-    # checked-in config files do not accidentally contain secrets.
     free: bool | None = None
     api_key_env: str | None = None
     api_key: str | None = None
 
-    # Provider-specific request settings.
     base_url: str | None = None
     timeout_seconds: float = 120.0
     max_tokens: int | None = None
@@ -75,28 +71,23 @@ class RouteRule:
 class HubConfig:
     """Complete server, workspace, routing, and agent configuration."""
 
-    # HTTP server binding.
     host: str = "127.0.0.1"
     port: int = 8787
 
-    # Workspace-relative folders used for request/response handoff and history.
     state_dir: Path = Path(".agent-hub/state")
     inbox_dir: Path = Path(".agent-hub/inbox")
     outbox_dir: Path = Path(".agent-hub/outbox")
     archive_dir: Path = Path(".agent-hub/archive")
     workspace_dir: Path = Path(".")
 
-    # Runtime policy.
     agent_max_steps: int = 8
     allow_shell_tools: bool = True
     free_only: bool = True
 
-    # Routing tables and the named agent definitions they reference.
     default_route: list[str] = field(default_factory=list)
     routes: list[RouteRule] = field(default_factory=list)
     agents: dict[str, AgentConfig] = field(default_factory=dict)
 
-    # Debug/diagnostic flags kept off by default to avoid noisy responses.
     include_raw_responses: bool = False
     expose_routing_details: bool = False
 
@@ -114,8 +105,6 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> HubConfig:
 
     config_path = Path(path)
     if not config_path.exists():
-        # First-run installs use the in-code starter config until the CLI writes
-        # an agent-hub.config.json file.
         return free_local_config()
 
     raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -129,9 +118,6 @@ def _ollama_cloud_agent(name: str, model: str) -> AgentConfig:
         name=name,
         provider="openai-compatible",
         model=model,
-        # Ollama cloud model IDs are still sent through an Ollama-compatible
-        # endpoint. By default that is the local Ollama daemon; override this
-        # when Ollama is running elsewhere or behind a proxy.
         base_url=os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
         free=True,
         timeout_seconds=180.0,
@@ -144,8 +130,6 @@ def _ollama_cloud_agent(name: str, model: str) -> AgentConfig:
 def free_local_config() -> HubConfig:
     """Starter config with Ollama-cloud control and explicit local control."""
 
-    # These environment variables let users point the starter config at their
-    # preferred local OpenAI-compatible server without editing JSON first.
     local_model = os.environ.get("AGENT_HUB_LOCAL_MODEL", "local-model")
     local_base_url = os.environ.get("AGENT_HUB_LOCAL_BASE_URL", "http://127.0.0.1:8000")
     local_max_tokens = _env_int("AGENT_HUB_LOCAL_MAX_TOKENS", 4096)
@@ -153,7 +137,6 @@ def free_local_config() -> HubConfig:
     local_timeout = _env_float("AGENT_HUB_LOCAL_TIMEOUT_SECONDS", 15.0)
 
     agents = {
-        # Lightweight in-process fallback for local extraction/search-style work.
         "local-research": AgentConfig(
             name="local-research",
             provider="local-research",
@@ -163,8 +146,6 @@ def free_local_config() -> HubConfig:
             cooldown_seconds=5.0,
             context_window=1_000_000,
         ),
-        # Ollama cloud model IDs keep the default route free while avoiding
-        # heavy local model startup for a fresh install.
         "ollama-kimi-cloud": _ollama_cloud_agent("ollama-kimi-cloud", "kimi-k2.6:cloud"),
         "ollama-glm-cloud": _ollama_cloud_agent("ollama-glm-cloud", "glm-5.1:cloud"),
         "ollama-qwen-cloud": _ollama_cloud_agent("ollama-qwen-cloud", "qwen3.5:cloud"),
@@ -173,8 +154,6 @@ def free_local_config() -> HubConfig:
             "nemotron-3-super:cloud",
         ),
         "ollama-gemma-cloud": _ollama_cloud_agent("ollama-gemma-cloud", "gemma4:31b-cloud"),
-        # User-configurable local endpoint for vLLM, llama.cpp servers, or any
-        # other OpenAI-compatible process.
         "custom-local": AgentConfig(
             name="custom-local",
             provider="openai-compatible",
@@ -186,8 +165,6 @@ def free_local_config() -> HubConfig:
             cooldown_seconds=20.0,
             context_window=local_context_window,
         ),
-        # Common local OpenAI-compatible providers. These are listed explicitly
-        # so users can enable them without remembering provider/base URL shapes.
         "ollama-qwen-coder": AgentConfig(
             name="ollama-qwen-coder",
             provider="openai-compatible",
@@ -243,8 +220,6 @@ def free_local_config() -> HubConfig:
             cooldown_seconds=10.0,
             context_window=local_context_window,
         ),
-        # Hosted providers require API keys, so they are defined but disabled
-        # until the user opts in from settings or the CLI.
         "codex": AgentConfig(
             name="codex",
             provider="openai",
@@ -299,8 +274,6 @@ def free_local_config() -> HubConfig:
             cooldown_seconds=30.0,
             context_window=128_000,
         ),
-        # Echo is intentionally last: it can report context, but it cannot carry
-        # the workspace-agent protocol forward.
         "echo": AgentConfig(
             name="echo",
             provider="echo",
@@ -317,7 +290,6 @@ def free_local_config() -> HubConfig:
         free_only=True,
         default_route=default_agent_names(),
         routes=[
-            # Keyword routes are automatic intent shortcuts.
             RouteRule(
                 name="coding",
                 keywords=["code", "bug", "fix", "refactor", "test", "repo"],
@@ -328,8 +300,6 @@ def free_local_config() -> HubConfig:
                 keywords=["agent", "workspace", "edit", "implement"],
                 agents=free_local_agent_names(),
             ),
-            # Empty-keyword routes are explicit route presets rather than
-            # automatic matches.
             RouteRule(
                 name="hybrid-agent",
                 keywords=[],
@@ -378,17 +348,12 @@ def cloud_agent_names() -> list[str]:
 def cloud_route_agent_names() -> list[str]:
     """Default cloud route: Ollama cloud first, then echo diagnostics."""
 
-    # If the shared Ollama endpoint is unavailable, each cloud candidate can
-    # fail before the route reaches echo. Echo only reports context; it cannot
-    # continue the workspace-agent tool protocol.
     return [*ollama_cloud_agent_names(), "echo"]
 
 
 def default_agent_names() -> list[str]:
     """Default route with Ollama cloud agents and no API-key providers."""
 
-    # Keep API-key providers out of the automatic starter route. Users can still
-    # opt into them explicitly by enabling the hosted agents in config.
     return [
         *ollama_cloud_agent_names(),
         "echo",
@@ -398,8 +363,6 @@ def default_agent_names() -> list[str]:
 def config_from_dict(raw: dict[str, Any]) -> HubConfig:
     """Convert the JSON-compatible config shape into dataclass instances."""
 
-    # Persisted config is intentionally plain JSON. Rebuild nested dataclasses
-    # here so the rest of the app can work with typed configuration objects.
     agents = {
         item["name"]: AgentConfig(
             name=item["name"],
@@ -448,7 +411,6 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
 def is_free_agent(agent: AgentConfig) -> bool:
     """Infer whether an agent is free/local enough for free_only routing."""
 
-    # Explicit config always wins over provider heuristics.
     if agent.free is not None:
         return bool(agent.free)
 
@@ -459,8 +421,6 @@ def is_free_agent(agent: AgentConfig) -> bool:
         return True
     if normalize_provider(provider) != "openai-compatible":
         return False
-    # OpenAI-compatible providers are only considered free when their base URL
-    # points at a loopback, private, or link-local address.
     return _is_local_or_private_url(agent.base_url)
 
 
@@ -556,8 +516,6 @@ def _is_local_or_private_url(value: str | None) -> bool:
     try:
         import ipaddress
 
-        # DNS names are not resolved here. Only literal private IPs and known
-        # local hostnames are treated as free/local for routing policy.
         address = ipaddress.ip_address(lowered)
     except ValueError:
         return False
