@@ -1328,6 +1328,11 @@ async function repairGeneratedLocalConfig(configPath) {
     return false;
   }
 
+  const agentNames = new Set(
+    raw.agents
+      .filter((agent) => agent && typeof agent === "object" && typeof agent.name === "string")
+      .map((agent) => agent.name)
+  );
   const hasOfflineDefaults = raw.agents.some((agent) => (
     agent &&
     typeof agent === "object" &&
@@ -1344,19 +1349,38 @@ async function repairGeneratedLocalConfig(configPath) {
     ["lm-studio", "custom-local", "vllm"].includes(agent.name) &&
     agent.model === "local-model"
   ));
+  const hasCloudStyleAliases = ["claude", "gemini", "chatgpt"].every((name) => agentNames.has(name));
+  const hasLegacyMinimalOllamaConfig = (
+    agentNames.has("ollama-qwen-coder") &&
+    agentNames.has("echo") &&
+    !hasCloudStyleAliases
+  );
 
   const sources = await detectLocalModelSources();
-  const shouldRepairGeneratedConfig = hasOfflineDefaults || hasGeneratedLocalConfig || hasPlaceholderLocalModel;
+  const shouldRepairGeneratedConfig = (
+    hasOfflineDefaults ||
+    hasGeneratedLocalConfig ||
+    hasPlaceholderLocalModel ||
+    hasLegacyMinimalOllamaConfig
+  );
   if (shouldRepairGeneratedConfig) {
     const selectedSources = sources.length ? sources : configuredLocalSources(raw);
-    const backupPath = backupConfigFile(configPath);
     const repaired = localConfigForLocalModels(selectedSources);
-    fs.writeFileSync(configPath, `${JSON.stringify(repaired, null, 2)}\n`, "utf8");
-    output.appendLine(`Repaired Agent Hub config at ${configPath}.`);
-    output.appendLine(`Original config was backed up to ${backupPath}.`);
-    output.appendLine(`Configured cloud-style aliases to use: ${describeCloudSources(selectedSources)}`);
-    output.appendLine(`Configured local fallback to use: ${describeLocalSources(selectedSources)}`);
-    return true;
+    const alreadyMatchesDetectedModels = configsEquivalent(raw, repaired);
+    if (alreadyMatchesDetectedModels && !usedLenientParser) {
+      return false;
+    }
+    if (alreadyMatchesDetectedModels && usedLenientParser) {
+      raw = repaired;
+    } else {
+      const backupPath = backupConfigFile(configPath);
+      fs.writeFileSync(configPath, `${JSON.stringify(repaired, null, 2)}\n`, "utf8");
+      output.appendLine(`Repaired Agent Hub config at ${configPath}.`);
+      output.appendLine(`Original config was backed up to ${backupPath}.`);
+      output.appendLine(`Configured cloud-style aliases to use: ${describeCloudSources(selectedSources)}`);
+      output.appendLine(`Configured local fallback to use: ${describeLocalSources(selectedSources)}`);
+      return true;
+    }
   }
 
   if (usedLenientParser) {
@@ -1367,6 +1391,25 @@ async function repairGeneratedLocalConfig(configPath) {
     return true;
   }
   return false;
+}
+
+function configsEquivalent(left, right) {
+  return JSON.stringify(stableConfigValue(left)) === JSON.stringify(stableConfigValue(right));
+}
+
+function stableConfigValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => stableConfigValue(item));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  return Object.keys(value)
+    .sort()
+    .reduce((result, key) => {
+      result[key] = stableConfigValue(value[key]);
+      return result;
+    }, {});
 }
 
 function configuredLocalSources(raw) {
@@ -1470,14 +1513,15 @@ function localConfigForLocalModels(sources) {
 
 function cloudModelSources(localSources = []) {
   const lmStudio = localSources.find((source) => source.name === "lm-studio" && source.detected !== false);
+  const ollama = localSources.find((source) => source.baseUrl === OLLAMA_BASE_URL && source.detected !== false);
   const baseUrl = lmStudio ? lmStudio.baseUrl : OLLAMA_BASE_URL;
-  const sharedLmStudioModel = lmStudio ? lmStudio.model : "";
+  const sharedDetectedModel = lmStudio ? lmStudio.model : (ollama ? ollama.model : "");
   return [
     {
       name: "claude",
       label: "Claude",
       provider: "openai-compatible",
-      model: process.env.AGENT_HUB_CLAUDE_LOCAL_MODEL || sharedLmStudioModel || DEFAULT_CLAUDE_MODEL,
+      model: process.env.AGENT_HUB_CLAUDE_LOCAL_MODEL || sharedDetectedModel || DEFAULT_CLAUDE_MODEL,
       baseUrl: process.env.AGENT_HUB_CLAUDE_LOCAL_BASE_URL || baseUrl,
       contextWindow: lmStudio ? 32768 : 32768
     },
@@ -1485,7 +1529,7 @@ function cloudModelSources(localSources = []) {
       name: "gemini",
       label: "Gemini",
       provider: "openai-compatible",
-      model: process.env.AGENT_HUB_GEMINI_LOCAL_MODEL || sharedLmStudioModel || DEFAULT_GEMINI_MODEL,
+      model: process.env.AGENT_HUB_GEMINI_LOCAL_MODEL || sharedDetectedModel || DEFAULT_GEMINI_MODEL,
       baseUrl: process.env.AGENT_HUB_GEMINI_LOCAL_BASE_URL || baseUrl,
       contextWindow: lmStudio ? 32768 : 128000
     },
@@ -1493,7 +1537,7 @@ function cloudModelSources(localSources = []) {
       name: "chatgpt",
       label: "ChatGPT",
       provider: "openai-compatible",
-      model: process.env.AGENT_HUB_CHATGPT_LOCAL_MODEL || sharedLmStudioModel || DEFAULT_CHATGPT_MODEL,
+      model: process.env.AGENT_HUB_CHATGPT_LOCAL_MODEL || sharedDetectedModel || DEFAULT_CHATGPT_MODEL,
       baseUrl: process.env.AGENT_HUB_CHATGPT_LOCAL_BASE_URL || baseUrl,
       contextWindow: 128000
     }

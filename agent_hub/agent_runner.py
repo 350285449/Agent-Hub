@@ -21,6 +21,21 @@ TOOL_ACTIONS = {
     "run_command",
 }
 
+REQUIRED_TOOL_ARGS = {
+    "read_file": ("path",),
+    "search_files": ("query",),
+    "write_file": ("path", "content"),
+    "replace_in_file": ("path", "old", "new"),
+    "run_command": ("command",),
+}
+NON_EMPTY_TOOL_ARGS = {
+    "read_file": ("path",),
+    "search_files": ("query",),
+    "write_file": ("path",),
+    "replace_in_file": ("path", "old"),
+    "run_command": ("command",),
+}
+
 
 class AgentRunner:
     def __init__(self, config: HubConfig, router: AgentRouter | None = None) -> None:
@@ -46,6 +61,21 @@ class AgentRunner:
             response = self.router.route(step_request)
             last_response = response
             failover.extend(response.failover)
+
+            if response.provider == "echo":
+                stopped = bool(trace or failover)
+                final = self._with_agent_metadata(
+                    response,
+                    request=request,
+                    text=_echo_fallback_text(response, failover=failover, trace=trace)
+                    if stopped
+                    else response.text,
+                    trace=trace,
+                    failover=failover,
+                    stopped=stopped,
+                )
+                self._record_final(request, final)
+                return final
 
             command = _command_from_response(response)
             if command["action"] == "tool":
@@ -185,22 +215,30 @@ class AgentRunner:
 def _command_from_response(response: HubResponse) -> dict[str, Any]:
     tool_call = _openai_tool_call(response.raw) or _anthropic_tool_call(response.raw)
     if tool_call:
-        return tool_call
+        return _validate_tool_command(tool_call)
 
     data = _json_from_text(response.text)
     if not isinstance(data, dict):
         recovered = _malformed_tool_command_from_text(response.text)
-        return recovered or {"action": "text"}
+        return (
+            _validate_tool_command(recovered)
+            if recovered
+            else {"action": "invalid", "reason": "response was not a JSON object"}
+        )
 
     action = str(data.get("action", "")).lower()
     if action == "tool" or "tool" in data:
         tool = data.get("tool") or data.get("name")
         if tool:
-            return _tool_command(str(tool), data.get("args", data.get("arguments", {})))
+            return _validate_tool_command(
+                _tool_command(str(tool), data.get("args", data.get("arguments", {})))
+            )
         return {"action": "invalid", "reason": "tool action is missing a tool name"}
 
     if action in TOOL_ACTIONS:
-        return _tool_command(action, data.get("args", data.get("arguments", {})))
+        return _validate_tool_command(
+            _tool_command(action, data.get("args", data.get("arguments", {})))
+        )
 
     if action == "final" or "final" in data or "answer" in data:
         return {"action": "final", "answer": data.get("answer", data.get("final", ""))}
@@ -230,6 +268,33 @@ def _invalid_json_reason(data: dict[str, Any], action: str) -> str:
     return f"missing action field; keys present: {keys}" if keys else "empty JSON object"
 
 
+def _echo_fallback_text(
+    response: HubResponse,
+    *,
+    failover: list[FailoverEvent],
+    trace: list[dict[str, Any]],
+) -> str:
+    lines = [
+        "Agent Hub reached the echo fallback, which cannot continue the workspace agent protocol.",
+    ]
+    if failover:
+        lines.append("")
+        lines.append("Provider attempts:")
+        for event in failover[-5:]:
+            lines.append(f"- {event.agent}: {event.reason}")
+    if trace:
+        last = trace[-1]
+        result = last.get("result") if isinstance(last.get("result"), dict) else {}
+        status = "failed" if result.get("ok") is False else "ran"
+        lines.append("")
+        lines.append(f"Last tool step: {last.get('tool', 'unknown')} {status}.")
+    if response.text:
+        lines.append("")
+        lines.append("Echo fallback response:")
+        lines.append(response.text)
+    return "\n".join(lines)
+
+
 def _tool_command(tool: str, args: Any) -> dict[str, Any]:
     if isinstance(args, str):
         try:
@@ -237,6 +302,44 @@ def _tool_command(tool: str, args: Any) -> dict[str, Any]:
         except json.JSONDecodeError:
             args = {"input": args}
     return {"action": "tool", "tool": tool, "args": args if isinstance(args, dict) else {}}
+
+
+def _validate_tool_command(command: dict[str, Any]) -> dict[str, Any]:
+    tool = str(command.get("tool", ""))
+    args = command.get("args") if isinstance(command.get("args"), dict) else {}
+    if tool not in TOOL_ACTIONS:
+        return {"action": "invalid", "reason": f"unknown tool {tool!r}"}
+
+    missing = [
+        key
+        for key in REQUIRED_TOOL_ARGS.get(tool, ())
+        if not isinstance(args.get(key), str)
+    ]
+    blank = [
+        key
+        for key in NON_EMPTY_TOOL_ARGS.get(tool, ())
+        if isinstance(args.get(key), str) and not args.get(key).strip()
+    ]
+    if missing or blank:
+        fields = ", ".join(f"args.{key}" for key in [*missing, *blank])
+        return {"action": "invalid", "reason": f"{tool} requires {fields}"}
+
+    if tool == "replace_in_file":
+        expected = args.get("expected_replacements")
+        if expected is not None:
+            try:
+                if int(expected) < 1:
+                    return {
+                        "action": "invalid",
+                        "reason": "replace_in_file expected_replacements must be at least 1",
+                    }
+            except (TypeError, ValueError):
+                return {
+                    "action": "invalid",
+                    "reason": "replace_in_file expected_replacements must be an integer",
+                }
+
+    return {"action": "tool", "tool": tool, "args": args}
 
 
 def _openai_tool_call(raw: dict[str, Any]) -> dict[str, Any] | None:

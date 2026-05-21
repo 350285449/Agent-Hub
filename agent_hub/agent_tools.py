@@ -311,6 +311,7 @@ def tool_result_message(tool_name: str, result: dict[str, Any]) -> dict[str, str
         "role": "user",
         "content": (
             f"Tool result for {tool_name}:\n{content}\n\n"
-            "Continue with exactly one JSON object: another tool call or a final answer."
+            "Continue with exactly one JSON object: another tool call or a final answer. "
+            "If the tool failed, correct the arguments before retrying."
         ),
     }

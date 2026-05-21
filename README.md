@@ -250,6 +250,16 @@ python -m agent_hub local-models
 python -m agent_hub agent --allow-shell-tools "inspect this repo"
 ```
 
+The Ollama desktop app's Launch page lists integrations such as Claude Code,
+Codex App, Hermes Agent, and OpenClaw. Those entries are launch targets, not
+model IDs. Agent-Hub talks to the Ollama model server, so it uses model IDs from
+`ollama list` such as `qwen2.5-coder:7b`; you can pass the same model to a
+Launch integration separately:
+
+```powershell
+ollama launch <integration> --model qwen2.5-coder:7b
+```
+
 For LM Studio, start its local server and load a model. The VS Code extension
 detects the loaded model automatically when it creates or repairs
 `agent-hub.config.json`; for CLI-only use, set `AGENT_HUB_LM_STUDIO_MODEL` to

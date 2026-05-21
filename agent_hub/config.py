@@ -1,3 +1,12 @@
+"""Configuration objects and defaults for the local Agent-Hub runtime.
+
+The app loads a JSON config into these dataclasses, then the router uses the
+routes to pick an enabled agent for each request. Most default "cloud" agent
+names are local aliases: Claude/Gemini/ChatGPT-style routes point at Ollama, LM
+Studio, or another OpenAI-compatible server unless the user explicitly configures
+hosted providers.
+"""
+
 from __future__ import annotations
 
 import json
@@ -422,4 +431,3 @@ def _env_float(name: str, default: float) -> float:
         return float(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
-

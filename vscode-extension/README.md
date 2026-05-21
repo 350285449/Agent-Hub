@@ -12,7 +12,7 @@ through local Claude/Gemini/ChatGPT-style aliases backed by Ollama or LM Studio.
    ```powershell
    cd vscode-extension
    npm run package
-   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.2.vsix --force
+   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.3.vsix --force
    ```
 
 4. Reload VS Code.
@@ -61,6 +61,11 @@ Otherwise, the aliases default to Ollama at `http://127.0.0.1:11434`:
 Use the chat panel's `Pull Ollama Models` button to pull those Ollama defaults.
 Official Claude, Gemini, and ChatGPT models are not downloadable into Ollama or
 LM Studio; these aliases give the extension familiar names while staying local.
+
+Ollama's Launch page shows integrations such as Claude Code, Codex App, Hermes
+Agent, and OpenClaw. They are not model IDs; Agent Hub uses the models reported
+by `ollama list`, then those integrations can be launched separately with
+`ollama launch <integration> --model <model>`.
 
 To see available local model servers, run:
 

@@ -9,6 +9,7 @@ from agent_hub.agent_runner import AgentRunner
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.router import AgentRouter
+from agent_hub.providers import ProviderError
 
 
 class AgentRunnerTests(unittest.TestCase):
@@ -212,6 +213,153 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertEqual(len(seen_messages), 2)
             self.assertIn("Invalid Agent Hub JSON response", seen_messages[1][-1]["content"])
             self.assertIn("unknown action 'initial_greeting'", seen_messages[1][-1]["content"])
+
+    def test_agent_loop_reprompts_plain_text_model_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            seen_messages: list[list[dict]] = []
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    seen_messages.append(request.messages)
+                    if len(seen_messages) == 1:
+                        return ProviderResult(
+                            text="I'm ready to help.",
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text='{"action":"final","answer":"Recovered from plain text."}',
+                        model=self.agent.model,
+                    )
+
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "add comments where needed"}],
+                )
+            )
+
+            self.assertEqual(response.text, "Recovered from plain text.")
+            self.assertEqual(len(seen_messages), 2)
+            self.assertIn("response was not a JSON object", seen_messages[1][-1]["content"])
+
+    def test_agent_loop_reprompts_missing_required_tool_args(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            seen_messages: list[list[dict]] = []
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    seen_messages.append(request.messages)
+                    if len(seen_messages) == 1:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"read_file","args":{}}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text='{"action":"final","answer":"Recovered from missing args."}',
+                        model=self.agent.model,
+                    )
+
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "read README.md"}],
+                )
+            )
+
+            self.assertEqual(response.text, "Recovered from missing args.")
+            self.assertEqual(response.raw["agent_hub"]["steps"], [])
+            self.assertIn("read_file requires args.path", seen_messages[1][-1]["content"])
+
+    def test_agent_loop_stops_when_echo_fallback_is_reached_after_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "note.txt").write_text("hello", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local", "echo"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                    "echo": AgentConfig(
+                        name="echo",
+                        provider="echo",
+                        model="local-echo",
+                    ),
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    if self.agent.name == "echo":
+                        return ProviderResult(
+                            text="[echo] Tool result for read_file: {}",
+                            model=self.agent.model,
+                        )
+                    calls += 1
+                    if calls == 1:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"read_file","args":{"path":"note.txt"}}',
+                            model=self.agent.model,
+                        )
+                    raise ProviderError("local model stopped", retryable=True)
+
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "read note.txt"}],
+                )
+            )
+
+            self.assertIn("echo fallback", response.text)
+            self.assertTrue(response.raw["agent_hub"]["stopped"])
+            self.assertEqual(response.raw["agent_hub"]["steps"][0]["tool"], "read_file")
 
     def test_file_tools_reject_paths_outside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

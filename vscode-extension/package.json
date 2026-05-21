@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Local Agent Hub",
   "description": "Run local Claude/Gemini/ChatGPT-style coding agents from VS Code.",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",

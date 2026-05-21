@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.3
+
+- Repairs older minimal Ollama workspace configs into Claude/Gemini/ChatGPT-style local aliases.
+- Reuses the detected Ollama model for local aliases so installed models are selected automatically.
+- Bundles Agent-Hub agent-loop fixes for malformed tool calls and echo fallback handling.
+
 ## 0.4.2
 
 - Changes Claude, Gemini, and ChatGPT from vendor API defaults into local OpenAI-compatible aliases.
