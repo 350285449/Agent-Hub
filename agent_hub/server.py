@@ -32,6 +32,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "status": "ok",
+                    "version": "0.2.0",
+                    "features": {
+                        "native_agent_streaming": True,
+                    },
                     "agents": [
                         name
                         for name, agent in self.server.config.agents.items()
@@ -39,6 +43,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     ],
                     "configured_agents": list(self.server.config.agents),
                     "free_only": self.server.config.free_only,
+                    "allow_shell_tools": self.server.config.allow_shell_tools,
+                    "workspace_dir": str(self.server.config.workspace_dir),
                 }
             )
             return
@@ -185,6 +191,13 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             send_event(event_type, event)
 
         try:
+            send_event(
+                "stream_open",
+                {
+                    "type": "stream_open",
+                    "message": "Opened live Agent Hub stream.",
+                },
+            )
             if agent_mode:
                 response = self.server.agent_runner.run(request, event_sink=send_progress)
             else:

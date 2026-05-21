@@ -13,6 +13,7 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let lastActiveTextEditor = null;
+const EXTENSION_VERSION = "0.4.8";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
@@ -466,6 +467,7 @@ async function sendChatTurn(panel, message) {
 
   const requestId = message.requestId || `${Date.now()}`;
   panel.webview.postMessage({ type: "typing", requestId });
+  postChatProgress(panel, requestId, `Agent Hub extension ${EXTENSION_VERSION}: checking local server...`);
 
   if (!(await ensureServerReady())) {
     panel.webview.postMessage({
@@ -477,6 +479,29 @@ async function sendChatTurn(panel, message) {
   }
 
   const config = settings();
+  const health = await serverHealth();
+  postChatProgress(panel, requestId, serverConnectionSummary(health, config));
+  if (!serverSupportsNativeStreaming(health)) {
+    output.appendLine("Connected Agent Hub server does not report native streaming support. Restarting the stale server.");
+    postChatProgress(panel, requestId, "Connected server is an older Agent Hub build; restarting to load the bundled backend...");
+    await restartAgentHubServerForUpdate(health);
+    if (!(await waitForStreamingServer(7000))) {
+      panel.webview.postMessage({
+        type: "chatError",
+        requestId,
+        text: [
+          "Agent Hub is online, but it is an older server that cannot stream live progress.",
+          "",
+          "Use Agent Hub: Stop Server, then Agent Hub: Start Server, or close the old terminal/process using port 8787.",
+          "After restart, the chat should show server, route, and tool-step progress instead of sitting at Starting..."
+        ].join("\n")
+      });
+      return;
+    }
+    postChatProgress(panel, requestId, "Restarted Agent Hub with streaming support.");
+  }
+  postChatProgress(panel, requestId, await localModelConnectionSummary());
+
   const workspace = workspaceRoot();
   const context = message.includeSelection
     ? selectedEditorContext() || activeEditorReferenceContext()
@@ -500,19 +525,24 @@ async function sendChatTurn(panel, message) {
   output.appendLine("");
   output.appendLine(`[Agent Hub Chat] ${text}`);
   try {
-    const response = await requestEventStream("POST", "/v1/agent", { ...body, stream: true }, (event) => {
-      const progress = progressTextFromEvent(event);
-      if (!progress) {
-        return;
+    const response = await requestEventStream("POST", "/v1/agent", { ...body, stream: true }, {
+      onEvent: (event) => {
+        const progress = progressTextFromEvent(event);
+        if (!progress) {
+          return;
+        }
+        output.appendLine(`[progress] ${progress}`);
+        postChatProgress(panel, requestId, progress, event.name, event.data);
+      },
+      onNoHeaders: () => {
+        postChatProgress(panel, requestId, "Waiting for Agent Hub to open a stream...");
+      },
+      onNoEvents: () => {
+        postChatProgress(panel, requestId, "Connected to Agent Hub; waiting for the model backend to answer...");
+      },
+      onJsonFallback: () => {
+        postChatProgress(panel, requestId, "Server returned a non-streaming response; restart Agent Hub to load the latest backend.");
       }
-      output.appendLine(`[progress] ${progress}`);
-      panel.webview.postMessage({
-        type: "chatProgress",
-        requestId,
-        text: progress,
-        event: event.name,
-        data: event.data
-      });
     });
     const reply = responseText(response);
     output.appendLine(reply || "(empty response)");
@@ -2239,6 +2269,155 @@ async function ensureServerReady() {
   return isServerOnline();
 }
 
+async function serverHealth() {
+  try {
+    return await requestJson("GET", "/health");
+  } catch (error) {
+    output.appendLine(`Could not read Agent Hub health: ${error.message}`);
+    return null;
+  }
+}
+
+function serverSupportsNativeStreaming(health) {
+  return !!(
+    health &&
+    health.features &&
+    health.features.native_agent_streaming === true
+  );
+}
+
+function serverConnectionSummary(health, config) {
+  if (!health) {
+    return `Connected to ${config.serverUrl}, but health details were unavailable.`;
+  }
+  const agents = Array.isArray(health.agents) && health.agents.length
+    ? health.agents.join(", ")
+    : "none reported";
+  const streaming = serverSupportsNativeStreaming(health) ? "streaming ready" : "old backend, no live stream";
+  const shellTools = health.allow_shell_tools === undefined
+    ? (config.allowShellTools ? "enabled by request" : "disabled by request")
+    : (health.allow_shell_tools ? "enabled" : "disabled in config");
+  return `Connected to Agent Hub at ${config.serverUrl}: ${streaming}; shell tools ${shellTools}; agents: ${agents}.`;
+}
+
+async function waitForStreamingServer(timeoutMs) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const health = await serverHealth();
+    if (serverSupportsNativeStreaming(health)) {
+      return true;
+    }
+    await delay(300);
+  }
+  return false;
+}
+
+async function restartAgentHubServerForUpdate(health) {
+  stopServerProcess();
+  await delay(500);
+  if (await isServerOnline()) {
+    const stillStale = !serverSupportsNativeStreaming(health || await serverHealth());
+    if (stillStale) {
+      await stopAgentHubServerOnConfiguredPort();
+      await delay(800);
+    }
+  }
+  if (!(await isServerOnline())) {
+    await startServer();
+  }
+}
+
+async function stopAgentHubServerOnConfiguredPort() {
+  const config = settings();
+  const url = new URL(config.serverUrl);
+  const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  if (!Number.isInteger(port) || port <= 0) {
+    return;
+  }
+
+  output.appendLine(`Stopping stale Agent Hub process listening on port ${port}.`);
+  if (process.platform === "win32") {
+    const script = [
+      `$port = ${port}`,
+      "$pids = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique",
+      "foreach ($processId in $pids) {",
+      "  if ($processId -and $processId -ne $PID) { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue }",
+      "}",
+    ].join("; ");
+    try {
+      await execFile("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+        timeout: 10000
+      });
+    } catch (error) {
+      output.appendLine(`Could not stop stale Agent Hub process on port ${port}: ${error.message}`);
+    }
+    return;
+  }
+
+  try {
+    await execFile("sh", ["-c", `pids=$(lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null); if [ -n "$pids" ]; then kill $pids; fi`], {
+      timeout: 10000
+    });
+  } catch (error) {
+    output.appendLine(`Could not stop stale Agent Hub process on port ${port}: ${error.message}`);
+  }
+}
+
+async function localModelConnectionSummary() {
+  const checks = await Promise.all([
+    localModelServerSummary("LM Studio", openAiModelsUrl(LM_STUDIO_BASE_URL), "data"),
+    localModelServerSummary("Ollama", `${OLLAMA_BASE_URL}/api/tags`, "models"),
+  ]);
+  const online = checks.filter((check) => check.online);
+  if (online.length) {
+    return `Model backend online: ${online.map((check) => check.text).join("; ")}.`;
+  }
+  return "No local model backend answered yet. Start LM Studio's local server with a loaded model, or start Ollama with a pulled model.";
+}
+
+async function localModelServerSummary(label, url, collectionKey) {
+  try {
+    const payload = await requestExternalJson(url, 3000);
+    const collection = Array.isArray(payload[collectionKey]) ? payload[collectionKey] : [];
+    const models = collection
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+        if (item && typeof item.id === "string") {
+          return item.id;
+        }
+        if (item && typeof item.name === "string") {
+          return item.name;
+        }
+        if (item && typeof item.model === "string") {
+          return item.model;
+        }
+        return "";
+      })
+      .filter(Boolean);
+    return {
+      online: true,
+      text: models.length ? `${label} (${models.slice(0, 3).join(", ")})` : `${label} (no models reported)`,
+    };
+  } catch (_error) {
+    return { online: false, text: `${label} offline` };
+  }
+}
+
+function postChatProgress(panel, requestId, text, event, data) {
+  if (!panel || !text) {
+    return;
+  }
+  panel.webview.postMessage({
+    type: "chatProgress",
+    requestId,
+    text,
+    event: event || "extension_progress",
+    data: data || {}
+  });
+}
+
 function editorContext({ preferSelection }) {
   const editor = currentTextEditor();
   if (!editor) {
@@ -2449,28 +2628,53 @@ function progressTextFromEvent(event) {
   return "";
 }
 
-function requestEventStream(method, pathname, body, onEvent) {
+function requestEventStream(method, pathname, body, callbacks = {}) {
   const config = settings();
   const url = new URL(pathname, config.serverUrl);
   const client = url.protocol === "https:" ? https : http;
   const data = body ? JSON.stringify(body) : undefined;
+  const handlers = typeof callbacks === "function" ? { onEvent: callbacks } : callbacks || {};
 
   return new Promise((resolve, reject) => {
     let settled = false;
     let responseRef = null;
+    let sawEvent = false;
+    let headersTimer = null;
+    let eventTimer = null;
+
+    const clearWatchdogs = () => {
+      if (headersTimer) {
+        clearTimeout(headersTimer);
+        headersTimer = null;
+      }
+      if (eventTimer) {
+        clearTimeout(eventTimer);
+        eventTimer = null;
+      }
+    };
 
     const finishResolve = (value) => {
       if (!settled) {
         settled = true;
+        clearWatchdogs();
         resolve(value);
       }
     };
     const finishReject = (error) => {
       if (!settled) {
         settled = true;
+        clearWatchdogs();
         reject(error);
       }
     };
+
+    if (typeof handlers.onNoHeaders === "function") {
+      headersTimer = setTimeout(() => {
+        if (!settled) {
+          handlers.onNoHeaders();
+        }
+      }, 4000);
+    }
 
     const request = client.request(
       url,
@@ -2485,8 +2689,15 @@ function requestEventStream(method, pathname, body, onEvent) {
       },
       (response) => {
         responseRef = response;
+        if (headersTimer) {
+          clearTimeout(headersTimer);
+          headersTimer = null;
+        }
         const contentType = String(response.headers["content-type"] || "");
         if (!contentType.includes("text/event-stream")) {
+          if (typeof handlers.onJsonFallback === "function") {
+            handlers.onJsonFallback();
+          }
           collectJsonResponse(response, (error, parsed) => {
             if (error) {
               finishReject(error);
@@ -2499,6 +2710,13 @@ function requestEventStream(method, pathname, body, onEvent) {
 
         let buffer = "";
         let finalResponse = null;
+        if (typeof handlers.onNoEvents === "function") {
+          eventTimer = setTimeout(() => {
+            if (!settled && !sawEvent) {
+              handlers.onNoEvents();
+            }
+          }, 7000);
+        }
         response.setEncoding("utf8");
         response.on("data", (chunk) => {
           buffer += String(chunk).replace(/\r\n/g, "\n");
@@ -2508,6 +2726,11 @@ function requestEventStream(method, pathname, body, onEvent) {
             buffer = buffer.slice(boundary + 2);
             const event = parseServerSentEvent(block);
             if (event) {
+              sawEvent = true;
+              if (eventTimer) {
+                clearTimeout(eventTimer);
+                eventTimer = null;
+              }
               if (event.name === "error") {
                 const error = new Error(event.data && event.data.message ? event.data.message : "Agent Hub stream failed");
                 if (event.data && Array.isArray(event.data.failover)) {
@@ -2522,8 +2745,8 @@ function requestEventStream(method, pathname, body, onEvent) {
               if (event.name === "final" && event.data && event.data.response) {
                 finalResponse = event.data.response;
               }
-              if (typeof onEvent === "function") {
-                onEvent(event);
+              if (typeof handlers.onEvent === "function") {
+                handlers.onEvent(event);
               }
             }
             boundary = buffer.indexOf("\n\n");

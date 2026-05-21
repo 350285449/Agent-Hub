@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.8
+
+- Detects stale pre-streaming Agent Hub servers and restarts them when possible.
+- Shows server, route, shell-tool, and local model-backend connection status in chat.
+- Adds watchdog progress messages when the server or model backend has not answered yet.
+
 ## 0.4.7
 
 - Streams live Agent Hub step/tool progress into the chat panel.
