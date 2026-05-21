@@ -16,13 +16,15 @@ from .payloads import (
 from .router import AgentRouter, RouterError
 
 
-BACKEND_VERSION = "0.2.1"
+BACKEND_VERSION = "0.2.3"
 BACKEND_FEATURES = {
     "native_agent_streaming": True,
     "agent_progress_v2": True,
     "active_file_context_resolution": True,
     "current_folder_context": True,
     "workspace_shell_commands": True,
+    "file_write_tools": True,
+    "fast_write_finalize": True,
 }
 
 

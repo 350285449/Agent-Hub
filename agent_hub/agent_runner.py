@@ -148,6 +148,24 @@ class AgentRunner:
                     ok=result.get("ok") is not False,
                     result=_progress_tool_result(tool_name, result),
                 )
+                fast_final_text = _fast_tool_final_text(tool_name, result, request)
+                if fast_final_text:
+                    _emit(
+                        event_sink,
+                        "agent_final",
+                        message="Agent completed after the local file edit.",
+                        step=step_number,
+                    )
+                    final = self._with_agent_metadata(
+                        response,
+                        request=request,
+                        text=fast_final_text,
+                        trace=trace,
+                        failover=failover,
+                        stopped=False,
+                    )
+                    self._record_final(request, final)
+                    return final
                 messages.append({"role": "assistant", "content": response.text})
                 messages.append(tool_result_message(tool_name, result))
                 continue
@@ -440,6 +458,26 @@ def _progress_tool_result(tool_name: str, result: dict[str, Any]) -> dict[str, A
     return {"ok": True, **summarized}
 
 
+def _fast_tool_final_text(tool_name: str, result: dict[str, Any], request: HubRequest) -> str:
+    if not _request_bool(request, "fast_write_finalize", True):
+        return ""
+    if result.get("ok") is False or tool_name not in {"write_file", "replace_in_file"}:
+        return ""
+    payload = result.get("result")
+    if not isinstance(payload, dict):
+        return ""
+    path = _short_value(payload.get("path")) or "the requested file"
+    if tool_name == "write_file":
+        action = "Appended to" if payload.get("append") else "Wrote"
+        chars = payload.get("chars")
+        suffix = f" ({chars} character(s))." if chars is not None else "."
+        return f"{action} {path}{suffix}"
+    replacements = payload.get("replacements")
+    if replacements is not None:
+        return f"Updated {path} with {replacements} replacement(s)."
+    return f"Updated {path}."
+
+
 def _short_value(value: Any, maximum: int = 120) -> str:
     if value is None:
         return ""
@@ -724,6 +762,19 @@ def _request_int(request: HubRequest, key: str, default: int) -> int:
     except (TypeError, ValueError):
         number = default
     return max(1, min(number, 50))
+
+
+def _request_bool(request: HubRequest, key: str, default: bool) -> bool:
+    raw = request.raw or {}
+    hub_options = raw.get("agent_hub")
+    value = hub_options.get(key) if isinstance(hub_options, dict) and key in hub_options else raw.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
 
 
 def _is_prefix(prefix: list[dict], messages: list[dict]) -> bool:

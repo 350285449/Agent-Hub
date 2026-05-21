@@ -13,7 +13,7 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let lastActiveTextEditor = null;
-const EXTENSION_VERSION = "0.4.10";
+const EXTENSION_VERSION = "0.4.12";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
@@ -28,7 +28,9 @@ const REQUIRED_BACKEND_FEATURES = [
   "agent_progress_v2",
   "active_file_context_resolution",
   "current_folder_context",
-  "workspace_shell_commands"
+  "workspace_shell_commands",
+  "file_write_tools",
+  "fast_write_finalize"
 ];
 
 function activate(context) {
@@ -189,6 +191,7 @@ function participantTask(command, prompt, chatContext) {
     "Use the current file path from context when the user refers to an open file by basename.",
     "Use the current folder path and file list from context when the request is about the open folder.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
+    "You can create files with write_file and edit files with replace_in_file. If the user asks to create, edit, fix, update, or implement, do the file change before finalizing.",
     "Shell tools are enabled for agent requests; use run_command for fast inspection, tests, builds, and commands the user asks you to run.",
     "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
     "For direct replies, use the final action; never invent other action names.",
@@ -581,6 +584,7 @@ function codexChatTask(text) {
     "Use the current file path from context when the user refers to an open file by basename.",
     "Use the current folder path and file list from context when the request is about the open folder.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
+    "You can create files with write_file and edit files with replace_in_file. If the user asks to create, edit, fix, update, or implement, do the file change before finalizing.",
     "Shell tools are enabled for agent requests; use run_command for fast inspection, tests, builds, and commands the user asks you to run.",
     "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
     "For direct replies, use the final action; never invent other action names.",
@@ -847,7 +851,7 @@ function chatHtml(webview, logoPath) {
     </header>
     <main class="transcript" id="transcript" aria-live="polite"></main>
     <form id="form">
-      <textarea id="prompt" placeholder="Ask Agent Hub to inspect, explain, or change this workspace"></textarea>
+      <textarea id="prompt" placeholder="Ask Agent Hub to create, edit, inspect, explain, or run commands"></textarea>
       <div class="actions">
         <div class="left">
           <label><input id="includeSelection" type="checkbox"> Include selection</label>
@@ -2123,10 +2127,11 @@ async function runCodingAgent() {
   await sendAgentRequest({
     task: [
       "Work as a coding agent in this workspace.",
-      "Inspect files before editing, keep changes scoped, and verify if possible.",
-      "Use the current file, current folder, and folder file list from context before searching broadly.",
-      "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
-      "Shell tools are enabled for agent requests; use run_command for fast inspection, tests, builds, and commands the user asks you to run.",
+    "Inspect files before editing, keep changes scoped, and verify if possible.",
+    "Use the current file, current folder, and folder file list from context before searching broadly.",
+    "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
+    "You can create files with write_file and edit files with replace_in_file. If the user asks to create, edit, fix, update, or implement, do the file change before finalizing.",
+    "Shell tools are enabled for agent requests; use run_command for fast inspection, tests, builds, and commands the user asks you to run.",
       "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
       "For direct replies, use the final action; never invent other action names.",
       "",

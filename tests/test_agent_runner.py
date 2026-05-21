@@ -169,6 +169,105 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertEqual(steps[0]["tool"], "read_file")
             self.assertIn("# Demo", steps[0]["result"]["result"]["content"])
 
+    def test_agent_loop_fast_finalizes_after_successful_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    return ProviderResult(
+                        text=(
+                            '{"action":"tool","tool":"write_file","args":'
+                            '{"path":"created.txt","content":"hello\\n"}}'
+                        ),
+                        model=self.agent.model,
+                    )
+
+            router = AgentRouter(config, provider_factory=Provider)
+            events: list[dict] = []
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Create created.txt"}],
+                ),
+                event_sink=events.append,
+            )
+
+            self.assertEqual(calls, 1)
+            self.assertEqual((root / "created.txt").read_text(encoding="utf-8"), "hello\n")
+            self.assertIn("Wrote created.txt", response.text)
+            self.assertEqual(response.raw["agent_hub"]["steps"][0]["tool"], "write_file")
+            self.assertIn("Agent completed after the local file edit.", [event.get("message") for event in events])
+
+    def test_agent_loop_can_disable_fast_write_finalize(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return ProviderResult(
+                            text=(
+                                '{"action":"tool","tool":"write_file","args":'
+                                '{"path":"created.txt","content":"hello\\n"}}'
+                            ),
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text='{"action":"final","answer":"Model saw the write result."}',
+                        model=self.agent.model,
+                    )
+
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Create created.txt"}],
+                    raw={"fast_write_finalize": False},
+                )
+            )
+
+            self.assertEqual(calls, 2)
+            self.assertEqual(response.text, "Model saw the write result.")
+
     def test_agent_loop_recovers_malformed_tool_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

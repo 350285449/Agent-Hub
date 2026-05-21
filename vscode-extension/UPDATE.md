@@ -2,8 +2,8 @@
 
 ## Next release
 
-- Target version: `0.4.10`
-- Purpose: publish stale-backend restart, active-folder context, and faster shell-first workspace-agent behavior
+- Target version: `0.4.12`
+- Purpose: publish fast local finalization for file edits, explicit create/edit behavior, and shell-first workspace-agent behavior
 
 ## Summary
 
@@ -25,6 +25,9 @@ This update file records the next VS Code extension release and the key change s
 - Already-running backend servers that lack the current feature flags are restarted automatically.
 - Agent requests include the current folder path and the files in that folder.
 - Shell command use is called out directly in the agent prompt, and backend command timeouts can run longer local jobs.
+- Agent prompts now explicitly require `write_file`/`replace_in_file` when users ask to create, edit, fix, update, or implement.
+- Backend health reports file write tool support so stale servers are not reused.
+- Successful `write_file` and `replace_in_file` calls now finalize locally without another Ollama validation turn.
 - The extension package now stages the Agent Hub Python backend into the VSIX.
 - Startup uses the bundled backend when available and auto-detects a usable Python 3.11+ runtime.
 - Config repair now writes Ollama/local models before Claude/Gemini/ChatGPT-style fallbacks.
@@ -45,5 +48,5 @@ The resulting `.vsix` can be installed locally or published with `npm run publis
 
 ## Notes
 
-- The current `package.json` version is `0.4.10`.
-- If you want this release to be published, run `npm run package` and install/publish the resulting `0.4.10` VSIX.
+- The current `package.json` version is `0.4.12`.
+- If you want this release to be published, run `npm run package` and install/publish the resulting `0.4.12` VSIX.

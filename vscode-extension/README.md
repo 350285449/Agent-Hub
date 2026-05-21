@@ -12,7 +12,7 @@ through Codex/Claude-style local routing backed by LM Studio or Ollama.
    ```powershell
    cd vscode-extension
    npm run package
-   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.10.vsix --force
+   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.12.vsix --force
    ```
 
 4. Reload VS Code.

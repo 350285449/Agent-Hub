@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.12
+
+- Fast-finalizes successful `write_file` and `replace_in_file` calls locally, avoiding an extra Ollama round-trip after file edits.
+- Adds a `fast_write_finalize` backend feature flag and request option.
+
+## 0.4.11
+
+- Makes create/edit behavior explicit in all agent prompts: create with `write_file`, edit with `replace_in_file`, then finalize.
+- Adds a backend feature flag for file write tools so stale backend processes are restarted.
+- Updates the chat prompt placeholder to include create, edit, and command-running workflows.
+
 ## 0.4.10
 
 - Restarts already-running backend servers that lack the active-file resolver and current-folder feature flags.
