@@ -1,18 +1,18 @@
 # Agent Hub
 
 Run Agent-Hub from VS Code and send coding, research, and explanation requests
-through Codex/Claude-style local routing backed by LM Studio or Ollama.
+through either hosted cloud control agents or local LM Studio/Ollama control.
 
 ## Quick Start
 
 1. Install Python 3.11 or newer.
-2. Start LM Studio with a loaded model, or install Ollama.
+2. Set a cloud provider API key, or start LM Studio with a loaded model, or install Ollama.
 3. Package and install the extension:
 
    ```powershell
    cd vscode-extension
    npm run package
-   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.12.vsix --force
+   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.14.vsix --force
    ```
 
 4. Reload VS Code.
@@ -46,23 +46,19 @@ you before sending a request.
 - `agentHub.autoStart`: automatically start the server when needed. Default:
   `true`
 
-## Local Model Aliases
+## Control Agent Mode
 
-Agent Hub is free/local by default. Generated workspace configs try
-Codex/Claude-style aliases first. Those names point to local
-OpenAI-compatible servers unless you explicitly configure hosted providers. When
-LM Studio is available with a loaded model, the extension prefers it at
-`http://127.0.0.1:1234`; otherwise it uses Ollama at
-`http://127.0.0.1:11434`:
+Agent Hub uses cloud control by default. The generated `cloud-agent` route uses
+hosted providers:
 
-- `codex` -> the loaded LM Studio model, or `qwen2.5-coder:7b` through Ollama
-- `claude` -> `qwen2.5-coder:7b`
-- `gemini` -> `gemma3:4b`
-- `chatgpt` -> `llama3.2`
+- `codex` and `chatgpt` -> OpenAI via `OPENAI_API_KEY`
+- `claude` -> Anthropic via `ANTHROPIC_API_KEY`
+- `gemini` -> Google Gemini via `GEMINI_API_KEY`
 
-Use the chat panel's `Pull Ollama Models` button to pull those Ollama defaults.
-Official Claude, Gemini, and ChatGPT models are not downloadable into Ollama or
-LM Studio; these aliases give the extension familiar names while staying local.
+Choose Local in the chat panel, or set `agentHub.agentProviderMode` to `local`,
+to use direct local model routes. Use the chat panel's `Pull Local Control
+Model` button to pull the default Ollama control model, `qwen2.5-coder:7b`.
+`hybrid` tries cloud providers first and then local fallbacks.
 
 Ollama's Launch page shows integrations such as Claude Code, Codex App, Hermes
 Agent, and OpenClaw. They are not model IDs; Agent Hub uses the models reported

@@ -12,6 +12,7 @@ from typing import Sequence
 
 from .agent_runner import AgentRunner
 from .config import (
+    cloud_route_agent_names,
     config_to_dict,
     default_agent_names,
     free_local_config,
@@ -39,7 +40,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     init_parser.add_argument(
         "--with-cloud-examples",
         action="store_true",
-        help="Also add optional provider examples that are not part of the default local aliases.",
+        help="Also add optional provider examples that are not part of the default routes.",
     )
 
     agents_parser = subparsers.add_parser("agents", help="List configured agents and routing status.")
@@ -412,7 +413,7 @@ def _ensure_cloud_routes(data: dict[str, Any]) -> None:
     _ensure_route(
         routes,
         "cloud-agent",
-        default_agent_names(),
+        cloud_route_agent_names(),
     )
 
 
@@ -465,7 +466,7 @@ def _init_config(path: str, force: bool = False, with_cloud_examples: bool = Fal
         _merge_agent_examples(data, _cloud_example_agents())
     config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Wrote {config_path}")
-    print("Pull the Ollama alias models or start LM Studio with a loaded model, then run: agent-hub doctor")
+    print("Set cloud provider API keys, or pull a local control model, then run: agent-hub doctor")
     return 0
 
 

@@ -13,14 +13,15 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let lastActiveTextEditor = null;
-const EXTENSION_VERSION = "0.4.12";
+const EXTENSION_VERSION = "0.4.14";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
-const DEFAULT_CODEX_MODEL = "qwen2.5-coder:7b";
-const DEFAULT_CLAUDE_MODEL = "qwen2.5-coder:7b";
-const DEFAULT_GEMINI_MODEL = "gemma3:4b";
-const DEFAULT_CHATGPT_MODEL = "llama3.2";
+const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
+const DEFAULT_CODEX_MODEL = DEFAULT_OPENAI_MODEL;
+const DEFAULT_CLAUDE_MODEL = "claude-3-5-haiku-latest";
+const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
+const DEFAULT_CHATGPT_MODEL = DEFAULT_OPENAI_MODEL;
 const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
 const REQUIRED_BACKEND_FEATURES = [
@@ -186,7 +187,7 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
 function participantTask(command, prompt, chatContext) {
   const history = participantHistory(chatContext);
   const base = [
-    "You are Agent Hub, a practical local-first coding agent inside VS Code.",
+    "You are Agent Hub, a practical coding agent inside VS Code.",
     "Inspect workspace files before making claims about code.",
     "Use the current file path from context when the user refers to an open file by basename.",
     "Use the current folder path and file list from context when the request is about the open folder.",
@@ -312,7 +313,7 @@ function openChat(context) {
   );
 
   chatPanel.iconPath = logoUri;
-  chatPanel.webview.html = chatHtml(chatPanel.webview, logoUri);
+  chatPanel.webview.html = chatHtml(chatPanel.webview, logoUri, settings().agentProviderMode);
   chatPanel.onDidDispose(() => {
     chatPanel = null;
   });
@@ -350,7 +351,7 @@ async function handleChatMessage(panel, message) {
   }
 
   if (message.type === "pullModel") {
-    await pullDefaultModel(panel);
+    await pullDefaultModel(panel, { useLocalControl: !!message.useLocalControl });
     return;
   }
 
@@ -359,7 +360,7 @@ async function handleChatMessage(panel, message) {
   }
 }
 
-async function pullDefaultModel(panel) {
+async function pullDefaultModel(panel, options = {}) {
   const models = modelsToPull();
   if (modelPullProcess) {
     panel.webview.postMessage({
@@ -389,10 +390,12 @@ async function pullDefaultModel(panel) {
       });
       await pullOllamaModel(model);
     }
+    const localControlSuffix = options.useLocalControl ? " Local control is selected for this chat." : "";
     panel.webview.postMessage({
       type: "modelPullStatus",
       running: false,
-      text: `${models.join(", ")} ready. Try your request again.`
+      providerMode: options.useLocalControl ? "local" : undefined,
+      text: `${models.join(", ")} ready.${localControlSuffix} Try your request again.`
     });
   } catch (error) {
     const message = formatOllamaError(error);
@@ -464,7 +467,7 @@ function modelsToPull() {
 }
 
 function defaultOllamaAliasModels() {
-  return uniqueModels([DEFAULT_CODEX_MODEL, DEFAULT_CLAUDE_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_CHATGPT_MODEL]);
+  return uniqueModels([DEFAULT_OLLAMA_MODEL]);
 }
 
 function uniqueModels(models) {
@@ -491,6 +494,7 @@ async function sendChatTurn(panel, message) {
   }
 
   const config = settings();
+  const providerMode = normalizeAgentProviderMode(message.providerMode || config.agentProviderMode);
   const health = await serverHealth();
   postChatProgress(panel, requestId, serverConnectionSummary(health, config));
   if (!serverSupportsRequiredBackend(health)) {
@@ -512,7 +516,10 @@ async function sendChatTurn(panel, message) {
     }
     postChatProgress(panel, requestId, "Restarted Agent Hub with streaming support.");
   }
-  postChatProgress(panel, requestId, await localModelConnectionSummary());
+  postChatProgress(panel, requestId, controlAgentSummary(providerMode));
+  if (providerMode !== "cloud") {
+    postChatProgress(panel, requestId, await localModelConnectionSummary());
+  }
 
   const workspace = workspaceRoot();
   const context = message.includeSelection
@@ -521,7 +528,7 @@ async function sendChatTurn(panel, message) {
   const body = {
     session_id: message.sessionId || `vscode-chat-${Date.now()}`,
     mode: "agent",
-    route: codingAgentRoute(config),
+    route: codingAgentRoute(config, providerMode),
     task: codexChatTask(text),
     context,
     use_session_history: true,
@@ -530,7 +537,8 @@ async function sendChatTurn(panel, message) {
     agent_max_steps: config.agentMaxSteps,
     workspace_dir: workspace || ".",
     metadata: {
-      source: "vscode-agent-hub-chat"
+      source: "vscode-agent-hub-chat",
+      control_agent_mode: providerMode
     }
   };
 
@@ -579,7 +587,7 @@ async function sendChatTurn(panel, message) {
 
 function codexChatTask(text) {
   return [
-    "Chat with the user as Agent Hub, a careful local-first workspace agent.",
+    "Chat with the user as Agent Hub, a careful workspace agent.",
     "Be conversational and concise. Use workspace tools when inspection or edits are useful.",
     "Use the current file path from context when the user refers to an open file by basename.",
     "Use the current folder path and file list from context when the request is about the open folder.",
@@ -624,9 +632,10 @@ function agentToolSteps(response) {
     });
 }
 
-function chatHtml(webview, logoPath) {
+function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
   const nonce = getNonce();
   const logoSrc = webview.asWebviewUri(logoPath);
+  const providerMode = normalizeAgentProviderMode(initialProviderMode);
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -801,6 +810,15 @@ function chatHtml(webview, logoPath) {
       flex-wrap: wrap;
     }
 
+    select {
+      border: 1px solid var(--input-border);
+      border-radius: 6px;
+      padding: 5px 8px;
+      color: var(--vscode-input-foreground);
+      background: var(--input);
+      font: inherit;
+    }
+
     button {
       border: 0;
       border-radius: 6px;
@@ -825,6 +843,7 @@ function chatHtml(webview, logoPath) {
     }
 
     button:disabled,
+    select:disabled,
     textarea:disabled {
       opacity: 0.65;
       cursor: default;
@@ -855,8 +874,15 @@ function chatHtml(webview, logoPath) {
       <div class="actions">
         <div class="left">
           <label><input id="includeSelection" type="checkbox"> Include selection</label>
+          <label>Control
+            <select id="controlMode">
+              <option value="cloud"${providerMode === "cloud" ? " selected" : ""}>Cloud</option>
+              <option value="hybrid"${providerMode === "hybrid" ? " selected" : ""}>Hybrid</option>
+              <option value="local"${providerMode === "local" ? " selected" : ""}>Local</option>
+            </select>
+          </label>
           <button class="secondary" id="startServer" type="button">Start Server</button>
-          <button class="secondary" id="pullModel" type="button">Pull Ollama Models</button>
+          <button class="secondary" id="pullModel" type="button">Pull Local Control Model</button>
           <button class="secondary" id="checkStatus" type="button">Status</button>
           <button class="secondary" id="clear" type="button">Clear</button>
         </div>
@@ -874,6 +900,7 @@ function chatHtml(webview, logoPath) {
     const send = document.getElementById("send");
     const status = document.getElementById("status");
     const includeSelection = document.getElementById("includeSelection");
+    const controlMode = document.getElementById("controlMode");
     const pullModel = document.getElementById("pullModel");
     const pending = new Map();
     let sessionId = "vscode-chat-" + Date.now().toString(36);
@@ -883,6 +910,7 @@ function chatHtml(webview, logoPath) {
     function setBusy(value) {
       prompt.disabled = value;
       send.disabled = value;
+      controlMode.disabled = value;
       if (!value && workingTimer) {
         clearInterval(workingTimer);
         workingTimer = null;
@@ -1008,7 +1036,8 @@ function chatHtml(webview, logoPath) {
         requestId,
         sessionId,
         text,
-        includeSelection: includeSelection.checked
+        includeSelection: includeSelection.checked,
+        providerMode: controlMode.value
       });
     });
 
@@ -1018,9 +1047,10 @@ function chatHtml(webview, logoPath) {
     });
 
     pullModel.addEventListener("click", () => {
-      status.textContent = "Pulling Ollama models...";
+      status.textContent = "Pulling local control model...";
       pullModel.disabled = true;
-      vscode.postMessage({ type: "pullModel" });
+      controlMode.value = "local";
+      vscode.postMessage({ type: "pullModel", useLocalControl: true });
     });
 
     document.getElementById("checkStatus").addEventListener("click", () => {
@@ -1057,6 +1087,9 @@ function chatHtml(webview, logoPath) {
       }
       if (message.type === "modelPullStatus") {
         status.textContent = message.text;
+        if (message.providerMode) {
+          controlMode.value = message.providerMode;
+        }
         pullModel.disabled = !!message.running;
         if (!message.running && message.text) {
           appendMessage("assistant", message.text);
@@ -1443,8 +1476,8 @@ async function ensureLocalConfig(config, workspace) {
   const data = localConfigForLocalModels(selectedSources);
   fs.writeFileSync(configPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   output.appendLine(`Created Agent Hub config at ${configPath}.`);
-  output.appendLine(`Configured cloud-style aliases to use: ${describeCloudSources(selectedSources)}`);
-  output.appendLine(`Configured local fallback to use: ${describeLocalSources(selectedSources)}`);
+  output.appendLine(`Configured cloud control agents: ${describeCloudSources()}`);
+  output.appendLine(`Configured local control agents: ${describeLocalSources(selectedSources)}`);
   if (!sources.length) {
     output.appendLine("No local model server was detected yet; start LM Studio or Ollama and restart Agent Hub to repair the config to the loaded model.");
   }
@@ -1466,8 +1499,8 @@ async function repairGeneratedLocalConfig(configPath) {
     fs.writeFileSync(configPath, `${JSON.stringify(localConfigForLocalModels(selectedSources), null, 2)}\n`, "utf8");
     output.appendLine(`Backed up unreadable Agent Hub config to ${backupPath}.`);
     output.appendLine(`Created a fresh local Agent Hub config at ${configPath}.`);
-    output.appendLine(`Configured cloud-style aliases to use: ${describeCloudSources(selectedSources)}`);
-    output.appendLine(`Configured local fallback to use: ${describeLocalSources(selectedSources)}`);
+    output.appendLine(`Configured cloud control agents: ${describeCloudSources()}`);
+    output.appendLine(`Configured local control agents: ${describeLocalSources(selectedSources)}`);
     return true;
   }
 
@@ -1497,6 +1530,12 @@ async function repairGeneratedLocalConfig(configPath) {
     agent.model === "local-model"
   ));
   const hasCloudStyleAliases = ["codex", "claude"].every((name) => agentNames.has(name));
+  const hasLocalBackedCloudAliases = raw.agents.some((agent) => (
+    agent &&
+    typeof agent === "object" &&
+    ["codex", "claude", "gemini", "chatgpt"].includes(agent.name) &&
+    agent.provider === "openai-compatible"
+  ));
   const hasLegacyMinimalOllamaConfig = (
     agentNames.has("ollama-qwen-coder") &&
     agentNames.has("echo") &&
@@ -1508,6 +1547,7 @@ async function repairGeneratedLocalConfig(configPath) {
     hasOfflineDefaults ||
     hasGeneratedLocalConfig ||
     hasPlaceholderLocalModel ||
+    hasLocalBackedCloudAliases ||
     hasLegacyMinimalOllamaConfig
   );
   if (shouldRepairGeneratedConfig) {
@@ -1524,8 +1564,8 @@ async function repairGeneratedLocalConfig(configPath) {
       fs.writeFileSync(configPath, `${JSON.stringify(repaired, null, 2)}\n`, "utf8");
       output.appendLine(`Repaired Agent Hub config at ${configPath}.`);
       output.appendLine(`Original config was backed up to ${backupPath}.`);
-      output.appendLine(`Configured cloud-style aliases to use: ${describeCloudSources(selectedSources)}`);
-      output.appendLine(`Configured local fallback to use: ${describeLocalSources(selectedSources)}`);
+      output.appendLine(`Configured cloud control agents: ${describeCloudSources()}`);
+      output.appendLine(`Configured local control agents: ${describeLocalSources(selectedSources)}`);
       return true;
     }
   }
@@ -1589,10 +1629,11 @@ function configuredLocalSources(raw) {
 
 function localConfigForLocalModels(sources) {
   const localSources = sources.length ? sources : fallbackLocalModelSources();
-  const cloudSources = cloudModelSources(localSources);
+  const cloudSources = cloudModelSources();
   const cloudAgents = cloudSources.map((source) => source.name);
   const localAgents = localSources.map((source) => source.name);
-  const routeAgents = [...cloudAgents, ...localAgents, "echo"];
+  const hybridAgents = [...cloudAgents, ...localAgents, "echo"];
+  const cloudRouteAgents = [...cloudAgents, "echo"];
   return {
     host: "127.0.0.1",
     port: 8787,
@@ -1606,12 +1647,12 @@ function localConfigForLocalModels(sources) {
     free_only: true,
     include_raw_responses: false,
     expose_routing_details: true,
-    default_route: routeAgents,
+    default_route: hybridAgents,
     routes: [
       {
         name: "coding",
         keywords: ["code", "bug", "fix", "refactor", "test", "repo"],
-        agents: routeAgents
+        agents: hybridAgents
       },
       {
         name: "local-agent",
@@ -1621,12 +1662,12 @@ function localConfigForLocalModels(sources) {
       {
         name: "hybrid-agent",
         keywords: [],
-        agents: routeAgents
+        agents: hybridAgents
       },
       {
         name: "cloud-agent",
         keywords: [],
-        agents: routeAgents
+        agents: cloudRouteAgents
       },
       {
         name: "research",
@@ -1658,63 +1699,64 @@ function localConfigForLocalModels(sources) {
   };
 }
 
-function cloudModelSources(localSources = []) {
-  const lmStudio = localSources.find((source) => source.name === "lm-studio" && source.detected !== false);
-  const ollama = localSources.find((source) => source.baseUrl === OLLAMA_BASE_URL && source.detected !== false);
-  const fallbackLmStudio = localSources.find((source) => source.name === "lm-studio");
-  const fallbackOllama = localSources.find((source) => source.baseUrl === OLLAMA_BASE_URL);
-  const primary = lmStudio || ollama || fallbackLmStudio || fallbackOllama || lmStudioSource(DEFAULT_LM_STUDIO_MODEL, false);
-  const baseUrl = primary.baseUrl;
-  const sharedDetectedModel = primary.model || "";
+function cloudModelSources() {
   return [
     {
       name: "codex",
       label: "Codex",
-      provider: "openai-compatible",
-      model: process.env.AGENT_HUB_CODEX_LOCAL_MODEL || sharedDetectedModel || DEFAULT_CODEX_MODEL,
-      baseUrl: process.env.AGENT_HUB_CODEX_LOCAL_BASE_URL || baseUrl,
-      contextWindow: 32768
+      provider: "openai",
+      model: process.env.AGENT_HUB_CODEX_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CODEX_MODEL,
+      apiKeyEnv: process.env.AGENT_HUB_CODEX_API_KEY_ENV || "OPENAI_API_KEY",
+      baseUrl: process.env.AGENT_HUB_CODEX_BASE_URL || process.env.OPENAI_BASE_URL || "",
+      contextWindow: 128000
     },
     {
       name: "claude",
       label: "Claude",
-      provider: "openai-compatible",
-      model: process.env.AGENT_HUB_CLAUDE_LOCAL_MODEL || sharedDetectedModel || DEFAULT_CLAUDE_MODEL,
-      baseUrl: process.env.AGENT_HUB_CLAUDE_LOCAL_BASE_URL || baseUrl,
-      contextWindow: lmStudio ? 32768 : 32768
+      provider: "anthropic",
+      model: process.env.AGENT_HUB_CLAUDE_MODEL || DEFAULT_CLAUDE_MODEL,
+      apiKeyEnv: process.env.AGENT_HUB_CLAUDE_API_KEY_ENV || "ANTHROPIC_API_KEY",
+      baseUrl: process.env.AGENT_HUB_CLAUDE_BASE_URL || "",
+      contextWindow: 200000
     },
     {
       name: "gemini",
       label: "Gemini",
-      provider: "openai-compatible",
-      model: process.env.AGENT_HUB_GEMINI_LOCAL_MODEL || sharedDetectedModel || DEFAULT_GEMINI_MODEL,
-      baseUrl: process.env.AGENT_HUB_GEMINI_LOCAL_BASE_URL || baseUrl,
-      contextWindow: lmStudio ? 32768 : 128000
+      provider: "gemini",
+      model: process.env.AGENT_HUB_GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
+      apiKeyEnv: process.env.AGENT_HUB_GEMINI_API_KEY_ENV || "GEMINI_API_KEY",
+      baseUrl: process.env.AGENT_HUB_GEMINI_BASE_URL || "",
+      contextWindow: 1000000
     },
     {
       name: "chatgpt",
       label: "ChatGPT",
-      provider: "openai-compatible",
-      model: process.env.AGENT_HUB_CHATGPT_LOCAL_MODEL || sharedDetectedModel || DEFAULT_CHATGPT_MODEL,
-      baseUrl: process.env.AGENT_HUB_CHATGPT_LOCAL_BASE_URL || baseUrl,
+      provider: "openai",
+      model: process.env.AGENT_HUB_CHATGPT_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CHATGPT_MODEL,
+      apiKeyEnv: process.env.AGENT_HUB_CHATGPT_API_KEY_ENV || "OPENAI_API_KEY",
+      baseUrl: process.env.AGENT_HUB_CHATGPT_BASE_URL || process.env.OPENAI_BASE_URL || "",
       contextWindow: 128000
     }
   ];
 }
 
 function cloudModelAgentConfig(source) {
-  return {
+  const agent = {
     name: source.name,
     provider: source.provider,
     model: source.model,
-    base_url: source.baseUrl,
     enabled: true,
     free: true,
+    api_key_env: source.apiKeyEnv,
     max_tokens: 4096,
     context_window: source.contextWindow,
-    timeout_seconds: 120,
+    timeout_seconds: 60,
     cooldown_seconds: 30
   };
+  if (source.baseUrl) {
+    agent.base_url = source.baseUrl;
+  }
+  return agent;
 }
 
 function localModelAgentConfig(source) {
@@ -1787,9 +1829,9 @@ function describeLocalSources(sources) {
     .join(", ");
 }
 
-function describeCloudSources(localSources = []) {
-  return cloudModelSources(localSources)
-    .map((source) => `${source.label} (${source.model})`)
+function describeCloudSources() {
+  return cloudModelSources()
+    .map((source) => `${source.label} (${source.model}, ${source.apiKeyEnv})`)
     .join(", ");
 }
 
@@ -2257,6 +2299,12 @@ function formatAgentHubError(error) {
       "",
       "ollama pull qwen2.5-coder:7b"
     );
+  } else if (raw.includes("missing API key env")) {
+    lines.push(
+      "Agent Hub tried the cloud control route, but the configured API key is missing.",
+      "",
+      "Set the provider API key environment variable and restart Agent Hub, or choose Local control and pull the local model."
+    );
   } else {
     lines.push(`Agent Hub request failed: ${raw}`);
   }
@@ -2560,6 +2608,7 @@ function currentTextEditor() {
 
 function settings() {
   const config = vscode.workspace.getConfiguration("agentHub");
+  const providerMode = normalizeAgentProviderMode(config.get("agentProviderMode", "cloud"));
   return {
     serverUrl: config.get("serverUrl", "http://127.0.0.1:8787").replace(/\/+$/, ""),
     pythonPath: config.get("pythonPath", "auto"),
@@ -2567,7 +2616,7 @@ function settings() {
     route: config.get("route", "coding"),
     researchRoute: config.get("researchRoute", "research"),
     codingAgentRoute: config.get("codingAgentRoute", "local-agent"),
-    agentProviderMode: config.get("agentProviderMode", "cloud"),
+    agentProviderMode: providerMode,
     agentMaxSteps: config.get("agentMaxSteps", 20),
     allowShellTools: config.get("allowShellTools", true),
     maxTokens: config.get("maxTokens", 1200),
@@ -2575,14 +2624,31 @@ function settings() {
   };
 }
 
-function codingAgentRoute(config) {
-  if (config.agentProviderMode === "cloud") {
+function normalizeAgentProviderMode(value) {
+  const mode = typeof value === "string" ? value.toLowerCase() : "";
+  return ["cloud", "hybrid", "local"].includes(mode) ? mode : "cloud";
+}
+
+function codingAgentRoute(config, providerMode = config.agentProviderMode) {
+  const mode = normalizeAgentProviderMode(providerMode);
+  if (mode === "cloud") {
     return "cloud-agent";
   }
-  if (config.agentProviderMode === "hybrid") {
+  if (mode === "hybrid") {
     return "hybrid-agent";
   }
   return config.codingAgentRoute || "local-agent";
+}
+
+function controlAgentSummary(providerMode) {
+  const mode = normalizeAgentProviderMode(providerMode);
+  if (mode === "local") {
+    return "Control agent: local model route.";
+  }
+  if (mode === "hybrid") {
+    return "Control agent: cloud route with local fallback.";
+  }
+  return "Control agent: cloud route.";
 }
 
 function appendAgentTrace(response) {

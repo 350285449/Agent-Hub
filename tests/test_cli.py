@@ -94,6 +94,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(codex["model"], "gpt-test")
             cloud_route = next(route for route in data["routes"] if route["name"] == "cloud-agent")
             self.assertEqual(cloud_route["agents"][0], "codex")
+            self.assertNotIn("ollama-qwen-coder", cloud_route["agents"])
 
     def test_chat_runs_one_turn_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

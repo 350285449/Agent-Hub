@@ -5,13 +5,11 @@ requests. It accepts JSON, chooses a configured agent/model, can run a small
 tool-using agent loop, and fails over to the next agent when a provider is out
 of quota, rate limited, overloaded, or cannot handle the context size.
 
-It is local-first by default: if no config file exists, Agent-Hub starts with
-Ollama's coder model, then falls back to Claude, Gemini, and ChatGPT-style
-aliases if the first model is unavailable, times out, or cannot handle the
-context/token budget. Those aliases are backed by Ollama, LM Studio, or another
-OpenAI-compatible local server unless you explicitly configure hosted providers.
-It does not automate bypassing free-tier limits,
-scraping web UIs, or downloading proprietary vendor models.
+It uses cloud control agents by default for the model calls that plan and assign
+workspace actions. Local control remains available as an explicit route backed
+by Ollama, LM Studio, or another OpenAI-compatible local server. It does not
+automate bypassing free-tier limits, scraping web UIs, or downloading
+proprietary vendor models.
 
 ## What It Runs
 
@@ -39,10 +37,10 @@ Then open a second terminal for an interactive Codex-style chat:
 .\.venv\Scripts\agent-hub.exe chat --allow-shell-tools
 ```
 
-Or use the VS Code extension command `Agent Hub: Open Codex Chat`.
-Codex chat needs one local OpenAI-compatible model online, such as Ollama or LM
-Studio. The Claude/Gemini/ChatGPT names are local aliases, not proprietary cloud
-models.
+Or use the VS Code extension command `Agent Hub: Open Chat`.
+Cloud control needs the relevant API key environment variable, such as
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`. To stay local, choose
+Local control in the VS Code chat and pull/start an Ollama or LM Studio model.
 
 Manual start without installing into a virtual environment:
 
@@ -50,14 +48,13 @@ Manual start without installing into a virtual environment:
 python -m agent_hub serve --watch-inbox
 ```
 
-That starts with the built-in local-first config. You can tune the local alias
-model defaults with environment variables:
+That starts with the built-in config. You can tune hosted cloud control models
+with environment variables:
 
 ```powershell
-$env:AGENT_HUB_CLAUDE_LOCAL_MODEL = "qwen2.5-coder:7b"
-$env:AGENT_HUB_GEMINI_LOCAL_MODEL = "gemma3:4b"
-$env:AGENT_HUB_CHATGPT_LOCAL_MODEL = "llama3.2"
-$env:AGENT_HUB_CLOUD_ALIAS_BASE_URL = "http://127.0.0.1:11434"
+$env:AGENT_HUB_CODEX_MODEL = "gpt-4o-mini"
+$env:AGENT_HUB_CLAUDE_MODEL = "claude-3-5-haiku-latest"
+$env:AGENT_HUB_GEMINI_MODEL = "gemini-2.0-flash"
 ```
 
 You can also point it at your own local server without a config file:
@@ -78,18 +75,16 @@ python -m agent_hub agents
 python -m agent_hub local-models
 ```
 
-The Ollama fallback aliases use Ollama model IDs. Pull them with:
+The local control route can use Ollama model IDs. Pull the default with:
 
 ```powershell
 ollama pull qwen2.5-coder:7b
-ollama pull gemma3:4b
-ollama pull llama3.2
 ```
 
-In VS Code, `agentHub.agentProviderMode` defaults to `cloud`, which means
-Codex/Claude-style aliases first. Those aliases are still local by default: the
-extension points them at LM Studio when a model is loaded there, otherwise
-Ollama. Set it to `local` for direct LM Studio/Ollama fallback routes only.
+In VS Code, `agentHub.agentProviderMode` defaults to `cloud`, which means hosted
+control providers. Set it to `local`, or choose Local in the chat panel, for
+direct LM Studio/Ollama control. `hybrid` tries cloud providers first and then
+local fallbacks.
 
 Health check:
 
@@ -112,7 +107,7 @@ code vscode-extension
 In the `vscode-extension` window, press `F5` to launch an Extension Development
 Host. In that new VS Code window, open this repository folder and use:
 
-- `Agent Hub: Open Codex Chat`
+- `Agent Hub: Open Chat`
 - `Agent Hub: Start Server`
 - `Agent Hub: Show Status`
 - `Agent Hub: Ask Agent`
@@ -229,10 +224,10 @@ python -m agent_hub chat --allow-shell-tools
 ```
 
 The dedicated `local-agent` route uses only direct free local model endpoints.
-The default `hybrid-agent` and `cloud-agent` routes try cloud-style local aliases
-first, starting with `codex` and `claude`, then direct LM Studio/Ollama
-fallbacks. The CLI agent command also forces `free_only=true` unless you
-explicitly pass `--allow-cloud`.
+The default `cloud-agent` route uses hosted providers such as OpenAI, Anthropic,
+and Gemini. The `hybrid-agent` route tries hosted providers first, then direct
+LM Studio/Ollama fallbacks. The CLI agent command also forces `free_only=true`
+unless you explicitly pass `--allow-cloud`.
 
 Agent-Hub includes free local model presets for:
 
@@ -247,13 +242,13 @@ or with environment variables such as `AGENT_HUB_OLLAMA_CODER_MODEL`,
 `AGENT_HUB_LM_STUDIO_MODEL`, `AGENT_HUB_LOCALAI_MODEL`, and
 `AGENT_HUB_VLLM_MODEL`.
 
-Example Ollama setup:
+Example local-control Ollama setup:
 
 ```powershell
 ollama pull qwen2.5-coder:7b
 ollama serve
 python -m agent_hub local-models
-python -m agent_hub agent --allow-shell-tools "inspect this repo"
+python -m agent_hub agent --route local-agent --allow-shell-tools "inspect this repo"
 ```
 
 The Ollama desktop app's Launch page lists integrations such as Claude Code,
@@ -305,7 +300,7 @@ snippets, and return citations without a paid API key.
     {
       "name": "cloud-agent",
       "keywords": [],
-      "agents": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["codex", "claude", "gemini", "chatgpt", "echo"]
     },
     {
       "name": "research",
@@ -323,11 +318,10 @@ too small. The estimate is intentionally rough, but it keeps obvious over-limit
 requests away from smaller local models.
 
 Provider/model failover is silent by default. If a request does not fit the
-primary Ollama coder model, or a provider reports context/token pressure,
-Agent-Hub tries the next configured fallback while returning the same public
-`model` alias to the client. Set `expose_routing_details` to `true` only when you
-want developer debug output showing the internal agent, model, and failover
-trace.
+primary control model, or a provider reports context/token pressure, Agent-Hub
+tries the next configured fallback while returning the same public `model` alias
+to the client. Set `expose_routing_details` to `true` only when you want
+developer debug output showing the internal agent, model, and failover trace.
 
 Supported providers:
 
@@ -336,20 +330,17 @@ Supported providers:
 - `local-research` for free local extractive web research with citations and
   search results, using no cloud LLM or paid API
 - `gemma` as a friendly alias for a local OpenAI-compatible Gemma/Gemma-like agent
-- `codex`, `claude`, `gemini`, and `chatgpt` in the default config are local
-  `openai-compatible` aliases backed by Ollama, LM Studio, or another local
-  server
-- `openai`, `google`, and `anthropic` API providers are optional advanced
-  integrations you can add explicitly; paid providers are skipped while
+- `codex`, `claude`, `gemini`, and `chatgpt` in the default config are hosted
+  control providers using `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+  `GEMINI_API_KEY`
+- `openai`, `google`, and `anthropic` API providers can be added or changed
+  with `agent-hub enable-provider`; paid providers are skipped while
   `free_only` is true unless marked `free`
 - `echo` for local smoke tests without API keys
 
-The default Codex/Claude/Gemini/ChatGPT agents do not use vendor API keys. To
-point these aliases at LM Studio, start LM Studio's local server and let the VS
-Code extension repair/create the config, or set their `base_url` values to
-`http://127.0.0.1:1234`. To use the real hosted APIs later, add explicit API
-provider entries with `agent-hub enable-provider` and use `--paid` when you want
-`free_only=false`.
+To avoid hosted model calls, use the `local-agent` route or set the VS Code
+control mode to Local. To change hosted providers, use `agent-hub
+enable-provider` and restart the Agent-Hub server.
 
 For cited research answers in VS Code, run `Agent Hub: Research Web`. The
 `local-research` agent is enabled by default, marked free, and returns top-level

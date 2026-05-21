@@ -2,16 +2,18 @@
 
 ## Next release
 
-- Target version: `0.4.12`
-- Purpose: publish fast local finalization for file edits, explicit create/edit behavior, and shell-first workspace-agent behavior
+- Target version: `0.4.14`
+- Purpose: publish hosted cloud control by default, explicit local control selection, fast local finalization for file edits, and shell-first workspace-agent behavior
 
 ## Summary
 
 This update file records the next VS Code extension release and the key change set for the extension.
 
-- VS Code agent requests now default to the `cloud-agent` route.
-- Generated configs route through local `codex` and `claude` aliases before direct local fallbacks.
-- LM Studio is preferred for cloud-style aliases when a loaded model is detected; Ollama remains the fallback.
+- VS Code agent requests now default to the hosted `cloud-agent` route.
+- Marketplace display name is now `Agent Hub Workspace` to avoid the taken `Agent Hub` name.
+- Generated configs use hosted `codex`, `claude`, `gemini`, and `chatgpt` control providers by default.
+- The chat UI can switch between Cloud, Hybrid, and Local control per request.
+- The chat UI can pull the default Ollama local control model and select Local control.
 - Chat and agent requests include the active editor path even when the webview has focus.
 - Backend file tools can resolve a unique bare filename such as `config.py` inside the workspace.
 - Ambiguous bare filenames are reported with workspace-relative path options.
@@ -30,9 +32,9 @@ This update file records the next VS Code extension release and the key change s
 - Successful `write_file` and `replace_in_file` calls now finalize locally without another Ollama validation turn.
 - The extension package now stages the Agent Hub Python backend into the VSIX.
 - Startup uses the bundled backend when available and auto-detects a usable Python 3.11+ runtime.
-- Config repair now writes Ollama/local models before Claude/Gemini/ChatGPT-style fallbacks.
-- If Ollama is running with a coder model, the generated route uses it first; LM Studio remains a fallback.
-- The chat UI can pull all Ollama alias defaults: `qwen2.5-coder:7b`, `gemma3:4b`, and `llama3.2`.
+- Config repair now upgrades generated local-backed cloud aliases into hosted control providers plus explicit local routes.
+- If Ollama is running with a coder model, the Local control route uses it; LM Studio remains a local fallback.
+- The chat UI pulls the default Ollama local control model: `qwen2.5-coder:7b`.
 
 ## Packaging
 
@@ -48,5 +50,5 @@ The resulting `.vsix` can be installed locally or published with `npm run publis
 
 ## Notes
 
-- The current `package.json` version is `0.4.12`.
-- If you want this release to be published, run `npm run package` and install/publish the resulting `0.4.12` VSIX.
+- The current `package.json` version is `0.4.14`.
+- If you want this release to be published, run `npm run package` and install/publish the resulting `0.4.14` VSIX.

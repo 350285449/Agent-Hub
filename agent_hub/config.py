@@ -1,9 +1,10 @@
-"""Configuration objects and defaults for the local Agent-Hub runtime.
+"""Configuration objects and defaults for the Agent-Hub runtime.
 
 The app loads a JSON config into these dataclasses, then the router uses the
-routes to pick an enabled agent for each request. Defaults use cloud-style
-Codex/Claude aliases backed by local OpenAI-compatible servers such as LM Studio
-or Ollama, unless the user explicitly configures hosted providers.
+routes to pick an enabled agent for each request. The default cloud-control
+route uses hosted providers when API keys are available; the local-control route
+keeps Ollama, LM Studio, and other OpenAI-compatible local servers available as
+an explicit option.
 """
 
 from __future__ import annotations
@@ -92,21 +93,13 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> HubConfig:
 
 
 def free_local_config() -> HubConfig:
-    """Local-first config backed by Ollama or another OpenAI-compatible server."""
+    """Starter config with hosted cloud control and explicit local control."""
 
     local_model = os.environ.get("AGENT_HUB_LOCAL_MODEL", "local-model")
     local_base_url = os.environ.get("AGENT_HUB_LOCAL_BASE_URL", "http://127.0.0.1:8000")
     local_max_tokens = _env_int("AGENT_HUB_LOCAL_MAX_TOKENS", 4096)
     local_context_window = _env_int("AGENT_HUB_LOCAL_CONTEXT_WINDOW", 8192)
     local_timeout = _env_float("AGENT_HUB_LOCAL_TIMEOUT_SECONDS", 15.0)
-    cloud_alias_base_url = os.environ.get(
-        "AGENT_HUB_CLOUD_ALIAS_BASE_URL",
-        os.environ.get("AGENT_HUB_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234"),
-    )
-    cloud_alias_model = os.environ.get(
-        "AGENT_HUB_CLOUD_ALIAS_MODEL",
-        os.environ.get("AGENT_HUB_LM_STUDIO_MODEL", "local-model"),
-    )
 
     agents = {
         "local-research": AgentConfig(
@@ -186,44 +179,50 @@ def free_local_config() -> HubConfig:
         ),
         "codex": AgentConfig(
             name="codex",
-            provider="openai-compatible",
-            model=os.environ.get("AGENT_HUB_CODEX_LOCAL_MODEL", cloud_alias_model),
-            base_url=os.environ.get("AGENT_HUB_CODEX_LOCAL_BASE_URL", cloud_alias_base_url),
+            provider="openai",
+            model=os.environ.get(
+                "AGENT_HUB_CODEX_MODEL",
+                os.environ.get("AGENT_HUB_OPENAI_MODEL", "gpt-4o-mini"),
+            ),
             free=True,
-            timeout_seconds=120.0,
-            max_tokens=4096,
-            cooldown_seconds=30.0,
-            context_window=32_768,
-        ),
-        "claude": AgentConfig(
-            name="claude",
-            provider="openai-compatible",
-            model=os.environ.get("AGENT_HUB_CLAUDE_LOCAL_MODEL", cloud_alias_model),
-            base_url=os.environ.get("AGENT_HUB_CLAUDE_LOCAL_BASE_URL", cloud_alias_base_url),
-            free=True,
-            timeout_seconds=120.0,
-            max_tokens=4096,
-            cooldown_seconds=30.0,
-            context_window=32_768,
-        ),
-        "gemini": AgentConfig(
-            name="gemini",
-            provider="openai-compatible",
-            model=os.environ.get("AGENT_HUB_GEMINI_LOCAL_MODEL", "gemma3:4b"),
-            base_url=os.environ.get("AGENT_HUB_GEMINI_LOCAL_BASE_URL", cloud_alias_base_url),
-            free=True,
-            timeout_seconds=120.0,
+            api_key_env=os.environ.get("AGENT_HUB_CODEX_API_KEY_ENV", "OPENAI_API_KEY"),
+            timeout_seconds=60.0,
             max_tokens=4096,
             cooldown_seconds=30.0,
             context_window=128_000,
         ),
+        "claude": AgentConfig(
+            name="claude",
+            provider="anthropic",
+            model=os.environ.get("AGENT_HUB_CLAUDE_MODEL", "claude-3-5-haiku-latest"),
+            free=True,
+            api_key_env=os.environ.get("AGENT_HUB_CLAUDE_API_KEY_ENV", "ANTHROPIC_API_KEY"),
+            timeout_seconds=60.0,
+            max_tokens=4096,
+            cooldown_seconds=30.0,
+            context_window=200_000,
+        ),
+        "gemini": AgentConfig(
+            name="gemini",
+            provider="gemini",
+            model=os.environ.get("AGENT_HUB_GEMINI_MODEL", "gemini-2.0-flash"),
+            free=True,
+            api_key_env=os.environ.get("AGENT_HUB_GEMINI_API_KEY_ENV", "GEMINI_API_KEY"),
+            timeout_seconds=60.0,
+            max_tokens=4096,
+            cooldown_seconds=30.0,
+            context_window=1_000_000,
+        ),
         "chatgpt": AgentConfig(
             name="chatgpt",
-            provider="openai-compatible",
-            model=os.environ.get("AGENT_HUB_CHATGPT_LOCAL_MODEL", "llama3.2"),
-            base_url=os.environ.get("AGENT_HUB_CHATGPT_LOCAL_BASE_URL", cloud_alias_base_url),
+            provider="openai",
+            model=os.environ.get(
+                "AGENT_HUB_CHATGPT_MODEL",
+                os.environ.get("AGENT_HUB_OPENAI_MODEL", "gpt-4o-mini"),
+            ),
             free=True,
-            timeout_seconds=120.0,
+            api_key_env=os.environ.get("AGENT_HUB_CHATGPT_API_KEY_ENV", "OPENAI_API_KEY"),
+            timeout_seconds=60.0,
             max_tokens=4096,
             cooldown_seconds=30.0,
             context_window=128_000,
@@ -262,7 +261,7 @@ def free_local_config() -> HubConfig:
             RouteRule(
                 name="cloud-agent",
                 keywords=[],
-                agents=default_agent_names(),
+                agents=cloud_route_agent_names(),
             ),
             RouteRule(
                 name="research",
@@ -283,8 +282,12 @@ def cloud_agent_names() -> list[str]:
     return ["codex", "claude", "gemini", "chatgpt"]
 
 
+def cloud_route_agent_names() -> list[str]:
+    return [*cloud_agent_names(), "echo"]
+
+
 def default_agent_names() -> list[str]:
-    """Cloud-style local aliases first, then direct local server fallbacks."""
+    """Hosted cloud agents first, then direct local server fallbacks."""
 
     return [
         *cloud_agent_names(),

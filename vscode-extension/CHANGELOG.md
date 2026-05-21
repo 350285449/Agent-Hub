@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.14
+
+- Makes hosted cloud providers the default control-agent route.
+- Adds a chat control selector plus a `Pull Local Control Model` action for local Ollama control.
+- Uses a unique Marketplace display name, `Agent Hub Workspace`.
+
+## 0.4.13
+
+- Makes hosted cloud providers the default control-agent route.
+- Adds a chat control selector plus a `Pull Local Control Model` action for local Ollama control.
+
 ## 0.4.12
 
 - Fast-finalizes successful `write_file` and `replace_in_file` calls locally, avoiding an extra Ollama round-trip after file edits.

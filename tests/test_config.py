@@ -39,39 +39,41 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(is_free_agent(config.agents["claude"]))
         self.assertTrue(is_free_agent(config.agents["gemini"]))
         self.assertTrue(is_free_agent(config.agents["chatgpt"]))
-        self.assertEqual(config.agents["codex"].provider, "openai-compatible")
-        self.assertEqual(config.agents["claude"].provider, "openai-compatible")
-        self.assertEqual(config.agents["gemini"].provider, "openai-compatible")
-        self.assertEqual(config.agents["chatgpt"].provider, "openai-compatible")
-        self.assertEqual(config.agents["codex"].model, "local-model")
-        self.assertEqual(config.agents["claude"].model, "local-model")
-        self.assertEqual(config.agents["gemini"].model, "gemma3:4b")
-        self.assertEqual(config.agents["chatgpt"].model, "llama3.2")
+        self.assertEqual(config.agents["codex"].provider, "openai")
+        self.assertEqual(config.agents["claude"].provider, "anthropic")
+        self.assertEqual(config.agents["gemini"].provider, "gemini")
+        self.assertEqual(config.agents["chatgpt"].provider, "openai")
+        self.assertEqual(config.agents["codex"].model, "gpt-4o-mini")
+        self.assertEqual(config.agents["claude"].model, "claude-3-5-haiku-latest")
+        self.assertEqual(config.agents["gemini"].model, "gemini-2.0-flash")
+        self.assertEqual(config.agents["chatgpt"].model, "gpt-4o-mini")
+        self.assertIsNone(config.agents["codex"].base_url)
+        cloud_route = next(route for route in config.routes if route.name == "cloud-agent")
+        self.assertEqual(cloud_route.agents, [*cloud_agent_names(), "echo"])
+        local_route = next(route for route in config.routes if route.name == "local-agent")
+        self.assertEqual(local_route.agents, free_local_agent_names())
         self.assertEqual(config.agents["ollama-qwen-coder"].timeout_seconds, 300.0)
         self.assertTrue(is_free_agent(config.agents["custom-local"]))
         self.assertTrue(is_free_agent(config.agents["ollama-qwen-coder"]))
 
-    def test_cloud_style_aliases_can_be_configured_from_environment(self) -> None:
+    def test_cloud_agents_can_be_configured_from_environment(self) -> None:
         with patch.dict(
             "os.environ",
             {
-                "AGENT_HUB_CLOUD_ALIAS_BASE_URL": "http://127.0.0.1:1234",
-                "AGENT_HUB_CODEX_LOCAL_MODEL": "codex-local-model",
-                "AGENT_HUB_CLAUDE_LOCAL_MODEL": "lmstudio-loaded-model",
-                "AGENT_HUB_GEMINI_LOCAL_MODEL": "gemma-custom",
-                "AGENT_HUB_CHATGPT_LOCAL_MODEL": "llama-custom",
+                "AGENT_HUB_CODEX_MODEL": "codex-cloud-model",
+                "AGENT_HUB_CLAUDE_MODEL": "claude-cloud-model",
+                "AGENT_HUB_GEMINI_MODEL": "gemini-cloud-model",
+                "AGENT_HUB_CHATGPT_MODEL": "chatgpt-cloud-model",
+                "AGENT_HUB_CODEX_API_KEY_ENV": "CODEX_KEY",
             },
         ):
             config = free_local_config()
 
-        self.assertEqual(config.agents["codex"].base_url, "http://127.0.0.1:1234")
-        self.assertEqual(config.agents["claude"].base_url, "http://127.0.0.1:1234")
-        self.assertEqual(config.agents["gemini"].base_url, "http://127.0.0.1:1234")
-        self.assertEqual(config.agents["chatgpt"].base_url, "http://127.0.0.1:1234")
-        self.assertEqual(config.agents["codex"].model, "codex-local-model")
-        self.assertEqual(config.agents["claude"].model, "lmstudio-loaded-model")
-        self.assertEqual(config.agents["gemini"].model, "gemma-custom")
-        self.assertEqual(config.agents["chatgpt"].model, "llama-custom")
+        self.assertEqual(config.agents["codex"].model, "codex-cloud-model")
+        self.assertEqual(config.agents["claude"].model, "claude-cloud-model")
+        self.assertEqual(config.agents["gemini"].model, "gemini-cloud-model")
+        self.assertEqual(config.agents["chatgpt"].model, "chatgpt-cloud-model")
+        self.assertEqual(config.agents["codex"].api_key_env, "CODEX_KEY")
 
     def test_custom_local_agent_can_be_configured_from_environment(self) -> None:
         with patch.dict(
