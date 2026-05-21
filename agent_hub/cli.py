@@ -380,6 +380,8 @@ def _enable_cloud_provider(
     )
 
     _move_agent_to_front(data, route, agent_name)
+    if route in {"cloud-agent", "hybrid-agent"}:
+        data["cloud_control_selection"] = {"route_mode": "api-key"}
     config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Enabled {agent_name} on route {route} in {config_path}.")
     print(f"Set {agent['api_key_env']} before starting Agent-Hub.")
@@ -462,11 +464,12 @@ def _init_config(path: str, force: bool = False, with_cloud_examples: bool = Fal
         return 1
 
     data = config_to_dict(free_local_config())
+    data["cloud_control_selection"] = {"route_mode": "ollama-cloud"}
     if with_cloud_examples:
         _merge_agent_examples(data, _cloud_example_agents())
     config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Wrote {config_path}")
-    print("Set cloud provider API keys, or pull a local control model, then run: agent-hub doctor")
+    print("Start Ollama for cloud model routing, or set provider API keys, then run: agent-hub doctor")
     return 0
 
 

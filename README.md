@@ -5,9 +5,10 @@ requests. It accepts JSON, chooses a configured agent/model, can run a small
 tool-using agent loop, and fails over to the next agent when a provider is out
 of quota, rate limited, overloaded, or cannot handle the context size.
 
-It uses cloud control agents by default for the model calls that plan and assign
-workspace actions. Local control remains available as an explicit route backed
-by Ollama, LM Studio, or another OpenAI-compatible local server. It does not
+It uses the `cloud-agent` route by default for the model calls that plan and
+assign workspace actions. Fresh configs put Ollama cloud model IDs first on that
+route, so no heavy local model is run unless you explicitly choose Local control.
+Hosted API-key providers remain available as configurable fallbacks. It does not
 automate bypassing free-tier limits, scraping web UIs, or downloading
 proprietary vendor models.
 
@@ -52,9 +53,10 @@ Then open a second terminal for an interactive Codex-style chat:
 ```
 
 Or use the VS Code extension command `Agent Hub: Open Chat`.
-Cloud control needs the relevant API key environment variable, such as
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`. To stay local, choose
-Local control in the VS Code chat and pull/start an Ollama or LM Studio model.
+Cloud control starts with Ollama cloud model IDs in fresh VS Code configs. Those
+models run through Ollama Cloud, not on your local CPU/GPU. To put hosted API-key
+models first, open the chat `Settings` menu, set `Cloud route` to `API-key
+models first`, save provider keys, and restart Agent Hub.
 
 Manual start without installing into a virtual environment:
 
@@ -95,10 +97,12 @@ The local control route can use Ollama model IDs. Pull the default with:
 ollama pull qwen2.5-coder:7b
 ```
 
-In VS Code, `agentHub.agentProviderMode` defaults to `cloud`, which means hosted
-control providers. Set it to `local`, or choose Local in the chat panel, for
-direct LM Studio/Ollama control. `hybrid` tries cloud providers first and then
-local fallbacks.
+In VS Code, `agentHub.agentProviderMode` defaults to `cloud`, which uses the
+configured `cloud-agent` route. Fresh configs use Ollama cloud model IDs first.
+Open the chat `Settings` menu to switch Cloud route priority to API-key models,
+change hosted model IDs, or choose Local for direct local-only control.
+`hybrid` follows the same Cloud route priority and then falls through remaining
+providers.
 
 Health check:
 
@@ -239,10 +243,12 @@ python -m agent_hub chat --allow-shell-tools
 ```
 
 The dedicated `local-agent` route uses only direct free local model endpoints.
-The default `cloud-agent` route uses hosted providers such as OpenAI, Anthropic,
-and Gemini. The `hybrid-agent` route tries hosted providers first, then direct
-LM Studio/Ollama fallbacks. The CLI agent command also forces `free_only=true`
-unless you explicitly pass `--allow-cloud`.
+The default `cloud-agent` route uses Ollama cloud model IDs first, then hosted
+providers such as OpenAI, Anthropic, and Gemini. Set the VS Code chat `Cloud
+route` option to `API-key models first`, or run `agent-hub enable-provider`, to
+move hosted providers to the front. Local LM Studio/Ollama models are only on the
+Local route unless you add them yourself. The CLI agent command also forces
+`free_only=true` unless you explicitly pass `--allow-cloud`.
 
 Agent-Hub includes free local model presets for:
 
@@ -295,12 +301,13 @@ snippets, and return citations without a paid API key.
   "allow_shell_tools": true,
   "free_only": true,
   "expose_routing_details": false,
-  "default_route": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
+  "cloud_control_selection": {"route_mode": "ollama-cloud"},
+  "default_route": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "codex", "claude", "gemini", "chatgpt", "echo"],
   "routes": [
     {
       "name": "coding",
       "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
-      "agents": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "codex", "claude", "gemini", "chatgpt", "echo"]
     },
     {
       "name": "local-agent",
@@ -310,17 +317,17 @@ snippets, and return citations without a paid API key.
     {
       "name": "hybrid-agent",
       "keywords": [],
-      "agents": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "codex", "claude", "gemini", "chatgpt", "echo"]
     },
     {
       "name": "cloud-agent",
       "keywords": [],
-      "agents": ["codex", "claude", "gemini", "chatgpt", "echo"]
+      "agents": ["ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "codex", "claude", "gemini", "chatgpt", "echo"]
     },
     {
       "name": "research",
       "keywords": ["research", "search", "latest", "sources", "web", "news"],
-      "agents": ["local-research", "codex", "claude", "gemini", "chatgpt", "echo"]
+      "agents": ["local-research", "ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud", "codex", "claude", "gemini", "chatgpt", "echo"]
     }
   ]
 }
@@ -345,17 +352,21 @@ Supported providers:
 - `local-research` for free local extractive web research with citations and
   search results, using no cloud LLM or paid API
 - `gemma` as a friendly alias for a local OpenAI-compatible Gemma/Gemma-like agent
-- `codex`, `claude`, `gemini`, and `chatgpt` in the default config are hosted
-  control providers using `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
-  `GEMINI_API_KEY`
+- `ollama-kimi-cloud`, `ollama-glm-cloud`, `ollama-qwen-cloud`,
+  `ollama-nemotron-cloud`, and `ollama-gemma-cloud` use Ollama cloud model IDs
+  through the Ollama server API without downloading or running local weights
+- `codex`, `claude`, `gemini`, and `chatgpt` are hosted control providers using
+  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`; fresh configs keep
+  them behind Ollama cloud models until you choose API-key models first
 - `openai`, `google`, and `anthropic` API providers can be added or changed
   with `agent-hub enable-provider`; paid providers are skipped while
   `free_only` is true unless marked `free`
 - `echo` for local smoke tests without API keys
 
-To avoid hosted model calls, use the `local-agent` route or set the VS Code
-control mode to Local. To change hosted providers, use `agent-hub
-enable-provider` and restart the Agent-Hub server.
+To avoid hosted model calls entirely, use the `local-agent` route or set the VS
+Code control mode to Local. To use hosted providers first, set the VS Code chat
+`Cloud route` option to `API-key models first` or run `agent-hub
+enable-provider`, then restart the Agent-Hub server.
 
 For cited research answers in VS Code, run `Agent Hub: Research Web`. The
 `local-research` agent is enabled by default, marked free, and returns top-level

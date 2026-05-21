@@ -11,12 +11,19 @@
   "free_only": true,
   "include_raw_responses": false,
   "expose_routing_details": true,
+  "cloud_control_selection": {
+    "route_mode": "ollama-cloud"
+  },
   "default_route": [
+    "ollama-kimi-cloud",
+    "ollama-glm-cloud",
+    "ollama-qwen-cloud",
+    "ollama-nemotron-cloud",
+    "ollama-gemma-cloud",
     "codex",
     "claude",
     "gemini",
     "chatgpt",
-    "ollama-local",
     "echo"
   ],
   "routes": [
@@ -31,11 +38,15 @@
         "repo"
       ],
       "agents": [
+        "ollama-kimi-cloud",
+        "ollama-glm-cloud",
+        "ollama-qwen-cloud",
+        "ollama-nemotron-cloud",
+        "ollama-gemma-cloud",
         "codex",
         "claude",
         "gemini",
         "chatgpt",
-        "ollama-local",
         "echo"
       ]
     },
@@ -48,18 +59,23 @@
         "implement"
       ],
       "agents": [
-        "ollama-local"
+        "ollama-local",
+        "lm-studio"
       ]
     },
     {
       "name": "hybrid-agent",
       "keywords": [],
       "agents": [
+        "ollama-kimi-cloud",
+        "ollama-glm-cloud",
+        "ollama-qwen-cloud",
+        "ollama-nemotron-cloud",
+        "ollama-gemma-cloud",
         "codex",
         "claude",
         "gemini",
         "chatgpt",
-        "ollama-local",
         "echo"
       ]
     },
@@ -67,6 +83,11 @@
       "name": "cloud-agent",
       "keywords": [],
       "agents": [
+        "ollama-kimi-cloud",
+        "ollama-glm-cloud",
+        "ollama-qwen-cloud",
+        "ollama-nemotron-cloud",
+        "ollama-gemma-cloud",
         "codex",
         "claude",
         "gemini",
@@ -86,6 +107,11 @@
       ],
       "agents": [
         "local-research",
+        "ollama-kimi-cloud",
+        "ollama-glm-cloud",
+        "ollama-qwen-cloud",
+        "ollama-nemotron-cloud",
+        "ollama-gemma-cloud",
         "codex",
         "claude",
         "gemini",
@@ -103,6 +129,61 @@
       "context_window": 1000000,
       "timeout_seconds": 20,
       "cooldown_seconds": 5
+    },
+    {
+      "name": "ollama-kimi-cloud",
+      "provider": "openai-compatible",
+      "model": "kimi-k2.6:cloud",
+      "base_url": "http://127.0.0.1:11434",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 128000,
+      "timeout_seconds": 180,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "ollama-glm-cloud",
+      "provider": "openai-compatible",
+      "model": "glm-5.1:cloud",
+      "base_url": "http://127.0.0.1:11434",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 128000,
+      "timeout_seconds": 180,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "ollama-qwen-cloud",
+      "provider": "openai-compatible",
+      "model": "qwen3.5:cloud",
+      "base_url": "http://127.0.0.1:11434",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 128000,
+      "timeout_seconds": 180,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "ollama-nemotron-cloud",
+      "provider": "openai-compatible",
+      "model": "nemotron-3-super:cloud",
+      "base_url": "http://127.0.0.1:11434",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 128000,
+      "timeout_seconds": 180,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "ollama-gemma-cloud",
+      "provider": "openai-compatible",
+      "model": "gemma4:31b-cloud",
+      "base_url": "http://127.0.0.1:11434",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 128000,
+      "timeout_seconds": 180,
+      "cooldown_seconds": 10
     },
     {
       "name": "codex",
@@ -157,6 +238,17 @@
       "provider": "openai-compatible",
       "model": "qwen2.5-coder:7b",
       "base_url": "http://127.0.0.1:11434",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 32768,
+      "timeout_seconds": 300,
+      "cooldown_seconds": 10
+    },
+    {
+      "name": "lm-studio",
+      "provider": "openai-compatible",
+      "model": "local-model",
+      "base_url": "http://127.0.0.1:1234",
       "free": true,
       "max_tokens": 4096,
       "context_window": 32768,

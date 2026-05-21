@@ -13,7 +13,7 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let lastActiveTextEditor = null;
-const EXTENSION_VERSION = "0.4.16";
+const EXTENSION_VERSION = "0.4.18";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
@@ -24,6 +24,41 @@ const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
 const DEFAULT_CHATGPT_MODEL = DEFAULT_OPENAI_MODEL;
 const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
+const HOSTED_CLOUD_AGENT_NAMES = ["codex", "claude", "gemini", "chatgpt"];
+const OLLAMA_CLOUD_AGENT_NAMES = [
+  "ollama-kimi-cloud",
+  "ollama-glm-cloud",
+  "ollama-qwen-cloud",
+  "ollama-nemotron-cloud",
+  "ollama-gemma-cloud"
+];
+const OLLAMA_CLOUD_MODELS = [
+  {
+    name: "ollama-kimi-cloud",
+    label: "Kimi K2.6 Cloud",
+    model: "kimi-k2.6:cloud"
+  },
+  {
+    name: "ollama-glm-cloud",
+    label: "GLM 5.1 Cloud",
+    model: "glm-5.1:cloud"
+  },
+  {
+    name: "ollama-qwen-cloud",
+    label: "Qwen 3.5 Cloud",
+    model: "qwen3.5:cloud"
+  },
+  {
+    name: "ollama-nemotron-cloud",
+    label: "Nemotron 3 Super Cloud",
+    model: "nemotron-3-super:cloud"
+  },
+  {
+    name: "ollama-gemma-cloud",
+    label: "Gemma 4 31B Cloud",
+    model: "gemma4:31b-cloud"
+  }
+];
 const OLLAMA_INSTALL_OPTIONS = [
   {
     model: DEFAULT_OLLAMA_MODEL,
@@ -516,7 +551,8 @@ function chatSettingsPayload(config) {
     agentMaxSteps: config.agentMaxSteps,
     allowShellTools: config.allowShellTools,
     maxTokens: config.maxTokens,
-    autoStart: config.autoStart
+    autoStart: config.autoStart,
+    ...cloudModelSettingsPayload(config)
   };
 }
 
@@ -527,14 +563,21 @@ async function saveChatSettingsFromWebview(panel, rawSettings) {
       ? vscode.ConfigurationTarget.Workspace
       : vscode.ConfigurationTarget.Global;
     const config = vscode.workspace.getConfiguration("agentHub");
-    for (const [key, value] of Object.entries(next)) {
+    for (const [key, value] of Object.entries(next.workspaceSettings)) {
       await config.update(key, value, target);
     }
+    const configPath = workspaceRoot()
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspaceRoot())
+      : "";
+    const configChanged = configPath
+      ? await saveCloudModelSettingsToConfig(configPath, next.cloudSettings)
+      : false;
     const scope = target === vscode.ConfigurationTarget.Workspace ? "workspace" : "user";
     const restartNote = serverProcess || (await isServerOnline())
       ? " Restart Agent Hub to use server or route changes."
       : "";
-    postChatSettings(panel, `Saved ${scope} settings.${restartNote}`);
+    const configNote = configChanged ? " Updated Agent Hub model routing." : "";
+    postChatSettings(panel, `Saved ${scope} settings.${configNote}${restartNote}`);
   } catch (error) {
     postChatSettings(panel, `Could not save settings: ${error.message}`);
   }
@@ -545,17 +588,26 @@ function normalizeChatSettingsInput(value) {
   const input = value && typeof value === "object" ? value : {};
   const serverUrl = normalizeServerUrl(input.serverUrl, current.serverUrl);
   return {
-    serverUrl,
-    pythonPath: cleanSettingString(input.pythonPath, current.pythonPath),
-    configPath: cleanSettingString(input.configPath, current.configPath),
-    route: cleanSettingString(input.route, current.route),
-    researchRoute: cleanSettingString(input.researchRoute, current.researchRoute),
-    codingAgentRoute: cleanSettingString(input.codingAgentRoute, current.codingAgentRoute),
-    agentProviderMode: normalizeAgentProviderMode(input.agentProviderMode || current.agentProviderMode),
-    agentMaxSteps: cleanSettingInteger(input.agentMaxSteps, current.agentMaxSteps, 1, 100),
-    allowShellTools: !!input.allowShellTools,
-    maxTokens: cleanSettingInteger(input.maxTokens, current.maxTokens, 1, 200000),
-    autoStart: !!input.autoStart
+    workspaceSettings: {
+      serverUrl,
+      pythonPath: cleanSettingString(input.pythonPath, current.pythonPath),
+      configPath: cleanSettingString(input.configPath, current.configPath),
+      route: cleanSettingString(input.route, current.route),
+      researchRoute: cleanSettingString(input.researchRoute, current.researchRoute),
+      codingAgentRoute: cleanSettingString(input.codingAgentRoute, current.codingAgentRoute),
+      agentProviderMode: normalizeAgentProviderMode(input.agentProviderMode || current.agentProviderMode),
+      agentMaxSteps: cleanSettingInteger(input.agentMaxSteps, current.agentMaxSteps, 1, 100),
+      allowShellTools: !!input.allowShellTools,
+      maxTokens: cleanSettingInteger(input.maxTokens, current.maxTokens, 1, 200000),
+      autoStart: !!input.autoStart
+    },
+    cloudSettings: {
+      cloudRouteMode: normalizeCloudRouteMode(input.cloudRouteMode || "ollama-cloud"),
+      codexModel: cleanSettingString(input.codexModel, DEFAULT_CODEX_MODEL),
+      claudeModel: cleanSettingString(input.claudeModel, DEFAULT_CLAUDE_MODEL),
+      geminiModel: cleanSettingString(input.geminiModel, DEFAULT_GEMINI_MODEL),
+      chatgptModel: cleanSettingString(input.chatgptModel, DEFAULT_CHATGPT_MODEL)
+    }
   };
 }
 
@@ -584,6 +636,58 @@ function normalizeServerUrl(value, fallback) {
     throw new Error("Server URL must use http:// or https://.");
   }
   return text;
+}
+
+function normalizeCloudRouteMode(value) {
+  const mode = typeof value === "string" ? value.toLowerCase() : "";
+  if (mode === "local") {
+    return "ollama-cloud";
+  }
+  return ["ollama-cloud", "api-key"].includes(mode) ? mode : "ollama-cloud";
+}
+
+function cloudModelSettingsPayload(config) {
+  const fallback = {
+    cloudRouteMode: "ollama-cloud",
+    codexModel: DEFAULT_CODEX_MODEL,
+    claudeModel: DEFAULT_CLAUDE_MODEL,
+    geminiModel: DEFAULT_GEMINI_MODEL,
+    chatgptModel: DEFAULT_CHATGPT_MODEL
+  };
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    return fallback;
+  }
+
+  const configPath = resolveConfigPath(config.configPath, workspace);
+  if (!fs.existsSync(configPath)) {
+    return fallback;
+  }
+
+  try {
+    const raw = parseJsonConfigText(fs.readFileSync(configPath, "utf8")).value;
+    if (!raw || typeof raw !== "object") {
+      return fallback;
+    }
+    return {
+      cloudRouteMode: configCloudRouteMode(raw),
+      codexModel: modelForAgent(raw, "codex", DEFAULT_CODEX_MODEL),
+      claudeModel: modelForAgent(raw, "claude", DEFAULT_CLAUDE_MODEL),
+      geminiModel: modelForAgent(raw, "gemini", DEFAULT_GEMINI_MODEL),
+      chatgptModel: modelForAgent(raw, "chatgpt", DEFAULT_CHATGPT_MODEL)
+    };
+  } catch (_error) {
+    return fallback;
+  }
+}
+
+function modelForAgent(data, name, fallback) {
+  const agent = Array.isArray(data.agents)
+    ? data.agents.find((item) => item && typeof item === "object" && item.name === name)
+    : null;
+  return agent && typeof agent.model === "string" && agent.model.trim()
+    ? agent.model.trim()
+    : fallback;
 }
 
 async function apiKeyStatusRows() {
@@ -1385,6 +1489,13 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
                 </select>
               </label>
               <label class="settings-field">
+                <span>Cloud route</span>
+                <select id="settingCloudRouteMode">
+                  <option value="ollama-cloud">Ollama cloud models first</option>
+                  <option value="api-key">API-key models first</option>
+                </select>
+              </label>
+              <label class="settings-field">
                 <span>Server URL</span>
                 <input id="settingServerUrl" type="text" autocomplete="off">
               </label>
@@ -1415,6 +1526,22 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
               <label class="settings-field">
                 <span>Agent max steps</span>
                 <input id="settingAgentMaxSteps" type="number" min="1" max="100" step="1">
+              </label>
+              <label class="settings-field">
+                <span>OpenAI / Codex model</span>
+                <input id="settingCodexModel" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Claude model</span>
+                <input id="settingClaudeModel" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Gemini model</span>
+                <input id="settingGeminiModel" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>ChatGPT model</span>
+                <input id="settingChatgptModel" type="text" autocomplete="off">
               </label>
             </div>
             <div class="settings-row">
@@ -1495,6 +1622,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     const controlMode = document.getElementById("controlMode");
     const pullModel = document.getElementById("pullModel");
     const settingInputs = {
+      cloudRouteMode: document.getElementById("settingCloudRouteMode"),
       serverUrl: document.getElementById("settingServerUrl"),
       pythonPath: document.getElementById("settingPythonPath"),
       configPath: document.getElementById("settingConfigPath"),
@@ -1503,6 +1631,10 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       researchRoute: document.getElementById("settingResearchRoute"),
       maxTokens: document.getElementById("settingMaxTokens"),
       agentMaxSteps: document.getElementById("settingAgentMaxSteps"),
+      codexModel: document.getElementById("settingCodexModel"),
+      claudeModel: document.getElementById("settingClaudeModel"),
+      geminiModel: document.getElementById("settingGeminiModel"),
+      chatgptModel: document.getElementById("settingChatgptModel"),
       allowShellTools: document.getElementById("settingAllowShellTools"),
       autoStart: document.getElementById("settingAutoStart")
     };
@@ -1546,6 +1678,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     function applyChatSettings(settings, messageText) {
       const next = settings || {};
       controlMode.value = next.agentProviderMode || "cloud";
+      settingInputs.cloudRouteMode.value = next.cloudRouteMode || "ollama-cloud";
       settingInputs.serverUrl.value = next.serverUrl || "";
       settingInputs.pythonPath.value = next.pythonPath || "";
       settingInputs.configPath.value = next.configPath || "";
@@ -1554,6 +1687,10 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       settingInputs.researchRoute.value = next.researchRoute || "";
       settingInputs.maxTokens.value = next.maxTokens || "";
       settingInputs.agentMaxSteps.value = next.agentMaxSteps || "";
+      settingInputs.codexModel.value = next.codexModel || "";
+      settingInputs.claudeModel.value = next.claudeModel || "";
+      settingInputs.geminiModel.value = next.geminiModel || "";
+      settingInputs.chatgptModel.value = next.chatgptModel || "";
       settingInputs.allowShellTools.checked = !!next.allowShellTools;
       settingInputs.autoStart.checked = !!next.autoStart;
       if (messageText !== undefined) {
@@ -1570,8 +1707,13 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
         codingAgentRoute: settingInputs.codingAgentRoute.value,
         researchRoute: settingInputs.researchRoute.value,
         agentProviderMode: controlMode.value,
+        cloudRouteMode: settingInputs.cloudRouteMode.value,
         maxTokens: settingInputs.maxTokens.value,
         agentMaxSteps: settingInputs.agentMaxSteps.value,
+        codexModel: settingInputs.codexModel.value,
+        claudeModel: settingInputs.claudeModel.value,
+        geminiModel: settingInputs.geminiModel.value,
+        chatgptModel: settingInputs.chatgptModel.value,
         allowShellTools: settingInputs.allowShellTools.checked,
         autoStart: settingInputs.autoStart.checked
       };
@@ -2245,7 +2387,7 @@ async function ensureLocalConfig(config, workspace) {
   const data = localConfigForLocalModels(selectedSources);
   fs.writeFileSync(configPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   output.appendLine(`Created Agent Hub config at ${configPath}.`);
-  output.appendLine(`Configured cloud control agents: ${describeCloudSources()}`);
+  output.appendLine(`Configured cloud control agents: ${describeCloudSources(selectedSources)}`);
   output.appendLine(`Configured local control agents: ${describeLocalSources(selectedSources)}`);
   if (!sources.length) {
     output.appendLine("No local model server was detected yet; start LM Studio or Ollama and restart Agent Hub to repair the config to the loaded model.");
@@ -2268,7 +2410,7 @@ async function repairGeneratedLocalConfig(configPath) {
     fs.writeFileSync(configPath, `${JSON.stringify(localConfigForLocalModels(selectedSources), null, 2)}\n`, "utf8");
     output.appendLine(`Backed up unreadable Agent Hub config to ${backupPath}.`);
     output.appendLine(`Created a fresh local Agent Hub config at ${configPath}.`);
-    output.appendLine(`Configured cloud control agents: ${describeCloudSources()}`);
+    output.appendLine(`Configured cloud control agents: ${describeCloudSources(selectedSources)}`);
     output.appendLine(`Configured local control agents: ${describeLocalSources(selectedSources)}`);
     return true;
   }
@@ -2324,7 +2466,10 @@ async function repairGeneratedLocalConfig(configPath) {
     const selectedSources = explicitLocalSources.length
       ? explicitLocalSources
       : (sources.length ? sources : configuredLocalSources(raw));
-    const repaired = localConfigForLocalModels(selectedSources);
+    const repaired = localConfigForLocalModels(selectedSources, {
+      cloudRouteMode: configCloudRouteMode(raw),
+      cloudSettings: cloudModelSettingsFromConfig(raw)
+    });
     if (explicitLocalSources.length) {
       repaired.local_model_selection = raw.local_model_selection;
     }
@@ -2339,7 +2484,7 @@ async function repairGeneratedLocalConfig(configPath) {
       fs.writeFileSync(configPath, `${JSON.stringify(repaired, null, 2)}\n`, "utf8");
       output.appendLine(`Repaired Agent Hub config at ${configPath}.`);
       output.appendLine(`Original config was backed up to ${backupPath}.`);
-      output.appendLine(`Configured cloud control agents: ${describeCloudSources()}`);
+      output.appendLine(`Configured cloud control agents: ${describeCloudSources(selectedSources)}`);
       output.appendLine(`Configured local control agents: ${describeLocalSources(selectedSources)}`);
       return true;
     }
@@ -2377,17 +2522,6 @@ function stableConfigValue(value) {
 function configuredLocalSources(raw) {
   const agents = raw && Array.isArray(raw.agents) ? raw.agents : [];
   const sources = [];
-  const lmStudio = agents.find((agent) => (
-    agent &&
-    typeof agent === "object" &&
-    agent.name === "lm-studio" &&
-    typeof agent.model === "string" &&
-    agent.model.trim()
-  ));
-  if (lmStudio) {
-    const model = lmStudio.model.trim();
-    sources.push(lmStudioSource(model, model !== DEFAULT_LM_STUDIO_MODEL));
-  }
   const ollama = agents.find((agent) => (
     agent &&
     typeof agent === "object" &&
@@ -2398,6 +2532,17 @@ function configuredLocalSources(raw) {
   if (ollama) {
     const model = ollama.model.trim();
     sources.push(ollamaSource(model, model !== DEFAULT_OLLAMA_MODEL));
+  }
+  const lmStudio = agents.find((agent) => (
+    agent &&
+    typeof agent === "object" &&
+    agent.name === "lm-studio" &&
+    typeof agent.model === "string" &&
+    agent.model.trim()
+  ));
+  if (lmStudio) {
+    const model = lmStudio.model.trim();
+    sources.push(lmStudioSource(model, model !== DEFAULT_LM_STUDIO_MODEL));
   }
   return sources.length ? sources : fallbackLocalModelSources();
 }
@@ -2418,6 +2563,16 @@ function selectedLocalSources(raw) {
     return [ollamaSource(model, true)];
   }
   return [];
+}
+
+function cloudModelSettingsFromConfig(raw) {
+  return {
+    cloudRouteMode: configCloudRouteMode(raw),
+    codexModel: modelForAgent(raw, "codex", DEFAULT_CODEX_MODEL),
+    claudeModel: modelForAgent(raw, "claude", DEFAULT_CLAUDE_MODEL),
+    geminiModel: modelForAgent(raw, "gemini", DEFAULT_GEMINI_MODEL),
+    chatgptModel: modelForAgent(raw, "chatgpt", DEFAULT_CHATGPT_MODEL)
+  };
 }
 
 function localModelSelection(source) {
@@ -2465,6 +2620,52 @@ function applyLocalModelSelectionToConfig(configPath, source) {
   return true;
 }
 
+async function saveCloudModelSettingsToConfig(configPath, cloudSettings) {
+  const existingText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
+  let data;
+  let backedUpExisting = false;
+  if (existingText) {
+    try {
+      data = parseJsonConfigText(existingText).value;
+    } catch (_error) {
+      const backupPath = backupConfigFile(configPath);
+      backedUpExisting = true;
+      output.appendLine(`Backed up unreadable Agent Hub config to ${backupPath}.`);
+    }
+  }
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    const sources = await detectLocalModelSources();
+    data = localConfigForLocalModels(sources.length ? sources : fallbackLocalModelSources(), {
+      cloudRouteMode: cloudSettings.cloudRouteMode
+    });
+  }
+
+  data.agents = Array.isArray(data.agents) ? data.agents : [];
+  data.routes = Array.isArray(data.routes) ? data.routes : [];
+  data.cloud_control_selection = {
+    route_mode: normalizeCloudRouteMode(cloudSettings.cloudRouteMode)
+  };
+
+  for (const source of cloudModelSources(cloudSettings)) {
+    upsertAgentConfig(data.agents, cloudModelAgentConfig(source));
+  }
+  ensureDefaultOllamaCloudAgents(data);
+  applyCloudRouteMode(data, data.cloud_control_selection.route_mode);
+
+  const nextText = `${JSON.stringify(data, null, 2)}\n`;
+  if (existingText && stableConfigText(existingText) === stableConfigText(nextText)) {
+    return false;
+  }
+  if (existingText && !backedUpExisting) {
+    const backupPath = backupConfigFile(configPath);
+    output.appendLine(`Backed up Agent Hub config to ${backupPath}.`);
+  }
+  fs.writeFileSync(configPath, nextText, "utf8");
+  output.appendLine(`Configured cloud route mode: ${data.cloud_control_selection.route_mode}.`);
+  return true;
+}
+
 function stableConfigText(text) {
   try {
     return JSON.stringify(stableConfigValue(parseJsonConfigText(text).value));
@@ -2499,6 +2700,105 @@ function ensureLocalModelRoutes(data, agentName) {
   data.default_route = ensureAgentFallback(listOrEmpty(data.default_route), agentName);
 }
 
+function ensureDefaultOllamaCloudAgents(data) {
+  const agents = Array.isArray(data.agents) ? data.agents : [];
+  const existing = new Set(
+    agents
+      .filter((agent) => agent && typeof agent === "object" && typeof agent.name === "string")
+      .map((agent) => agent.name)
+  );
+  for (const source of ollamaCloudModelSources()) {
+    if (!existing.has(source.name)) {
+      upsertAgentConfig(agents, ollamaCloudModelAgentConfig(source));
+      existing.add(source.name);
+    }
+  }
+  data.agents = agents;
+}
+
+function applyCloudRouteMode(data, mode) {
+  const routeMode = normalizeCloudRouteMode(mode);
+  const routeAgents = cloudRouteAgentsForConfig(data, routeMode);
+  setRouteAgents(data.routes, "cloud-agent", [], routeAgents);
+  setRouteAgents(data.routes, "hybrid-agent", [], routeAgents);
+  setRouteAgents(data.routes, "coding", ["code", "bug", "fix", "refactor", "test", "repo"], routeAgents);
+  setRouteAgents(data.routes, "research", ["research", "search", "latest", "sources", "web", "news"], [
+    "local-research",
+    ...routeAgents.filter((name) => name !== "echo"),
+    "echo"
+  ]);
+  data.default_route = routeAgents;
+}
+
+function setRouteAgents(routes, name, keywords, agents) {
+  let route = routes.find((item) => item && typeof item === "object" && item.name === name);
+  if (!route) {
+    route = { name, keywords, agents: [] };
+    routes.push(route);
+  }
+  if (!Array.isArray(route.keywords)) {
+    route.keywords = keywords;
+  }
+  route.agents = uniqueAgentNames(agents);
+}
+
+function cloudRouteAgentsForConfig(data, mode) {
+  const ollamaCloudAgents = ollamaCloudAgentNames(data);
+  const hostedAgents = hostedCloudAgentNames(data);
+  const ordered = normalizeCloudRouteMode(mode) === "api-key"
+    ? [...hostedAgents, ...ollamaCloudAgents, "echo"]
+    : [...ollamaCloudAgents, ...hostedAgents, "echo"];
+  return uniqueAgentNames(ordered);
+}
+
+function ollamaCloudAgentNames(data) {
+  const existing = agentNameSet(data);
+  const names = OLLAMA_CLOUD_AGENT_NAMES.filter((name) => existing.has(name));
+  return names.length ? names : OLLAMA_CLOUD_AGENT_NAMES;
+}
+
+function hostedCloudAgentNames(data) {
+  const existing = agentNameSet(data);
+  const names = HOSTED_CLOUD_AGENT_NAMES.filter((name) => existing.has(name));
+  return names.length ? names : HOSTED_CLOUD_AGENT_NAMES;
+}
+
+function agentNameSet(data) {
+  return new Set(
+    (Array.isArray(data.agents) ? data.agents : [])
+      .filter((agent) => agent && typeof agent === "object" && typeof agent.name === "string")
+      .map((agent) => agent.name)
+  );
+}
+
+function configCloudRouteMode(data) {
+  const explicit = data && data.cloud_control_selection;
+  if (explicit && typeof explicit === "object" && typeof explicit.route_mode === "string") {
+    return normalizeCloudRouteMode(explicit.route_mode);
+  }
+
+  const route = data && Array.isArray(data.routes)
+    ? data.routes.find((item) => item && typeof item === "object" && item.name === "cloud-agent")
+    : null;
+  const firstAgent = route && Array.isArray(route.agents)
+    ? route.agents.find((name) => name && name !== "echo")
+    : "";
+  return OLLAMA_CLOUD_AGENT_NAMES.includes(firstAgent) ? "ollama-cloud" : "api-key";
+}
+
+function uniqueAgentNames(names) {
+  const seen = new Set();
+  const result = [];
+  for (const name of names) {
+    if (!name || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    result.push(name);
+  }
+  return result;
+}
+
 function ensureRouteContainsAgent(routes, name, keywords, agentName, options = {}) {
   let route = routes.find((item) => item && typeof item === "object" && item.name === name);
   if (!route) {
@@ -2530,13 +2830,20 @@ function listOrEmpty(value) {
   return Array.isArray(value) ? value : [];
 }
 
-function localConfigForLocalModels(sources) {
-  const localSources = sources.length ? sources : fallbackLocalModelSources();
-  const cloudSources = cloudModelSources();
+function localConfigForLocalModels(sources, options = {}) {
+  const localSources = completeLocalModelSources(sources);
+  const ollamaCloudSources = ollamaCloudModelSources();
+  const cloudSources = cloudModelSources(options.cloudSettings || {});
+  const ollamaCloudAgents = ollamaCloudSources.map((source) => source.name);
   const cloudAgents = cloudSources.map((source) => source.name);
   const localAgents = localSources.map((source) => source.name);
-  const hybridAgents = [...cloudAgents, ...localAgents, "echo"];
-  const cloudRouteAgents = [...cloudAgents, "echo"];
+  const cloudRouteMode = normalizeCloudRouteMode(options.cloudRouteMode || "ollama-cloud");
+  const cloudRouteAgents = uniqueAgentNames(
+    cloudRouteMode === "api-key"
+      ? [...cloudAgents, ...ollamaCloudAgents, "echo"]
+      : [...ollamaCloudAgents, ...cloudAgents, "echo"]
+  );
+  const hybridAgents = cloudRouteAgents;
   return {
     host: "127.0.0.1",
     port: 8787,
@@ -2550,6 +2857,9 @@ function localConfigForLocalModels(sources) {
     free_only: true,
     include_raw_responses: false,
     expose_routing_details: true,
+    cloud_control_selection: {
+      route_mode: cloudRouteMode
+    },
     default_route: hybridAgents,
     routes: [
       {
@@ -2588,6 +2898,7 @@ function localConfigForLocalModels(sources) {
         timeout_seconds: 20,
         cooldown_seconds: 5
       },
+      ...ollamaCloudSources.map((source) => ollamaCloudModelAgentConfig(source)),
       ...cloudSources.map((source) => cloudModelAgentConfig(source)),
       ...localSources.map((source) => localModelAgentConfig(source)),
       {
@@ -2602,13 +2913,13 @@ function localConfigForLocalModels(sources) {
   };
 }
 
-function cloudModelSources() {
+function cloudModelSources(settings = {}) {
   return [
     {
       name: "codex",
       label: "Codex",
       provider: "openai",
-      model: process.env.AGENT_HUB_CODEX_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CODEX_MODEL,
+      model: cleanSettingString(settings.codexModel, process.env.AGENT_HUB_CODEX_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CODEX_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CODEX_API_KEY_ENV || "OPENAI_API_KEY",
       baseUrl: process.env.AGENT_HUB_CODEX_BASE_URL || process.env.OPENAI_BASE_URL || "",
       contextWindow: 128000
@@ -2617,7 +2928,7 @@ function cloudModelSources() {
       name: "claude",
       label: "Claude",
       provider: "anthropic",
-      model: process.env.AGENT_HUB_CLAUDE_MODEL || DEFAULT_CLAUDE_MODEL,
+      model: cleanSettingString(settings.claudeModel, process.env.AGENT_HUB_CLAUDE_MODEL || DEFAULT_CLAUDE_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CLAUDE_API_KEY_ENV || "ANTHROPIC_API_KEY",
       baseUrl: process.env.AGENT_HUB_CLAUDE_BASE_URL || "",
       contextWindow: 200000
@@ -2626,7 +2937,7 @@ function cloudModelSources() {
       name: "gemini",
       label: "Gemini",
       provider: "gemini",
-      model: process.env.AGENT_HUB_GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
+      model: cleanSettingString(settings.geminiModel, process.env.AGENT_HUB_GEMINI_MODEL || DEFAULT_GEMINI_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_GEMINI_API_KEY_ENV || "GEMINI_API_KEY",
       baseUrl: process.env.AGENT_HUB_GEMINI_BASE_URL || "",
       contextWindow: 1000000
@@ -2635,12 +2946,36 @@ function cloudModelSources() {
       name: "chatgpt",
       label: "ChatGPT",
       provider: "openai",
-      model: process.env.AGENT_HUB_CHATGPT_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CHATGPT_MODEL,
+      model: cleanSettingString(settings.chatgptModel, process.env.AGENT_HUB_CHATGPT_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CHATGPT_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CHATGPT_API_KEY_ENV || "OPENAI_API_KEY",
       baseUrl: process.env.AGENT_HUB_CHATGPT_BASE_URL || process.env.OPENAI_BASE_URL || "",
       contextWindow: 128000
     }
   ];
+}
+
+function ollamaCloudModelSources() {
+  return OLLAMA_CLOUD_MODELS.map((source) => ({
+    ...source,
+    baseUrl: OLLAMA_BASE_URL,
+    contextWindow: 128000,
+    timeoutSeconds: 180,
+    cooldownSeconds: 10
+  }));
+}
+
+function ollamaCloudModelAgentConfig(source) {
+  return {
+    name: source.name,
+    provider: "openai-compatible",
+    model: source.model,
+    base_url: source.baseUrl,
+    free: true,
+    max_tokens: 4096,
+    context_window: source.contextWindow || 128000,
+    timeout_seconds: source.timeoutSeconds || 180,
+    cooldown_seconds: source.cooldownSeconds || 10
+  };
 }
 
 function cloudModelAgentConfig(source) {
@@ -2682,22 +3017,36 @@ async function detectLocalModelSources() {
     detectOllamaModels()
   ]);
   const sources = [];
-  const lmStudioModel = chooseLmStudioModel(lmStudioModels);
-  if (lmStudioModel) {
-    sources.push(lmStudioSource(lmStudioModel));
-  }
   const ollamaModel = chooseOllamaModel(ollamaModels);
   if (ollamaModel) {
     sources.push(ollamaSource(ollamaModel));
+  }
+  const lmStudioModel = chooseLmStudioModel(lmStudioModels);
+  if (lmStudioModel) {
+    sources.push(lmStudioSource(lmStudioModel));
   }
   return sources;
 }
 
 function fallbackLocalModelSources() {
   return [
-    lmStudioSource(DEFAULT_LM_STUDIO_MODEL, false),
-    ollamaSource(DEFAULT_OLLAMA_MODEL, false)
+    ollamaSource(DEFAULT_OLLAMA_MODEL, false),
+    lmStudioSource(DEFAULT_LM_STUDIO_MODEL, false)
   ];
+}
+
+function completeLocalModelSources(sources) {
+  const selected = Array.isArray(sources) ? sources.filter(Boolean) : [];
+  const hasOllama = selected.some((source) => source && source.name === "ollama-local");
+  const hasLmStudio = selected.some((source) => source && source.name === "lm-studio");
+  const completed = [...selected];
+  if (!hasOllama) {
+    completed.push(ollamaSource(DEFAULT_OLLAMA_MODEL, false));
+  }
+  if (!hasLmStudio) {
+    completed.push(lmStudioSource(DEFAULT_LM_STUDIO_MODEL, false));
+  }
+  return completed;
 }
 
 function lmStudioSource(model, detected = true) {
@@ -2732,9 +3081,12 @@ function describeLocalSources(sources) {
     .join(", ");
 }
 
-function describeCloudSources() {
-  return cloudModelSources()
-    .map((source) => `${source.label} (${source.model}, ${source.apiKeyEnv})`)
+function describeCloudSources(localSources = fallbackLocalModelSources()) {
+  const ollamaCloud = ollamaCloudModelSources()
+    .map((source) => `${source.label} (${source.model})`);
+  const apiKey = cloudModelSources()
+    .map((source) => `${source.label} (${source.model}, ${source.apiKeyEnv})`);
+  return [...ollamaCloud, ...apiKey]
     .join(", ");
 }
 
@@ -3221,9 +3573,9 @@ function formatAgentHubError(error) {
     );
   } else if (raw.includes("missing API key env")) {
     lines.push(
-      "Agent Hub tried the cloud control route, but the configured API key is missing.",
+      "Agent Hub tried an API-key model on the cloud control route, but the configured API key is missing.",
       "",
-      "Open the API Keys panel in Agent Hub chat, save the provider key, and restart Agent Hub. You can also choose Local control and pull the local model."
+      "Open Settings in Agent Hub chat, save the provider key, and restart Agent Hub. You can also set Cloud route to Ollama cloud models first."
     );
   } else {
     lines.push(`Agent Hub request failed: ${raw}`);

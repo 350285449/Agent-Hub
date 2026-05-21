@@ -2,16 +2,16 @@
 
 ## Next release
 
-- Target version: `0.4.16`
-- Purpose: publish the chat Settings menu alongside hosted cloud control by default, explicit local control selection, API key management, local model selection, fast local finalization for file edits, and shell-first workspace-agent behavior
+- Target version: `0.4.18`
+- Purpose: publish the chat Settings menu with Ollama cloud defaults, API-key model overrides, explicit local control selection, API key management, local model selection, fast local finalization for file edits, and shell-first workspace-agent behavior
 
 ## Summary
 
 This update file records the next VS Code extension release and the key change set for the extension.
 
-- VS Code agent requests now default to the hosted `cloud-agent` route.
+- VS Code agent requests now default to the `cloud-agent` route.
 - Marketplace display name is now `Agent Hub Workspace` to avoid the taken `Agent Hub` name.
-- Generated configs use hosted `codex`, `claude`, `gemini`, and `chatgpt` control providers by default.
+- Generated configs use Ollama cloud model IDs before hosted `codex`, `claude`, `gemini`, and `chatgpt` control providers by default.
 - The chat UI can switch between Cloud, Hybrid, and Local control per request.
 - The chat UI can pull the default Ollama local control model and select Local control.
 - Chat and agent requests include the active editor path even when the webview has focus.
@@ -38,6 +38,8 @@ This update file records the next VS Code extension release and the key change s
 - The chat UI scans LM Studio and Ollama for installed local models before offering Ollama install choices with approximate storage sizes.
 - A one-command installer now packages the VSIX, detects the VS Code CLI, installs the extension, and warns when Python 3.11+ is missing.
 - The chat header now has a Settings menu for provider mode, server settings, local model selection, output access, API keys, and server actions.
+- The chat Settings menu can switch Cloud routing to API-key models first and update hosted model IDs for Codex/OpenAI, Claude, Gemini, and ChatGPT.
+- Generated Cloud routes now use Ollama cloud model IDs by default so local model weights are not run unless Local control is selected.
 
 ## Packaging
 
@@ -58,5 +60,5 @@ The resulting `.vsix` can be published with `npm run publish` from `vscode-exten
 
 ## Notes
 
-- The current `package.json` version is `0.4.16`.
-- If you want this release to be published, run `npm run package` from `vscode-extension` and publish the resulting `0.4.16` VSIX.
+- The current `package.json` version is `0.4.18`.
+- If you want this release to be published, run `npm run package` from `vscode-extension` and publish the resulting `0.4.18` VSIX.

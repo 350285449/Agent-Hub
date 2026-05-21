@@ -4,6 +4,17 @@
 
 - No changes yet.
 
+## 0.4.18
+
+- Changes the default Cloud route to Ollama cloud model IDs so large local models are not run by default.
+- Adds `kimi-k2.6:cloud`, `glm-5.1:cloud`, `qwen3.5:cloud`, `nemotron-3-super:cloud`, and `gemma4:31b-cloud` as default cloud-control candidates.
+- Keeps local LM Studio/Ollama models available only through Local control unless users explicitly add them to another route.
+
+## 0.4.17
+
+- Adds chat Settings controls for Cloud route priority and hosted API-key model IDs.
+- Keeps hosted Codex/OpenAI, Claude, Gemini, and ChatGPT agents available as API-key fallbacks that can be moved to the front.
+
 ## 0.4.16
 
 - Adds a Settings menu to the Agent Hub chat header.

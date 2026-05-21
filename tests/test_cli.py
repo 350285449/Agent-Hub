@@ -92,8 +92,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue(codex["enabled"])
             self.assertTrue(codex["free"])
             self.assertEqual(codex["model"], "gpt-test")
+            self.assertEqual(data["cloud_control_selection"]["route_mode"], "api-key")
             cloud_route = next(route for route in data["routes"] if route["name"] == "cloud-agent")
             self.assertEqual(cloud_route["agents"][0], "codex")
+            self.assertIn("ollama-kimi-cloud", cloud_route["agents"])
             self.assertNotIn("ollama-qwen-coder", cloud_route["agents"])
 
     def test_chat_runs_one_turn_without_traceback(self) -> None:

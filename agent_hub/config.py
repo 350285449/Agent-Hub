@@ -2,9 +2,8 @@
 
 The app loads a JSON config into these dataclasses, then the router uses the
 routes to pick an enabled agent for each request. The default cloud-control
-route uses hosted providers when API keys are available; the local-control route
-keeps Ollama, LM Studio, and other OpenAI-compatible local servers available as
-an explicit option.
+route starts with Ollama cloud model IDs, so fresh configs do not run heavy local
+models unless the user chooses the explicit local-control route.
 """
 
 from __future__ import annotations
@@ -92,8 +91,22 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> HubConfig:
     return config_from_dict(raw)
 
 
+def _ollama_cloud_agent(name: str, model: str) -> AgentConfig:
+    return AgentConfig(
+        name=name,
+        provider="openai-compatible",
+        model=model,
+        base_url=os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+        free=True,
+        timeout_seconds=180.0,
+        max_tokens=4096,
+        cooldown_seconds=10.0,
+        context_window=128_000,
+    )
+
+
 def free_local_config() -> HubConfig:
-    """Starter config with hosted cloud control and explicit local control."""
+    """Starter config with Ollama-cloud control and explicit local control."""
 
     local_model = os.environ.get("AGENT_HUB_LOCAL_MODEL", "local-model")
     local_base_url = os.environ.get("AGENT_HUB_LOCAL_BASE_URL", "http://127.0.0.1:8000")
@@ -111,6 +124,14 @@ def free_local_config() -> HubConfig:
             cooldown_seconds=5.0,
             context_window=1_000_000,
         ),
+        "ollama-kimi-cloud": _ollama_cloud_agent("ollama-kimi-cloud", "kimi-k2.6:cloud"),
+        "ollama-glm-cloud": _ollama_cloud_agent("ollama-glm-cloud", "glm-5.1:cloud"),
+        "ollama-qwen-cloud": _ollama_cloud_agent("ollama-qwen-cloud", "qwen3.5:cloud"),
+        "ollama-nemotron-cloud": _ollama_cloud_agent(
+            "ollama-nemotron-cloud",
+            "nemotron-3-super:cloud",
+        ),
+        "ollama-gemma-cloud": _ollama_cloud_agent("ollama-gemma-cloud", "gemma4:31b-cloud"),
         "custom-local": AgentConfig(
             name="custom-local",
             provider="openai-compatible",
@@ -266,7 +287,7 @@ def free_local_config() -> HubConfig:
             RouteRule(
                 name="research",
                 keywords=["research", "search", "latest", "sources", "web", "news"],
-                agents=["local-research", *cloud_agent_names(), "echo"],
+                agents=["local-research", *ollama_cloud_agent_names(), *cloud_agent_names(), "echo"],
             )
         ],
         agents=agents,
@@ -278,20 +299,30 @@ def free_local_agent_names() -> list[str]:
     return ["ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai"]
 
 
+def ollama_cloud_agent_names() -> list[str]:
+    return [
+        "ollama-kimi-cloud",
+        "ollama-glm-cloud",
+        "ollama-qwen-cloud",
+        "ollama-nemotron-cloud",
+        "ollama-gemma-cloud",
+    ]
+
+
 def cloud_agent_names() -> list[str]:
     return ["codex", "claude", "gemini", "chatgpt"]
 
 
 def cloud_route_agent_names() -> list[str]:
-    return [*cloud_agent_names(), "echo"]
+    return [*ollama_cloud_agent_names(), *cloud_agent_names(), "echo"]
 
 
 def default_agent_names() -> list[str]:
-    """Hosted cloud agents first, then direct local server fallbacks."""
+    """Ollama cloud agents first, then hosted API-key fallbacks."""
 
     return [
+        *ollama_cloud_agent_names(),
         *cloud_agent_names(),
-        *free_local_agent_names(),
         "echo",
     ]
 

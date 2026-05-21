@@ -11,6 +11,7 @@ from agent_hub.config import (
     free_local_config,
     is_free_agent,
     normalize_provider,
+    ollama_cloud_agent_names,
 )
 
 
@@ -20,8 +21,8 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.default_route, default_agent_names())
         self.assertEqual(free_local_agent_names()[0], "ollama-qwen-coder")
-        self.assertEqual(default_agent_names()[0], "codex")
-        self.assertEqual(default_agent_names()[1], "claude")
+        self.assertEqual(default_agent_names()[0], "ollama-kimi-cloud")
+        self.assertEqual(default_agent_names()[1], "ollama-glm-cloud")
         self.assertLess(
             free_local_agent_names().index("ollama-qwen3"),
             free_local_agent_names().index("custom-local"),
@@ -30,7 +31,13 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("custom-local", config.agents)
         self.assertEqual(
             set(config.agents),
-            {"local-research", *cloud_agent_names(), *free_local_agent_names(), "echo"},
+            {
+                "local-research",
+                *ollama_cloud_agent_names(),
+                *cloud_agent_names(),
+                *free_local_agent_names(),
+                "echo",
+            },
         )
         self.assertTrue(config.free_only)
         self.assertTrue(config.allow_shell_tools)
@@ -49,9 +56,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.agents["chatgpt"].model, "gpt-4o-mini")
         self.assertIsNone(config.agents["codex"].base_url)
         cloud_route = next(route for route in config.routes if route.name == "cloud-agent")
-        self.assertEqual(cloud_route.agents, [*cloud_agent_names(), "echo"])
+        self.assertEqual(cloud_route.agents, [*ollama_cloud_agent_names(), *cloud_agent_names(), "echo"])
         local_route = next(route for route in config.routes if route.name == "local-agent")
         self.assertEqual(local_route.agents, free_local_agent_names())
+        self.assertEqual(config.agents["ollama-kimi-cloud"].model, "kimi-k2.6:cloud")
         self.assertEqual(config.agents["ollama-qwen-coder"].timeout_seconds, 300.0)
         self.assertTrue(is_free_agent(config.agents["custom-local"]))
         self.assertTrue(is_free_agent(config.agents["ollama-qwen-coder"]))

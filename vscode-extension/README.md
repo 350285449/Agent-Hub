@@ -1,12 +1,13 @@
 # Agent Hub
 
 Run Agent-Hub from VS Code and send coding, research, and explanation requests
-through either hosted cloud control agents or local LM Studio/Ollama control.
+through Ollama cloud models by default, with hosted API-key models and explicit
+local control as configurable options.
 
 ## Quick Start
 
 1. Install Node.js 20 or newer and Python 3.11 or newer.
-2. Set a cloud provider API key, or start LM Studio with a loaded model, or install Ollama.
+2. Install/start Ollama for Ollama cloud routing, or set a hosted provider API key.
 3. Package and install the extension from the repository root:
 
    ```powershell
@@ -40,8 +41,9 @@ still use `.\install.ps1` if you want a local editable `.venv`.
 When `agentHub.autoStart` is enabled, the extension starts the local server for
 you before sending a request.
 
-The chat header includes a `Settings` menu for provider mode, server settings,
-local model selection, API keys, and server actions.
+The chat header includes a `Settings` menu for provider mode, the Cloud route
+priority, API-key model names, server settings, local model selection, API keys,
+and server actions.
 
 ## Common Settings
 
@@ -55,23 +57,33 @@ local model selection, API keys, and server actions.
 
 ## Control Agent Mode
 
-Agent Hub uses cloud control by default. The generated `cloud-agent` route uses
-hosted providers:
+Agent Hub uses cloud control by default. The generated `cloud-agent` route now
+tries Ollama cloud model IDs first, so it does not download or run large local
+weights:
+
+- `kimi-k2.6:cloud`
+- `glm-5.1:cloud`
+- `qwen3.5:cloud`
+- `nemotron-3-super:cloud`
+- `gemma4:31b-cloud`
+
+Open the chat `Settings` menu and set `Cloud route` to `API-key models first`
+when you want hosted providers to lead the route:
 
 - `codex` and `chatgpt` -> OpenAI via `OPENAI_API_KEY`
 - `claude` -> Anthropic via `ANTHROPIC_API_KEY`
 - `gemini` -> Google Gemini via `GEMINI_API_KEY`
 
-Open the chat panel's **API Keys** section to save provider keys in VS Code
-secret storage. Restart Agent Hub from that panel after saving keys so the
-Python server receives the updated environment variables.
+Use the model-name fields in `Settings` to change the hosted model IDs, then
+save API keys in VS Code secret storage. Restart Agent Hub from that menu after
+saving keys so the Python server receives the updated environment variables.
 
 Choose Local in the chat panel, or set `agentHub.agentProviderMode` to `local`,
 to use direct local model routes. Use the chat panel's `Choose Local Model`
 button to scan LM Studio and Ollama, pick an installed local model, or pull a
 recommended Ollama model. When no local models are found, the install menu shows
-each model's approximate storage size before pulling it. `hybrid` tries cloud
-providers first and then local fallbacks.
+each model's approximate storage size before pulling it. `hybrid` follows the
+same Cloud route priority and then falls back through the remaining providers.
 
 Ollama's Launch page shows integrations such as Claude Code, Codex App, Hermes
 Agent, and OpenClaw. They are not model IDs; Agent Hub uses the models reported
