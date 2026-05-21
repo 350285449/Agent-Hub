@@ -12,10 +12,10 @@
   "include_raw_responses": false,
   "expose_routing_details": true,
   "default_route": [
+    "ollama-local",
     "claude",
     "gemini",
     "chatgpt",
-    "ollama-local",
     "echo"
   ],
   "routes": [
@@ -30,10 +30,10 @@
         "repo"
       ],
       "agents": [
+        "ollama-local",
         "claude",
         "gemini",
         "chatgpt",
-        "ollama-local",
         "echo"
       ]
     },
@@ -53,10 +53,10 @@
       "name": "hybrid-agent",
       "keywords": [],
       "agents": [
+        "ollama-local",
         "claude",
         "gemini",
         "chatgpt",
-        "ollama-local",
         "echo"
       ]
     },
@@ -64,10 +64,10 @@
       "name": "cloud-agent",
       "keywords": [],
       "agents": [
+        "ollama-local",
         "claude",
         "gemini",
         "chatgpt",
-        "ollama-local",
         "echo"
       ]
     },

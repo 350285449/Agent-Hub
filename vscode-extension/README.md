@@ -1,7 +1,7 @@
 # Agent Hub
 
 Run Agent-Hub from VS Code and send coding, research, and explanation requests
-through local Claude/Gemini/ChatGPT-style aliases backed by Ollama or LM Studio.
+through Ollama-first local routing with Claude/Gemini/ChatGPT-style fallbacks.
 
 ## Quick Start
 
@@ -12,7 +12,7 @@ through local Claude/Gemini/ChatGPT-style aliases backed by Ollama or LM Studio.
    ```powershell
    cd vscode-extension
    npm run package
-   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.3.vsix --force
+   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.4.vsix --force
    ```
 
 4. Reload VS Code.
@@ -42,17 +42,18 @@ you before sending a request.
   `http://127.0.0.1:8787`
 - `agentHub.pythonPath`: Python executable or launcher. Default: `auto`
 - `agentHub.configPath`: config file path. Default: `agent-hub.config.json`
-- `agentHub.agentProviderMode`: `local`, `hybrid`, or `cloud`. Default: `cloud`
+- `agentHub.agentProviderMode`: `local`, `hybrid`, or `cloud`. Default: `hybrid`
 - `agentHub.autoStart`: automatically start the server when needed. Default:
   `true`
 
 ## Local Model Aliases
 
-Agent Hub is free/local by default. Generated workspace configs try Claude,
-Gemini, and ChatGPT-style aliases first, but those names point to local
-OpenAI-compatible servers. If LM Studio is running with a loaded model, the
-extension maps all three aliases to LM Studio at `http://127.0.0.1:1234`.
-Otherwise, the aliases default to Ollama at `http://127.0.0.1:11434`:
+Agent Hub is free/local by default. Generated workspace configs try Ollama's
+coder model first, then Claude, Gemini, and ChatGPT-style fallbacks. Those names
+point to local OpenAI-compatible servers unless you explicitly configure hosted
+providers. When Ollama is available, the extension prefers it at
+`http://127.0.0.1:11434`; otherwise it can use LM Studio at
+`http://127.0.0.1:1234`:
 
 - `claude` -> `qwen2.5-coder:7b`
 - `gemini` -> `gemma3:4b`

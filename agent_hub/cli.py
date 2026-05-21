@@ -12,9 +12,8 @@ from typing import Sequence
 
 from .agent_runner import AgentRunner
 from .config import (
-    cloud_agent_names,
     config_to_dict,
-    free_local_agent_names,
+    default_agent_names,
     free_local_config,
     is_free_agent,
     load_config,
@@ -96,7 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     agent_parser = subparsers.add_parser("agent", help="Run the workspace coding agent.")
     agent_parser.add_argument("task", nargs="+", help="Task for the agent.")
-    agent_parser.add_argument("--route", default="cloud-agent", help="Route to use for agent model calls.")
+    agent_parser.add_argument("--route", default="hybrid-agent", help="Route to use for agent model calls.")
     agent_parser.add_argument("--max-steps", type=int, default=20, help="Maximum agent tool steps.")
     agent_parser.add_argument(
         "--allow-shell-tools",
@@ -110,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     chat_parser = subparsers.add_parser("chat", help="Open an interactive Codex-style workspace chat.")
-    chat_parser.add_argument("--route", default="cloud-agent", help="Route to use for chat turns.")
+    chat_parser.add_argument("--route", default="hybrid-agent", help="Route to use for chat turns.")
     chat_parser.add_argument("--session-id", help="Reuse an existing chat session id.")
     chat_parser.add_argument("--max-steps", type=int, default=20, help="Maximum agent tool steps per turn.")
     chat_parser.add_argument(
@@ -406,12 +405,12 @@ def _ensure_cloud_routes(data: dict[str, Any]) -> None:
     _ensure_route(
         routes,
         "hybrid-agent",
-        [*cloud_agent_names(), *free_local_agent_names(), "echo"],
+        default_agent_names(),
     )
     _ensure_route(
         routes,
         "cloud-agent",
-        [*cloud_agent_names(), *free_local_agent_names(), "echo"],
+        default_agent_names(),
     )
 
 

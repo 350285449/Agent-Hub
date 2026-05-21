@@ -1,8 +1,8 @@
 {
   "name": "agent-hub-vscode",
   "displayName": "Local Agent Hub",
-  "description": "Run local Claude/Gemini/ChatGPT-style coding agents from VS Code.",
-  "version": "0.4.3",
+  "description": "Run Ollama-first local coding agents with provider fallback from VS Code.",
+  "version": "0.4.4",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
@@ -52,7 +52,7 @@
         "id": "agent-hub.agent-hub-vscode.agenthub",
         "name": "agenthub",
         "fullName": "Agent Hub",
-        "description": "Run local Claude/Gemini/ChatGPT-style workspace agents",
+        "description": "Run Ollama-first local workspace agents",
         "isSticky": true,
         "commands": [
           {
@@ -152,8 +152,8 @@
             "hybrid",
             "cloud"
           ],
-          "default": "cloud",
-          "description": "Provider mode for the coding agent. Cloud uses local Claude, Gemini, and ChatGPT-style aliases first, then local fallbacks; local uses only local models."
+          "default": "hybrid",
+          "description": "Provider mode for the coding agent. Hybrid uses Ollama/local first, then Claude/Gemini/ChatGPT-style fallbacks; local uses only local models."
         },
         "agentHub.agentMaxSteps": {
           "type": "number",

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.4
+
+- Makes the extension default to Ollama-first hybrid routing.
+- Generates workspace configs with the Ollama coder model before Claude/Gemini/ChatGPT-style fallbacks.
+- Bundles the updated Agent-Hub backend with local-first defaults.
+
 ## 0.4.3
 
 - Repairs older minimal Ollama workspace configs into Claude/Gemini/ChatGPT-style local aliases.

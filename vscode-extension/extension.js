@@ -1445,7 +1445,9 @@ function localConfigForLocalModels(sources) {
   const cloudSources = cloudModelSources(localSources);
   const cloudAgents = cloudSources.map((source) => source.name);
   const localAgents = localSources.map((source) => source.name);
-  const routeAgents = [...cloudAgents, ...localAgents, "echo"];
+  const primaryLocalAgents = localAgents.slice(0, 1);
+  const secondaryLocalAgents = localAgents.slice(1);
+  const routeAgents = [...primaryLocalAgents, ...cloudAgents, ...secondaryLocalAgents, "echo"];
   return {
     host: "127.0.0.1",
     port: 8787,
@@ -1512,10 +1514,10 @@ function localConfigForLocalModels(sources) {
 }
 
 function cloudModelSources(localSources = []) {
-  const lmStudio = localSources.find((source) => source.name === "lm-studio" && source.detected !== false);
   const ollama = localSources.find((source) => source.baseUrl === OLLAMA_BASE_URL && source.detected !== false);
-  const baseUrl = lmStudio ? lmStudio.baseUrl : OLLAMA_BASE_URL;
-  const sharedDetectedModel = lmStudio ? lmStudio.model : (ollama ? ollama.model : "");
+  const lmStudio = localSources.find((source) => source.name === "lm-studio" && source.detected !== false);
+  const baseUrl = ollama ? ollama.baseUrl : (lmStudio ? lmStudio.baseUrl : OLLAMA_BASE_URL);
+  const sharedDetectedModel = ollama ? ollama.model : (lmStudio ? lmStudio.model : "");
   return [
     {
       name: "claude",
@@ -1579,21 +1581,21 @@ async function detectLocalModelSources() {
     detectOllamaModels()
   ]);
   const sources = [];
-  const lmStudioModel = chooseLmStudioModel(lmStudioModels);
-  if (lmStudioModel) {
-    sources.push(lmStudioSource(lmStudioModel));
-  }
   const ollamaModel = chooseOllamaModel(ollamaModels);
   if (ollamaModel) {
     sources.push(ollamaSource(ollamaModel));
+  }
+  const lmStudioModel = chooseLmStudioModel(lmStudioModels);
+  if (lmStudioModel) {
+    sources.push(lmStudioSource(lmStudioModel));
   }
   return sources;
 }
 
 function fallbackLocalModelSources() {
   return [
-    lmStudioSource(DEFAULT_LM_STUDIO_MODEL, false),
-    ollamaSource(DEFAULT_OLLAMA_MODEL, false)
+    ollamaSource(DEFAULT_OLLAMA_MODEL, false),
+    lmStudioSource(DEFAULT_LM_STUDIO_MODEL, false)
   ];
 }
 
@@ -2165,7 +2167,7 @@ function settings() {
     route: config.get("route", "coding"),
     researchRoute: config.get("researchRoute", "research"),
     codingAgentRoute: config.get("codingAgentRoute", "local-agent"),
-    agentProviderMode: config.get("agentProviderMode", "cloud"),
+    agentProviderMode: config.get("agentProviderMode", "hybrid"),
     agentMaxSteps: config.get("agentMaxSteps", 20),
     allowShellTools: config.get("allowShellTools", true),
     maxTokens: config.get("maxTokens", 1200),

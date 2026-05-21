@@ -11,12 +11,12 @@
   "free_only": true,
   "include_raw_responses": false,
   "expose_routing_details": false,
-  "default_route": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
+  "default_route": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
   "routes": [
     {
       "name": "coding",
       "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
-      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "local-agent",
@@ -26,12 +26,12 @@
     {
       "name": "hybrid-agent",
       "keywords": [],
-      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "cloud-agent",
       "keywords": [],
-      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "research",

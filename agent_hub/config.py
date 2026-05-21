@@ -1,10 +1,10 @@
 """Configuration objects and defaults for the local Agent-Hub runtime.
 
 The app loads a JSON config into these dataclasses, then the router uses the
-routes to pick an enabled agent for each request. Most default "cloud" agent
-names are local aliases: Claude/Gemini/ChatGPT-style routes point at Ollama, LM
-Studio, or another OpenAI-compatible server unless the user explicitly configures
-hosted providers.
+routes to pick an enabled agent for each request. Defaults are local-first:
+Ollama's coder model is the primary workspace agent, while Claude/Gemini/
+ChatGPT-style names remain fallback aliases unless the user explicitly
+configures hosted providers.
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> HubConfig:
 
 
 def free_local_config() -> HubConfig:
-    """Cloud-style local aliases backed by Ollama or another OpenAI-compatible server."""
+    """Local-first config backed by Ollama or another OpenAI-compatible server."""
 
     local_model = os.environ.get("AGENT_HUB_LOCAL_MODEL", "local-model")
     local_base_url = os.environ.get("AGENT_HUB_LOCAL_BASE_URL", "http://127.0.0.1:8000")
@@ -132,7 +132,7 @@ def free_local_config() -> HubConfig:
             model=os.environ.get("AGENT_HUB_OLLAMA_CODER_MODEL", "qwen2.5-coder:7b"),
             base_url=os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
             free=True,
-            timeout_seconds=30.0,
+            timeout_seconds=300.0,
             max_tokens=4096,
             cooldown_seconds=10.0,
             context_window=32_768,
@@ -143,7 +143,7 @@ def free_local_config() -> HubConfig:
             model=os.environ.get("AGENT_HUB_OLLAMA_GENERAL_MODEL", "qwen3:8b"),
             base_url=os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
             free=True,
-            timeout_seconds=30.0,
+            timeout_seconds=300.0,
             max_tokens=4096,
             cooldown_seconds=10.0,
             context_window=32_768,
@@ -228,12 +228,12 @@ def free_local_config() -> HubConfig:
         agent_max_steps=8,
         allow_shell_tools=True,
         free_only=True,
-        default_route=[*cloud_agent_names(), *free_local_agent_names(), "echo"],
+        default_route=default_agent_names(),
         routes=[
             RouteRule(
                 name="coding",
                 keywords=["code", "bug", "fix", "refactor", "test", "repo"],
-                agents=[*cloud_agent_names(), *free_local_agent_names(), "echo"],
+                agents=default_agent_names(),
             ),
             RouteRule(
                 name="local-agent",
@@ -243,12 +243,12 @@ def free_local_config() -> HubConfig:
             RouteRule(
                 name="hybrid-agent",
                 keywords=[],
-                agents=[*cloud_agent_names(), *free_local_agent_names(), "echo"],
+                agents=default_agent_names(),
             ),
             RouteRule(
                 name="cloud-agent",
                 keywords=[],
-                agents=[*cloud_agent_names(), *free_local_agent_names(), "echo"],
+                agents=default_agent_names(),
             ),
             RouteRule(
                 name="research",
@@ -267,6 +267,18 @@ def free_local_agent_names() -> list[str]:
 
 def cloud_agent_names() -> list[str]:
     return ["claude", "gemini", "chatgpt"]
+
+
+def default_agent_names() -> list[str]:
+    """Primary Ollama coder, then cloud-style fallbacks, then other local servers."""
+
+    primary = "ollama-qwen-coder"
+    return [
+        primary,
+        *cloud_agent_names(),
+        *[name for name in free_local_agent_names() if name != primary],
+        "echo",
+    ]
 
 
 def config_from_dict(raw: dict[str, Any]) -> HubConfig:

@@ -5,11 +5,12 @@ requests. It accepts JSON, chooses a configured agent/model, can run a small
 tool-using agent loop, and fails over to the next agent when a provider is out
 of quota, rate limited, overloaded, or cannot handle the context size.
 
-It is cloud-style and free/local by default: if no config file exists,
-Agent-Hub tries Claude, Gemini, and ChatGPT-style aliases first, but those
-aliases are backed by Ollama, LM Studio, or another OpenAI-compatible local
-server. It then falls back to local model presets and the built-in `echo`
-provider for smoke tests. It does not automate bypassing free-tier limits,
+It is local-first by default: if no config file exists, Agent-Hub starts with
+Ollama's coder model, then falls back to Claude, Gemini, and ChatGPT-style
+aliases if the first model is unavailable, times out, or cannot handle the
+context/token budget. Those aliases are backed by Ollama, LM Studio, or another
+OpenAI-compatible local server unless you explicitly configure hosted providers.
+It does not automate bypassing free-tier limits,
 scraping web UIs, or downloading proprietary vendor models.
 
 ## What It Runs
@@ -49,8 +50,8 @@ Manual start without installing into a virtual environment:
 python -m agent_hub serve --watch-inbox
 ```
 
-That starts with the built-in cloud-style local config. You can tune the local
-alias model defaults with environment variables:
+That starts with the built-in local-first config. You can tune the local alias
+model defaults with environment variables:
 
 ```powershell
 $env:AGENT_HUB_CLAUDE_LOCAL_MODEL = "qwen2.5-coder:7b"
@@ -85,9 +86,9 @@ ollama pull gemma3:4b
 ollama pull llama3.2
 ```
 
-In VS Code, `agentHub.agentProviderMode` defaults to `cloud`, which means
-Claude/Gemini/ChatGPT-style local aliases first. Set it to `local` for direct
-LM Studio/Ollama fallback routes only.
+In VS Code, `agentHub.agentProviderMode` defaults to `hybrid`, which means
+Ollama/local first and Claude/Gemini/ChatGPT-style fallbacks after that. Set it
+to `local` for direct LM Studio/Ollama fallback routes only.
 
 Health check:
 
@@ -224,9 +225,9 @@ python -m agent_hub chat --allow-shell-tools
 ```
 
 The dedicated `local-agent` route uses only free local model endpoints. The
-`cloud-agent` route tries Claude, Gemini, and ChatGPT-style local aliases first,
-then direct local fallback. The CLI agent command also forces `free_only=true`
-unless you explicitly pass `--allow-cloud`.
+default `hybrid-agent` and `cloud-agent` routes try Ollama's coder model first,
+then Claude, Gemini, and ChatGPT-style fallbacks. The CLI agent command also
+forces `free_only=true` unless you explicitly pass `--allow-cloud`.
 
 Agent-Hub includes free local model presets for:
 
@@ -279,12 +280,12 @@ snippets, and return citations without a paid API key.
   "allow_shell_tools": true,
   "free_only": true,
   "expose_routing_details": false,
-  "default_route": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
+  "default_route": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
   "routes": [
     {
       "name": "coding",
       "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
-      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "local-agent",
@@ -294,12 +295,12 @@ snippets, and return citations without a paid API key.
     {
       "name": "hybrid-agent",
       "keywords": [],
-      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "cloud-agent",
       "keywords": [],
-      "agents": ["claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "research",
@@ -316,11 +317,12 @@ request, then the agent, then `4096`), and skips agents whose context window is
 too small. The estimate is intentionally rough, but it keeps obvious over-limit
 requests away from smaller local models.
 
-Provider/model failover is silent by default. If a request does not fit one
-local model, or a provider reports context/token pressure, Agent-Hub tries the
-next configured free local model while returning the same public `model` alias to
-the client. Set `expose_routing_details` to `true` only when you want developer
-debug output showing the internal agent, model, and failover trace.
+Provider/model failover is silent by default. If a request does not fit the
+primary Ollama coder model, or a provider reports context/token pressure,
+Agent-Hub tries the next configured fallback while returning the same public
+`model` alias to the client. Set `expose_routing_details` to `true` only when you
+want developer debug output showing the internal agent, model, and failover
+trace.
 
 Supported providers:
 

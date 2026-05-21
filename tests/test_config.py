@@ -6,6 +6,7 @@ from unittest.mock import patch
 from agent_hub.config import (
     AgentConfig,
     cloud_agent_names,
+    default_agent_names,
     free_local_agent_names,
     free_local_config,
     is_free_agent,
@@ -17,8 +18,10 @@ class ConfigTests(unittest.TestCase):
     def test_free_local_config_uses_custom_local_agent(self) -> None:
         config = free_local_config()
 
-        self.assertEqual(config.default_route, [*cloud_agent_names(), *free_local_agent_names(), "echo"])
+        self.assertEqual(config.default_route, default_agent_names())
         self.assertEqual(free_local_agent_names()[0], "ollama-qwen-coder")
+        self.assertEqual(default_agent_names()[0], "ollama-qwen-coder")
+        self.assertEqual(default_agent_names()[1], "claude")
         self.assertLess(
             free_local_agent_names().index("ollama-qwen3"),
             free_local_agent_names().index("custom-local"),
@@ -41,6 +44,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.agents["claude"].model, "qwen2.5-coder:7b")
         self.assertEqual(config.agents["gemini"].model, "gemma3:4b")
         self.assertEqual(config.agents["chatgpt"].model, "llama3.2")
+        self.assertEqual(config.agents["ollama-qwen-coder"].timeout_seconds, 300.0)
         self.assertTrue(is_free_agent(config.agents["custom-local"]))
         self.assertTrue(is_free_agent(config.agents["ollama-qwen-coder"]))
 
