@@ -4,6 +4,15 @@
 
 - No changes yet.
 
+## 0.5.5
+
+- Bumps the VS Code extension package to `0.5.5`.
+- Documents Agent Hub runtime health diagnostics and adaptive failover support.
+
+## 0.5.1
+
+- Bumps the VS Code extension package to `0.5.1`.
+
 ## 0.5.0
 
 - Bumps the VS Code extension version for the next Agent Hub release.

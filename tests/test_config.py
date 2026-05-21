@@ -11,9 +11,11 @@ from agent_hub.config import (
     free_local_agent_names,
     free_local_config,
     is_free_agent,
+    load_config,
     normalize_provider,
     ollama_cloud_agent_names,
 )
+from agent_hub.discovery import auto_configure_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -90,6 +92,48 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.agents["gemini"].model, "gemini-cloud-model")
         self.assertEqual(config.agents["chatgpt"].model, "chatgpt-cloud-model")
         self.assertEqual(config.agents["codex"].api_key_env, "CODEX_KEY")
+
+    def test_missing_config_is_created_automatically(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+
+            config = load_config(path, auto_detect=False)
+
+            self.assertTrue(path.exists())
+            self.assertTrue((Path(tmp) / ".agent-hub" / "state").exists())
+            self.assertTrue(config.initialization_report["created_default_config"])
+            self.assertIn("echo", config.agents)
+
+    def test_available_keyed_providers_are_enabled_at_runtime(self) -> None:
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True):
+            config = free_local_config()
+            config.auto_detect_local_models = False
+            report = auto_configure_config(config)
+
+        self.assertTrue(config.agents["codex"].enabled)
+        self.assertTrue(config.agents["chatgpt"].enabled)
+        enabled_names = {item["agent"] for item in report["enabled_from_environment"]}
+        self.assertIn("codex", enabled_names)
+        cloud_route = next(route for route in config.routes if route.name == "cloud-agent")
+        self.assertIn("codex", cloud_route.agents)
+        self.assertIn("chatgpt", config.default_route)
+
+    def test_free_provider_presets_are_added_when_key_is_available(self) -> None:
+        with patch.dict("os.environ", {"GROQ_API_KEY": "groq-key"}, clear=True):
+            config = free_local_config()
+            config.auto_detect_local_models = False
+            report = auto_configure_config(config)
+
+        self.assertIn("groq-qwen3-32b", config.agents)
+        self.assertTrue(config.agents["groq-qwen3-32b"].enabled)
+        self.assertEqual(config.agents["groq-qwen3-32b"].provider_type, "groq")
+        cloud_route = next(route for route in config.routes if route.name == "cloud-agent")
+        self.assertIn("groq-qwen3-32b", cloud_route.agents)
+        added_names = {item["agent"] for item in report["added_provider_presets"]}
+        self.assertIn("groq-qwen3-32b", added_names)
 
     def test_custom_local_agent_can_be_configured_from_environment(self) -> None:
         with patch.dict(

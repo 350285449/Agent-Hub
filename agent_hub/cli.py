@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import threading
+import time
 import uuid
 import urllib.error
 import urllib.request
@@ -59,11 +60,44 @@ def main(argv: Sequence[str] | None = None) -> int:
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     doctor_parser.add_argument("--providers", action="store_true", help="Include known provider metadata.")
 
+    health_parser = subparsers.add_parser("health", help="Show live provider health and best route candidates.")
+    health_parser.add_argument("--route", default="cloud-agent", help="Route to summarize.")
+    health_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    metrics_parser = subparsers.add_parser("metrics", help="Show persisted provider metrics and failover history.")
+    metrics_parser.add_argument("--route", default="cloud-agent", help="Route to summarize.")
+    metrics_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     local_models_parser = subparsers.add_parser(
         "local-models",
         help="Probe free local OpenAI-compatible model servers.",
     )
     local_models_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    recommend_parser = subparsers.add_parser(
+        "recommend",
+        help="Suggest the best configured model for a task without calling a provider.",
+    )
+    recommend_parser.add_argument("prompt", nargs="*", default=[""], help="Task or prompt to score.")
+    recommend_parser.add_argument("--route", default="cloud-agent", help="Route to score.")
+    recommend_parser.add_argument("--limit", type=int, default=5, help="Number of suggestions.")
+    recommend_parser.add_argument(
+        "--prefer",
+        choices=["balanced", "coding", "reasoning", "speed"],
+        default="balanced",
+        help="Recommendation bias.",
+    )
+    recommend_parser.add_argument(
+        "--needs-tools",
+        action="store_true",
+        help="Prefer models with tool/function-call support.",
+    )
+    recommend_parser.add_argument(
+        "--include-unavailable",
+        action="store_true",
+        help="Include disabled, cooled down, or skipped agents with reasons.",
+    )
+    recommend_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     providers_parser = subparsers.add_parser("providers", help="List known provider types.")
     providers_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -140,6 +174,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Allow the agent to run local shell commands.",
     )
     agent_parser.add_argument(
+        "--confirm-shell-tools",
+        action="store_true",
+        help="Ask before each shell command is executed.",
+    )
+    agent_parser.add_argument(
         "--allow-cloud",
         action="store_true",
         help="Respect config free_only=false. By default this command forces free_only=true.",
@@ -154,6 +193,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--allow-shell-tools",
         action="store_true",
         help="Allow the agent team to run local shell commands.",
+    )
+    group_agent_parser.add_argument(
+        "--confirm-shell-tools",
+        action="store_true",
+        help="Ask before each shell command is executed.",
     )
     group_agent_parser.add_argument(
         "--allow-cloud",
@@ -179,6 +223,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--allow-shell-tools",
         action="store_true",
         help="Allow the chat agent to run local shell commands.",
+    )
+    chat_parser.add_argument(
+        "--confirm-shell-tools",
+        action="store_true",
+        help="Ask before each shell command is executed.",
     )
     chat_parser.add_argument(
         "--allow-cloud",
@@ -259,6 +308,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             _print_doctor(report)
         return 0
+    if command == "health":
+        report = _health_report(config, route=args.route, include_history=False)
+        if args.json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            _print_health(report)
+        return 0
+    if command == "metrics":
+        report = _health_report(config, route=args.route, include_history=True)
+        if args.json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            _print_metrics(report)
+        return 0
     if command == "providers":
         rows = provider_metadata_rows()
         if args.json:
@@ -280,6 +343,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             _print_local_models(report)
         return 0
+    if command == "recommend":
+        return _recommend(
+            config,
+            route=args.route,
+            prompt=" ".join(args.prompt),
+            limit=args.limit,
+            prefer=args.prefer,
+            needs_tools=args.needs_tools,
+            include_unavailable=args.include_unavailable,
+            as_json=args.json,
+        )
     if command == "serve":
         if getattr(args, "watch_inbox", False):
             processor = InboxProcessor(config)
@@ -305,11 +379,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             "task": " ".join(args.task),
             "agent_max_steps": args.max_steps,
         }
-        if args.allow_shell_tools:
+        if args.allow_shell_tools or args.confirm_shell_tools:
             payload["allow_shell_tools"] = True
+        if args.confirm_shell_tools:
+            payload["shell_command_policy"] = "ask"
         request = request_from_payload(payload)
         try:
-            response = AgentRunner(config, AgentRouter(config)).run(request)
+            response = AgentRunner(config, AgentRouter(config)).run(
+                request,
+                shell_permission_callback=_shell_permission_prompt
+                if args.confirm_shell_tools
+                else None,
+            )
         except RouterError as exc:
             _print_route_error(exc)
             return 1
@@ -327,11 +408,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             "coder_max_steps": args.max_steps,
             "group_agent": {"plan_candidates": args.plan_candidates},
         }
-        if args.allow_shell_tools:
+        if args.allow_shell_tools or args.confirm_shell_tools:
             payload["allow_shell_tools"] = True
+        if args.confirm_shell_tools:
+            payload["shell_command_policy"] = "ask"
         request = request_from_payload(payload)
         try:
-            response = TeamAgentRunner(config, AgentRouter(config)).run(request)
+            response = TeamAgentRunner(config, AgentRouter(config)).run(
+                request,
+                shell_permission_callback=_shell_permission_prompt
+                if args.confirm_shell_tools
+                else None,
+            )
         except RouterError as exc:
             _print_route_error(exc)
             return 1
@@ -396,6 +484,7 @@ def _chat(config: Any, args: argparse.Namespace) -> int:
             print(f"Route: {route}")
             print(f"free_only: {config.free_only}")
             print(f"allow_shell_tools: {args.allow_shell_tools}")
+            print(f"shell_command_policy: {'ask' if args.confirm_shell_tools else config.shell_command_policy}")
             continue
         if lowered.startswith("/route "):
             route = prompt.split(None, 1)[1].strip()
@@ -412,11 +501,22 @@ def _chat(config: Any, args: argparse.Namespace) -> int:
             "workspace_dir": str(config.workspace_dir),
             "metadata": {"source": "cli-chat"},
         }
-        if args.allow_shell_tools:
+        if args.allow_shell_tools or args.confirm_shell_tools:
             payload["allow_shell_tools"] = True
+        if args.confirm_shell_tools:
+            payload["shell_command_policy"] = "ask"
         request = request_from_payload(payload)
         try:
-            response = router.route(request) if args.no_agent else runner.run(request)
+            response = (
+                router.route(request)
+                if args.no_agent
+                else runner.run(
+                    request,
+                    shell_permission_callback=_shell_permission_prompt
+                    if args.confirm_shell_tools
+                    else None,
+                )
+            )
         except RouterError as exc:
             _print_route_error(exc)
             print()
@@ -712,6 +812,24 @@ def _print_route_error(error: RouterError) -> None:
             print(f"- {event.agent}: {event.reason}")
 
 
+def _shell_permission_prompt(details: dict[str, Any]) -> bool:
+    command = str(details.get("command") or "")
+    cwd = str(details.get("cwd") or ".")
+    timeout = details.get("timeout_seconds")
+    print()
+    print("Agent-Hub wants to run a shell command:")
+    print(f"cwd: {cwd}")
+    print(f"command: {command}")
+    if timeout:
+        print(f"timeout: {timeout}s")
+    try:
+        answer = input("Allow this command? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in {"y", "yes"}
+
+
 def _init_config(path: str, force: bool = False, with_cloud_examples: bool = False) -> int:
     config_path = Path(path)
     if config_path.exists() and not force:
@@ -837,6 +955,22 @@ def _agent_status(agent: Any, *, free: bool, allowed: bool, normalized: str) -> 
 
 def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
     rows = _agent_rows(config)
+    router = AgentRouter(config)
+    provider_health = router.health_snapshot()
+    recommendations = router.recommend(
+        request_from_payload(
+            {
+                "session_id": f"doctor-{uuid.uuid4().hex}",
+                "route": "cloud-agent",
+                "task": "Select the best model for a coding-agent workflow.",
+                "use_session_history": False,
+                "record_session": False,
+            }
+        ),
+        limit=5,
+        needs_tools=True,
+        include_unavailable=True,
+    )
     warnings: list[str] = []
     usable = [
         row
@@ -845,6 +979,28 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
     ]
     if config.free_only:
         warnings.append("free_only is enabled; paid providers are skipped unless an agent is marked free=true.")
+    init_report = getattr(config, "initialization_report", {}) or {}
+    if init_report.get("created_default_config"):
+        warnings.append("Created a default config automatically because none existed.")
+    enabled_from_env = init_report.get("enabled_from_environment")
+    if isinstance(enabled_from_env, list) and enabled_from_env:
+        names = ", ".join(str(item.get("agent")) for item in enabled_from_env if isinstance(item, dict))
+        warnings.append(f"Enabled provider agent(s) from environment variables: {names}.")
+    added_presets = init_report.get("added_provider_presets")
+    if isinstance(added_presets, list) and added_presets:
+        names = ", ".join(str(item.get("agent")) for item in added_presets if isinstance(item, dict))
+        warnings.append(f"Added free provider preset agent(s) from detected API keys: {names}.")
+    free_cloud_agents = init_report.get("free_cloud_route_agents")
+    if isinstance(free_cloud_agents, list) and free_cloud_agents:
+        warnings.append(
+            "Free cloud route candidates: "
+            + ", ".join(str(name) for name in free_cloud_agents)
+            + "."
+        )
+    selected_models = init_report.get("selected_local_models")
+    if isinstance(selected_models, dict) and selected_models:
+        pairs = ", ".join(f"{name}={model}" for name, model in selected_models.items())
+        warnings.append(f"Selected detected local model ID(s): {pairs}.")
     if not usable:
         warnings.append("No enabled ready agents are currently available.")
     for row in rows:
@@ -860,8 +1016,12 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
         "host": config.host,
         "port": config.port,
         "free_only": config.free_only,
+        "shell_command_policy": config.shell_command_policy,
         "default_route": config.default_route,
+        "initialization": init_report,
         "agents": rows,
+        "provider_health": provider_health,
+        "recommendations": recommendations,
         "warnings": warnings,
     }
 
@@ -870,9 +1030,26 @@ def _print_doctor(report: dict[str, Any]) -> None:
     print(f"Config: {report['config']}")
     print(f"Server: http://{report['host']}:{report['port']}")
     print(f"free_only: {report['free_only']}")
+    print(f"shell_command_policy: {report['shell_command_policy']}")
     print(f"default_route: {', '.join(report['default_route'])}")
     print()
     _print_table(report["agents"], ["name", "provider", "model", "enabled", "free", "allowed", "tokens", "status"])
+    health_rows = _health_rows(report.get("provider_health", {}))
+    if health_rows:
+        print()
+        print("Provider health:")
+        _print_table(
+            health_rows,
+            ["name", "available", "degraded", "reliability", "avg_ms", "cooldown", "quota", "requests", "status"],
+        )
+    recommendations = report.get("recommendations")
+    if isinstance(recommendations, list) and recommendations:
+        print()
+        print("Best cloud-agent candidates:")
+        _print_table(
+            recommendations[:5],
+            ["rank", "agent", "provider", "model", "score", "available", "why"],
+        )
     if report["warnings"]:
         print()
         print("Notes:")
@@ -883,6 +1060,185 @@ def _print_doctor(report: dict[str, Any]) -> None:
         print()
         print("Known provider types:")
         _print_table(provider_types, ["provider_type", "display_name", "api_key_env", "free"])
+
+
+def _health_rows(provider_health: Any) -> list[dict[str, Any]]:
+    if not isinstance(provider_health, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for name, health in provider_health.items():
+        if not isinstance(health, dict):
+            continue
+        status = "ready"
+        if health.get("cooldown_until", 0) and float(health.get("cooldown_until") or 0) > time.time():
+            status = "cooldown"
+        elif health.get("requests_remaining") == 0:
+            status = "quota"
+        elif health.get("quota_remaining") == 0:
+            status = "quota"
+        elif health.get("degraded"):
+            status = "degraded"
+        rows.append(
+            {
+                "name": name,
+                "available": health.get("available"),
+                "degraded": health.get("degraded"),
+                "reliability": health.get("reliability_score"),
+                "avg_ms": health.get("average_latency_ms"),
+                "cooldown": _future_seconds(health.get("cooldown_until")),
+                "quota": _unknown_if_none(health.get("quota_remaining")),
+                "requests": _unknown_if_none(health.get("requests_remaining")),
+                "status": status,
+            }
+        )
+    return rows
+
+
+def _metrics_rows(provider_health: Any) -> list[dict[str, Any]]:
+    if not isinstance(provider_health, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for name, health in provider_health.items():
+        if not isinstance(health, dict):
+            continue
+        rows.append(
+            {
+                "name": name,
+                "success": health.get("success_count", 0),
+                "failure": health.get("failure_count", 0),
+                "timeouts": health.get("timeout_count", 0),
+                "tool_ok": health.get("tool_call_success_count", 0),
+                "tool_fail": health.get("tool_call_failure_count", 0),
+                "avg_ms": health.get("average_latency_ms", 0),
+                "stream_tps": health.get("streaming_tokens_per_second", 0),
+                "tokens": f"{health.get('tokens_in', 0)}/{health.get('tokens_out', 0)}",
+            }
+        )
+    return rows
+
+
+def _recent_failover_events(provider_health: dict[str, Any]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for health in provider_health.values():
+        if not isinstance(health, dict):
+            continue
+        for event in health.get("failover_events", []):
+            if isinstance(event, dict):
+                events.append(
+                    {
+                        "time": event.get("time", 0),
+                        "age": _age_seconds(event.get("time")),
+                        "agent": event.get("agent", ""),
+                        "error_type": event.get("error_type", ""),
+                        "status_code": event.get("status_code", ""),
+                        "reason": str(event.get("reason", ""))[:100],
+                    }
+                )
+    return sorted(events, key=lambda item: float(item.get("time") or 0), reverse=True)
+
+
+def _future_seconds(timestamp: Any) -> str:
+    try:
+        value = float(timestamp or 0)
+    except (TypeError, ValueError):
+        return ""
+    remaining = int(value - time.time())
+    return f"{remaining}s" if remaining > 0 else ""
+
+
+def _age_seconds(timestamp: Any) -> str:
+    try:
+        value = float(timestamp or 0)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    return f"{max(0, int(time.time() - value))}s"
+
+
+def _unknown_if_none(value: Any) -> Any:
+    return "?" if value is None else value
+
+
+def _health_report(config: Any, *, route: str, include_history: bool) -> dict[str, Any]:
+    router = AgentRouter(config)
+    request = request_from_payload(
+        {
+            "session_id": f"health-{uuid.uuid4().hex}",
+            "route": route,
+            "task": "Choose the best available model for an agent workflow.",
+            "use_session_history": False,
+            "record_session": False,
+        }
+    )
+    recommendations = router.recommend(
+        request,
+        limit=8,
+        needs_tools=True,
+        include_unavailable=True,
+    )
+    health = router.health_snapshot(include_history=include_history)
+    return {
+        "status": "ok",
+        "route": route,
+        "provider_health": health,
+        "recommendations": recommendations,
+        "routing_decisions": [
+            {
+                "rank": row["rank"],
+                "agent": row["agent"],
+                "available": row["available"],
+                "degraded": row["degraded"],
+                "score": row["score"],
+                "reason": row.get("unavailable_reason") or row.get("why"),
+            }
+            for row in recommendations
+        ],
+        "failover_history": _recent_failover_events(health),
+    }
+
+
+def _print_health(report: dict[str, Any]) -> None:
+    print("Agent-Hub health")
+    print(f"Route: {report['route']}")
+    print()
+    _print_table(
+        _health_rows(report.get("provider_health", {})),
+        ["name", "available", "degraded", "reliability", "avg_ms", "cooldown", "quota", "requests", "status"],
+    )
+    recommendations = report.get("recommendations")
+    if isinstance(recommendations, list) and recommendations:
+        print()
+        print("Best candidates:")
+        _print_table(
+            recommendations[:5],
+            ["rank", "agent", "provider", "model", "score", "available", "why"],
+        )
+
+
+def _print_metrics(report: dict[str, Any]) -> None:
+    print("Agent-Hub metrics")
+    print(f"Route: {report['route']}")
+    print()
+    _print_table(
+        _metrics_rows(report.get("provider_health", {})),
+        [
+            "name",
+            "success",
+            "failure",
+            "timeouts",
+            "tool_ok",
+            "tool_fail",
+            "avg_ms",
+            "stream_tps",
+            "tokens",
+        ],
+    )
+    history = report.get("failover_history")
+    if isinstance(history, list) and history:
+        print()
+        print("Recent failover:")
+        _print_table(history[:10], ["age", "agent", "error_type", "status_code", "reason"])
 
 
 def _local_models_report(config: Any) -> list[dict[str, Any]]:
@@ -912,6 +1268,50 @@ def _local_models_report(config: Any) -> list[dict[str, Any]]:
             row["configured_model_available"] = False
         rows.append(row)
     return rows
+
+
+def _recommend(
+    config: Any,
+    *,
+    route: str,
+    prompt: str,
+    limit: int,
+    prefer: str,
+    needs_tools: bool,
+    include_unavailable: bool,
+    as_json: bool,
+) -> int:
+    router = AgentRouter(config)
+    request = request_from_payload(
+        {
+            "session_id": f"recommend-{uuid.uuid4().hex}",
+            "route": route,
+            "task": prompt or "Recommend a model.",
+            "use_session_history": False,
+            "record_session": False,
+        }
+    )
+    rows = router.recommend(
+        request,
+        limit=max(1, limit),
+        needs_tools=needs_tools or None,
+        prefer=None if prefer == "balanced" else prefer,
+        include_unavailable=include_unavailable,
+    )
+    if as_json:
+        print(json.dumps({"route": route, "recommendations": rows}, indent=2, ensure_ascii=False))
+    else:
+        if not rows:
+            print("No configured agents are available for that route.")
+            return 1
+        _print_table(rows, ["rank", "agent", "provider", "model", "score", "free", "available", "why"])
+        unavailable = [row for row in rows if not row.get("available")]
+        if unavailable:
+            print()
+            print("Unavailable:")
+            for row in unavailable:
+                print(f"- {row['agent']}: {row['unavailable_reason']}")
+    return 0
 
 
 def _benchmark(config: HubConfig, *, route: str, prompt: str, as_json: bool) -> int:

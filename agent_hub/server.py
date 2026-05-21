@@ -6,6 +6,7 @@ from typing import Any
 
 from .agent_runner import AgentRunner
 from .config import HubConfig
+from .models import HubRequest
 from .payloads import (
     anthropic_message_response,
     anthropic_stream_events,
@@ -19,7 +20,7 @@ from .router import AgentRouter, RouterError
 from .team_agent_runner import TeamAgentRunner
 
 
-BACKEND_VERSION = "0.3.0"
+BACKEND_VERSION = "0.3.2"
 BACKEND_FEATURES = {
     "native_agent_streaming": True,
     "native_agent_tool_schemas": True,
@@ -34,6 +35,15 @@ BACKEND_FEATURES = {
     "transparent_openai_responses": True,
     "openrouter_style_api_path": True,
     "provider_presets": True,
+    "automatic_config_initialization": True,
+    "model_recommendations": True,
+    "quota_aware_failover": True,
+    "persistent_provider_health": True,
+    "adaptive_latency_routing": True,
+    "provider_health_metrics": True,
+    "shell_command_permission_policy": True,
+    "agent_hub_model_aliases": True,
+    "openai_tool_call_passthrough": True,
 }
 
 
@@ -67,7 +77,22 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "configured_agents": list(self.server.config.agents),
                     "free_only": self.server.config.free_only,
                     "allow_shell_tools": self.server.config.allow_shell_tools,
+                    "shell_command_policy": self.server.config.shell_command_policy,
                     "workspace_dir": str(self.server.config.workspace_dir),
+                    "initialization": self.server.config.initialization_report,
+                    "provider_health": self.server.router.health_snapshot(),
+                    "recommendations": self.server.router.recommend(
+                        HubRequest(
+                            session_id="health",
+                            route="cloud-agent",
+                            messages=[{"role": "user", "content": "select an agent model"}],
+                            record_session=False,
+                        ),
+                        limit=5,
+                        needs_tools=True,
+                        include_unavailable=True,
+                    ),
+                    "models": _model_rows(self.server.config, self.server.router),
                 }
             )
             return
@@ -75,16 +100,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "object": "list",
-                    "data": [
-                        {
-                            "id": agent.model,
-                            "object": "model",
-                            "owned_by": agent.provider,
-                            "agent_hub": {"agent": agent.name},
-                        }
-                        for agent in self.server.config.agents.values()
-                        if agent.enabled
-                    ],
+                    "data": _model_rows(self.server.config, self.server.router),
                 }
             )
             return
@@ -104,6 +120,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 response_shape="native",
                 agent_mode_default=True,
             )
+            return
+        if self.path in {"/v1/recommend-model", "/api/v1/recommend-model"}:
+            self._handle_recommendation(payload)
             return
         if self.path in {"/api/v1/chat/completions", "/openrouter/v1/chat/completions"}:
             self._handle_payload(
@@ -138,6 +157,28 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"error": "not found"}, status=404)
 
+    def _handle_recommendation(self, payload: dict[str, Any]) -> None:
+        request = request_from_payload(payload, api_shape="native")
+        limit = _positive_int(payload.get("limit"), default=5, maximum=25)
+        prefer = payload.get("prefer")
+        if not isinstance(prefer, str) or prefer == "balanced":
+            prefer = None
+        needs_tools = payload.get("needs_tools")
+        recommendations = self.server.router.recommend(
+            request,
+            limit=limit,
+            needs_tools=bool(needs_tools) if needs_tools is not None else None,
+            prefer=prefer,
+            include_unavailable=bool(payload.get("include_unavailable", False)),
+        )
+        self._send_json(
+            {
+                "object": "agent_hub.model_recommendations",
+                "route": request.route,
+                "recommendations": recommendations,
+            }
+        )
+
     def log_message(self, format: str, *args: Any) -> None:
         if self.server.config.include_raw_responses:
             super().log_message(format, *args)
@@ -150,6 +191,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         agent_mode_default: bool = False,
     ) -> None:
         request = request_from_payload(payload, api_shape=api_shape)
+        _apply_model_routing(self.server.config, request)
         if response_shape == "native" and request.stream:
             self._send_native_stream(
                 request,
@@ -447,6 +489,123 @@ def serve(config: HubConfig) -> None:
         server.server_close()
 
 
+ROUTE_MODEL_ALIASES = {
+    "agent-hub": "cloud-agent",
+    "agent-hub-cloud": "cloud-agent",
+    "agent-hub-coding": "coding",
+    "agent-hub-tools": "coding",
+    "agent-hub-agent": "coding",
+    "agent-hub-local": "local-agent",
+    "agent-hub-research": "research",
+}
+
+
+def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    health = router.health_snapshot()
+    for model_id, route_name in ROUTE_MODEL_ALIASES.items():
+        if route_name not in {route.name for route in config.routes}:
+            continue
+        recommendation = router.recommend(
+            HubRequest(
+                session_id="models",
+                route=route_name,
+                messages=[{"role": "user", "content": "select an agent model"}],
+                record_session=False,
+            ),
+            limit=1,
+            needs_tools=route_name in {"coding", "local-agent"},
+        )
+        row = {
+            "id": model_id,
+            "object": "model",
+            "owned_by": "agent-hub",
+            "agent_hub": {
+                "type": "route",
+                "route": route_name,
+                "recommended_agent": recommendation[0]["agent"] if recommendation else None,
+                "recommended_model": recommendation[0]["model"] if recommendation else None,
+                "available": bool(recommendation),
+                "recommended_health": (
+                    health.get(recommendation[0]["agent"], {}) if recommendation else {}
+                ),
+            },
+        }
+        rows.append(row)
+        seen.add(model_id)
+
+    for route in config.routes:
+        if route.name in seen:
+            continue
+        rows.append(
+            {
+                "id": route.name,
+                "object": "model",
+                "owned_by": "agent-hub",
+                "agent_hub": {
+                    "type": "route",
+                    "route": route.name,
+                    "available": any(
+                        name in config.agents and config.agents[name].enabled
+                        for name in route.agents
+                    ),
+                },
+            }
+        )
+        seen.add(route.name)
+
+    for agent in config.agents.values():
+        if not agent.enabled:
+            continue
+        for model_id in (agent.name, agent.model):
+            if model_id in seen:
+                continue
+            rows.append(
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "owned_by": agent.provider,
+                    "agent_hub": {
+                        "type": "agent",
+                        "agent": agent.name,
+                        "provider_type": agent.provider_type,
+                        "free": agent.free,
+                        "context_window": agent.context_window,
+                        "coding_score": agent.coding_score,
+                        "reasoning_score": agent.reasoning_score,
+                        "speed_score": agent.speed_score,
+                        "supports_tools": bool(agent.supports_tools or agent.supports_function_calling),
+                        "health": health.get(agent.name, {}),
+                    },
+                }
+            )
+            seen.add(model_id)
+    return rows
+
+
+def _apply_model_routing(config: HubConfig, request: HubRequest) -> None:
+    if not isinstance(request.raw, dict):
+        return
+    model = request.raw.get("model")
+    if not isinstance(model, str) or not model.strip():
+        return
+    normalized = model.strip().lower()
+    route_names = {route.name.lower(): route.name for route in config.routes}
+    if request.route is None and normalized in route_names:
+        request.route = route_names[normalized]
+        return
+    agent_names = {agent.name.lower(): agent.name for agent in config.agents.values()}
+    if request.preferred_agent is None and normalized in agent_names:
+        request.preferred_agent = agent_names[normalized]
+        return
+    if request.preferred_agent is None:
+        for agent in config.agents.values():
+            if agent.model.lower() == normalized:
+                request.preferred_agent = agent.name
+                return
+
+
 def _wants_agent_mode(payload: dict[str, Any], default: bool = False) -> bool:
     hub_options = payload.get("agent_hub")
     if isinstance(hub_options, dict) and "agent_mode" in hub_options:
@@ -473,3 +632,11 @@ def _payload_mode(payload: dict[str, Any], default_agent: bool = False) -> str:
     if bool(payload.get("agent_mode")):
         return "agent"
     return "agent" if default_agent else "route"
+
+
+def _positive_int(value: Any, *, default: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(1, min(number, maximum))

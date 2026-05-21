@@ -7,8 +7,8 @@ Use this checklist to package, smoke-test, and publish the VS Code extension in
 
 - Extension ID: `agent-hub.agent-hub-vscode`
 - Package name: `agent-hub-vscode`
-- Current version: `0.4.18`
-- Expected VSIX: `vscode-extension/agent-hub-vscode-0.5.0.vsix`
+- Current version: `0.5.5`
+- Expected VSIX: `vscode-extension/agent-hub-vscode-0.5.5.vsix`
 
 ## Prerequisites
 
@@ -58,7 +58,7 @@ sh ./install-extension.sh --package-only
 This runs the backend staging step and creates:
 
 ```text
-vscode-extension/agent-hub-vscode-0.5.0.vsix
+vscode-extension/agent-hub-vscode-0.5.5.vsix
 ```
 
 ## Smoke-Test Locally
@@ -66,7 +66,7 @@ vscode-extension/agent-hub-vscode-0.5.0.vsix
 Install the built VSIX into VS Code:
 
 ```powershell
-.\install-extension.ps1 --vsix .\vscode-extension\agent-hub-vscode-0.5.0.vsix
+.\install-extension.ps1 --vsix .\vscode-extension\agent-hub-vscode-0.5.5.vsix
 ```
 
 Reload VS Code, open a workspace, and run:
@@ -90,7 +90,7 @@ To publish the already-built VSIX instead:
 ```powershell
 cd vscode-extension
 $env:VSCE_PAT = "<marketplace-personal-access-token>"
-npx.cmd vsce publish --packagePath agent-hub-vscode-0.5.0.vsix --allow-missing-repository
+npx.cmd vsce publish --packagePath agent-hub-vscode-0.5.5.vsix --allow-missing-repository
 ```
 
 If the Marketplace reports that the current version already exists, choose a new version,
@@ -141,5 +141,5 @@ or publish with the token in the current shell:
 ```powershell
 cd vscode-extension
 $env:VSCE_PAT = "<marketplace-personal-access-token>"
-npx.cmd vsce publish --packagePath agent-hub-vscode-0.5.0.vsix --allow-missing-repository
+npx.cmd vsce publish --packagePath agent-hub-vscode-0.5.5.vsix --allow-missing-repository
 ```

@@ -5,7 +5,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import HubConfig
 from .models import HubRequest
@@ -112,6 +112,9 @@ class ToolError(Exception):
     pass
 
 
+ShellPermissionCallback = Callable[[dict[str, Any]], bool]
+
+
 def agent_tool_definitions(allow_shell: bool) -> list[dict[str, Any]]:
     """Common workspace tool definitions converted by each provider."""
 
@@ -125,6 +128,7 @@ def agent_tool_definitions(allow_shell: bool) -> list[dict[str, Any]]:
 class AgentToolbox:
     config: HubConfig
     request: HubRequest
+    shell_permission_callback: ShellPermissionCallback | None = None
 
     @property
     def root(self) -> Path:
@@ -137,6 +141,15 @@ class AgentToolbox:
         return bool(value)
 
     @property
+    def shell_command_policy(self) -> str:
+        value = _request_option(
+            self.request,
+            "shell_command_policy",
+            self.config.shell_command_policy,
+        )
+        return _normalize_shell_policy(value)
+
+    @property
     def allowed_tool_names(self) -> set[str] | None:
         value = _request_option(self.request, "agent_hub_allowed_tools", None)
         if value is None:
@@ -145,7 +158,7 @@ class AgentToolbox:
         if not isinstance(value, list):
             return None
         allowed = {str(item) for item in value if isinstance(item, str)}
-        if not self.allow_shell:
+        if not self.allow_shell or self.shell_command_policy == "deny":
             allowed.discard("run_command")
         return allowed
 
@@ -172,8 +185,13 @@ class AgentToolbox:
             for name in tool_order
             if (allowed is None or name in allowed) and (name != "run_command" or self.allow_shell)
         ]
+        shell_policy = self.shell_command_policy
         if not self.allow_shell:
             tools.append("run_command: unavailable unless allow_shell_tools is true.")
+        elif shell_policy == "deny":
+            tools.append("run_command: unavailable because shell_command_policy is deny.")
+        elif shell_policy == "ask":
+            tools.append("run_command: asks the user for permission before execution.")
 
         return "\n".join(
             [
@@ -182,7 +200,7 @@ class AgentToolbox:
                 "Use tools for file inspection, file creation, and edits. Do not invent file contents you have not inspected.",
                 "When the user asks to create, edit, fix, update, or implement something, make the requested file change before your final answer.",
                 "Use write_file to create files or rewrite a file you have read. Use replace_in_file for targeted edits.",
-                "If shell tools are enabled, use run_command freely for fast inspection, builds, tests, and requested commands.",
+                _shell_instruction(self.allow_shell, shell_policy),
                 "Before editing, confirm the workspace root and target path from the request, active file context, or inspected files.",
                 "When the request is about the open file or folder, prefer the Current file and Current folder paths from context.",
                 "Do not edit duplicate workspace copies such as vscode-extension/backend/... unless that path is the active file or explicitly requested.",
@@ -363,6 +381,8 @@ class AgentToolbox:
     def _run_command(self, args: dict[str, Any]) -> dict[str, Any]:
         if not self.allow_shell:
             raise ToolError("run_command is disabled. Set allow_shell_tools to true to enable it.")
+        if self.shell_command_policy == "deny":
+            raise ToolError("run_command is disabled by shell_command_policy=deny.")
         command = args.get("command")
         if not isinstance(command, str) or not command.strip():
             raise ToolError("run_command requires a command string")
@@ -375,6 +395,7 @@ class AgentToolbox:
             default=60,
             maximum=MAX_COMMAND_TIMEOUT_SECONDS,
         )
+        self._check_shell_permission(command=command, cwd=cwd, timeout_seconds=timeout)
         completed = subprocess.run(
             command,
             shell=True,
@@ -392,6 +413,27 @@ class AgentToolbox:
             "stdout_truncated": len(completed.stdout) > MAX_TOOL_OUTPUT_CHARS,
             "stderr_truncated": len(completed.stderr) > MAX_TOOL_OUTPUT_CHARS,
         }
+
+    def _check_shell_permission(self, *, command: str, cwd: Path, timeout_seconds: int) -> None:
+        if self.shell_command_policy != "ask":
+            return
+        if self.shell_permission_callback is None:
+            raise ToolError(
+                "run_command requires user permission, but no shell permission prompt is available."
+            )
+        details = {
+            "command": command,
+            "cwd": self._relative(cwd),
+            "absolute_cwd": str(cwd),
+            "workspace": str(self.root),
+            "timeout_seconds": timeout_seconds,
+        }
+        try:
+            approved = self.shell_permission_callback(details)
+        except Exception as exc:
+            raise ToolError(f"Shell command permission prompt failed: {exc}") from exc
+        if not approved:
+            raise ToolError("User denied permission to run shell command.")
 
     def _resolve_required_path(
         self,
@@ -587,6 +629,28 @@ def _request_option(request: HubRequest, key: str, default: Any) -> Any:
     if isinstance(hub_options, dict) and key in hub_options:
         return hub_options[key]
     return raw.get(key, default)
+
+
+def _shell_instruction(allow_shell: bool, policy: str) -> str:
+    if not allow_shell:
+        return "Shell tools are disabled; do not call run_command."
+    if policy == "ask":
+        return (
+            "Use run_command only when it materially helps; the user will be asked "
+            "for permission before each shell command runs."
+        )
+    if policy == "deny":
+        return "Shell command execution is disabled by policy; do not call run_command."
+    return "If shell tools are enabled, use run_command for fast inspection, builds, tests, and requested commands."
+
+
+def _normalize_shell_policy(value: Any) -> str:
+    text = str(value or "allow").strip().lower()
+    if text in {"ask", "confirm", "prompt"}:
+        return "ask"
+    if text in {"deny", "disabled", "disable", "off", "false", "0"}:
+        return "deny"
+    return "allow"
 
 
 def _is_bare_filename(value: str) -> bool:

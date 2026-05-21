@@ -96,13 +96,20 @@ class HubConfig:
 
     agent_max_steps: int = 8
     allow_shell_tools: bool = True
+    shell_command_policy: str = "allow"
     free_only: bool = True
     enable_load_balancing: bool = True
+    auto_enable_available_providers: bool = True
+    auto_detect_local_models: bool = True
+    local_model_probe_timeout_seconds: float = 0.35
+    quota_cooldown_seconds: float = 1800.0
+    rate_limit_cooldown_seconds: float = 300.0
 
     default_route: list[str] = field(default_factory=list)
     routes: list[RouteRule] = field(default_factory=list)
     agents: dict[str, AgentConfig] = field(default_factory=dict)
     group_roles: dict[str, str] = field(default_factory=dict)
+    initialization_report: dict[str, Any] = field(default_factory=dict)
 
     include_raw_responses: bool = False
     expose_routing_details: bool = False
@@ -116,15 +123,49 @@ class HubConfig:
         self.archive_dir.mkdir(parents=True, exist_ok=True)
 
 
-def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> HubConfig:
-    """Load JSON config from disk, or build the starter config when absent."""
+def load_config(
+    path: str | Path = DEFAULT_CONFIG_PATH,
+    *,
+    create_if_missing: bool = True,
+    auto_detect: bool = True,
+) -> HubConfig:
+    """Load JSON config, creating and runtime-initializing defaults when absent."""
 
     config_path = Path(path)
+    created_default_config = False
     if not config_path.exists():
-        return free_local_config()
+        config = free_local_config()
+        if create_if_missing:
+            write_default_config(config_path, config)
+            created_default_config = True
+    else:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        config = config_from_dict(raw)
 
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    return config_from_dict(raw)
+    if auto_detect:
+        from .discovery import auto_configure_config
+
+        _resolve_config_paths(config, config_path.parent)
+        config.initialization_report = auto_configure_config(config)
+    else:
+        _resolve_config_paths(config, config_path.parent)
+    if created_default_config:
+        config.initialization_report["created_default_config"] = True
+    config.ensure_dirs()
+    return config
+
+
+def write_default_config(path: str | Path, config: HubConfig | None = None) -> None:
+    """Write the default editable config JSON to disk if initialization needs it."""
+
+    config_path = Path(path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    data = config_to_dict(config or free_local_config())
+    data["cloud_control_selection"] = {
+        "route_mode": "ollama-cloud",
+        "api_key_models_enabled": False,
+    }
+    config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _ollama_cloud_agent(name: str, model: str) -> AgentConfig:
@@ -383,7 +424,10 @@ def free_local_config() -> HubConfig:
         workspace_dir=Path("."),
         agent_max_steps=8,
         allow_shell_tools=True,
+        shell_command_policy="allow",
         free_only=True,
+        auto_enable_available_providers=True,
+        auto_detect_local_models=True,
         default_route=default_agent_names(),
         routes=[
             RouteRule(
@@ -505,15 +549,28 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         archive_dir=Path(raw.get("archive_dir", ".agent-hub/archive")),
         workspace_dir=Path(raw.get("workspace_dir", ".")),
         agent_max_steps=int(raw.get("agent_max_steps", 8)),
-        allow_shell_tools=bool(raw.get("allow_shell_tools", True)),
-        free_only=bool(raw.get("free_only", True)),
-        enable_load_balancing=bool(raw.get("enable_load_balancing", True)),
+        allow_shell_tools=_bool_with_default(raw.get("allow_shell_tools"), True),
+        shell_command_policy=_normalize_shell_command_policy(
+            raw.get("shell_command_policy", raw.get("shell_tools_policy", "allow"))
+        ),
+        free_only=_bool_with_default(raw.get("free_only"), True),
+        enable_load_balancing=_bool_with_default(raw.get("enable_load_balancing"), True),
+        auto_enable_available_providers=_bool_with_default(
+            raw.get("auto_enable_available_providers"),
+            True,
+        ),
+        auto_detect_local_models=_bool_with_default(raw.get("auto_detect_local_models"), True),
+        local_model_probe_timeout_seconds=float(
+            raw.get("local_model_probe_timeout_seconds", 0.35)
+        ),
+        quota_cooldown_seconds=float(raw.get("quota_cooldown_seconds", 1800.0)),
+        rate_limit_cooldown_seconds=float(raw.get("rate_limit_cooldown_seconds", 300.0)),
         default_route=list(raw.get("default_route", agents.keys())),
         routes=routes,
         agents=agents,
         group_roles=dict(raw.get("group_roles", {})),
-        include_raw_responses=bool(raw.get("include_raw_responses", False)),
-        expose_routing_details=bool(raw.get("expose_routing_details", False)),
+        include_raw_responses=_bool_with_default(raw.get("include_raw_responses"), False),
+        expose_routing_details=_bool_with_default(raw.get("expose_routing_details"), False),
     )
 
 
@@ -568,8 +625,14 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "workspace_dir": str(config.workspace_dir),
         "agent_max_steps": config.agent_max_steps,
         "allow_shell_tools": config.allow_shell_tools,
+        "shell_command_policy": config.shell_command_policy,
         "free_only": config.free_only,
         "enable_load_balancing": config.enable_load_balancing,
+        "auto_enable_available_providers": config.auto_enable_available_providers,
+        "auto_detect_local_models": config.auto_detect_local_models,
+        "local_model_probe_timeout_seconds": config.local_model_probe_timeout_seconds,
+        "quota_cooldown_seconds": config.quota_cooldown_seconds,
+        "rate_limit_cooldown_seconds": config.rate_limit_cooldown_seconds,
         "include_raw_responses": config.include_raw_responses,
         "expose_routing_details": config.expose_routing_details,
         "default_route": config.default_route,
@@ -624,6 +687,24 @@ def _drop_empty(data: dict[str, Any]) -> dict[str, Any]:
         for key, value in data.items()
         if value is not None and value != {} and value != []
     }
+
+
+def _resolve_config_paths(config: HubConfig, base_dir: Path) -> None:
+    """Resolve workspace/state paths relative to the config file location."""
+
+    base = base_dir.resolve()
+    config.state_dir = _resolve_config_path(config.state_dir, base)
+    config.inbox_dir = _resolve_config_path(config.inbox_dir, base)
+    config.outbox_dir = _resolve_config_path(config.outbox_dir, base)
+    config.archive_dir = _resolve_config_path(config.archive_dir, base)
+    config.workspace_dir = _resolve_config_path(config.workspace_dir, base)
+
+
+def _resolve_config_path(path: Path, base: Path) -> Path:
+    expanded = Path(path).expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return (base / expanded).resolve()
 
 
 def _is_local_or_private_url(value: str | None) -> bool:
@@ -684,6 +765,20 @@ def _optional_bool(value: Any) -> bool | None:
     if isinstance(value, str):
         return value.strip().lower() not in {"0", "false", "no", "off"}
     return bool(value)
+
+
+def _bool_with_default(value: Any, default: bool) -> bool:
+    parsed = _optional_bool(value)
+    return default if parsed is None else parsed
+
+
+def _normalize_shell_command_policy(value: Any) -> str:
+    text = str(value or "allow").strip().lower()
+    if text in {"ask", "confirm", "prompt"}:
+        return "ask"
+    if text in {"deny", "disabled", "disable", "off", "false", "0"}:
+        return "deny"
+    return "allow"
 
 
 def _expand_env_string(value: Any) -> Any:

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_runner import AgentEventSink, AgentRunner
-from .agent_tools import AgentToolbox
+from .agent_tools import AgentToolbox, ShellPermissionCallback
 from .config import AgentConfig, HubConfig, is_free_agent
 from .models import FailoverEvent, HubRequest, HubResponse
 from .payloads import content_to_text, request_text
@@ -26,7 +26,12 @@ class TeamAgentRunner:
         self.config = config
         self.router = router or AgentRouter(config)
 
-    def run(self, request: HubRequest, event_sink: AgentEventSink | None = None) -> HubResponse:
+    def run(
+        self,
+        request: HubRequest,
+        event_sink: AgentEventSink | None = None,
+        shell_permission_callback: ShellPermissionCallback | None = None,
+    ) -> HubResponse:
         toolbox = AgentToolbox(self.config, request)
         failover: list[FailoverEvent] = []
         phases: list[dict[str, Any]] = []
@@ -53,11 +58,23 @@ class TeamAgentRunner:
             }
         )
 
-        researcher = self._run_researcher(request, toolbox, selected_plan, event_sink)
+        researcher = self._run_researcher(
+            request,
+            toolbox,
+            selected_plan,
+            event_sink,
+            shell_permission_callback,
+        )
         failover.extend(researcher.failover)
         phases.append({"role": "researcher", "agent": researcher.agent, "text": researcher.text})
 
-        coder = self._run_coder(request, selected_plan, researcher.text, event_sink)
+        coder = self._run_coder(
+            request,
+            selected_plan,
+            researcher.text,
+            event_sink,
+            shell_permission_callback,
+        )
         failover.extend(coder.failover)
         phases.append(_phase_from_agent_response("coder", coder))
 
@@ -73,7 +90,13 @@ class TeamAgentRunner:
 
         fixer: HubResponse | None = None
         if _review_requests_fixes(reviewer.text):
-            fixer = self._run_fixer(request, selected_plan, reviewer.text, event_sink)
+            fixer = self._run_fixer(
+                request,
+                selected_plan,
+                reviewer.text,
+                event_sink,
+                shell_permission_callback,
+            )
             failover.extend(fixer.failover)
             phases.append(_phase_from_agent_response("fixer", fixer))
 
@@ -163,6 +186,7 @@ class TeamAgentRunner:
         toolbox: AgentToolbox,
         plan: str,
         event_sink: AgentEventSink | None,
+        shell_permission_callback: ShellPermissionCallback | None,
     ) -> HubResponse:
         prompt = _researcher_prompt(request, toolbox.root, plan)
         return AgentRunner(self.config, self.router).run(
@@ -175,6 +199,7 @@ class TeamAgentRunner:
                 fast_write_finalize=False,
             ),
             event_sink=event_sink,
+            shell_permission_callback=shell_permission_callback,
         )
 
     def _run_coder(
@@ -183,6 +208,7 @@ class TeamAgentRunner:
         plan: str,
         research: str,
         event_sink: AgentEventSink | None,
+        shell_permission_callback: ShellPermissionCallback | None,
     ) -> HubResponse:
         prompt = _coder_prompt(request, plan, research)
         return AgentRunner(self.config, self.router).run(
@@ -201,6 +227,7 @@ class TeamAgentRunner:
                 fast_write_finalize=True,
             ),
             event_sink=event_sink,
+            shell_permission_callback=shell_permission_callback,
         )
 
     def _run_fixer(
@@ -209,6 +236,7 @@ class TeamAgentRunner:
         plan: str,
         review: str,
         event_sink: AgentEventSink | None,
+        shell_permission_callback: ShellPermissionCallback | None,
     ) -> HubResponse:
         prompt = _fixer_prompt(request, plan, review)
         return AgentRunner(self.config, self.router).run(
@@ -221,6 +249,7 @@ class TeamAgentRunner:
                 fast_write_finalize=True,
             ),
             event_sink=event_sink,
+            shell_permission_callback=shell_permission_callback,
         )
 
     def _role_call(

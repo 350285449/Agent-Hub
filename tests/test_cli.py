@@ -48,6 +48,38 @@ class CliTests(unittest.TestCase):
             self.assertIn("custom-local", output)
             self.assertIn("allowed", output)
 
+    def test_health_command_prints_provider_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "state_dir": str(Path(tmp) / "state"),
+                        "auto_detect_local_models": False,
+                        "default_route": ["echo"],
+                        "routes": [{"name": "cloud-agent", "agents": ["echo"]}],
+                        "agents": [
+                            {
+                                "name": "echo",
+                                "provider": "echo",
+                                "model": "local-echo",
+                                "free": True,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(["--config", str(path), "health"])
+
+            self.assertEqual(code, 0)
+            output = buffer.getvalue()
+            self.assertIn("Agent-Hub health", output)
+            self.assertIn("reliability", output)
+
     def test_agent_command_reports_route_errors_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"
@@ -140,6 +172,58 @@ class CliTests(unittest.TestCase):
             names = {agent["name"] for agent in data["agents"]}
             self.assertIn("groq-qwen3-32b", names)
             self.assertIn("openrouter-deepseek-free", names)
+
+    def test_recommend_command_prints_model_suggestions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "state_dir": str(Path(tmp) / "state"),
+                        "auto_detect_local_models": False,
+                        "default_route": ["general", "coder"],
+                        "routes": [{"name": "coding", "agents": ["general", "coder"]}],
+                        "agents": [
+                            {
+                                "name": "general",
+                                "provider": "openai-compatible",
+                                "model": "general-test",
+                                "base_url": "http://127.0.0.1:9999",
+                                "coding_score": 0.2,
+                                "reasoning_score": 0.7,
+                            },
+                            {
+                                "name": "coder",
+                                "provider": "openai-compatible",
+                                "model": "coder-test",
+                                "base_url": "http://127.0.0.1:9999",
+                                "coding_score": 0.95,
+                                "supports_tools": True,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "recommend",
+                        "--route",
+                        "coding",
+                        "--needs-tools",
+                        "fix tests",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            output = buffer.getvalue()
+            self.assertIn("coder", output)
+            self.assertIn("score", output)
 
     def test_chat_runs_one_turn_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

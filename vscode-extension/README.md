@@ -26,6 +26,18 @@ local control as configurable options.
 Packaged builds include the Agent Hub Python backend. A source checkout can
 still use `.\install.ps1` if you want a local editable `.venv`.
 
+For a single setup command from a source checkout:
+
+```powershell
+.\install.ps1 -WithExtension
+```
+
+On macOS or Linux:
+
+```sh
+sh ./install.sh --with-extension
+```
+
 ## Commands
 
 - `@agenthub` in the VS Code Chat view
@@ -46,9 +58,10 @@ Hub exposes file tools to compatible models, applies `write_file` and
 `replace_in_file` directly to the workspace, and streams a progress event when a
 file edit lands on disk.
 
-The chat header includes a `Settings` menu for provider mode, API-key model
-enablement, the Cloud route priority, model names, server settings, local model
-selection, API keys, and server actions.
+The chat header includes a `Settings` menu for provider mode, standard versus
+group-agent mode, planner candidate count, API-key and free-cloud model
+enablement, Cloud route priority, model names, router flags, server settings,
+local model selection, API keys, and server actions.
 
 ## Common Settings
 
@@ -57,6 +70,9 @@ selection, API keys, and server actions.
 - `agentHub.pythonPath`: Python executable or launcher. Default: `auto`
 - `agentHub.configPath`: config file path. Default: `agent-hub.config.json`
 - `agentHub.agentProviderMode`: `local`, `hybrid`, or `cloud`. Default: `cloud`
+- `agentHub.agentMode`: `agent` or `group-agent`. Default: `agent`
+- `agentHub.groupPlanCandidates`: planner candidates for group-agent mode.
+  Default: `1`
 - `agentHub.autoStart`: automatically start the server when needed. Default:
   `true`
 
@@ -84,6 +100,12 @@ Use the model-name fields in `Settings` to change the hosted model IDs, then
 save API keys in VS Code secret storage. Restart Agent Hub from that menu after
 saving settings or keys so the Python server receives the updated config and
 environment variables.
+
+The same menu can enable the newer free-cloud preset agents for Groq,
+OpenRouter, Cerebras, Mistral, GitHub Models, Hugging Face, NVIDIA NIM, and
+Cloudflare Workers AI. Additional provider keys, including Together, Fireworks,
+DeepInfra, SambaNova, Hyperbolic, Featherless, Novita, Parasail, and Anyscale,
+can be saved in the API Keys panel for configs that use those providers.
 
 Choose Local in the chat panel, or set `agentHub.agentProviderMode` to `local`,
 to use direct local model routes. Use the chat panel's `Choose Local Model`

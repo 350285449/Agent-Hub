@@ -4,9 +4,11 @@ import html
 import json
 import re
 import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 from typing import Any, Protocol
@@ -22,34 +24,87 @@ from .provider_presets import (
 
 
 FAILOVER_STATUSES = {401, 402, 403, 404, 408, 409, 429, 500, 502, 503}
-FAILOVER_TEXT_MARKERS = (
+QUOTA_TEXT_MARKERS = (
     "account limit",
+    "billing",
+    "credit",
+    "credits exhausted",
+    "daily limit",
+    "exceeded your quota",
+    "free quota",
+    "free tier",
+    "free-tier",
+    "free usage",
+    "insufficient balance",
+    "insufficient_quota",
+    "monthly limit",
+    "payment required",
+    "quota",
+    "quota exceeded",
+    "quotaexceeded",
+    "resource exhausted",
+    "resource_exhausted",
+    "tokens exhausted",
+    "usage limit",
+)
+RATE_LIMIT_TEXT_MARKERS = (
     "rate limit",
     "rate_limit",
     "rate-limit",
     "rate limited",
+    "rate_limit_error",
     "rate_limit_exceeded",
-    "daily limit",
-    "quota",
-    "quota exceeded",
-    "exceeded your quota",
-    "insufficient_quota",
-    "billing",
-    "credit",
-    "free tier",
-    "free-tier",
-    "tokens exhausted",
+    "requests per day",
+    "requests per minute",
+    "rpm",
+    "too_many_requests",
+    "tokens per minute",
+    "tpm",
+)
+CONTEXT_LIMIT_TEXT_MARKERS = (
+    "context length",
+    "context_length",
+    "context window",
+    "input is too long",
+    "maximum context",
+    "max tokens",
+    "too many tokens",
+    "token limit",
+)
+TEMPORARY_TEXT_MARKERS = (
     "capacity",
     "overloaded",
     "temporarily overloaded",
     "temporarily unavailable",
     "try again later",
-    "context length",
-    "context_length",
-    "too many tokens",
-    "token limit",
-    "maximum context",
+    "server error",
+    "service unavailable",
 )
+AUTH_TEXT_MARKERS = (
+    "api key",
+    "authentication",
+    "authorization",
+    "invalid api key",
+    "permission denied",
+    "unauthorized",
+)
+FAILOVER_TEXT_MARKERS = (
+    *QUOTA_TEXT_MARKERS,
+    *RATE_LIMIT_TEXT_MARKERS,
+    *CONTEXT_LIMIT_TEXT_MARKERS,
+    *TEMPORARY_TEXT_MARKERS,
+    *AUTH_TEXT_MARKERS,
+)
+RETRYABLE_ERROR_TYPES = {
+    "quota_exhausted",
+    "rate_limited",
+    "context_limit",
+    "temporary_unavailable",
+    "authentication",
+    "model_unavailable",
+    "network",
+    "timeout",
+}
 
 
 @dataclass(slots=True)
@@ -57,6 +112,13 @@ class ProviderError(Exception):
     message: str
     status_code: int | None = None
     retryable: bool = True
+    error_type: str = "provider_error"
+    cooldown_seconds: float | None = None
+    metadata: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.error_type == "provider_error":
+            self.error_type = _classify_provider_error(self.message, status_code=self.status_code)
 
     def __str__(self) -> str:
         return self.message
@@ -102,6 +164,7 @@ class OpenAIChatProvider:
             raise ProviderError(
                 f"{self.agent.name} is missing API key env {self.agent.api_key_env}",
                 retryable=True,
+                error_type="configuration",
             )
 
         payload = self._payload(request)
@@ -276,6 +339,7 @@ class AnthropicMessagesProvider:
             raise ProviderError(
                 f"{self.agent.name} is missing API key env {self.agent.api_key_env}",
                 retryable=True,
+                error_type="configuration",
             )
 
         raw = _post_json(
@@ -318,7 +382,7 @@ class AnthropicMessagesProvider:
                 "top_p",
             },
         )
-        agent_tools = _agent_hub_tool_specs(request)
+        agent_tools = _request_tool_specs(request)
         if agent_tools:
             payload["tools"] = _anthropic_tool_specs(agent_tools)
         system_parts: list[str] = []
@@ -363,6 +427,7 @@ class GeminiProvider:
             raise ProviderError(
                 f"{self.agent.name} is missing API key env {self.agent.api_key_env}",
                 retryable=True,
+                error_type="configuration",
             )
 
         raw = _post_json(
@@ -401,7 +466,7 @@ class GeminiProvider:
                 "toolConfig",
             },
         )
-        agent_tools = _agent_hub_tool_specs(request)
+        agent_tools = _request_tool_specs(request)
         if agent_tools:
             payload["tools"] = _gemini_tool_specs(agent_tools)
         generation_config = dict(
@@ -458,6 +523,34 @@ def _agent_hub_tool_specs(request: HubRequest) -> list[dict[str, Any]]:
                 {
                     "name": name,
                     "description": str(tool.get("description") or ""),
+                    "parameters": parameters,
+                }
+            )
+    return specs
+
+
+def _request_tool_specs(request: HubRequest) -> list[dict[str, Any]]:
+    return _agent_hub_tool_specs(request) or _openai_request_tool_specs(request)
+
+
+def _openai_request_tool_specs(request: HubRequest) -> list[dict[str, Any]]:
+    tools = request.raw.get("tools") if isinstance(request.raw, dict) else None
+    if not isinstance(tools, list):
+        return []
+    specs: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function") if tool.get("type") == "function" else tool
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        parameters = function.get("parameters", {"type": "object", "properties": {}})
+        if isinstance(name, str) and isinstance(parameters, dict):
+            specs.append(
+                {
+                    "name": name,
+                    "description": str(function.get("description") or ""),
                     "parameters": parameters,
                 }
             )
@@ -534,7 +627,11 @@ def create_provider(agent: AgentConfig) -> Provider:
         return GeminiProvider(agent)
     if provider == "echo":
         return EchoProvider(agent)
-    raise ProviderError(f"Unsupported provider {agent.provider!r}", retryable=False)
+        raise ProviderError(
+            f"Unsupported provider {agent.provider!r}",
+            retryable=False,
+            error_type="configuration",
+        )
 
 
 def provider_headers(agent: AgentConfig, api_key: str | None = None) -> dict[str, str]:
@@ -574,38 +671,102 @@ def _post_json(
         with urllib.request.urlopen(request, timeout=timeout) as response:
             text = response.read().decode("utf-8")
             data = json.loads(text) if text else {}
+            metadata = _quota_metadata_from_headers(dict(response.headers.items()))
             if isinstance(data, dict) and data.get("error"):
-                raise _provider_error_from_payload(data, status_code=response.status)
+                raise _provider_error_from_payload(
+                    data,
+                    status_code=response.status,
+                    metadata=metadata,
+                )
+            if isinstance(data, dict) and metadata:
+                provider_metadata = data.setdefault("agent_hub_provider", {})
+                if isinstance(provider_metadata, dict):
+                    provider_metadata["quota"] = metadata
             return data
     except urllib.error.HTTPError as exc:
         text = exc.read().decode("utf-8", errors="replace")
-        raise _provider_error_from_http(exc.code, text) from exc
-    except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
-        raise ProviderError(f"Network error: {exc}", retryable=True) from exc
+        raise _provider_error_from_http(
+            exc.code,
+            text,
+            headers=dict(exc.headers.items()) if exc.headers else None,
+        ) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise ProviderError(f"Provider request timed out: {exc}", retryable=True, error_type="timeout") from exc
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        error_type = "timeout" if _looks_like_timeout(reason) else "network"
+        prefix = "Provider request timed out" if error_type == "timeout" else "Network error"
+        raise ProviderError(f"{prefix}: {reason}", retryable=True, error_type=error_type) from exc
     except json.JSONDecodeError as exc:
-        raise ProviderError(f"Provider returned invalid JSON: {exc}", retryable=True) from exc
+        raise ProviderError(
+            f"Provider returned invalid JSON: {exc}",
+            retryable=True,
+            error_type="invalid_provider_response",
+        ) from exc
 
 
-def _provider_error_from_http(status_code: int, text: str) -> ProviderError:
+def _provider_error_from_http(
+    status_code: int,
+    text: str,
+    headers: dict[str, str] | None = None,
+) -> ProviderError:
     message = _extract_error_message(text)
-    marker_text = message.lower()
+    error_type = _classify_provider_error(message, status_code=status_code)
     retryable = (
         status_code in FAILOVER_STATUSES
         or status_code >= 500
-        or any(marker in marker_text for marker in FAILOVER_TEXT_MARKERS)
+        or error_type in RETRYABLE_ERROR_TYPES
     )
-    return ProviderError(message, status_code=status_code, retryable=retryable)
+    metadata = _quota_metadata_from_headers(headers or {})
+    return ProviderError(
+        message,
+        status_code=status_code,
+        retryable=retryable,
+        error_type=error_type,
+        cooldown_seconds=_metadata_cooldown_seconds(metadata),
+        metadata=metadata,
+    )
 
 
-def _provider_error_from_payload(data: dict[str, Any], status_code: int | None = None) -> ProviderError:
+def _provider_error_from_payload(
+    data: dict[str, Any],
+    status_code: int | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ProviderError:
     message = _extract_error_message(json.dumps(data))
-    marker_text = message.lower()
+    error_type = _classify_provider_error(message, status_code=status_code)
     retryable = (
         status_code in FAILOVER_STATUSES
         or (status_code is not None and status_code >= 500)
-        or any(marker in marker_text for marker in FAILOVER_TEXT_MARKERS)
+        or error_type in RETRYABLE_ERROR_TYPES
     )
-    return ProviderError(message, status_code=status_code, retryable=retryable)
+    return ProviderError(
+        message,
+        status_code=status_code,
+        retryable=retryable,
+        error_type=error_type,
+        cooldown_seconds=_metadata_cooldown_seconds(metadata or {}),
+        metadata=metadata or {},
+    )
+
+
+def _classify_provider_error(message: str, status_code: int | None = None) -> str:
+    marker_text = message.lower().replace("-", " ")
+    if any(marker in marker_text for marker in QUOTA_TEXT_MARKERS):
+        return "quota_exhausted"
+    if status_code == 429 or any(marker in marker_text for marker in RATE_LIMIT_TEXT_MARKERS):
+        return "rate_limited"
+    if any(marker in marker_text for marker in CONTEXT_LIMIT_TEXT_MARKERS):
+        return "context_limit"
+    if status_code in {401, 403} or any(marker in marker_text for marker in AUTH_TEXT_MARKERS):
+        return "authentication"
+    if status_code in {408, 409, 500, 502, 503} or any(
+        marker in marker_text for marker in TEMPORARY_TEXT_MARKERS
+    ):
+        return "temporary_unavailable"
+    if status_code == 404:
+        return "model_unavailable"
+    return "provider_error"
 
 
 def _extract_error_message(text: str) -> str:
@@ -623,6 +784,170 @@ def _extract_error_message(text: str) -> str:
     if isinstance(error, str):
         return error
     return text[:500]
+
+
+def _quota_metadata_from_headers(headers: dict[str, str]) -> dict[str, Any]:
+    """Normalize common provider quota/rate-limit headers into router metadata."""
+
+    if not headers:
+        return {}
+    lower = {str(key).lower(): str(value) for key, value in headers.items() if value is not None}
+    metadata: dict[str, Any] = {}
+
+    requests_remaining = _first_number(
+        lower,
+        (
+            "x-ratelimit-remaining-requests",
+            "x-rate-limit-remaining-requests",
+            "anthropic-ratelimit-requests-remaining",
+            "x-request-limit-remaining",
+            "ratelimit-remaining",
+            "x-ratelimit-remaining",
+        ),
+        integer=True,
+    )
+    if requests_remaining is not None:
+        metadata["requests_remaining"] = int(requests_remaining)
+        metadata["quota_remaining"] = int(requests_remaining)
+
+    tokens_remaining = _first_number(
+        lower,
+        (
+            "x-ratelimit-remaining-tokens",
+            "x-rate-limit-remaining-tokens",
+            "anthropic-ratelimit-tokens-remaining",
+            "x-token-limit-remaining",
+        ),
+        integer=True,
+    )
+    if tokens_remaining is not None:
+        metadata["tokens_remaining"] = int(tokens_remaining)
+
+    credits_remaining = _first_number(
+        lower,
+        (
+            "x-ratelimit-remaining-credits",
+            "x-credits-remaining",
+            "x-credit-balance",
+            "x-openrouter-credits-remaining",
+        ),
+    )
+    if credits_remaining is not None:
+        metadata["credits_remaining"] = credits_remaining
+        metadata["quota_remaining"] = credits_remaining
+
+    reset_at = _first_reset_timestamp(
+        lower,
+        (
+            "x-ratelimit-reset",
+            "x-ratelimit-reset-requests",
+            "x-rate-limit-reset",
+            "anthropic-ratelimit-requests-reset",
+            "ratelimit-reset",
+        ),
+    )
+    if reset_at is not None:
+        metadata["rate_limit_reset_at"] = reset_at
+
+    retry_after = _parse_retry_after(lower.get("retry-after"))
+    if retry_after is not None:
+        metadata["cooldown_seconds"] = retry_after
+        metadata["cooldown_until"] = time.time() + retry_after
+
+    return metadata
+
+
+def _metadata_cooldown_seconds(metadata: dict[str, Any]) -> float | None:
+    value = metadata.get("cooldown_seconds")
+    if value is not None:
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return None
+    cooldown_until = metadata.get("cooldown_until")
+    if cooldown_until is not None:
+        try:
+            return max(0.0, float(cooldown_until) - time.time())
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _first_number(
+    headers: dict[str, str],
+    names: tuple[str, ...],
+    *,
+    integer: bool = False,
+) -> float | int | None:
+    for name in names:
+        if name not in headers:
+            continue
+        match = re.search(r"-?\d+(?:\.\d+)?", headers[name])
+        if not match:
+            continue
+        try:
+            value = float(match.group(0))
+        except ValueError:
+            continue
+        return int(value) if integer else value
+    return None
+
+
+def _first_reset_timestamp(headers: dict[str, str], names: tuple[str, ...]) -> float | None:
+    for name in names:
+        value = headers.get(name)
+        parsed = _parse_reset_timestamp(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_reset_timestamp(value: str | None) -> float | None:
+    if not value:
+        return None
+    stripped = value.strip()
+    number_match = re.fullmatch(r"\d+(?:\.\d+)?", stripped)
+    if number_match:
+        try:
+            number = float(number_match.group(0))
+        except ValueError:
+            number = 0.0
+        if number > 1_000_000_000:
+            return number / 1000.0 if number > 10_000_000_000 else number
+        if number >= 0:
+            return time.time() + number
+    try:
+        parsed = parsedate_to_datetime(stripped)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        loose_match = re.search(r"\d+(?:\.\d+)?", stripped)
+        if not loose_match:
+            return None
+        try:
+            return time.time() + max(0.0, float(loose_match.group(0)))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.timestamp()
+    return parsed.timestamp()
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    stripped = value.strip()
+    try:
+        return max(0.0, float(stripped))
+    except ValueError:
+        timestamp = _parse_reset_timestamp(stripped)
+        if timestamp is None:
+            return None
+        return max(0.0, timestamp - time.time())
+
+
+def _looks_like_timeout(reason: object) -> bool:
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return True
+    return "timed out" in str(reason).lower() or "timeout" in str(reason).lower()
 
 
 def _research_query(request: HubRequest) -> str:
@@ -653,7 +978,11 @@ def _search_with_duckduckgo(query: str, limit: int, timeout: float) -> list[dict
     url = "https://duckduckgo.com/html/?" + urlencode({"q": query})
     content_type, text = _get_url_text(url, timeout=timeout, max_bytes=200_000)
     if "html" not in content_type:
-        raise ProviderError("Search returned a non-HTML response", retryable=True)
+        raise ProviderError(
+            "Search returned a non-HTML response",
+            retryable=True,
+            error_type="invalid_provider_response",
+        )
 
     parser = _LinkExtractor()
     parser.feed(text)
@@ -693,7 +1022,7 @@ def _get_url_text(url: str, timeout: float, max_bytes: int) -> tuple[str, str]:
             exc.read().decode("utf-8", errors="replace"),
         ) from exc
     except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
-        raise ProviderError(f"Network error: {exc}", retryable=True) from exc
+        raise ProviderError(f"Network error: {exc}", retryable=True, error_type="network") from exc
 
     charset = _charset_from_content_type(content_type) or "utf-8"
     return content_type.lower(), body.decode(charset, errors="replace")

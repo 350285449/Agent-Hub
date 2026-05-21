@@ -7,7 +7,12 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
-from .agent_tools import AgentToolbox, agent_tool_definitions, tool_result_message
+from .agent_tools import (
+    AgentToolbox,
+    ShellPermissionCallback,
+    agent_tool_definitions,
+    tool_result_message,
+)
 from .config import HubConfig
 from .models import FailoverEvent, HubRequest, HubResponse
 from .router import AgentRouter
@@ -45,8 +50,17 @@ class AgentRunner:
         self.config = config
         self.router = router or AgentRouter(config)
 
-    def run(self, request: HubRequest, event_sink: AgentEventSink | None = None) -> HubResponse:
-        toolbox = AgentToolbox(self.config, request)
+    def run(
+        self,
+        request: HubRequest,
+        event_sink: AgentEventSink | None = None,
+        shell_permission_callback: ShellPermissionCallback | None = None,
+    ) -> HubResponse:
+        toolbox = AgentToolbox(
+            self.config,
+            request,
+            shell_permission_callback=shell_permission_callback,
+        )
         messages = self._initial_messages(request, toolbox)
         max_steps = _request_int(request, "agent_max_steps", self.config.agent_max_steps)
         trace: list[dict[str, Any]] = []
@@ -132,6 +146,7 @@ class AgentRunner:
                     args=_progress_tool_args(tool_name, args),
                 )
                 result = toolbox.run(tool_name, args)
+                self.router.record_tool_result(response.agent, result.get("ok") is not False)
                 trace.append(
                     {
                         "step": step_number,
@@ -375,6 +390,8 @@ def _emit(event_sink: AgentEventSink | None, event_type: str, **data: Any) -> No
 def _agent_step_raw(request: HubRequest, toolbox: AgentToolbox) -> dict[str, Any]:
     raw = dict(request.raw or {})
     tools = agent_tool_definitions(toolbox.allow_shell)
+    if toolbox.shell_command_policy == "deny":
+        tools = [tool for tool in tools if tool.get("name") != "run_command"]
     allowed = toolbox.allowed_tool_names
     if allowed is not None:
         tools = [tool for tool in tools if tool.get("name") in allowed]

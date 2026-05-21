@@ -13,6 +13,7 @@ from agent_hub.providers import (
     provider_headers,
     _join_url,
     _provider_error_from_http,
+    _quota_metadata_from_headers,
 )
 
 
@@ -24,6 +25,33 @@ class ProviderTests(unittest.TestCase):
         )
 
         self.assertTrue(error.retryable)
+
+    def test_free_tier_quota_errors_are_classified_for_cooldown(self) -> None:
+        error = _provider_error_from_http(
+            429,
+            '{"error":{"message":"Free tier usage limit reached"}}',
+            headers={"Retry-After": "42", "X-RateLimit-Remaining-Requests": "0"},
+        )
+
+        self.assertTrue(error.retryable)
+        self.assertEqual(error.error_type, "quota_exhausted")
+        self.assertEqual(error.cooldown_seconds, 42)
+        self.assertEqual(error.metadata["requests_remaining"], 0)
+
+    def test_quota_metadata_is_normalized_from_headers(self) -> None:
+        metadata = _quota_metadata_from_headers(
+            {
+                "X-RateLimit-Remaining-Requests": "12",
+                "X-RateLimit-Remaining-Tokens": "3456",
+                "X-Credits-Remaining": "7.5",
+                "Retry-After": "3",
+            }
+        )
+
+        self.assertEqual(metadata["requests_remaining"], 12)
+        self.assertEqual(metadata["tokens_remaining"], 3456)
+        self.assertEqual(metadata["credits_remaining"], 7.5)
+        self.assertEqual(metadata["cooldown_seconds"], 3)
 
     def test_bad_request_still_stops_routing(self) -> None:
         error = _provider_error_from_http(

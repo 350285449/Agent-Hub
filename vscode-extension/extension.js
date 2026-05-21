@@ -13,7 +13,7 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let lastActiveTextEditor = null;
-const EXTENSION_VERSION = "0.5.0";
+const EXTENSION_VERSION = "0.5.1";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
@@ -22,9 +22,49 @@ const DEFAULT_CODEX_MODEL = DEFAULT_OPENAI_MODEL;
 const DEFAULT_CLAUDE_MODEL = "claude-3-5-haiku-latest";
 const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
 const DEFAULT_CHATGPT_MODEL = DEFAULT_OPENAI_MODEL;
+const DEFAULT_GROQ_MODEL = "qwen/qwen3-32b";
+const DEFAULT_OPENROUTER_MODEL = "qwen/qwen3-coder:free";
+const DEFAULT_CEREBRAS_MODEL = "llama-3.3-70b";
+const DEFAULT_MISTRAL_MODEL = "mistral-small-latest";
+const DEFAULT_GITHUB_MODELS_MODEL = "qwen/qwen3-coder-30b-a3b-instruct";
+const DEFAULT_HUGGINGFACE_MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct";
+const DEFAULT_NVIDIA_MODEL = "nvidia/llama-3.1-nemotron-70b-instruct";
+const DEFAULT_CLOUDFLARE_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
 const HOSTED_CLOUD_AGENT_NAMES = ["codex", "claude", "gemini", "chatgpt"];
+const FREE_CLOUD_AGENT_NAMES = [
+  "groq-qwen3-32b",
+  "openrouter-qwen-free",
+  "cerebras-llama-3-3-70b",
+  "mistral-small-latest",
+  "github-models-qwen3-coder",
+  "huggingface-qwen3-coder",
+  "nvidia-nemotron",
+  "cloudflare-llama-3-1-8b"
+];
+const CLOUD_PROVIDER_TYPES = new Set([
+  "groq",
+  "openrouter",
+  "cerebras",
+  "together",
+  "fireworks",
+  "deepinfra",
+  "mistral",
+  "sambanova",
+  "nvidia-nim",
+  "github-models",
+  "google-ai-studio",
+  "huggingface",
+  "cloudflare-workers-ai",
+  "hyperbolic",
+  "featherless",
+  "replicate",
+  "novita",
+  "kluster",
+  "parasail",
+  "anyscale"
+]);
 const OLLAMA_CLOUD_AGENT_NAMES = [
   "ollama-kimi-cloud",
   "ollama-glm-cloud",
@@ -87,6 +127,12 @@ const OLLAMA_INSTALL_OPTIONS = [
 ];
 const API_KEY_SECRETS = [
   {
+    id: "ollama",
+    label: "Ollama Cloud",
+    env: "OLLAMA_API_KEY",
+    secret: "agentHub.ollamaApiKey"
+  },
+  {
     id: "openai",
     label: "OpenAI / Codex",
     env: "OPENAI_API_KEY",
@@ -103,6 +149,108 @@ const API_KEY_SECRETS = [
     label: "Gemini",
     env: "GEMINI_API_KEY",
     secret: "agentHub.geminiApiKey"
+  },
+  {
+    id: "groq",
+    label: "Groq",
+    env: "GROQ_API_KEY",
+    secret: "agentHub.groqApiKey"
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    env: "OPENROUTER_API_KEY",
+    secret: "agentHub.openrouterApiKey"
+  },
+  {
+    id: "cerebras",
+    label: "Cerebras",
+    env: "CEREBRAS_API_KEY",
+    secret: "agentHub.cerebrasApiKey"
+  },
+  {
+    id: "together",
+    label: "Together",
+    env: "TOGETHER_API_KEY",
+    secret: "agentHub.togetherApiKey"
+  },
+  {
+    id: "fireworks",
+    label: "Fireworks",
+    env: "FIREWORKS_API_KEY",
+    secret: "agentHub.fireworksApiKey"
+  },
+  {
+    id: "deepinfra",
+    label: "DeepInfra",
+    env: "DEEPINFRA_API_KEY",
+    secret: "agentHub.deepinfraApiKey"
+  },
+  {
+    id: "mistral",
+    label: "Mistral",
+    env: "MISTRAL_API_KEY",
+    secret: "agentHub.mistralApiKey"
+  },
+  {
+    id: "sambanova",
+    label: "SambaNova",
+    env: "SAMBANOVA_API_KEY",
+    secret: "agentHub.sambanovaApiKey"
+  },
+  {
+    id: "nvidia",
+    label: "NVIDIA NIM",
+    env: "NVIDIA_API_KEY",
+    secret: "agentHub.nvidiaApiKey"
+  },
+  {
+    id: "github",
+    label: "GitHub Models",
+    env: "GITHUB_TOKEN",
+    secret: "agentHub.githubToken"
+  },
+  {
+    id: "huggingface",
+    label: "Hugging Face",
+    env: "HUGGINGFACE_API_KEY",
+    secret: "agentHub.huggingfaceApiKey"
+  },
+  {
+    id: "cloudflare",
+    label: "Cloudflare",
+    env: "CLOUDFLARE_API_TOKEN",
+    secret: "agentHub.cloudflareApiToken"
+  },
+  {
+    id: "hyperbolic",
+    label: "Hyperbolic",
+    env: "HYPERBOLIC_API_KEY",
+    secret: "agentHub.hyperbolicApiKey"
+  },
+  {
+    id: "featherless",
+    label: "Featherless",
+    env: "FEATHERLESS_API_KEY",
+    secret: "agentHub.featherlessApiKey"
+  },
+  {
+    id: "novita",
+    label: "Novita",
+    env: "NOVITA_API_KEY",
+    secret: "agentHub.novitaApiKey"
+  },
+  {
+    id: "parasail",
+    label: "Parasail",
+    env: "PARASAIL_API_KEY",
+    secret: "agentHub.parasailApiKey"
+  },
+  {
+    id: "anyscale",
+    label: "Anyscale",
+    env: "ANYSCALE_API_KEY",
+    secret: "agentHub.anyscaleApiKey"
   }
 ];
 const REQUIRED_BACKEND_FEATURES = [
@@ -114,7 +262,9 @@ const REQUIRED_BACKEND_FEATURES = [
   "current_folder_context",
   "workspace_shell_commands",
   "file_write_tools",
-  "fast_write_finalize"
+  "fast_write_finalize",
+  "team_agent_mode",
+  "provider_presets"
 ];
 
 function activate(context) {
@@ -184,6 +334,7 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
   const workspace = workspaceRoot();
   const command = request.command || "agent";
   const agentMode = command !== "research";
+  const selectedAgentMode = agentMode ? normalizeAgentMode(config.agentMode) : "route";
   const route = command === "research" ? config.researchRoute : codingAgentRoute(config);
   const context = participantContext(command, request);
   const task = participantTask(command, prompt, chatContext);
@@ -199,7 +350,7 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
 
   const body = {
     session_id: "vscode-agenthub-chat",
-    mode: agentMode ? "agent" : "route",
+    mode: selectedAgentMode,
     route,
     task,
     context,
@@ -207,13 +358,18 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
     max_tokens: config.maxTokens,
     metadata: {
       source: "vscode-chat-participant",
-      command
+      command,
+      agent_mode: selectedAgentMode
     }
   };
 
   if (agentMode) {
     body.allow_shell_tools = config.allowShellTools;
     body.agent_max_steps = config.agentMaxSteps;
+    body.coder_max_steps = config.agentMaxSteps;
+    body.group_agent = {
+      plan_candidates: config.groupPlanCandidates
+    };
     body.workspace_dir = workspace || ".";
   } else {
     body.query = prompt;
@@ -550,6 +706,8 @@ function chatSettingsPayload(config) {
     researchRoute: config.researchRoute,
     codingAgentRoute: config.codingAgentRoute,
     agentProviderMode: config.agentProviderMode,
+    agentMode: config.agentMode,
+    groupPlanCandidates: config.groupPlanCandidates,
     agentMaxSteps: config.agentMaxSteps,
     allowShellTools: config.allowShellTools,
     maxTokens: config.maxTokens,
@@ -598,6 +756,8 @@ function normalizeChatSettingsInput(value) {
       researchRoute: cleanSettingString(input.researchRoute, current.researchRoute),
       codingAgentRoute: cleanSettingString(input.codingAgentRoute, current.codingAgentRoute),
       agentProviderMode: normalizeAgentProviderMode(input.agentProviderMode || current.agentProviderMode),
+      agentMode: normalizeAgentMode(input.agentMode || current.agentMode),
+      groupPlanCandidates: cleanSettingInteger(input.groupPlanCandidates, current.groupPlanCandidates, 1, 5),
       agentMaxSteps: cleanSettingInteger(input.agentMaxSteps, current.agentMaxSteps, 1, 100),
       allowShellTools: !!input.allowShellTools,
       maxTokens: cleanSettingInteger(input.maxTokens, current.maxTokens, 1, 200000),
@@ -606,10 +766,22 @@ function normalizeChatSettingsInput(value) {
     cloudSettings: {
       cloudRouteMode: normalizeCloudRouteMode(input.cloudRouteMode || "ollama-cloud"),
       apiKeyModelsEnabled: !!input.apiKeyModelsEnabled,
+      freeCloudPresetsEnabled: !!input.freeCloudPresetsEnabled,
+      freeOnly: !!input.freeOnly,
+      enableLoadBalancing: !!input.enableLoadBalancing,
+      exposeRoutingDetails: !!input.exposeRoutingDetails,
       codexModel: cleanSettingString(input.codexModel, DEFAULT_CODEX_MODEL),
       claudeModel: cleanSettingString(input.claudeModel, DEFAULT_CLAUDE_MODEL),
       geminiModel: cleanSettingString(input.geminiModel, DEFAULT_GEMINI_MODEL),
-      chatgptModel: cleanSettingString(input.chatgptModel, DEFAULT_CHATGPT_MODEL)
+      chatgptModel: cleanSettingString(input.chatgptModel, DEFAULT_CHATGPT_MODEL),
+      groqModel: cleanSettingString(input.groqModel, DEFAULT_GROQ_MODEL),
+      openrouterModel: cleanSettingString(input.openrouterModel, DEFAULT_OPENROUTER_MODEL),
+      cerebrasModel: cleanSettingString(input.cerebrasModel, DEFAULT_CEREBRAS_MODEL),
+      mistralModel: cleanSettingString(input.mistralModel, DEFAULT_MISTRAL_MODEL),
+      githubModelsModel: cleanSettingString(input.githubModelsModel, DEFAULT_GITHUB_MODELS_MODEL),
+      huggingfaceModel: cleanSettingString(input.huggingfaceModel, DEFAULT_HUGGINGFACE_MODEL),
+      nvidiaModel: cleanSettingString(input.nvidiaModel, DEFAULT_NVIDIA_MODEL),
+      cloudflareModel: cleanSettingString(input.cloudflareModel, DEFAULT_CLOUDFLARE_MODEL)
     }
   };
 }
@@ -653,10 +825,22 @@ function cloudModelSettingsPayload(config) {
   const fallback = {
     cloudRouteMode: "ollama-cloud",
     apiKeyModelsEnabled: false,
+    freeCloudPresetsEnabled: false,
+    freeOnly: true,
+    enableLoadBalancing: true,
+    exposeRoutingDetails: false,
     codexModel: DEFAULT_CODEX_MODEL,
     claudeModel: DEFAULT_CLAUDE_MODEL,
     geminiModel: DEFAULT_GEMINI_MODEL,
-    chatgptModel: DEFAULT_CHATGPT_MODEL
+    chatgptModel: DEFAULT_CHATGPT_MODEL,
+    groqModel: DEFAULT_GROQ_MODEL,
+    openrouterModel: DEFAULT_OPENROUTER_MODEL,
+    cerebrasModel: DEFAULT_CEREBRAS_MODEL,
+    mistralModel: DEFAULT_MISTRAL_MODEL,
+    githubModelsModel: DEFAULT_GITHUB_MODELS_MODEL,
+    huggingfaceModel: DEFAULT_HUGGINGFACE_MODEL,
+    nvidiaModel: DEFAULT_NVIDIA_MODEL,
+    cloudflareModel: DEFAULT_CLOUDFLARE_MODEL
   };
   const workspace = workspaceRoot();
   if (!workspace) {
@@ -676,10 +860,22 @@ function cloudModelSettingsPayload(config) {
     return {
       cloudRouteMode: configCloudRouteMode(raw),
       apiKeyModelsEnabled: apiKeyModelsEnabledFromConfig(raw),
+      freeCloudPresetsEnabled: freeCloudPresetsEnabledFromConfig(raw),
+      freeOnly: raw.free_only !== false,
+      enableLoadBalancing: raw.enable_load_balancing !== false,
+      exposeRoutingDetails: raw.expose_routing_details === true,
       codexModel: modelForAgent(raw, "codex", DEFAULT_CODEX_MODEL),
       claudeModel: modelForAgent(raw, "claude", DEFAULT_CLAUDE_MODEL),
       geminiModel: modelForAgent(raw, "gemini", DEFAULT_GEMINI_MODEL),
-      chatgptModel: modelForAgent(raw, "chatgpt", DEFAULT_CHATGPT_MODEL)
+      chatgptModel: modelForAgent(raw, "chatgpt", DEFAULT_CHATGPT_MODEL),
+      groqModel: modelForAgent(raw, "groq-qwen3-32b", DEFAULT_GROQ_MODEL),
+      openrouterModel: modelForAgent(raw, "openrouter-qwen-free", DEFAULT_OPENROUTER_MODEL),
+      cerebrasModel: modelForAgent(raw, "cerebras-llama-3-3-70b", DEFAULT_CEREBRAS_MODEL),
+      mistralModel: modelForAgent(raw, "mistral-small-latest", DEFAULT_MISTRAL_MODEL),
+      githubModelsModel: modelForAgent(raw, "github-models-qwen3-coder", DEFAULT_GITHUB_MODELS_MODEL),
+      huggingfaceModel: modelForAgent(raw, "huggingface-qwen3-coder", DEFAULT_HUGGINGFACE_MODEL),
+      nvidiaModel: modelForAgent(raw, "nvidia-nemotron", DEFAULT_NVIDIA_MODEL),
+      cloudflareModel: modelForAgent(raw, "cloudflare-llama-3-1-8b", DEFAULT_CLOUDFLARE_MODEL)
     };
   } catch (_error) {
     return fallback;
@@ -705,6 +901,17 @@ function apiKeyModelsEnabledFromConfig(data) {
       item &&
       typeof item === "object" &&
       HOSTED_CLOUD_AGENT_NAMES.includes(item.name) &&
+      item.enabled === true
+    ))
+    : false;
+}
+
+function freeCloudPresetsEnabledFromConfig(data) {
+  return Array.isArray(data && data.agents)
+    ? data.agents.some((item) => (
+      item &&
+      typeof item === "object" &&
+      FREE_CLOUD_AGENT_NAMES.includes(item.name) &&
       item.enabled === true
     ))
     : false;
@@ -963,6 +1170,7 @@ async function sendChatTurn(panel, message) {
 
   const config = settings();
   const providerMode = normalizeAgentProviderMode(message.providerMode || config.agentProviderMode);
+  const agentMode = normalizeAgentMode(config.agentMode);
   const health = await serverHealth();
   postChatProgress(panel, requestId, serverConnectionSummary(health, config));
   if (!serverSupportsRequiredBackend(health)) {
@@ -995,7 +1203,7 @@ async function sendChatTurn(panel, message) {
     : activeEditorReferenceContext();
   const body = {
     session_id: message.sessionId || `vscode-chat-${Date.now()}`,
-    mode: "agent",
+    mode: agentMode,
     route: codingAgentRoute(config, providerMode),
     task: codexChatTask(text),
     context,
@@ -1003,10 +1211,15 @@ async function sendChatTurn(panel, message) {
     max_tokens: config.maxTokens,
     allow_shell_tools: config.allowShellTools,
     agent_max_steps: config.agentMaxSteps,
+    coder_max_steps: config.agentMaxSteps,
+    group_agent: {
+      plan_candidates: config.groupPlanCandidates
+    },
     workspace_dir: workspace || ".",
     metadata: {
       source: "vscode-agent-hub-chat",
-      control_agent_mode: providerMode
+      control_agent_mode: providerMode,
+      agent_mode: agentMode
     }
   };
 
@@ -1100,10 +1313,28 @@ function agentToolSteps(response) {
     });
 }
 
+function apiKeyFieldsHtml() {
+  return API_KEY_SECRETS.map((spec) => `
+                <label class="key-field">
+                  <span>${escapeHtml(spec.label)}</span>
+                  <input id="key-${escapeHtml(spec.id)}" type="password" autocomplete="off" placeholder="${escapeHtml(spec.env)}">
+                  <span class="key-state" id="key-${escapeHtml(spec.id)}-state">Checking...</span>
+                </label>`).join("");
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function chatHtml(webview, logoPath, initialSettings = settings()) {
   const nonce = getNonce();
   const logoSrc = webview.asWebviewUri(logoPath);
   const initialSettingsJson = jsonForScript(chatSettingsPayload(initialSettings));
+  const apiKeyIdsJson = jsonForScript(API_KEY_SECRETS.map((spec) => spec.id));
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1509,6 +1740,13 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
                 </select>
               </label>
               <label class="settings-field">
+                <span>Agent mode</span>
+                <select id="settingAgentMode">
+                  <option value="agent">Standard agent</option>
+                  <option value="group-agent">Group agent</option>
+                </select>
+              </label>
+              <label class="settings-field">
                 <span>Cloud route</span>
                 <select id="settingCloudRouteMode">
                   <option value="ollama-cloud">Ollama cloud models first</option>
@@ -1548,6 +1786,10 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
                 <input id="settingAgentMaxSteps" type="number" min="1" max="100" step="1">
               </label>
               <label class="settings-field">
+                <span>Group plans</span>
+                <input id="settingGroupPlanCandidates" type="number" min="1" max="5" step="1">
+              </label>
+              <label class="settings-field">
                 <span>OpenAI / Codex model</span>
                 <input id="settingCodexModel" type="text" autocomplete="off">
               </label>
@@ -1563,11 +1805,47 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
                 <span>ChatGPT model</span>
                 <input id="settingChatgptModel" type="text" autocomplete="off">
               </label>
+              <label class="settings-field">
+                <span>Groq model</span>
+                <input id="settingGroqModel" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>OpenRouter model</span>
+                <input id="settingOpenrouterModel" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Cerebras model</span>
+                <input id="settingCerebrasModel" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Mistral model</span>
+                <input id="settingMistralModel" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>GitHub Models model</span>
+                <input id="settingGithubModelsModel" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Hugging Face model</span>
+                <input id="settingHuggingfaceModel" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>NVIDIA NIM model</span>
+                <input id="settingNvidiaModel" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Cloudflare model</span>
+                <input id="settingCloudflareModel" type="text" autocomplete="off">
+              </label>
             </div>
             <div class="settings-row">
               <label class="settings-check"><input id="settingAllowShellTools" type="checkbox"> Allow shell tools</label>
               <label class="settings-check"><input id="settingAutoStart" type="checkbox"> Auto-start server</label>
               <label class="settings-check"><input id="settingApiKeyModelsEnabled" type="checkbox"> Enable API-key models</label>
+              <label class="settings-check"><input id="settingFreeCloudPresetsEnabled" type="checkbox"> Enable free cloud presets</label>
+              <label class="settings-check"><input id="settingFreeOnly" type="checkbox"> Free-only routing</label>
+              <label class="settings-check"><input id="settingLoadBalancing" type="checkbox"> Load balancing</label>
+              <label class="settings-check"><input id="settingRoutingDetails" type="checkbox"> Routing details</label>
             </div>
             <div class="settings-actions">
               <button id="saveSettings" type="button">Save Settings</button>
@@ -1587,21 +1865,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
             <details class="key-panel" id="apiKeyPanel">
               <summary>API Keys</summary>
               <div class="key-grid">
-                <label class="key-field">
-                  <span>OpenAI / Codex</span>
-                  <input id="keyOpenai" type="password" autocomplete="off" placeholder="OPENAI_API_KEY">
-                  <span class="key-state" id="keyOpenaiState">Checking...</span>
-                </label>
-                <label class="key-field">
-                  <span>Claude</span>
-                  <input id="keyAnthropic" type="password" autocomplete="off" placeholder="ANTHROPIC_API_KEY">
-                  <span class="key-state" id="keyAnthropicState">Checking...</span>
-                </label>
-                <label class="key-field">
-                  <span>Gemini</span>
-                  <input id="keyGemini" type="password" autocomplete="off" placeholder="GEMINI_API_KEY">
-                  <span class="key-state" id="keyGeminiState">Checking...</span>
-                </label>
+${apiKeyFieldsHtml()}
               </div>
               <div class="key-actions">
                 <button class="secondary" id="saveApiKeys" type="button">Save Keys</button>
@@ -1630,6 +1894,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const initialSettings = ${initialSettingsJson};
+    const apiKeyIds = ${apiKeyIdsJson};
     const transcript = document.getElementById("transcript");
     const form = document.getElementById("form");
     const prompt = document.getElementById("prompt");
@@ -1644,6 +1909,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     const pullModel = document.getElementById("pullModel");
     const settingInputs = {
       cloudRouteMode: document.getElementById("settingCloudRouteMode"),
+      agentMode: document.getElementById("settingAgentMode"),
       serverUrl: document.getElementById("settingServerUrl"),
       pythonPath: document.getElementById("settingPythonPath"),
       configPath: document.getElementById("settingConfigPath"),
@@ -1652,24 +1918,29 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       researchRoute: document.getElementById("settingResearchRoute"),
       maxTokens: document.getElementById("settingMaxTokens"),
       agentMaxSteps: document.getElementById("settingAgentMaxSteps"),
+      groupPlanCandidates: document.getElementById("settingGroupPlanCandidates"),
       codexModel: document.getElementById("settingCodexModel"),
       claudeModel: document.getElementById("settingClaudeModel"),
       geminiModel: document.getElementById("settingGeminiModel"),
       chatgptModel: document.getElementById("settingChatgptModel"),
+      groqModel: document.getElementById("settingGroqModel"),
+      openrouterModel: document.getElementById("settingOpenrouterModel"),
+      cerebrasModel: document.getElementById("settingCerebrasModel"),
+      mistralModel: document.getElementById("settingMistralModel"),
+      githubModelsModel: document.getElementById("settingGithubModelsModel"),
+      huggingfaceModel: document.getElementById("settingHuggingfaceModel"),
+      nvidiaModel: document.getElementById("settingNvidiaModel"),
+      cloudflareModel: document.getElementById("settingCloudflareModel"),
       apiKeyModelsEnabled: document.getElementById("settingApiKeyModelsEnabled"),
+      freeCloudPresetsEnabled: document.getElementById("settingFreeCloudPresetsEnabled"),
+      freeOnly: document.getElementById("settingFreeOnly"),
+      enableLoadBalancing: document.getElementById("settingLoadBalancing"),
+      exposeRoutingDetails: document.getElementById("settingRoutingDetails"),
       allowShellTools: document.getElementById("settingAllowShellTools"),
       autoStart: document.getElementById("settingAutoStart")
     };
-    const keyInputs = {
-      openai: document.getElementById("keyOpenai"),
-      anthropic: document.getElementById("keyAnthropic"),
-      gemini: document.getElementById("keyGemini")
-    };
-    const keyStates = {
-      openai: document.getElementById("keyOpenaiState"),
-      anthropic: document.getElementById("keyAnthropicState"),
-      gemini: document.getElementById("keyGeminiState")
-    };
+    const keyInputs = Object.fromEntries(apiKeyIds.map((id) => [id, document.getElementById("key-" + id)]));
+    const keyStates = Object.fromEntries(apiKeyIds.map((id) => [id, document.getElementById("key-" + id + "-state")]));
     const keyMessage = document.getElementById("keyMessage");
     const pending = new Map();
     let sessionId = "vscode-chat-" + Date.now().toString(36);
@@ -1701,6 +1972,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       const next = settings || {};
       controlMode.value = next.agentProviderMode || "cloud";
       settingInputs.cloudRouteMode.value = next.cloudRouteMode || "ollama-cloud";
+      settingInputs.agentMode.value = next.agentMode || "agent";
       settingInputs.serverUrl.value = next.serverUrl || "";
       settingInputs.pythonPath.value = next.pythonPath || "";
       settingInputs.configPath.value = next.configPath || "";
@@ -1709,11 +1981,24 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       settingInputs.researchRoute.value = next.researchRoute || "";
       settingInputs.maxTokens.value = next.maxTokens || "";
       settingInputs.agentMaxSteps.value = next.agentMaxSteps || "";
+      settingInputs.groupPlanCandidates.value = next.groupPlanCandidates || "";
       settingInputs.codexModel.value = next.codexModel || "";
       settingInputs.claudeModel.value = next.claudeModel || "";
       settingInputs.geminiModel.value = next.geminiModel || "";
       settingInputs.chatgptModel.value = next.chatgptModel || "";
+      settingInputs.groqModel.value = next.groqModel || "";
+      settingInputs.openrouterModel.value = next.openrouterModel || "";
+      settingInputs.cerebrasModel.value = next.cerebrasModel || "";
+      settingInputs.mistralModel.value = next.mistralModel || "";
+      settingInputs.githubModelsModel.value = next.githubModelsModel || "";
+      settingInputs.huggingfaceModel.value = next.huggingfaceModel || "";
+      settingInputs.nvidiaModel.value = next.nvidiaModel || "";
+      settingInputs.cloudflareModel.value = next.cloudflareModel || "";
       settingInputs.apiKeyModelsEnabled.checked = !!next.apiKeyModelsEnabled;
+      settingInputs.freeCloudPresetsEnabled.checked = !!next.freeCloudPresetsEnabled;
+      settingInputs.freeOnly.checked = next.freeOnly !== false;
+      settingInputs.enableLoadBalancing.checked = next.enableLoadBalancing !== false;
+      settingInputs.exposeRoutingDetails.checked = !!next.exposeRoutingDetails;
       settingInputs.allowShellTools.checked = !!next.allowShellTools;
       settingInputs.autoStart.checked = !!next.autoStart;
       if (messageText !== undefined) {
@@ -1730,14 +2015,28 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
         codingAgentRoute: settingInputs.codingAgentRoute.value,
         researchRoute: settingInputs.researchRoute.value,
         agentProviderMode: controlMode.value,
+        agentMode: settingInputs.agentMode.value,
         cloudRouteMode: settingInputs.cloudRouteMode.value,
         maxTokens: settingInputs.maxTokens.value,
         agentMaxSteps: settingInputs.agentMaxSteps.value,
+        groupPlanCandidates: settingInputs.groupPlanCandidates.value,
         codexModel: settingInputs.codexModel.value,
         claudeModel: settingInputs.claudeModel.value,
         geminiModel: settingInputs.geminiModel.value,
         chatgptModel: settingInputs.chatgptModel.value,
+        groqModel: settingInputs.groqModel.value,
+        openrouterModel: settingInputs.openrouterModel.value,
+        cerebrasModel: settingInputs.cerebrasModel.value,
+        mistralModel: settingInputs.mistralModel.value,
+        githubModelsModel: settingInputs.githubModelsModel.value,
+        huggingfaceModel: settingInputs.huggingfaceModel.value,
+        nvidiaModel: settingInputs.nvidiaModel.value,
+        cloudflareModel: settingInputs.cloudflareModel.value,
         apiKeyModelsEnabled: settingInputs.apiKeyModelsEnabled.checked,
+        freeCloudPresetsEnabled: settingInputs.freeCloudPresetsEnabled.checked,
+        freeOnly: settingInputs.freeOnly.checked,
+        enableLoadBalancing: settingInputs.enableLoadBalancing.checked,
+        exposeRoutingDetails: settingInputs.exposeRoutingDetails.checked,
         allowShellTools: settingInputs.allowShellTools.checked,
         autoStart: settingInputs.autoStart.checked
       };
@@ -1935,13 +2234,13 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
 
     document.getElementById("saveApiKeys").addEventListener("click", () => {
       keyMessage.textContent = "Saving keys...";
+      const keys = {};
+      for (const id of apiKeyIds) {
+        keys[id] = keyInputs[id] ? keyInputs[id].value : "";
+      }
       vscode.postMessage({
         type: "saveApiKeys",
-        keys: {
-          openai: keyInputs.openai.value,
-          anthropic: keyInputs.anthropic.value,
-          gemini: keyInputs.gemini.value
-        }
+        keys
       });
     });
 
@@ -2593,10 +2892,22 @@ function cloudModelSettingsFromConfig(raw) {
   return {
     cloudRouteMode: configCloudRouteMode(raw),
     apiKeyModelsEnabled: apiKeyModelsEnabledFromConfig(raw),
+    freeCloudPresetsEnabled: freeCloudPresetsEnabledFromConfig(raw),
+    freeOnly: raw.free_only !== false,
+    enableLoadBalancing: raw.enable_load_balancing !== false,
+    exposeRoutingDetails: raw.expose_routing_details === true,
     codexModel: modelForAgent(raw, "codex", DEFAULT_CODEX_MODEL),
     claudeModel: modelForAgent(raw, "claude", DEFAULT_CLAUDE_MODEL),
     geminiModel: modelForAgent(raw, "gemini", DEFAULT_GEMINI_MODEL),
-    chatgptModel: modelForAgent(raw, "chatgpt", DEFAULT_CHATGPT_MODEL)
+    chatgptModel: modelForAgent(raw, "chatgpt", DEFAULT_CHATGPT_MODEL),
+    groqModel: modelForAgent(raw, "groq-qwen3-32b", DEFAULT_GROQ_MODEL),
+    openrouterModel: modelForAgent(raw, "openrouter-qwen-free", DEFAULT_OPENROUTER_MODEL),
+    cerebrasModel: modelForAgent(raw, "cerebras-llama-3-3-70b", DEFAULT_CEREBRAS_MODEL),
+    mistralModel: modelForAgent(raw, "mistral-small-latest", DEFAULT_MISTRAL_MODEL),
+    githubModelsModel: modelForAgent(raw, "github-models-qwen3-coder", DEFAULT_GITHUB_MODELS_MODEL),
+    huggingfaceModel: modelForAgent(raw, "huggingface-qwen3-coder", DEFAULT_HUGGINGFACE_MODEL),
+    nvidiaModel: modelForAgent(raw, "nvidia-nemotron", DEFAULT_NVIDIA_MODEL),
+    cloudflareModel: modelForAgent(raw, "cloudflare-llama-3-1-8b", DEFAULT_CLOUDFLARE_MODEL)
   };
 }
 
@@ -2669,9 +2980,13 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings) {
 
   data.agents = Array.isArray(data.agents) ? data.agents : [];
   data.routes = Array.isArray(data.routes) ? data.routes : [];
+  data.free_only = cloudSettings.freeOnly !== false;
+  data.enable_load_balancing = cloudSettings.enableLoadBalancing !== false;
+  data.expose_routing_details = !!cloudSettings.exposeRoutingDetails;
   data.cloud_control_selection = {
     route_mode: normalizeCloudRouteMode(cloudSettings.cloudRouteMode),
-    api_key_models_enabled: !!cloudSettings.apiKeyModelsEnabled
+    api_key_models_enabled: !!cloudSettings.apiKeyModelsEnabled,
+    free_cloud_presets_enabled: !!cloudSettings.freeCloudPresetsEnabled
   };
 
   for (const source of cloudModelSources(cloudSettings)) {
@@ -2786,10 +3101,18 @@ function ollamaCloudAgentNames(data) {
 
 function hostedCloudAgentNames(data) {
   const agents = Array.isArray(data && data.agents) ? data.agents : [];
-  return HOSTED_CLOUD_AGENT_NAMES.filter((name) => {
-    const agent = agents.find((item) => item && typeof item === "object" && item.name === name);
-    return agent && agent.enabled === true;
-  });
+  return agents
+    .filter((agent) => (
+      agent &&
+      typeof agent === "object" &&
+      typeof agent.name === "string" &&
+      agent.enabled === true &&
+      (
+        HOSTED_CLOUD_AGENT_NAMES.includes(agent.name) ||
+        CLOUD_PROVIDER_TYPES.has(String(agent.provider_type || "").toLowerCase())
+      )
+    ))
+    .map((agent) => agent.name);
 }
 
 function agentNameSet(data) {
@@ -2885,12 +3208,14 @@ function localConfigForLocalModels(sources, options = {}) {
     workspace_dir: ".",
     agent_max_steps: 8,
     allow_shell_tools: true,
-    free_only: true,
+    free_only: options.cloudSettings?.freeOnly !== false,
+    enable_load_balancing: options.cloudSettings?.enableLoadBalancing !== false,
     include_raw_responses: false,
-    expose_routing_details: true,
+    expose_routing_details: options.cloudSettings?.exposeRoutingDetails === true,
     cloud_control_selection: {
       route_mode: cloudRouteMode,
-      api_key_models_enabled: !!options.cloudSettings?.apiKeyModelsEnabled
+      api_key_models_enabled: !!options.cloudSettings?.apiKeyModelsEnabled,
+      free_cloud_presets_enabled: !!options.cloudSettings?.freeCloudPresetsEnabled
     },
     default_route: hybridAgents,
     routes: [
@@ -2946,7 +3271,7 @@ function localConfigForLocalModels(sources, options = {}) {
 }
 
 function cloudModelSources(settings = {}) {
-  return [
+  const hosted = [
     {
       name: "codex",
       label: "Codex",
@@ -2988,6 +3313,147 @@ function cloudModelSources(settings = {}) {
       contextWindow: 128000
     }
   ];
+  return [...hosted, ...freeCloudPresetSources(settings)];
+}
+
+function freeCloudPresetSources(settings = {}) {
+  const enabled = !!settings.freeCloudPresetsEnabled;
+  return [
+    {
+      name: "groq-qwen3-32b",
+      label: "Groq Qwen3 32B",
+      provider: "openai-compatible",
+      providerType: "groq",
+      enabled,
+      model: cleanSettingString(settings.groqModel, DEFAULT_GROQ_MODEL),
+      apiKeyEnv: "GROQ_API_KEY",
+      baseUrl: "https://api.groq.com/openai/v1",
+      contextWindow: 128000,
+      priority: 74,
+      codingScore: 0.84,
+      reasoningScore: 0.82,
+      speedScore: 0.9,
+      supportsTools: true
+    },
+    {
+      name: "openrouter-qwen-free",
+      label: "OpenRouter Qwen free",
+      provider: "openai-compatible",
+      providerType: "openrouter",
+      enabled,
+      model: cleanSettingString(settings.openrouterModel, DEFAULT_OPENROUTER_MODEL),
+      apiKeyEnv: "OPENROUTER_API_KEY",
+      baseUrl: "https://openrouter.ai/api/v1",
+      headers: {
+        "HTTP-Referer": "${AGENT_HUB_HTTP_REFERER:-http://localhost:8787}",
+        "X-Title": "${AGENT_HUB_X_TITLE:-Agent Hub}"
+      },
+      contextWindow: 64000,
+      priority: 66,
+      codingScore: 0.9,
+      reasoningScore: 0.78,
+      speedScore: 0.5,
+      supportsTools: true
+    },
+    {
+      name: "cerebras-llama-3-3-70b",
+      label: "Cerebras Llama 3.3 70B",
+      provider: "openai-compatible",
+      providerType: "cerebras",
+      enabled,
+      model: cleanSettingString(settings.cerebrasModel, DEFAULT_CEREBRAS_MODEL),
+      apiKeyEnv: "CEREBRAS_API_KEY",
+      baseUrl: "https://api.cerebras.ai/v1",
+      contextWindow: 128000,
+      priority: 68,
+      codingScore: 0.68,
+      reasoningScore: 0.78,
+      speedScore: 0.95
+    },
+    {
+      name: "mistral-small-latest",
+      label: "Mistral Small",
+      provider: "openai-compatible",
+      providerType: "mistral",
+      enabled,
+      model: cleanSettingString(settings.mistralModel, DEFAULT_MISTRAL_MODEL),
+      apiKeyEnv: "MISTRAL_API_KEY",
+      baseUrl: "https://api.mistral.ai/v1",
+      contextWindow: 128000,
+      priority: 58,
+      codingScore: 0.66,
+      reasoningScore: 0.72,
+      speedScore: 0.75,
+      supportsTools: true
+    },
+    {
+      name: "github-models-qwen3-coder",
+      label: "GitHub Models Qwen3 Coder",
+      provider: "openai-compatible",
+      providerType: "github-models",
+      enabled,
+      model: cleanSettingString(settings.githubModelsModel, DEFAULT_GITHUB_MODELS_MODEL),
+      apiKeyEnv: "GITHUB_TOKEN",
+      baseUrl: "https://models.github.ai/inference",
+      chatCompletionsPath: "/chat/completions",
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "${GITHUB_API_VERSION:-2026-03-10}"
+      },
+      contextWindow: 128000,
+      priority: 62,
+      codingScore: 0.86,
+      reasoningScore: 0.78,
+      speedScore: 0.6
+    },
+    {
+      name: "huggingface-qwen3-coder",
+      label: "Hugging Face Qwen3 Coder",
+      provider: "openai-compatible",
+      providerType: "huggingface",
+      enabled,
+      model: cleanSettingString(settings.huggingfaceModel, DEFAULT_HUGGINGFACE_MODEL),
+      apiKeyEnv: "HUGGINGFACE_API_KEY",
+      baseUrl: "https://router.huggingface.co/v1",
+      contextWindow: 64000,
+      priority: 54,
+      codingScore: 0.86,
+      reasoningScore: 0.78,
+      speedScore: 0.45,
+      supportsTools: true
+    },
+    {
+      name: "nvidia-nemotron",
+      label: "NVIDIA Nemotron",
+      provider: "openai-compatible",
+      providerType: "nvidia-nim",
+      enabled,
+      model: cleanSettingString(settings.nvidiaModel, DEFAULT_NVIDIA_MODEL),
+      apiKeyEnv: "NVIDIA_API_KEY",
+      baseUrl: "https://integrate.api.nvidia.com/v1",
+      contextWindow: 131072,
+      priority: 64,
+      codingScore: 0.72,
+      reasoningScore: 0.82,
+      speedScore: 0.72,
+      supportsTools: true
+    },
+    {
+      name: "cloudflare-llama-3-1-8b",
+      label: "Cloudflare Workers AI",
+      provider: "openai-compatible",
+      providerType: "cloudflare-workers-ai",
+      enabled,
+      model: cleanSettingString(settings.cloudflareModel, DEFAULT_CLOUDFLARE_MODEL),
+      apiKeyEnv: "CLOUDFLARE_API_TOKEN",
+      baseUrl: "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1",
+      contextWindow: 8192,
+      priority: 40,
+      codingScore: 0.45,
+      reasoningScore: 0.55,
+      speedScore: 0.8
+    }
+  ];
 }
 
 function ollamaCloudModelSources() {
@@ -3004,6 +3470,7 @@ function ollamaCloudModelAgentConfig(source) {
   return {
     name: source.name,
     provider: "openai-compatible",
+    provider_type: "ollama-cloud",
     model: source.model,
     base_url: source.baseUrl,
     free: true,
@@ -3018,6 +3485,7 @@ function cloudModelAgentConfig(source) {
   const agent = {
     name: source.name,
     provider: source.provider,
+    provider_type: source.providerType,
     model: source.model,
     enabled: !!source.enabled,
     free: true,
@@ -3025,10 +3493,25 @@ function cloudModelAgentConfig(source) {
     max_tokens: 4096,
     context_window: source.contextWindow,
     timeout_seconds: 60,
-    cooldown_seconds: 30
+    cooldown_seconds: source.cooldownSeconds || 30,
+    coding_score: source.codingScore,
+    reasoning_score: source.reasoningScore,
+    speed_score: source.speedScore,
+    supports_tools: source.supportsTools,
+    supports_json: source.supportsJson !== false,
+    supports_streaming: source.supportsStreaming !== false,
+    supports_vision: source.supportsVision,
+    supports_function_calling: source.supportsFunctionCalling,
+    priority: source.priority
   };
   if (source.baseUrl) {
     agent.base_url = source.baseUrl;
+  }
+  if (source.chatCompletionsPath) {
+    agent.chat_completions_path = source.chatCompletionsPath;
+  }
+  if (source.headers) {
+    agent.headers = source.headers;
   }
   return agent;
 }
@@ -3037,6 +3520,7 @@ function localModelAgentConfig(source) {
   return {
     name: source.name,
     provider: "openai-compatible",
+    provider_type: "openai-compatible",
     model: source.model,
     base_url: source.baseUrl,
     free: true,
@@ -3557,16 +4041,21 @@ async function sendAgentRequest({ task, context, route, agentMode = true, extra 
     return;
   }
 
+  const selectedAgentMode = agentMode ? normalizeAgentMode(config.agentMode) : "route";
   const body = {
     ...extra,
     session_id: `vscode-${Date.now()}`,
-    mode: agentMode ? "agent" : "route",
+    mode: selectedAgentMode,
     route: route || config.route,
     task,
     context,
     max_tokens: config.maxTokens,
+    group_agent: {
+      plan_candidates: config.groupPlanCandidates
+    },
     metadata: {
-      source: "vscode"
+      source: "vscode",
+      agent_mode: selectedAgentMode
     }
   };
 
@@ -3925,6 +4414,8 @@ function settings() {
     researchRoute: config.get("researchRoute", "research"),
     codingAgentRoute: config.get("codingAgentRoute", "local-agent"),
     agentProviderMode: providerMode,
+    agentMode: normalizeAgentMode(config.get("agentMode", "agent")),
+    groupPlanCandidates: config.get("groupPlanCandidates", 1),
     agentMaxSteps: config.get("agentMaxSteps", 20),
     allowShellTools: config.get("allowShellTools", true),
     maxTokens: config.get("maxTokens", 1200),
@@ -3935,6 +4426,11 @@ function settings() {
 function normalizeAgentProviderMode(value) {
   const mode = typeof value === "string" ? value.toLowerCase() : "";
   return ["cloud", "hybrid", "local"].includes(mode) ? mode : "cloud";
+}
+
+function normalizeAgentMode(value) {
+  const mode = typeof value === "string" ? value.toLowerCase() : "";
+  return ["agent", "group-agent"].includes(mode) ? mode : "agent";
 }
 
 function codingAgentRoute(config, providerMode = config.agentProviderMode) {

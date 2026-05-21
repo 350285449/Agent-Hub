@@ -50,9 +50,11 @@ class FailoverEvent:
     reason: str
     status_code: int | None = None
     retryable: bool = True
+    error_type: str | None = None
+    unavailable_until: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "agent": self.agent,
             "provider": self.provider,
             "model": self.model,
@@ -60,6 +62,11 @@ class FailoverEvent:
             "status_code": self.status_code,
             "retryable": self.retryable,
         }
+        if self.error_type:
+            data["error_type"] = self.error_type
+        if self.unavailable_until is not None:
+            data["unavailable_until"] = self.unavailable_until
+        return data
 
 
 @dataclass(slots=True)

@@ -68,6 +68,113 @@ class RouterTests(unittest.TestCase):
 
             self.assertEqual(calls, ["claude", "openai", "openai"])
 
+    def test_quota_failures_mark_agent_temporarily_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = _config(Path(tmp))
+            config.quota_cooldown_seconds = 600
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+
+            response = router.route(
+                HubRequest(
+                    session_id="abc",
+                    route="coding",
+                    messages=[{"role": "user", "content": "code a parser"}],
+                )
+            )
+
+            self.assertEqual(response.agent, "openai")
+            self.assertEqual(response.failover[0].error_type, "quota_exhausted")
+            health = router.health_snapshot()
+            self.assertEqual(health["claude"]["last_error_type"], "quota_exhausted")
+            self.assertGreater(health["claude"]["unavailable_until"], 0)
+
+    def test_provider_health_persists_across_router_restarts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = _config(Path(tmp))
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+            request = HubRequest(
+                session_id="abc",
+                route="coding",
+                messages=[{"role": "user", "content": "code a parser"}],
+            )
+
+            router.route(request)
+            restarted = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+            restarted.route(request)
+
+            self.assertEqual(calls, ["claude", "openai", "openai"])
+            health = restarted.health_snapshot(include_history=True)
+            self.assertEqual(health["claude"]["failure_count"], 1)
+            self.assertGreater(health["claude"]["cooldown_until"], 0)
+            self.assertTrue(health["claude"]["failover_events"])
+
+    def test_success_metadata_can_cool_down_exhausted_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                enable_load_balancing=False,
+                default_route=["primary", "fallback"],
+                agents={
+                    "primary": AgentConfig(
+                        name="primary",
+                        provider="openai-compatible",
+                        model="primary-test",
+                        base_url="http://127.0.0.1:9999",
+                        cooldown_seconds=300,
+                    ),
+                    "fallback": AgentConfig(
+                        name="fallback",
+                        provider="openai-compatible",
+                        model="fallback-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                },
+            )
+
+            class MetadataProvider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    if self.agent.name == "primary":
+                        return ProviderResult(
+                            text="almost out",
+                            model=self.agent.model,
+                            raw={
+                                "agent_hub_provider": {
+                                    "quota": {"requests_remaining": 0}
+                                }
+                            },
+                        )
+                    return ProviderResult(text="fallback", model=self.agent.model)
+
+            router = AgentRouter(config, provider_factory=MetadataProvider)
+            request = HubRequest(
+                session_id="abc",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+            self.assertEqual(router.route(request).agent, "primary")
+            self.assertEqual(router.route(request).agent, "fallback")
+
+            self.assertEqual(calls, ["primary", "fallback"])
+            health = router.health_snapshot()
+            self.assertEqual(health["primary"]["requests_remaining"], 0)
+            self.assertFalse(health["primary"]["available"])
+
     def test_provider_balancing_respects_priority(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             calls: list[str] = []
@@ -105,6 +212,149 @@ class RouterTests(unittest.TestCase):
 
             self.assertEqual(calls, ["high"])
             self.assertEqual(response.agent, "high")
+
+    def test_tool_requests_prefer_tool_capable_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                default_route=["plain", "tooly"],
+                agents={
+                    "plain": AgentConfig(
+                        name="plain",
+                        provider="openai-compatible",
+                        model="plain-test",
+                        base_url="http://127.0.0.1:9999",
+                        priority=20,
+                    ),
+                    "tooly": AgentConfig(
+                        name="tooly",
+                        provider="openai-compatible",
+                        model="tooly-test",
+                        base_url="http://127.0.0.1:9999",
+                        supports_tools=True,
+                        supports_function_calling=True,
+                        coding_score=0.9,
+                    ),
+                },
+            )
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+
+            response = router.route(
+                HubRequest(
+                    session_id="abc",
+                    messages=[{"role": "user", "content": "edit a file"}],
+                    raw={
+                        "tools": [
+                            {
+                                "type": "function",
+                                "function": {"name": "read_file", "parameters": {"type": "object"}},
+                            }
+                        ]
+                    },
+                )
+            )
+
+            self.assertEqual(response.agent, "tooly")
+            self.assertEqual(calls, ["tooly"])
+
+    def test_preferred_agent_can_fall_back_to_route_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = _config(Path(tmp))
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+
+            response = router.route(
+                HubRequest(
+                    session_id="abc",
+                    preferred_agent="claude",
+                    route="coding",
+                    messages=[{"role": "user", "content": "code a parser"}],
+                )
+            )
+
+            self.assertEqual(calls, ["claude", "openai"])
+            self.assertEqual(response.agent, "openai")
+
+    def test_recommendation_prefers_coding_model_for_coding_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp),
+                default_route=["general", "coder"],
+                agents={
+                    "general": AgentConfig(
+                        name="general",
+                        provider="openai-compatible",
+                        model="general-test",
+                        base_url="http://127.0.0.1:9999",
+                        coding_score=0.2,
+                        reasoning_score=0.8,
+                        speed_score=0.8,
+                    ),
+                    "coder": AgentConfig(
+                        name="coder",
+                        provider="openai-compatible",
+                        model="coder-test",
+                        base_url="http://127.0.0.1:9999",
+                        coding_score=0.95,
+                        reasoning_score=0.6,
+                        supports_tools=True,
+                    ),
+                },
+            )
+            router = AgentRouter(config)
+
+            recommendations = router.recommend(
+                HubRequest(
+                    session_id="abc",
+                    messages=[{"role": "user", "content": "fix the failing tests in this repo"}],
+                ),
+                needs_tools=True,
+            )
+
+            self.assertEqual(recommendations[0]["agent"], "coder")
+            self.assertTrue(recommendations[0]["supports_tools"])
+
+    def test_recommendation_keeps_echo_as_last_resort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp),
+                default_route=["cloud", "echo"],
+                agents={
+                    "cloud": AgentConfig(
+                        name="cloud",
+                        provider="openai-compatible",
+                        provider_type="ollama-cloud",
+                        model="cloud-test",
+                        base_url="http://127.0.0.1:11434",
+                        free=True,
+                        context_window=128000,
+                    ),
+                    "echo": AgentConfig(
+                        name="echo",
+                        provider="echo",
+                        model="local-echo",
+                        free=True,
+                        context_window=1000000,
+                        speed_score=1,
+                    ),
+                },
+            )
+
+            recommendations = AgentRouter(config).recommend(
+                HubRequest(
+                    session_id="abc",
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+            )
+
+            self.assertEqual(recommendations[0]["agent"], "cloud")
 
     def test_session_history_is_replayed_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

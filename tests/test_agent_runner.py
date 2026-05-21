@@ -927,6 +927,44 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertEqual(result["result"]["cwd"], "tools")
             self.assertIn("tools", result["result"]["stdout"])
 
+    def test_run_command_can_ask_for_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(workspace_dir=root, shell_command_policy="ask")
+            prompts: list[dict] = []
+            toolbox = AgentToolbox(
+                config,
+                HubRequest(session_id="agent", messages=[]),
+                shell_permission_callback=lambda details: prompts.append(details) or True,
+            )
+
+            result = toolbox.run(
+                "run_command",
+                {"command": "python -c \"print('approved')\""},
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(prompts[0]["cwd"], ".")
+            self.assertIn("approved", result["result"]["stdout"])
+
+    def test_run_command_denies_when_permission_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(workspace_dir=root, shell_command_policy="ask")
+            toolbox = AgentToolbox(
+                config,
+                HubRequest(session_id="agent", messages=[]),
+                shell_permission_callback=lambda details: False,
+            )
+
+            result = toolbox.run(
+                "run_command",
+                {"command": "python -c \"print('nope')\""},
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("denied", result["error"])
+
     def test_file_tools_report_ambiguous_bare_filename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
