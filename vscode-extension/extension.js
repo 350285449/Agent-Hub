@@ -12,9 +12,11 @@ let modelPullProcess = null;
 let output;
 let chatPanel = null;
 let extensionContext = null;
+let lastActiveTextEditor = null;
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
+const DEFAULT_CODEX_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_CLAUDE_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_GEMINI_MODEL = "gemma3:4b";
 const DEFAULT_CHATGPT_MODEL = "llama3.2";
@@ -25,6 +27,14 @@ function activate(context) {
   extensionContext = context;
   output = vscode.window.createOutputChannel("Agent Hub");
   context.subscriptions.push(output);
+  lastActiveTextEditor = vscode.window.activeTextEditor || null;
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      if (editor) {
+        lastActiveTextEditor = editor;
+      }
+    })
+  );
 
   registerChatParticipant(context);
 
@@ -121,7 +131,15 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
 
   try {
     stream.progress(command === "research" ? "Researching..." : "Running the workspace agent...");
-    const response = await requestJson("POST", agentMode ? "/v1/agent" : "/v1/route", body);
+    const response = agentMode
+      ? await requestEventStream("POST", "/v1/agent", { ...body, stream: true }, (event) => {
+        const progress = progressTextFromEvent(event);
+        if (progress) {
+          output.appendLine(`[progress] ${progress}`);
+          stream.progress(progress);
+        }
+      })
+      : await requestJson("POST", "/v1/route", body);
     const reply = responseText(response) || "(empty response)";
     output.appendLine(reply);
     appendAgentTrace(response);
@@ -160,6 +178,7 @@ function participantTask(command, prompt, chatContext) {
   const base = [
     "You are Agent Hub, a practical local-first coding agent inside VS Code.",
     "Inspect workspace files before making claims about code.",
+    "Use the current file path from context when the user refers to an open file by basename.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
     "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
     "For direct replies, use the final action; never invent other action names.",
@@ -189,12 +208,15 @@ function participantContext(command, request) {
     return selected;
   }
   if (command === "explain") {
-    const editor = vscode.window.activeTextEditor;
+    const editor = currentTextEditor();
     if (editor) {
       return contextForDocument(editor.document, editor.document.getText());
     }
   }
-  return participantReferences(request);
+  return [
+    activeEditorReferenceContext(),
+    participantReferences(request)
+  ].filter(Boolean).join("\n\n");
 }
 
 function participantHistory(chatContext) {
@@ -429,7 +451,7 @@ function modelsToPull() {
 }
 
 function defaultOllamaAliasModels() {
-  return uniqueModels([DEFAULT_CLAUDE_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_CHATGPT_MODEL]);
+  return uniqueModels([DEFAULT_CODEX_MODEL, DEFAULT_CLAUDE_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_CHATGPT_MODEL]);
 }
 
 function uniqueModels(models) {
@@ -456,7 +478,9 @@ async function sendChatTurn(panel, message) {
 
   const config = settings();
   const workspace = workspaceRoot();
-  const context = message.includeSelection ? selectedEditorContext() : "";
+  const context = message.includeSelection
+    ? selectedEditorContext() || activeEditorReferenceContext()
+    : activeEditorReferenceContext();
   const body = {
     session_id: message.sessionId || `vscode-chat-${Date.now()}`,
     mode: "agent",
@@ -476,7 +500,20 @@ async function sendChatTurn(panel, message) {
   output.appendLine("");
   output.appendLine(`[Agent Hub Chat] ${text}`);
   try {
-    const response = await requestJson("POST", "/v1/agent", body);
+    const response = await requestEventStream("POST", "/v1/agent", { ...body, stream: true }, (event) => {
+      const progress = progressTextFromEvent(event);
+      if (!progress) {
+        return;
+      }
+      output.appendLine(`[progress] ${progress}`);
+      panel.webview.postMessage({
+        type: "chatProgress",
+        requestId,
+        text: progress,
+        event: event.name,
+        data: event.data
+      });
+    });
     const reply = responseText(response);
     output.appendLine(reply || "(empty response)");
     appendAgentTrace(response);
@@ -502,6 +539,7 @@ function codexChatTask(text) {
   return [
     "Chat with the user as Agent Hub, a careful local-first workspace agent.",
     "Be conversational and concise. Use workspace tools when inspection or edits are useful.",
+    "Use the current file path from context when the user refers to an open file by basename.",
     "Use Agent Hub file tools when you need to inspect or edit files; do not show tool-call JSON to the user.",
     "When using a tool, reply with one raw JSON object, no Markdown fences, and quote every string value such as \"README.md\".",
     "For direct replies, use the final action; never invent other action names.",
@@ -670,6 +708,16 @@ function chatHtml(webview, logoPath) {
       padding-left: 18px;
     }
 
+    .activity {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .activity li {
+      margin: 2px 0;
+    }
+
     form {
       display: grid;
       gap: 8px;
@@ -823,6 +871,7 @@ function chatHtml(webview, logoPath) {
       const bubble = document.createElement("div");
       bubble.className = "bubble";
       bubble.textContent = text;
+      item.agentHubBubble = bubble;
 
       item.append(roleLabel, bubble);
       if (options.tools && options.tools.length) {
@@ -837,6 +886,50 @@ function chatHtml(webview, logoPath) {
       transcript.append(item);
       transcript.scrollTop = transcript.scrollHeight;
       return item;
+    }
+
+    function appendLiveMessage() {
+      const item = appendMessage("assistant", "Starting...");
+      const activity = document.createElement("ul");
+      activity.className = "activity";
+      item.append(activity);
+      return { item, bubble: item.agentHubBubble, activity };
+    }
+
+    function appendActivity(turn, text) {
+      if (!turn || !turn.activity || !text) {
+        return;
+      }
+      const previous = turn.activity.lastElementChild;
+      if (previous && previous.textContent === text) {
+        return;
+      }
+      const item = document.createElement("li");
+      item.textContent = text;
+      turn.activity.append(item);
+      if (turn.bubble && turn.bubble.textContent === "Starting...") {
+        turn.bubble.textContent = text;
+      }
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    function finishLiveMessage(turn, text, options = {}) {
+      if (!turn || !turn.item || !turn.bubble) {
+        appendMessage("assistant", text, options);
+        return;
+      }
+      turn.bubble.textContent = text;
+      turn.item.classList.toggle("error", !!options.error);
+      if (options.tools && options.tools.length) {
+        turn.item.append(detailsBlock("Tools", options.tools.map((tool) => {
+          const status = tool.ok ? "ok" : "failed";
+          return "#" + tool.step + " " + tool.tool + " (" + status + ")" + (tool.error ? ": " + tool.error : "");
+        })));
+      }
+      if (options.sources && options.sources.length) {
+        turn.item.append(detailsBlock("Sources", options.sources));
+      }
+      transcript.scrollTop = transcript.scrollHeight;
     }
 
     function detailsBlock(summaryText, lines) {
@@ -861,7 +954,7 @@ function chatHtml(webview, logoPath) {
       }
       const requestId = Date.now().toString(36) + Math.random().toString(36).slice(2);
       appendMessage("user", text);
-      pending.set(requestId, true);
+      pending.set(requestId, appendLiveMessage());
       prompt.value = "";
       setBusy(true);
       startWorkingStatus();
@@ -910,6 +1003,13 @@ function chatHtml(webview, logoPath) {
         startWorkingStatus();
         return;
       }
+      if (message.type === "chatProgress") {
+        appendActivity(pending.get(message.requestId), message.text);
+        if (message.text) {
+          status.textContent = message.text;
+        }
+        return;
+      }
       if (message.type === "modelPullStatus") {
         status.textContent = message.text;
         pullModel.disabled = !!message.running;
@@ -919,8 +1019,9 @@ function chatHtml(webview, logoPath) {
         return;
       }
       if (message.type === "chatResponse") {
+        const turn = pending.get(message.requestId);
         pending.delete(message.requestId);
-        appendMessage("assistant", message.text, {
+        finishLiveMessage(turn, message.text, {
           tools: message.tools || [],
           sources: message.sources || []
         });
@@ -930,8 +1031,9 @@ function chatHtml(webview, logoPath) {
         return;
       }
       if (message.type === "chatError") {
+        const turn = pending.get(message.requestId);
         pending.delete(message.requestId);
-        appendMessage("assistant", message.text, { error: true });
+        finishLiveMessage(turn, message.text, { error: true });
         setBusy(false);
         status.textContent = "Request failed";
         prompt.focus();
@@ -1349,7 +1451,7 @@ async function repairGeneratedLocalConfig(configPath) {
     ["lm-studio", "custom-local", "vllm"].includes(agent.name) &&
     agent.model === "local-model"
   ));
-  const hasCloudStyleAliases = ["claude", "gemini", "chatgpt"].every((name) => agentNames.has(name));
+  const hasCloudStyleAliases = ["codex", "claude"].every((name) => agentNames.has(name));
   const hasLegacyMinimalOllamaConfig = (
     agentNames.has("ollama-qwen-coder") &&
     agentNames.has("echo") &&
@@ -1445,9 +1547,7 @@ function localConfigForLocalModels(sources) {
   const cloudSources = cloudModelSources(localSources);
   const cloudAgents = cloudSources.map((source) => source.name);
   const localAgents = localSources.map((source) => source.name);
-  const primaryLocalAgents = localAgents.slice(0, 1);
-  const secondaryLocalAgents = localAgents.slice(1);
-  const routeAgents = [...primaryLocalAgents, ...cloudAgents, ...secondaryLocalAgents, "echo"];
+  const routeAgents = [...cloudAgents, ...localAgents, "echo"];
   return {
     host: "127.0.0.1",
     port: 8787,
@@ -1457,7 +1557,7 @@ function localConfigForLocalModels(sources) {
     archive_dir: ".agent-hub/archive",
     workspace_dir: ".",
     agent_max_steps: 8,
-    allow_shell_tools: false,
+    allow_shell_tools: true,
     free_only: true,
     include_raw_responses: false,
     expose_routing_details: true,
@@ -1514,11 +1614,22 @@ function localConfigForLocalModels(sources) {
 }
 
 function cloudModelSources(localSources = []) {
-  const ollama = localSources.find((source) => source.baseUrl === OLLAMA_BASE_URL && source.detected !== false);
   const lmStudio = localSources.find((source) => source.name === "lm-studio" && source.detected !== false);
-  const baseUrl = ollama ? ollama.baseUrl : (lmStudio ? lmStudio.baseUrl : OLLAMA_BASE_URL);
-  const sharedDetectedModel = ollama ? ollama.model : (lmStudio ? lmStudio.model : "");
+  const ollama = localSources.find((source) => source.baseUrl === OLLAMA_BASE_URL && source.detected !== false);
+  const fallbackLmStudio = localSources.find((source) => source.name === "lm-studio");
+  const fallbackOllama = localSources.find((source) => source.baseUrl === OLLAMA_BASE_URL);
+  const primary = lmStudio || ollama || fallbackLmStudio || fallbackOllama || lmStudioSource(DEFAULT_LM_STUDIO_MODEL, false);
+  const baseUrl = primary.baseUrl;
+  const sharedDetectedModel = primary.model || "";
   return [
+    {
+      name: "codex",
+      label: "Codex",
+      provider: "openai-compatible",
+      model: process.env.AGENT_HUB_CODEX_LOCAL_MODEL || sharedDetectedModel || DEFAULT_CODEX_MODEL,
+      baseUrl: process.env.AGENT_HUB_CODEX_LOCAL_BASE_URL || baseUrl,
+      contextWindow: 32768
+    },
     {
       name: "claude",
       label: "Claude",
@@ -1581,21 +1692,21 @@ async function detectLocalModelSources() {
     detectOllamaModels()
   ]);
   const sources = [];
-  const ollamaModel = chooseOllamaModel(ollamaModels);
-  if (ollamaModel) {
-    sources.push(ollamaSource(ollamaModel));
-  }
   const lmStudioModel = chooseLmStudioModel(lmStudioModels);
   if (lmStudioModel) {
     sources.push(lmStudioSource(lmStudioModel));
+  }
+  const ollamaModel = chooseOllamaModel(ollamaModels);
+  if (ollamaModel) {
+    sources.push(ollamaSource(ollamaModel));
   }
   return sources;
 }
 
 function fallbackLocalModelSources() {
   return [
-    ollamaSource(DEFAULT_OLLAMA_MODEL, false),
-    lmStudioSource(DEFAULT_LM_STUDIO_MODEL, false)
+    lmStudioSource(DEFAULT_LM_STUDIO_MODEL, false),
+    ollamaSource(DEFAULT_OLLAMA_MODEL, false)
   ];
 }
 
@@ -1978,7 +2089,7 @@ async function runCodingAgent() {
       "",
       task
     ].join("\n"),
-    context: selectedEditorContext(),
+    context: selectedEditorContext() || activeEditorReferenceContext(),
     route,
     agentMode: true,
     extra: {
@@ -2017,7 +2128,7 @@ async function researchWeb() {
 }
 
 async function explainSelection() {
-  const editor = vscode.window.activeTextEditor;
+  const editor = currentTextEditor();
   if (!editor || editor.selection.isEmpty) {
     vscode.window.showWarningMessage("Select some text first.");
     return;
@@ -2030,7 +2141,7 @@ async function explainSelection() {
 }
 
 async function explainFile() {
-  const editor = vscode.window.activeTextEditor;
+  const editor = currentTextEditor();
   if (!editor) {
     vscode.window.showWarningMessage("Open a file first.");
     return;
@@ -2129,7 +2240,7 @@ async function ensureServerReady() {
 }
 
 function editorContext({ preferSelection }) {
-  const editor = vscode.window.activeTextEditor;
+  const editor = currentTextEditor();
   if (!editor) {
     return "";
   }
@@ -2140,15 +2251,23 @@ function editorContext({ preferSelection }) {
 }
 
 function selectedEditorContext() {
-  const editor = vscode.window.activeTextEditor;
+  const editor = currentTextEditor();
   if (!editor || editor.selection.isEmpty) {
     return "";
   }
   return contextForDocument(editor.document, editor.document.getText(editor.selection));
 }
 
+function activeEditorReferenceContext() {
+  const editor = currentTextEditor();
+  if (!editor) {
+    return "";
+  }
+  return documentReferenceContext(editor.document);
+}
+
 function contextForDocument(document, text) {
-  const relative = vscode.workspace.asRelativePath(document.uri, false);
+  const relative = documentRelativePath(document);
   const language = document.languageId || "plaintext";
   return [
     `File: ${relative}`,
@@ -2156,6 +2275,23 @@ function contextForDocument(document, text) {
     "",
     text
   ].join("\n");
+}
+
+function documentReferenceContext(document) {
+  const relative = documentRelativePath(document);
+  const language = document.languageId || "plaintext";
+  return [
+    `Current file: ${relative}`,
+    `Language: ${language}`
+  ].join("\n");
+}
+
+function documentRelativePath(document) {
+  return vscode.workspace.asRelativePath(document.uri, false);
+}
+
+function currentTextEditor() {
+  return vscode.window.activeTextEditor || lastActiveTextEditor;
 }
 
 function settings() {
@@ -2167,7 +2303,7 @@ function settings() {
     route: config.get("route", "coding"),
     researchRoute: config.get("researchRoute", "research"),
     codingAgentRoute: config.get("codingAgentRoute", "local-agent"),
-    agentProviderMode: config.get("agentProviderMode", "hybrid"),
+    agentProviderMode: config.get("agentProviderMode", "cloud"),
     agentMaxSteps: config.get("agentMaxSteps", 20),
     allowShellTools: config.get("allowShellTools", true),
     maxTokens: config.get("maxTokens", 1200),
@@ -2257,6 +2393,13 @@ function sourceLines(response) {
 }
 
 function workspaceRoot() {
+  const editor = currentTextEditor();
+  if (editor) {
+    const activeFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+    if (activeFolder) {
+      return activeFolder.uri.fsPath;
+    }
+  }
   const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
   return folder ? folder.uri.fsPath : undefined;
 }
@@ -2290,6 +2433,178 @@ async function waitForServer(timeoutMs) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function progressTextFromEvent(event) {
+  if (!event || !event.data || typeof event.data !== "object") {
+    return "";
+  }
+  const type = event.data.type || event.name;
+  if (type === "final" || type === "done") {
+    return "";
+  }
+  if (typeof event.data.message === "string" && event.data.message.trim()) {
+    return event.data.message.trim();
+  }
+  return "";
+}
+
+function requestEventStream(method, pathname, body, onEvent) {
+  const config = settings();
+  const url = new URL(pathname, config.serverUrl);
+  const client = url.protocol === "https:" ? https : http;
+  const data = body ? JSON.stringify(body) : undefined;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let responseRef = null;
+
+    const finishResolve = (value) => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+    const finishReject = (error) => {
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    };
+
+    const request = client.request(
+      url,
+      {
+        method,
+        headers: {
+          "Accept": "text/event-stream",
+          "Content-Type": "application/json",
+          "Content-Length": data ? Buffer.byteLength(data) : 0
+        },
+        timeout: 600000
+      },
+      (response) => {
+        responseRef = response;
+        const contentType = String(response.headers["content-type"] || "");
+        if (!contentType.includes("text/event-stream")) {
+          collectJsonResponse(response, (error, parsed) => {
+            if (error) {
+              finishReject(error);
+            } else {
+              finishResolve(parsed);
+            }
+          });
+          return;
+        }
+
+        let buffer = "";
+        let finalResponse = null;
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          buffer += String(chunk).replace(/\r\n/g, "\n");
+          let boundary = buffer.indexOf("\n\n");
+          while (boundary !== -1) {
+            const block = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const event = parseServerSentEvent(block);
+            if (event) {
+              if (event.name === "error") {
+                const error = new Error(event.data && event.data.message ? event.data.message : "Agent Hub stream failed");
+                if (event.data && Array.isArray(event.data.failover)) {
+                  error.failover = event.data.failover;
+                }
+                finishReject(error);
+                if (responseRef && typeof responseRef.destroy === "function") {
+                  responseRef.destroy();
+                }
+                return;
+              }
+              if (event.name === "final" && event.data && event.data.response) {
+                finalResponse = event.data.response;
+              }
+              if (typeof onEvent === "function") {
+                onEvent(event);
+              }
+            }
+            boundary = buffer.indexOf("\n\n");
+          }
+        });
+        response.on("end", () => {
+          if (buffer.trim()) {
+            const event = parseServerSentEvent(buffer);
+            if (event && event.name === "final" && event.data && event.data.response) {
+              finalResponse = event.data.response;
+            }
+          }
+          finishResolve(finalResponse || {});
+        });
+      }
+    );
+    request.on("timeout", () => {
+      request.destroy(new Error("Request timed out"));
+    });
+    request.on("error", finishReject);
+    if (data) {
+      request.write(data);
+    }
+    request.end();
+  });
+}
+
+function collectJsonResponse(response, callback) {
+  const chunks = [];
+  response.on("data", (chunk) => chunks.push(chunk));
+  response.on("end", () => {
+    const text = Buffer.concat(chunks).toString("utf8");
+    let parsed;
+    try {
+      parsed = text ? JSON.parse(text) : {};
+    } catch (error) {
+      callback(new Error(`Invalid JSON response: ${error.message}`));
+      return;
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      const message = parsed.error && parsed.error.message
+        ? parsed.error.message
+        : text || `HTTP ${response.statusCode}`;
+      const error = new Error(message);
+      if (Array.isArray(parsed.failover)) {
+        error.failover = parsed.failover;
+      }
+      callback(error);
+      return;
+    }
+    callback(null, parsed);
+  });
+}
+
+function parseServerSentEvent(block) {
+  const lines = String(block || "").split("\n");
+  let name = "message";
+  const dataLines = [];
+  for (const line of lines) {
+    if (!line || line.startsWith(":")) {
+      continue;
+    }
+    if (line.startsWith("event:")) {
+      name = line.slice("event:".length).trim() || "message";
+      continue;
+    }
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice("data:".length).trimStart());
+    }
+  }
+  if (!dataLines.length) {
+    return null;
+  }
+  const rawData = dataLines.join("\n");
+  let data;
+  try {
+    data = JSON.parse(rawData);
+  } catch (_error) {
+    data = rawData;
+  }
+  return { name, data };
 }
 
 function requestJson(method, pathname, body) {

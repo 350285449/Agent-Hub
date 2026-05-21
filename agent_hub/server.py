@@ -107,6 +107,12 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         agent_mode_default: bool = False,
     ) -> None:
         request = request_from_payload(payload, api_shape=api_shape)
+        if response_shape == "native" and request.stream:
+            self._send_native_stream(
+                request,
+                agent_mode=_wants_agent_mode(payload, default=agent_mode_default),
+            )
+            return
         try:
             if _wants_agent_mode(payload, default=agent_mode_default):
                 response = self.server.agent_runner.run(request)
@@ -152,6 +158,60 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 include_routing_details=self.server.config.expose_routing_details,
             )
         )
+
+    def _send_native_stream(self, request: Any, agent_mode: bool) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+        client_connected = True
+
+        def send_event(name: str, data: dict[str, Any]) -> None:
+            nonlocal client_connected
+            if not client_connected:
+                return
+            try:
+                self.wfile.write(f"event: {name}\n".encode("utf-8"))
+                self.wfile.write(
+                    f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+                )
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                client_connected = False
+
+        def send_progress(event: dict[str, Any]) -> None:
+            event_type = str(event.get("type") or "progress")
+            send_event(event_type, event)
+
+        try:
+            if agent_mode:
+                response = self.server.agent_runner.run(request, event_sink=send_progress)
+            else:
+                send_event("route_started", {"type": "route_started", "message": "Routing request."})
+                response = self.server.router.route(request)
+            send_event(
+                "final",
+                {
+                    "type": "final",
+                    "response": response.to_native_dict(
+                        include_raw=self.server.config.include_raw_responses,
+                        include_routing_details=self.server.config.expose_routing_details,
+                    ),
+                },
+            )
+            send_event("done", {"type": "done"})
+        except RouterError as exc:
+            send_event(
+                "error",
+                {
+                    "type": "error",
+                    "message": str(exc),
+                    "failover": [event.to_dict() for event in exc.failover],
+                },
+            )
+        except Exception as exc:
+            send_event("error", {"type": "error", "message": str(exc)})
 
     def _read_json(self) -> dict[str, Any]:
         try:

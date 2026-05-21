@@ -11,12 +11,12 @@
   "free_only": true,
   "include_raw_responses": false,
   "expose_routing_details": false,
-  "default_route": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
+  "default_route": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
   "routes": [
     {
       "name": "coding",
       "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
-      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "local-agent",
@@ -26,17 +26,17 @@
     {
       "name": "hybrid-agent",
       "keywords": [],
-      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "cloud-agent",
       "keywords": [],
-      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "research",
       "keywords": ["research", "search", "latest", "sources", "web", "news"],
-      "agents": ["local-research", "claude", "gemini", "chatgpt", "echo"]
+      "agents": ["local-research", "codex", "claude", "gemini", "chatgpt", "echo"]
     }
   ],
   "agents": [
@@ -50,10 +50,22 @@
       "cooldown_seconds": 5
     },
     {
+      "name": "codex",
+      "provider": "openai-compatible",
+      "model": "local-model",
+      "base_url": "http://127.0.0.1:1234",
+      "enabled": true,
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 32768,
+      "timeout_seconds": 120,
+      "cooldown_seconds": 30
+    },
+    {
       "name": "claude",
       "provider": "openai-compatible",
-      "model": "qwen2.5-coder:7b",
-      "base_url": "http://127.0.0.1:11434",
+      "model": "local-model",
+      "base_url": "http://127.0.0.1:1234",
       "enabled": true,
       "free": true,
       "max_tokens": 4096,

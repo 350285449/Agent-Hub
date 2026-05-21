@@ -7,15 +7,17 @@
   "archive_dir": ".agent-hub/archive",
   "workspace_dir": ".",
   "agent_max_steps": 8,
-  "allow_shell_tools": false,
+  "allow_shell_tools": true,
   "free_only": true,
   "include_raw_responses": false,
   "expose_routing_details": true,
   "default_route": [
-    "ollama-local",
+    "codex",
     "claude",
     "gemini",
     "chatgpt",
+    "lm-studio",
+    "ollama-local",
     "echo"
   ],
   "routes": [
@@ -30,10 +32,12 @@
         "repo"
       ],
       "agents": [
-        "ollama-local",
+        "codex",
         "claude",
         "gemini",
         "chatgpt",
+        "lm-studio",
+        "ollama-local",
         "echo"
       ]
     },
@@ -46,6 +50,7 @@
         "implement"
       ],
       "agents": [
+        "lm-studio",
         "ollama-local"
       ]
     },
@@ -53,10 +58,12 @@
       "name": "hybrid-agent",
       "keywords": [],
       "agents": [
-        "ollama-local",
+        "codex",
         "claude",
         "gemini",
         "chatgpt",
+        "lm-studio",
+        "ollama-local",
         "echo"
       ]
     },
@@ -64,10 +71,12 @@
       "name": "cloud-agent",
       "keywords": [],
       "agents": [
-        "ollama-local",
+        "codex",
         "claude",
         "gemini",
         "chatgpt",
+        "lm-studio",
+        "ollama-local",
         "echo"
       ]
     },
@@ -83,6 +92,7 @@
       ],
       "agents": [
         "local-research",
+        "codex",
         "claude",
         "gemini",
         "chatgpt",
@@ -99,6 +109,18 @@
       "context_window": 1000000,
       "timeout_seconds": 20,
       "cooldown_seconds": 5
+    },
+    {
+      "name": "codex",
+      "provider": "openai-compatible",
+      "model": "qwen2.5-coder:7b",
+      "base_url": "http://127.0.0.1:11434",
+      "enabled": true,
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 32768,
+      "timeout_seconds": 120,
+      "cooldown_seconds": 30
     },
     {
       "name": "claude",
@@ -135,6 +157,17 @@
       "context_window": 128000,
       "timeout_seconds": 120,
       "cooldown_seconds": 30
+    },
+    {
+      "name": "lm-studio",
+      "provider": "openai-compatible",
+      "model": "local-model",
+      "base_url": "http://127.0.0.1:1234",
+      "free": true,
+      "max_tokens": 4096,
+      "context_window": 32768,
+      "timeout_seconds": 300,
+      "cooldown_seconds": 10
     },
     {
       "name": "ollama-local",

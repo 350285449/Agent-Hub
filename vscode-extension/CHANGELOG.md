@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.7
+
+- Streams live Agent Hub step/tool progress into the chat panel.
+- Enables shell tools in generated workspace configs by default.
+- Bundles native backend agent streaming support.
+
+## 0.4.6
+
+- Defaults VS Code agent requests to the cloud-style route.
+- Adds a local `codex` alias and routes Codex/Claude-style agents before direct local fallbacks.
+- Prefers LM Studio for generated cloud-style aliases when a model is loaded, with Ollama as fallback.
+
+## 0.4.5
+
+- Sends the active editor path with chat and agent requests so basename prompts target the open file.
+- Bundles backend file-tool resolution for unique bare filenames such as `config.py`.
+- Reports ambiguous bare filenames with concrete workspace-relative path options.
+
 ## 0.4.4
 
 - Makes the extension default to Ollama-first hybrid routing.

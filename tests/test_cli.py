@@ -25,6 +25,7 @@ class CliTests(unittest.TestCase):
             names = {agent["name"] for agent in data["agents"]}
             self.assertIn("custom-local", names)
             self.assertIn("local-research", names)
+            self.assertIn("codex", names)
             self.assertIn("chatgpt", names)
             self.assertIn("gemini", names)
             self.assertIn("claude", names)
@@ -87,12 +88,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertTrue(data["free_only"])
-            chatgpt = next(agent for agent in data["agents"] if agent["name"] == "chatgpt")
-            self.assertTrue(chatgpt["enabled"])
-            self.assertTrue(chatgpt["free"])
-            self.assertEqual(chatgpt["model"], "gpt-test")
+            codex = next(agent for agent in data["agents"] if agent["name"] == "codex")
+            self.assertTrue(codex["enabled"])
+            self.assertTrue(codex["free"])
+            self.assertEqual(codex["model"], "gpt-test")
             cloud_route = next(route for route in data["routes"] if route["name"] == "cloud-agent")
-            self.assertEqual(cloud_route["agents"][0], "chatgpt")
+            self.assertEqual(cloud_route["agents"][0], "codex")
 
     def test_chat_runs_one_turn_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

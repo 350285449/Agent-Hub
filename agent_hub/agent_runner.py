@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -36,13 +37,15 @@ NON_EMPTY_TOOL_ARGS = {
     "run_command": ("command",),
 }
 
+AgentEventSink = Callable[[dict[str, Any]], None]
+
 
 class AgentRunner:
     def __init__(self, config: HubConfig, router: AgentRouter | None = None) -> None:
         self.config = config
         self.router = router or AgentRouter(config)
 
-    def run(self, request: HubRequest) -> HubResponse:
+    def run(self, request: HubRequest, event_sink: AgentEventSink | None = None) -> HubResponse:
         toolbox = AgentToolbox(self.config, request)
         messages = self._initial_messages(request, toolbox)
         max_steps = _request_int(request, "agent_max_steps", self.config.agent_max_steps)
@@ -50,7 +53,22 @@ class AgentRunner:
         failover: list[FailoverEvent] = []
         last_response: HubResponse | None = None
 
+        _emit(
+            event_sink,
+            "agent_started",
+            message=f"Started workspace agent with up to {max_steps} steps.",
+            max_steps=max_steps,
+            workspace=str(toolbox.root),
+            allow_shell_tools=toolbox.allow_shell,
+        )
+
         for step_number in range(1, max_steps + 1):
+            _emit(
+                event_sink,
+                "model_request",
+                message=f"Step {step_number}: asking the model for the next action.",
+                step=step_number,
+            )
             step_request = replace(
                 request,
                 messages=messages,
@@ -64,6 +82,15 @@ class AgentRunner:
 
             if response.provider == "echo":
                 stopped = bool(trace or failover)
+                _emit(
+                    event_sink,
+                    "agent_stopped",
+                    message="Agent reached the echo fallback and stopped.",
+                    step=step_number,
+                    agent=response.agent,
+                    provider=response.provider,
+                    model=response.model,
+                )
                 final = self._with_agent_metadata(
                     response,
                     request=request,
@@ -78,9 +105,28 @@ class AgentRunner:
                 return final
 
             command = _command_from_response(response)
+            _emit(
+                event_sink,
+                "model_response",
+                message=_model_response_message(step_number, response, command),
+                step=step_number,
+                agent=response.agent,
+                provider=response.provider,
+                model=response.model,
+                action=command.get("action"),
+                tool=command.get("tool"),
+            )
             if command["action"] == "tool":
                 tool_name = str(command["tool"])
                 args = command.get("args") if isinstance(command.get("args"), dict) else {}
+                _emit(
+                    event_sink,
+                    "tool_started",
+                    message=_tool_started_message(step_number, tool_name, args),
+                    step=step_number,
+                    tool=tool_name,
+                    args=_progress_tool_args(tool_name, args),
+                )
                 result = toolbox.run(tool_name, args)
                 trace.append(
                     {
@@ -93,11 +139,26 @@ class AgentRunner:
                         "result": result,
                     }
                 )
+                _emit(
+                    event_sink,
+                    "tool_finished",
+                    message=_tool_finished_message(step_number, tool_name, result),
+                    step=step_number,
+                    tool=tool_name,
+                    ok=result.get("ok") is not False,
+                    result=_progress_tool_result(tool_name, result),
+                )
                 messages.append({"role": "assistant", "content": response.text})
                 messages.append(tool_result_message(tool_name, result))
                 continue
 
             if command["action"] == "final":
+                _emit(
+                    event_sink,
+                    "agent_final",
+                    message="Agent produced a final answer.",
+                    step=step_number,
+                )
                 final = self._with_agent_metadata(
                     response,
                     request=request,
@@ -110,10 +171,23 @@ class AgentRunner:
                 return final
 
             if command["action"] == "invalid":
+                _emit(
+                    event_sink,
+                    "invalid_response",
+                    message=f"Step {step_number}: model response did not match the agent protocol; retrying.",
+                    step=step_number,
+                    reason=command.get("reason"),
+                )
                 messages.append({"role": "assistant", "content": response.text})
                 messages.append(_invalid_response_message(command))
                 continue
 
+            _emit(
+                event_sink,
+                "agent_final",
+                message="Agent returned a direct response.",
+                step=step_number,
+            )
             final = self._with_agent_metadata(
                 response,
                 request=request,
@@ -128,6 +202,12 @@ class AgentRunner:
         text = "Agent stopped before producing a final answer."
         if last_response and last_response.text:
             text = f"{text}\n\nLast model message:\n{last_response.text}"
+        _emit(
+            event_sink,
+            "agent_stopped",
+            message="Agent stopped before producing a final answer.",
+            max_steps=max_steps,
+        )
         final = self._with_agent_metadata(
             last_response,
             request=request,
@@ -210,6 +290,163 @@ class AgentRunner:
     def _record_final(self, request: HubRequest, response: HubResponse) -> None:
         if request.record_session:
             self.router.session_store.record_turn(request, response)
+
+
+def _emit(event_sink: AgentEventSink | None, event_type: str, **data: Any) -> None:
+    if event_sink is None:
+        return
+    event = {"type": event_type, **data}
+    try:
+        event_sink(event)
+    except Exception:
+        # Progress events are best-effort; the agent loop should still complete.
+        return
+
+
+def _model_response_message(
+    step_number: int,
+    response: HubResponse,
+    command: dict[str, Any],
+) -> str:
+    action = command.get("action")
+    if action == "tool":
+        return f"Step {step_number}: {response.agent} asked to run {command.get('tool', 'a tool')}."
+    if action == "final":
+        return f"Step {step_number}: {response.agent} returned a final answer."
+    if action == "invalid":
+        return f"Step {step_number}: {response.agent} returned an invalid agent message."
+    return f"Step {step_number}: {response.agent} returned a response."
+
+
+def _tool_started_message(step_number: int, tool_name: str, args: dict[str, Any]) -> str:
+    target = _tool_target(tool_name, args)
+    suffix = f" for {target}" if target else ""
+    return f"Step {step_number}: running {tool_name}{suffix}."
+
+
+def _tool_finished_message(step_number: int, tool_name: str, result: dict[str, Any]) -> str:
+    status = "finished" if result.get("ok") is not False else "failed"
+    summary = _tool_result_summary(tool_name, result)
+    suffix = f": {summary}" if summary else ""
+    return f"Step {step_number}: {tool_name} {status}{suffix}."
+
+
+def _tool_target(tool_name: str, args: dict[str, Any]) -> str:
+    if tool_name in {"read_file", "write_file", "replace_in_file"}:
+        return _short_value(args.get("path"))
+    if tool_name == "search_files":
+        query = _short_value(args.get("query"))
+        path = _short_value(args.get("path", "."))
+        return f"{query} in {path}" if query else path
+    if tool_name == "list_files":
+        return _short_value(args.get("path", "."))
+    if tool_name == "run_command":
+        return _short_value(args.get("command"), maximum=160)
+    return ""
+
+
+def _tool_result_summary(tool_name: str, result: dict[str, Any]) -> str:
+    if result.get("ok") is False:
+        return _short_value(result.get("error"), maximum=180)
+    payload = result.get("result")
+    if not isinstance(payload, dict):
+        return ""
+    if tool_name in {"read_file", "write_file", "replace_in_file"}:
+        path = _short_value(payload.get("path"))
+        if tool_name == "replace_in_file" and payload.get("replacements") is not None:
+            return f"{path}, {payload.get('replacements')} replacement(s)"
+        return path
+    if tool_name == "search_files":
+        matches = payload.get("matches")
+        return f"{len(matches)} match(es)" if isinstance(matches, list) else ""
+    if tool_name == "list_files":
+        files = payload.get("files")
+        return f"{len(files)} item(s)" if isinstance(files, list) else ""
+    if tool_name == "run_command":
+        return f"exit code {payload.get('returncode')}"
+    return ""
+
+
+def _progress_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    if tool_name == "run_command":
+        return {
+            "command": args.get("command"),
+            "cwd": args.get("cwd", "."),
+            "timeout_seconds": args.get("timeout_seconds"),
+        }
+    if tool_name == "write_file":
+        content = args.get("content")
+        return {
+            "path": args.get("path"),
+            "append": args.get("append", False),
+            "content_chars": len(content) if isinstance(content, str) else None,
+        }
+    if tool_name == "replace_in_file":
+        old = args.get("old")
+        new = args.get("new")
+        return {
+            "path": args.get("path"),
+            "old_chars": len(old) if isinstance(old, str) else None,
+            "new_chars": len(new) if isinstance(new, str) else None,
+            "expected_replacements": args.get("expected_replacements", 1),
+        }
+    allowed = {
+        "path",
+        "pattern",
+        "recursive",
+        "limit",
+        "query",
+        "case_sensitive",
+        "start_line",
+        "line_count",
+        "max_chars",
+    }
+    return {key: value for key, value in args.items() if key in allowed}
+
+
+def _progress_tool_result(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    if result.get("ok") is False:
+        return {"ok": False, "error": result.get("error")}
+    payload = result.get("result")
+    if not isinstance(payload, dict):
+        return {"ok": True}
+    if tool_name == "run_command":
+        return {
+            "ok": True,
+            "command": payload.get("command"),
+            "cwd": payload.get("cwd"),
+            "returncode": payload.get("returncode"),
+            "stdout": _short_value(payload.get("stdout"), maximum=2000),
+            "stderr": _short_value(payload.get("stderr"), maximum=2000),
+            "stdout_truncated": payload.get("stdout_truncated"),
+            "stderr_truncated": payload.get("stderr_truncated"),
+        }
+    summary_keys = {
+        "path",
+        "replacements",
+        "chars",
+        "append",
+        "truncated",
+        "start_line",
+        "end_line",
+        "total_lines",
+        "query",
+    }
+    summarized = {key: value for key, value in payload.items() if key in summary_keys}
+    if isinstance(payload.get("files"), list):
+        summarized["file_count"] = len(payload["files"])
+    if isinstance(payload.get("matches"), list):
+        summarized["match_count"] = len(payload["matches"])
+    return {"ok": True, **summarized}
+
+
+def _short_value(value: Any, maximum: int = 120) -> str:
+    if value is None:
+        return ""
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    if len(text) <= maximum:
+        return text
+    return f"{text[: maximum - 1]}..."
 
 
 def _command_from_response(response: HubResponse) -> dict[str, Any]:

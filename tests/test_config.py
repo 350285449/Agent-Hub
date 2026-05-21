@@ -20,13 +20,13 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.default_route, default_agent_names())
         self.assertEqual(free_local_agent_names()[0], "ollama-qwen-coder")
-        self.assertEqual(default_agent_names()[0], "ollama-qwen-coder")
+        self.assertEqual(default_agent_names()[0], "codex")
         self.assertEqual(default_agent_names()[1], "claude")
         self.assertLess(
             free_local_agent_names().index("ollama-qwen3"),
             free_local_agent_names().index("custom-local"),
         )
-        self.assertEqual(cloud_agent_names(), ["claude", "gemini", "chatgpt"])
+        self.assertEqual(cloud_agent_names(), ["codex", "claude", "gemini", "chatgpt"])
         self.assertIn("custom-local", config.agents)
         self.assertEqual(
             set(config.agents),
@@ -35,13 +35,16 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.free_only)
         self.assertTrue(config.allow_shell_tools)
         self.assertTrue(is_free_agent(config.agents["local-research"]))
+        self.assertTrue(is_free_agent(config.agents["codex"]))
         self.assertTrue(is_free_agent(config.agents["claude"]))
         self.assertTrue(is_free_agent(config.agents["gemini"]))
         self.assertTrue(is_free_agent(config.agents["chatgpt"]))
+        self.assertEqual(config.agents["codex"].provider, "openai-compatible")
         self.assertEqual(config.agents["claude"].provider, "openai-compatible")
         self.assertEqual(config.agents["gemini"].provider, "openai-compatible")
         self.assertEqual(config.agents["chatgpt"].provider, "openai-compatible")
-        self.assertEqual(config.agents["claude"].model, "qwen2.5-coder:7b")
+        self.assertEqual(config.agents["codex"].model, "local-model")
+        self.assertEqual(config.agents["claude"].model, "local-model")
         self.assertEqual(config.agents["gemini"].model, "gemma3:4b")
         self.assertEqual(config.agents["chatgpt"].model, "llama3.2")
         self.assertEqual(config.agents["ollama-qwen-coder"].timeout_seconds, 300.0)
@@ -53,6 +56,7 @@ class ConfigTests(unittest.TestCase):
             "os.environ",
             {
                 "AGENT_HUB_CLOUD_ALIAS_BASE_URL": "http://127.0.0.1:1234",
+                "AGENT_HUB_CODEX_LOCAL_MODEL": "codex-local-model",
                 "AGENT_HUB_CLAUDE_LOCAL_MODEL": "lmstudio-loaded-model",
                 "AGENT_HUB_GEMINI_LOCAL_MODEL": "gemma-custom",
                 "AGENT_HUB_CHATGPT_LOCAL_MODEL": "llama-custom",
@@ -60,9 +64,11 @@ class ConfigTests(unittest.TestCase):
         ):
             config = free_local_config()
 
+        self.assertEqual(config.agents["codex"].base_url, "http://127.0.0.1:1234")
         self.assertEqual(config.agents["claude"].base_url, "http://127.0.0.1:1234")
         self.assertEqual(config.agents["gemini"].base_url, "http://127.0.0.1:1234")
         self.assertEqual(config.agents["chatgpt"].base_url, "http://127.0.0.1:1234")
+        self.assertEqual(config.agents["codex"].model, "codex-local-model")
         self.assertEqual(config.agents["claude"].model, "lmstudio-loaded-model")
         self.assertEqual(config.agents["gemini"].model, "gemma-custom")
         self.assertEqual(config.agents["chatgpt"].model, "llama-custom")
@@ -85,6 +91,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(agent.max_tokens, 678)
 
     def test_provider_names_are_normalized_for_friendly_aliases(self) -> None:
+        self.assertEqual(normalize_provider("codex"), "openai")
         self.assertEqual(normalize_provider("chatgpt"), "openai")
         self.assertEqual(normalize_provider("claude"), "anthropic")
         self.assertEqual(normalize_provider("google"), "gemini")

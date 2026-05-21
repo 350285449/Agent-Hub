@@ -1,10 +1,9 @@
 """Configuration objects and defaults for the local Agent-Hub runtime.
 
 The app loads a JSON config into these dataclasses, then the router uses the
-routes to pick an enabled agent for each request. Defaults are local-first:
-Ollama's coder model is the primary workspace agent, while Claude/Gemini/
-ChatGPT-style names remain fallback aliases unless the user explicitly
-configures hosted providers.
+routes to pick an enabled agent for each request. Defaults use cloud-style
+Codex/Claude aliases backed by local OpenAI-compatible servers such as LM Studio
+or Ollama, unless the user explicitly configures hosted providers.
 """
 
 from __future__ import annotations
@@ -102,7 +101,11 @@ def free_local_config() -> HubConfig:
     local_timeout = _env_float("AGENT_HUB_LOCAL_TIMEOUT_SECONDS", 15.0)
     cloud_alias_base_url = os.environ.get(
         "AGENT_HUB_CLOUD_ALIAS_BASE_URL",
-        os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+        os.environ.get("AGENT_HUB_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234"),
+    )
+    cloud_alias_model = os.environ.get(
+        "AGENT_HUB_CLOUD_ALIAS_MODEL",
+        os.environ.get("AGENT_HUB_LM_STUDIO_MODEL", "local-model"),
     )
 
     agents = {
@@ -181,10 +184,21 @@ def free_local_config() -> HubConfig:
             cooldown_seconds=10.0,
             context_window=local_context_window,
         ),
+        "codex": AgentConfig(
+            name="codex",
+            provider="openai-compatible",
+            model=os.environ.get("AGENT_HUB_CODEX_LOCAL_MODEL", cloud_alias_model),
+            base_url=os.environ.get("AGENT_HUB_CODEX_LOCAL_BASE_URL", cloud_alias_base_url),
+            free=True,
+            timeout_seconds=120.0,
+            max_tokens=4096,
+            cooldown_seconds=30.0,
+            context_window=32_768,
+        ),
         "claude": AgentConfig(
             name="claude",
             provider="openai-compatible",
-            model=os.environ.get("AGENT_HUB_CLAUDE_LOCAL_MODEL", "qwen2.5-coder:7b"),
+            model=os.environ.get("AGENT_HUB_CLAUDE_LOCAL_MODEL", cloud_alias_model),
             base_url=os.environ.get("AGENT_HUB_CLAUDE_LOCAL_BASE_URL", cloud_alias_base_url),
             free=True,
             timeout_seconds=120.0,
@@ -266,17 +280,15 @@ def free_local_agent_names() -> list[str]:
 
 
 def cloud_agent_names() -> list[str]:
-    return ["claude", "gemini", "chatgpt"]
+    return ["codex", "claude", "gemini", "chatgpt"]
 
 
 def default_agent_names() -> list[str]:
-    """Primary Ollama coder, then cloud-style fallbacks, then other local servers."""
+    """Cloud-style local aliases first, then direct local server fallbacks."""
 
-    primary = "ollama-qwen-coder"
     return [
-        primary,
         *cloud_agent_names(),
-        *[name for name in free_local_agent_names() if name != primary],
+        *free_local_agent_names(),
         "echo",
     ]
 
@@ -343,7 +355,7 @@ def is_free_agent(agent: AgentConfig) -> bool:
 
 def normalize_provider(provider: str) -> str:
     lowered = provider.lower()
-    if lowered in {"chatgpt", "openai-chat", "gpt"}:
+    if lowered in {"codex", "chatgpt", "openai-chat", "gpt"}:
         return "openai"
     if lowered in {"claude", "anthropic-messages"}:
         return "anthropic"

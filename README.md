@@ -78,7 +78,7 @@ python -m agent_hub agents
 python -m agent_hub local-models
 ```
 
-The default local aliases use Ollama model IDs. Pull them with:
+The Ollama fallback aliases use Ollama model IDs. Pull them with:
 
 ```powershell
 ollama pull qwen2.5-coder:7b
@@ -86,9 +86,10 @@ ollama pull gemma3:4b
 ollama pull llama3.2
 ```
 
-In VS Code, `agentHub.agentProviderMode` defaults to `hybrid`, which means
-Ollama/local first and Claude/Gemini/ChatGPT-style fallbacks after that. Set it
-to `local` for direct LM Studio/Ollama fallback routes only.
+In VS Code, `agentHub.agentProviderMode` defaults to `cloud`, which means
+Codex/Claude-style aliases first. Those aliases are still local by default: the
+extension points them at LM Studio when a model is loaded there, otherwise
+Ollama. Set it to `local` for direct LM Studio/Ollama fallback routes only.
 
 Health check:
 
@@ -201,6 +202,9 @@ or:
 
 The hub executes tool calls locally, feeds the result back to the model, and
 continues until the model returns a final answer or `agent_max_steps` is reached.
+Native agent requests can set `"stream": true` to receive server-sent progress
+events for model steps and tool execution while the final answer is still being
+prepared.
 
 Available tools:
 
@@ -224,10 +228,11 @@ For an ongoing chat session that keeps conversation history, use:
 python -m agent_hub chat --allow-shell-tools
 ```
 
-The dedicated `local-agent` route uses only free local model endpoints. The
-default `hybrid-agent` and `cloud-agent` routes try Ollama's coder model first,
-then Claude, Gemini, and ChatGPT-style fallbacks. The CLI agent command also
-forces `free_only=true` unless you explicitly pass `--allow-cloud`.
+The dedicated `local-agent` route uses only direct free local model endpoints.
+The default `hybrid-agent` and `cloud-agent` routes try cloud-style local aliases
+first, starting with `codex` and `claude`, then direct LM Studio/Ollama
+fallbacks. The CLI agent command also forces `free_only=true` unless you
+explicitly pass `--allow-cloud`.
 
 Agent-Hub includes free local model presets for:
 
@@ -280,12 +285,12 @@ snippets, and return citations without a paid API key.
   "allow_shell_tools": true,
   "free_only": true,
   "expose_routing_details": false,
-  "default_route": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
+  "default_route": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"],
   "routes": [
     {
       "name": "coding",
       "keywords": ["code", "bug", "fix", "refactor", "test", "repo"],
-      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "local-agent",
@@ -295,17 +300,17 @@ snippets, and return citations without a paid API key.
     {
       "name": "hybrid-agent",
       "keywords": [],
-      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "cloud-agent",
       "keywords": [],
-      "agents": ["ollama-qwen-coder", "claude", "gemini", "chatgpt", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
+      "agents": ["codex", "claude", "gemini", "chatgpt", "ollama-qwen-coder", "ollama-qwen3", "lm-studio", "vllm", "custom-local", "localai", "echo"]
     },
     {
       "name": "research",
       "keywords": ["research", "search", "latest", "sources", "web", "news"],
-      "agents": ["local-research", "claude", "gemini", "chatgpt", "echo"]
+      "agents": ["local-research", "codex", "claude", "gemini", "chatgpt", "echo"]
     }
   ]
 }
@@ -331,7 +336,7 @@ Supported providers:
 - `local-research` for free local extractive web research with citations and
   search results, using no cloud LLM or paid API
 - `gemma` as a friendly alias for a local OpenAI-compatible Gemma/Gemma-like agent
-- `chatgpt`, `gemini`, and `claude` in the default config are local
+- `codex`, `claude`, `gemini`, and `chatgpt` in the default config are local
   `openai-compatible` aliases backed by Ollama, LM Studio, or another local
   server
 - `openai`, `google`, and `anthropic` API providers are optional advanced
@@ -339,8 +344,8 @@ Supported providers:
   `free_only` is true unless marked `free`
 - `echo` for local smoke tests without API keys
 
-The default Claude/Gemini/ChatGPT agents do not use vendor API keys. To point
-all three aliases at LM Studio, start LM Studio's local server and let the VS
+The default Codex/Claude/Gemini/ChatGPT agents do not use vendor API keys. To
+point these aliases at LM Studio, start LM Studio's local server and let the VS
 Code extension repair/create the config, or set their `base_url` values to
 `http://127.0.0.1:1234`. To use the real hosted APIs later, add explicit API
 provider entries with `agent-hub enable-provider` and use `--paid` when you want
@@ -357,8 +362,9 @@ or hosted agent service.
 
 ## Notes
 
-- Streaming is currently bridged as one server-sent event containing the completed
-  response, so clients that require true token streaming may still need adapter work.
+- Native agent streaming emits live step/tool progress and a final response over
+  server-sent events. Provider token streaming is still normalized into completed
+  provider turns inside the agent loop.
 - Tool schemas are forwarded for OpenAI-compatible requests. Cross-provider tool
   translation is intentionally conservative because vendor tool formats differ.
 - Local model IDs in the example config are placeholders you should replace with

@@ -62,6 +62,64 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertNotIn("agent_hub", response.to_native_dict())
             self.assertIn("agent_hub", response.to_native_dict(include_routing_details=True))
 
+    def test_agent_loop_emits_progress_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "note.txt").write_text("hello from a local file", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    if any("Tool result for read_file" in message.get("content", "") for message in request.messages):
+                        return ProviderResult(
+                            text='{"action":"final","answer":"I read note.txt."}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text='{"action":"tool","tool":"read_file","args":{"path":"note.txt"}}',
+                        model=self.agent.model,
+                    )
+
+            events: list[dict] = []
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Read note.txt"}],
+                ),
+                event_sink=events.append,
+            )
+
+            self.assertEqual(response.text, "I read note.txt.")
+            event_types = [event["type"] for event in events]
+            self.assertIn("agent_started", event_types)
+            self.assertIn("model_request", event_types)
+            self.assertIn("model_response", event_types)
+            self.assertIn("tool_started", event_types)
+            self.assertIn("tool_finished", event_types)
+            self.assertIn("agent_final", event_types)
+            tool_started = next(event for event in events if event["type"] == "tool_started")
+            self.assertEqual(tool_started["tool"], "read_file")
+            self.assertIn("note.txt", tool_started["message"])
+            tool_finished = next(event for event in events if event["type"] == "tool_finished")
+            self.assertTrue(tool_finished["ok"])
+            self.assertEqual(tool_finished["result"]["path"], "note.txt")
+
     def test_agent_loop_accepts_tool_name_as_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -444,6 +502,59 @@ class AgentRunnerTests(unittest.TestCase):
 
             self.assertFalse(failed["ok"])
             self.assertIn("Expected 1 replacement", failed["error"])
+
+    def test_file_tools_resolve_unique_bare_filename_inside_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package = root / "agent_hub"
+            package.mkdir()
+            target = package / "config.py"
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            config = HubConfig(workspace_dir=root)
+            toolbox = AgentToolbox(
+                config,
+                HubRequest(session_id="agent", messages=[]),
+            )
+
+            result = toolbox.run("read_file", {"path": "config.py"})
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["result"]["path"], "agent_hub/config.py")
+            self.assertIn("VALUE = 1", result["result"]["content"])
+
+            replaced = toolbox.run(
+                "replace_in_file",
+                {
+                    "path": "config.py",
+                    "old": "VALUE = 1",
+                    "new": "VALUE = 2",
+                    "expected_replacements": 1,
+                },
+            )
+
+            self.assertTrue(replaced["ok"])
+            self.assertEqual(replaced["result"]["path"], "agent_hub/config.py")
+            self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 2\n")
+
+    def test_file_tools_report_ambiguous_bare_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a").mkdir()
+            (root / "b").mkdir()
+            (root / "a" / "config.py").write_text("A = 1\n", encoding="utf-8")
+            (root / "b" / "config.py").write_text("B = 1\n", encoding="utf-8")
+            config = HubConfig(workspace_dir=root)
+            toolbox = AgentToolbox(
+                config,
+                HubRequest(session_id="agent", messages=[]),
+            )
+
+            result = toolbox.run("read_file", {"path": "config.py"})
+
+            self.assertFalse(result["ok"])
+            self.assertIn("Ambiguous path 'config.py'", result["error"])
+            self.assertIn("a/config.py", result["error"])
+            self.assertIn("b/config.py", result["error"])
 
 
 if __name__ == "__main__":

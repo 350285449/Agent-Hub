@@ -14,6 +14,7 @@ SKIPPED_DIRS = {".agent-hub", ".git", ".hg", ".svn", ".venv", "__pycache__", "no
 MAX_FILE_CHARS = 80_000
 MAX_TOOL_OUTPUT_CHARS = 20_000
 MAX_REPLACE_CHARS = 200_000
+MAX_PATH_HINTS = 10
 
 
 class ToolError(Exception):
@@ -88,7 +89,7 @@ class AgentToolbox:
             return {"ok": False, "tool": name, "error": str(exc)}
 
     def _list_files(self, args: dict[str, Any]) -> dict[str, Any]:
-        target = self._resolve(args.get("path", "."))
+        target = self._resolve_existing(args.get("path", "."))
         pattern = str(args.get("pattern", "*"))
         recursive = bool(args.get("recursive", True))
         limit = _positive_int(args.get("limit"), default=200, maximum=1000)
@@ -109,7 +110,7 @@ class AgentToolbox:
         return {"root": str(self.root), "path": self._relative(target), "files": files}
 
     def _read_file(self, args: dict[str, Any]) -> dict[str, Any]:
-        path = self._resolve_required_path(args, "path")
+        path = self._resolve_required_path(args, "path", existing=True)
         if not path.is_file():
             raise ToolError(f"Not a file: {self._relative(path)}")
         max_chars = _positive_int(args.get("max_chars"), default=MAX_FILE_CHARS, maximum=MAX_FILE_CHARS)
@@ -144,7 +145,7 @@ class AgentToolbox:
         if not query:
             raise ToolError("search_files requires a non-empty query")
 
-        target = self._resolve(args.get("path", "."))
+        target = self._resolve_existing(args.get("path", "."))
         pattern = str(args.get("pattern", "*"))
         case_sensitive = bool(args.get("case_sensitive", False))
         limit = _positive_int(args.get("limit"), default=50, maximum=200)
@@ -195,7 +196,7 @@ class AgentToolbox:
         return {"path": self._relative(path), "chars": len(content), "append": append}
 
     def _replace_in_file(self, args: dict[str, Any]) -> dict[str, Any]:
-        path = self._resolve_required_path(args, "path")
+        path = self._resolve_required_path(args, "path", existing=True)
         if not path.is_file():
             raise ToolError(f"Not a file: {self._relative(path)}")
         old = args.get("old")
@@ -253,10 +254,18 @@ class AgentToolbox:
             "stderr_truncated": len(completed.stderr) > MAX_TOOL_OUTPUT_CHARS,
         }
 
-    def _resolve_required_path(self, args: dict[str, Any], key: str) -> Path:
+    def _resolve_required_path(
+        self,
+        args: dict[str, Any],
+        key: str,
+        *,
+        existing: bool = False,
+    ) -> Path:
         value = args.get(key)
         if not isinstance(value, str) or not value.strip():
             raise ToolError(f"Missing required path argument: {key}")
+        if existing:
+            return self._resolve_existing(value)
         return self._resolve(value)
 
     def _resolve(self, value: Any) -> Path:
@@ -266,6 +275,48 @@ class AgentToolbox:
         if resolved != self.root and not resolved.is_relative_to(self.root):
             raise ToolError(f"Path escapes workspace: {raw}")
         return resolved
+
+    def _resolve_existing(self, value: Any) -> Path:
+        raw = str(value or ".")
+        resolved = self._resolve(raw)
+        if resolved.exists():
+            return resolved
+        if _is_bare_filename(raw):
+            match = self._unique_workspace_match(raw)
+            if match:
+                return match
+        return resolved
+
+    def _unique_workspace_match(self, raw: str) -> Path | None:
+        needle = raw.casefold()
+        matches: list[Path] = []
+        pending = [self.root]
+        while pending:
+            directory = pending.pop()
+            try:
+                children = list(directory.iterdir())
+            except OSError:
+                continue
+            for path in children:
+                if self._is_skipped(path):
+                    continue
+                if path.name.casefold() == needle:
+                    matches.append(path)
+                    if len(matches) > MAX_PATH_HINTS:
+                        break
+                if path.is_dir():
+                    pending.append(path)
+            if len(matches) > MAX_PATH_HINTS:
+                break
+
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+
+        hints = ", ".join(self._relative(path) for path in matches[:MAX_PATH_HINTS])
+        extra = "" if len(matches) <= MAX_PATH_HINTS else ", ..."
+        raise ToolError(f"Ambiguous path {raw!r}; use one of: {hints}{extra}")
 
     def _relative(self, path: Path) -> str:
         try:
@@ -295,6 +346,15 @@ def _request_option(request: HubRequest, key: str, default: Any) -> Any:
     if isinstance(hub_options, dict) and key in hub_options:
         return hub_options[key]
     return raw.get(key, default)
+
+
+def _is_bare_filename(value: str) -> bool:
+    if not value or value in {".", ".."}:
+        return False
+    if "/" in value or "\\" in value:
+        return False
+    path = Path(value)
+    return not path.is_absolute() and len(path.parts) == 1
 
 
 def _positive_int(value: Any, default: int, maximum: int) -> int:

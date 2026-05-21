@@ -1,7 +1,7 @@
 # Agent Hub
 
 Run Agent-Hub from VS Code and send coding, research, and explanation requests
-through Ollama-first local routing with Claude/Gemini/ChatGPT-style fallbacks.
+through Codex/Claude-style local routing backed by LM Studio or Ollama.
 
 ## Quick Start
 
@@ -12,7 +12,7 @@ through Ollama-first local routing with Claude/Gemini/ChatGPT-style fallbacks.
    ```powershell
    cd vscode-extension
    npm run package
-   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.4.vsix --force
+   $env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd --install-extension .\agent-hub-vscode-0.4.7.vsix --force
    ```
 
 4. Reload VS Code.
@@ -42,19 +42,20 @@ you before sending a request.
   `http://127.0.0.1:8787`
 - `agentHub.pythonPath`: Python executable or launcher. Default: `auto`
 - `agentHub.configPath`: config file path. Default: `agent-hub.config.json`
-- `agentHub.agentProviderMode`: `local`, `hybrid`, or `cloud`. Default: `hybrid`
+- `agentHub.agentProviderMode`: `local`, `hybrid`, or `cloud`. Default: `cloud`
 - `agentHub.autoStart`: automatically start the server when needed. Default:
   `true`
 
 ## Local Model Aliases
 
-Agent Hub is free/local by default. Generated workspace configs try Ollama's
-coder model first, then Claude, Gemini, and ChatGPT-style fallbacks. Those names
-point to local OpenAI-compatible servers unless you explicitly configure hosted
-providers. When Ollama is available, the extension prefers it at
-`http://127.0.0.1:11434`; otherwise it can use LM Studio at
-`http://127.0.0.1:1234`:
+Agent Hub is free/local by default. Generated workspace configs try
+Codex/Claude-style aliases first. Those names point to local
+OpenAI-compatible servers unless you explicitly configure hosted providers. When
+LM Studio is available with a loaded model, the extension prefers it at
+`http://127.0.0.1:1234`; otherwise it uses Ollama at
+`http://127.0.0.1:11434`:
 
+- `codex` -> the loaded LM Studio model, or `qwen2.5-coder:7b` through Ollama
 - `claude` -> `qwen2.5-coder:7b`
 - `gemini` -> `gemma3:4b`
 - `chatgpt` -> `llama3.2`

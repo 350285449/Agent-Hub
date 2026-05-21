@@ -60,7 +60,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     enable_provider_parser.add_argument(
         "provider",
-        choices=["openai", "chatgpt", "claude", "anthropic", "gemini", "google"],
+        choices=["openai", "codex", "chatgpt", "claude", "anthropic", "gemini", "google"],
     )
     enable_provider_parser.add_argument("--model", required=True, help="Provider model ID to use.")
     enable_provider_parser.add_argument(
@@ -95,7 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     agent_parser = subparsers.add_parser("agent", help="Run the workspace coding agent.")
     agent_parser.add_argument("task", nargs="+", help="Task for the agent.")
-    agent_parser.add_argument("--route", default="hybrid-agent", help="Route to use for agent model calls.")
+    agent_parser.add_argument("--route", default="cloud-agent", help="Route to use for agent model calls.")
     agent_parser.add_argument("--max-steps", type=int, default=20, help="Maximum agent tool steps.")
     agent_parser.add_argument(
         "--allow-shell-tools",
@@ -109,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     chat_parser = subparsers.add_parser("chat", help="Open an interactive Codex-style workspace chat.")
-    chat_parser.add_argument("--route", default="hybrid-agent", help="Route to use for chat turns.")
+    chat_parser.add_argument("--route", default="cloud-agent", help="Route to use for chat turns.")
     chat_parser.add_argument("--session-id", help="Reuse an existing chat session id.")
     chat_parser.add_argument("--max-steps", type=int, default=20, help="Maximum agent tool steps per turn.")
     chat_parser.add_argument(
@@ -390,7 +390,9 @@ def _enable_cloud_provider(
 
 def _cloud_provider_defaults(provider: str) -> tuple[str, str, str]:
     normalized = provider.lower()
-    if normalized in {"openai", "chatgpt"}:
+    if normalized in {"openai", "codex"}:
+        return "codex", "openai", "OPENAI_API_KEY"
+    if normalized == "chatgpt":
         return "chatgpt", "chatgpt", "OPENAI_API_KEY"
     if normalized in {"claude", "anthropic"}:
         return "claude", "claude", "ANTHROPIC_API_KEY"
