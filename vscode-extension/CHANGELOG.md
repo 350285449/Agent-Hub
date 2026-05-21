@@ -4,6 +4,16 @@
 
 - No changes yet.
 
+## 0.4.20
+
+- Adds bundled backend comments that clarify Ollama cloud sign-in, endpoint routing, and echo fallback behavior.
+
+## 0.4.19
+
+- Disables hosted API-key providers by default and adds a Settings toggle to enable them.
+- Adds native workspace tool schemas so compatible models can call file tools directly.
+- Streams workspace edit progress events when file writes or replacements land on disk.
+
 ## 0.4.18
 
 - Changes the default Cloud route to Ollama cloud model IDs so large local models are not run by default.

@@ -114,6 +114,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> HubConfig:
 
     config_path = Path(path)
     if not config_path.exists():
+        # First-run installs use the in-code starter config until the CLI writes
+        # an agent-hub.config.json file.
         return free_local_config()
 
     raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -127,6 +129,9 @@ def _ollama_cloud_agent(name: str, model: str) -> AgentConfig:
         name=name,
         provider="openai-compatible",
         model=model,
+        # Ollama cloud model IDs are still sent through an Ollama-compatible
+        # endpoint. By default that is the local Ollama daemon; override this
+        # when Ollama is running elsewhere or behind a proxy.
         base_url=os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
         free=True,
         timeout_seconds=180.0,
@@ -373,12 +378,17 @@ def cloud_agent_names() -> list[str]:
 def cloud_route_agent_names() -> list[str]:
     """Default cloud route: Ollama cloud first, then echo diagnostics."""
 
+    # If the shared Ollama endpoint is unavailable, each cloud candidate can
+    # fail before the route reaches echo. Echo only reports context; it cannot
+    # continue the workspace-agent tool protocol.
     return [*ollama_cloud_agent_names(), "echo"]
 
 
 def default_agent_names() -> list[str]:
     """Default route with Ollama cloud agents and no API-key providers."""
 
+    # Keep API-key providers out of the automatic starter route. Users can still
+    # opt into them explicitly by enabling the hosted agents in config.
     return [
         *ollama_cloud_agent_names(),
         "echo",
@@ -388,6 +398,8 @@ def default_agent_names() -> list[str]:
 def config_from_dict(raw: dict[str, Any]) -> HubConfig:
     """Convert the JSON-compatible config shape into dataclass instances."""
 
+    # Persisted config is intentionally plain JSON. Rebuild nested dataclasses
+    # here so the rest of the app can work with typed configuration objects.
     agents = {
         item["name"]: AgentConfig(
             name=item["name"],
@@ -544,6 +556,8 @@ def _is_local_or_private_url(value: str | None) -> bool:
     try:
         import ipaddress
 
+        # DNS names are not resolved here. Only literal private IPs and known
+        # local hostnames are treated as free/local for routing policy.
         address = ipaddress.ip_address(lowered)
     except ValueError:
         return False
