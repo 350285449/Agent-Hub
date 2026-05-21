@@ -40,6 +40,9 @@ still use `.\install.ps1` if you want a local editable `.venv`.
 When `agentHub.autoStart` is enabled, the extension starts the local server for
 you before sending a request.
 
+The chat header includes a `Settings` menu for provider mode, server settings,
+local model selection, API keys, and server actions.
+
 ## Common Settings
 
 - `agentHub.serverUrl`: local Agent-Hub server URL. Default:
@@ -97,3 +100,6 @@ To package and install from inside `vscode-extension`:
 cd vscode-extension
 npm run install-extension
 ```
+
+For the Marketplace release checklist, see
+[PUBLISHING.md](https://github.com/350285449/Agent-Hub/blob/main/vscode-extension/PUBLISHING.md).

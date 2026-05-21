@@ -2,8 +2,13 @@
 
 ## Unreleased
 
-- Adds a one-command cross-platform installer for packaging and installing the VS Code extension from a checkout.
-- Detects VS Code, VS Code Insiders, or VSCodium CLI paths and warns when Python 3.11+ is missing.
+- No changes yet.
+
+## 0.4.16
+
+- Adds a Settings menu to the Agent Hub chat header.
+- Lets the chat save server URL, Python path, route names, control mode, token budget, agent step limit, shell-tool access, and auto-start settings.
+- Moves server actions, local model selection, output access, and API key management into the in-chat Settings menu.
 
 ## 0.4.15
 
@@ -11,6 +16,8 @@
 - Injects saved provider keys into the Agent Hub server environment on startup.
 - Replaces the pull-only local model button with a chooser for installed LM Studio/Ollama models.
 - Shows recommended Ollama install choices with approximate storage sizes when no local model is found.
+- Adds a one-command cross-platform installer for packaging and installing the VS Code extension from a checkout.
+- Detects VS Code, VS Code Insiders, or VSCodium CLI paths and warns when Python 3.11+ is missing.
 
 ## 0.4.14
 

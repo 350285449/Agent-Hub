@@ -13,7 +13,7 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let lastActiveTextEditor = null;
-const EXTENSION_VERSION = "0.4.15";
+const EXTENSION_VERSION = "0.4.16";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
@@ -359,7 +359,7 @@ function openChat(context) {
   );
 
   chatPanel.iconPath = logoUri;
-  chatPanel.webview.html = chatHtml(chatPanel.webview, logoUri, settings().agentProviderMode);
+  chatPanel.webview.html = chatHtml(chatPanel.webview, logoUri, settings());
   chatPanel.onDidDispose(() => {
     chatPanel = null;
   });
@@ -382,6 +382,7 @@ async function handleChatMessage(panel, message) {
       online,
       text: online ? "Agent Hub is online" : "Agent Hub is offline"
     });
+    postChatSettings(panel);
     await postApiKeyStatus(panel);
     return;
   }
@@ -409,6 +410,21 @@ async function handleChatMessage(panel, message) {
 
   if (message.type === "clearApiKeys") {
     await clearApiKeysFromWebview(panel);
+    return;
+  }
+
+  if (message.type === "saveChatSettings") {
+    await saveChatSettingsFromWebview(panel, message.settings);
+    return;
+  }
+
+  if (message.type === "openSettings") {
+    await vscode.commands.executeCommand("workbench.action.openSettings", "Agent Hub");
+    return;
+  }
+
+  if (message.type === "openOutput") {
+    output.show(true);
     return;
   }
 
@@ -475,6 +491,99 @@ async function postApiKeyStatus(panel, text = "", options = {}) {
     clearInputs: !!options.clearInputs,
     keys: await apiKeyStatusRows()
   });
+}
+
+function postChatSettings(panel, text = "") {
+  if (!panel || !panel.webview) {
+    return;
+  }
+  panel.webview.postMessage({
+    type: "chatSettings",
+    settings: chatSettingsPayload(settings()),
+    text
+  });
+}
+
+function chatSettingsPayload(config) {
+  return {
+    serverUrl: config.serverUrl,
+    pythonPath: config.pythonPath,
+    configPath: config.configPath,
+    route: config.route,
+    researchRoute: config.researchRoute,
+    codingAgentRoute: config.codingAgentRoute,
+    agentProviderMode: config.agentProviderMode,
+    agentMaxSteps: config.agentMaxSteps,
+    allowShellTools: config.allowShellTools,
+    maxTokens: config.maxTokens,
+    autoStart: config.autoStart
+  };
+}
+
+async function saveChatSettingsFromWebview(panel, rawSettings) {
+  try {
+    const next = normalizeChatSettingsInput(rawSettings);
+    const target = workspaceRoot()
+      ? vscode.ConfigurationTarget.Workspace
+      : vscode.ConfigurationTarget.Global;
+    const config = vscode.workspace.getConfiguration("agentHub");
+    for (const [key, value] of Object.entries(next)) {
+      await config.update(key, value, target);
+    }
+    const scope = target === vscode.ConfigurationTarget.Workspace ? "workspace" : "user";
+    const restartNote = serverProcess || (await isServerOnline())
+      ? " Restart Agent Hub to use server or route changes."
+      : "";
+    postChatSettings(panel, `Saved ${scope} settings.${restartNote}`);
+  } catch (error) {
+    postChatSettings(panel, `Could not save settings: ${error.message}`);
+  }
+}
+
+function normalizeChatSettingsInput(value) {
+  const current = settings();
+  const input = value && typeof value === "object" ? value : {};
+  const serverUrl = normalizeServerUrl(input.serverUrl, current.serverUrl);
+  return {
+    serverUrl,
+    pythonPath: cleanSettingString(input.pythonPath, current.pythonPath),
+    configPath: cleanSettingString(input.configPath, current.configPath),
+    route: cleanSettingString(input.route, current.route),
+    researchRoute: cleanSettingString(input.researchRoute, current.researchRoute),
+    codingAgentRoute: cleanSettingString(input.codingAgentRoute, current.codingAgentRoute),
+    agentProviderMode: normalizeAgentProviderMode(input.agentProviderMode || current.agentProviderMode),
+    agentMaxSteps: cleanSettingInteger(input.agentMaxSteps, current.agentMaxSteps, 1, 100),
+    allowShellTools: !!input.allowShellTools,
+    maxTokens: cleanSettingInteger(input.maxTokens, current.maxTokens, 1, 200000),
+    autoStart: !!input.autoStart
+  };
+}
+
+function cleanSettingString(value, fallback) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text || fallback;
+}
+
+function cleanSettingInteger(value, fallback, min, max) {
+  const number = Number.parseInt(value, 10);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, number));
+}
+
+function normalizeServerUrl(value, fallback) {
+  const text = cleanSettingString(value, fallback).replace(/\/+$/, "");
+  let url;
+  try {
+    url = new URL(text);
+  } catch (error) {
+    throw new Error("Server URL must be a valid http:// or https:// URL.");
+  }
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("Server URL must use http:// or https://.");
+  }
+  return text;
 }
 
 async function apiKeyStatusRows() {
@@ -867,10 +976,10 @@ function agentToolSteps(response) {
     });
 }
 
-function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
+function chatHtml(webview, logoPath, initialSettings = settings()) {
   const nonce = getNonce();
   const logoSrc = webview.asWebviewUri(logoPath);
-  const providerMode = normalizeAgentProviderMode(initialProviderMode);
+  const initialSettingsJson = jsonForScript(chatSettingsPayload(initialSettings));
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -945,6 +1054,91 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
       color: var(--muted);
       font-size: 12px;
       white-space: nowrap;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .settings-wrap {
+      position: relative;
+      flex: 0 0 auto;
+    }
+
+    .settings-menu {
+      position: absolute;
+      z-index: 20;
+      top: calc(100% + 8px);
+      right: 0;
+      width: min(680px, calc(100vw - 28px));
+      max-height: calc(100vh - 88px);
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    }
+
+    .settings-menu[hidden] {
+      display: none;
+    }
+
+    .settings-head,
+    .settings-actions,
+    .settings-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .settings-head {
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .settings-title,
+    .settings-section-title {
+      color: var(--vscode-foreground);
+      font-weight: 600;
+    }
+
+    .settings-section {
+      display: grid;
+      gap: 10px;
+      padding-top: 10px;
+      margin-top: 10px;
+      border-top: 1px solid var(--border);
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(180px, 1fr));
+      gap: 10px;
+    }
+
+    .settings-field {
+      display: grid;
+      align-items: stretch;
+      gap: 5px;
+      color: var(--vscode-foreground);
+      font-size: 12px;
+    }
+
+    .settings-check {
+      color: var(--vscode-foreground);
+    }
+
+    .settings-message {
+      min-height: 16px;
+      color: var(--muted);
+      font-size: 11px;
     }
 
     .transcript {
@@ -1054,6 +1248,8 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
       font: inherit;
     }
 
+    input[type="text"],
+    input[type="number"],
     input[type="password"] {
       width: 100%;
       min-width: 0;
@@ -1090,6 +1286,7 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
 
     button:disabled,
     select:disabled,
+    input:disabled,
     textarea:disabled {
       opacity: 0.65;
       cursor: default;
@@ -1146,8 +1343,18 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
     }
 
     @media (max-width: 720px) {
+      .settings-grid,
       .key-grid {
         grid-template-columns: 1fr;
+      }
+
+      header {
+        align-items: flex-start;
+      }
+
+      .header-actions {
+        flex-direction: column;
+        align-items: flex-end;
       }
     }
   </style>
@@ -1159,50 +1366,111 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
         <img class="logo" src="${logoSrc}" alt="Agent Hub logo">
         <h1>Agent Hub</h1>
       </div>
-      <div class="status" id="status">Checking Agent Hub...</div>
+      <div class="header-actions">
+        <div class="status" id="status">Checking Agent Hub...</div>
+        <div class="settings-wrap">
+          <button class="secondary" id="settingsToggle" type="button" aria-expanded="false" aria-controls="settingsMenu">Settings</button>
+          <section class="settings-menu" id="settingsMenu" hidden>
+            <div class="settings-head">
+              <div class="settings-title">Settings</div>
+              <button class="secondary" id="settingsClose" type="button">Close</button>
+            </div>
+            <div class="settings-grid">
+              <label class="settings-field">
+                <span>Control agent</span>
+                <select id="controlMode">
+                  <option value="cloud">Cloud</option>
+                  <option value="hybrid">Hybrid</option>
+                  <option value="local">Local</option>
+                </select>
+              </label>
+              <label class="settings-field">
+                <span>Server URL</span>
+                <input id="settingServerUrl" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Python path</span>
+                <input id="settingPythonPath" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Config path</span>
+                <input id="settingConfigPath" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Default route</span>
+                <input id="settingRoute" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Local coding route</span>
+                <input id="settingCodingRoute" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Research route</span>
+                <input id="settingResearchRoute" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Max tokens</span>
+                <input id="settingMaxTokens" type="number" min="1" step="100">
+              </label>
+              <label class="settings-field">
+                <span>Agent max steps</span>
+                <input id="settingAgentMaxSteps" type="number" min="1" max="100" step="1">
+              </label>
+            </div>
+            <div class="settings-row">
+              <label class="settings-check"><input id="settingAllowShellTools" type="checkbox"> Allow shell tools</label>
+              <label class="settings-check"><input id="settingAutoStart" type="checkbox"> Auto-start server</label>
+            </div>
+            <div class="settings-actions">
+              <button id="saveSettings" type="button">Save Settings</button>
+              <button class="secondary" id="openSettings" type="button">Open VS Code Settings</button>
+            </div>
+            <div class="settings-message" id="settingsMessage"></div>
+            <div class="settings-section">
+              <div class="settings-section-title">Server</div>
+              <div class="settings-actions">
+                <button class="secondary" id="startServer" type="button">Start Server</button>
+                <button class="secondary" id="restartServer" type="button">Restart Server</button>
+                <button class="secondary" id="checkStatus" type="button">Status</button>
+                <button class="secondary" id="pullModel" type="button">Choose Local Model</button>
+                <button class="secondary" id="openOutput" type="button">Open Output</button>
+              </div>
+            </div>
+            <details class="key-panel" id="apiKeyPanel">
+              <summary>API Keys</summary>
+              <div class="key-grid">
+                <label class="key-field">
+                  <span>OpenAI / Codex</span>
+                  <input id="keyOpenai" type="password" autocomplete="off" placeholder="OPENAI_API_KEY">
+                  <span class="key-state" id="keyOpenaiState">Checking...</span>
+                </label>
+                <label class="key-field">
+                  <span>Claude</span>
+                  <input id="keyAnthropic" type="password" autocomplete="off" placeholder="ANTHROPIC_API_KEY">
+                  <span class="key-state" id="keyAnthropicState">Checking...</span>
+                </label>
+                <label class="key-field">
+                  <span>Gemini</span>
+                  <input id="keyGemini" type="password" autocomplete="off" placeholder="GEMINI_API_KEY">
+                  <span class="key-state" id="keyGeminiState">Checking...</span>
+                </label>
+              </div>
+              <div class="key-actions">
+                <button class="secondary" id="saveApiKeys" type="button">Save Keys</button>
+                <button class="secondary" id="clearApiKeys" type="button">Clear Saved Keys</button>
+              </div>
+              <div class="key-message" id="keyMessage"></div>
+            </details>
+          </section>
+        </div>
+      </div>
     </header>
     <main class="transcript" id="transcript" aria-live="polite"></main>
     <form id="form">
-      <details class="key-panel" id="apiKeyPanel">
-        <summary>API Keys</summary>
-        <div class="key-grid">
-          <label class="key-field">
-            <span>OpenAI / Codex</span>
-            <input id="keyOpenai" type="password" autocomplete="off" placeholder="OPENAI_API_KEY">
-            <span class="key-state" id="keyOpenaiState">Checking...</span>
-          </label>
-          <label class="key-field">
-            <span>Claude</span>
-            <input id="keyAnthropic" type="password" autocomplete="off" placeholder="ANTHROPIC_API_KEY">
-            <span class="key-state" id="keyAnthropicState">Checking...</span>
-          </label>
-          <label class="key-field">
-            <span>Gemini</span>
-            <input id="keyGemini" type="password" autocomplete="off" placeholder="GEMINI_API_KEY">
-            <span class="key-state" id="keyGeminiState">Checking...</span>
-          </label>
-        </div>
-        <div class="key-actions">
-          <button class="secondary" id="saveApiKeys" type="button">Save Keys</button>
-          <button class="secondary" id="restartServer" type="button">Restart Server</button>
-          <button class="secondary" id="clearApiKeys" type="button">Clear Saved Keys</button>
-        </div>
-        <div class="key-message" id="keyMessage"></div>
-      </details>
       <textarea id="prompt" placeholder="Ask Agent Hub to create, edit, inspect, explain, or run commands"></textarea>
       <div class="actions">
         <div class="left">
           <label><input id="includeSelection" type="checkbox"> Include selection</label>
-          <label>Control
-            <select id="controlMode">
-              <option value="cloud"${providerMode === "cloud" ? " selected" : ""}>Cloud</option>
-              <option value="hybrid"${providerMode === "hybrid" ? " selected" : ""}>Hybrid</option>
-              <option value="local"${providerMode === "local" ? " selected" : ""}>Local</option>
-            </select>
-          </label>
-          <button class="secondary" id="startServer" type="button">Start Server</button>
-          <button class="secondary" id="pullModel" type="button">Choose Local Model</button>
-          <button class="secondary" id="checkStatus" type="button">Status</button>
           <button class="secondary" id="clear" type="button">Clear</button>
         </div>
         <div class="right">
@@ -1213,14 +1481,31 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const initialSettings = ${initialSettingsJson};
     const transcript = document.getElementById("transcript");
     const form = document.getElementById("form");
     const prompt = document.getElementById("prompt");
     const send = document.getElementById("send");
     const status = document.getElementById("status");
+    const settingsToggle = document.getElementById("settingsToggle");
+    const settingsMenu = document.getElementById("settingsMenu");
+    const settingsClose = document.getElementById("settingsClose");
+    const settingsMessage = document.getElementById("settingsMessage");
     const includeSelection = document.getElementById("includeSelection");
     const controlMode = document.getElementById("controlMode");
     const pullModel = document.getElementById("pullModel");
+    const settingInputs = {
+      serverUrl: document.getElementById("settingServerUrl"),
+      pythonPath: document.getElementById("settingPythonPath"),
+      configPath: document.getElementById("settingConfigPath"),
+      route: document.getElementById("settingRoute"),
+      codingAgentRoute: document.getElementById("settingCodingRoute"),
+      researchRoute: document.getElementById("settingResearchRoute"),
+      maxTokens: document.getElementById("settingMaxTokens"),
+      agentMaxSteps: document.getElementById("settingAgentMaxSteps"),
+      allowShellTools: document.getElementById("settingAllowShellTools"),
+      autoStart: document.getElementById("settingAutoStart")
+    };
     const keyInputs = {
       openai: document.getElementById("keyOpenai"),
       anthropic: document.getElementById("keyAnthropic"),
@@ -1245,6 +1530,51 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
         clearInterval(workingTimer);
         workingTimer = null;
       }
+    }
+
+    function setSettingsMenuOpen(value) {
+      settingsMenu.hidden = !value;
+      settingsToggle.setAttribute("aria-expanded", value ? "true" : "false");
+      if (value) {
+        const firstField = settingsMenu.querySelector("select, input, button");
+        if (firstField) {
+          firstField.focus();
+        }
+      }
+    }
+
+    function applyChatSettings(settings, messageText) {
+      const next = settings || {};
+      controlMode.value = next.agentProviderMode || "cloud";
+      settingInputs.serverUrl.value = next.serverUrl || "";
+      settingInputs.pythonPath.value = next.pythonPath || "";
+      settingInputs.configPath.value = next.configPath || "";
+      settingInputs.route.value = next.route || "";
+      settingInputs.codingAgentRoute.value = next.codingAgentRoute || "";
+      settingInputs.researchRoute.value = next.researchRoute || "";
+      settingInputs.maxTokens.value = next.maxTokens || "";
+      settingInputs.agentMaxSteps.value = next.agentMaxSteps || "";
+      settingInputs.allowShellTools.checked = !!next.allowShellTools;
+      settingInputs.autoStart.checked = !!next.autoStart;
+      if (messageText !== undefined) {
+        settingsMessage.textContent = messageText || "";
+      }
+    }
+
+    function collectChatSettings() {
+      return {
+        serverUrl: settingInputs.serverUrl.value,
+        pythonPath: settingInputs.pythonPath.value,
+        configPath: settingInputs.configPath.value,
+        route: settingInputs.route.value,
+        codingAgentRoute: settingInputs.codingAgentRoute.value,
+        researchRoute: settingInputs.researchRoute.value,
+        agentProviderMode: controlMode.value,
+        maxTokens: settingInputs.maxTokens.value,
+        agentMaxSteps: settingInputs.agentMaxSteps.value,
+        allowShellTools: settingInputs.allowShellTools.checked,
+        autoStart: settingInputs.autoStart.checked
+      };
     }
 
     function startWorkingStatus() {
@@ -1367,6 +1697,49 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
       }
     }
 
+    settingsToggle.addEventListener("click", () => {
+      setSettingsMenuOpen(settingsMenu.hidden);
+    });
+
+    settingsClose.addEventListener("click", () => {
+      setSettingsMenuOpen(false);
+      settingsToggle.focus();
+    });
+
+    document.addEventListener("click", (event) => {
+      if (
+        settingsMenu.hidden ||
+        settingsMenu.contains(event.target) ||
+        settingsToggle.contains(event.target)
+      ) {
+        return;
+      }
+      setSettingsMenuOpen(false);
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !settingsMenu.hidden) {
+        setSettingsMenuOpen(false);
+        settingsToggle.focus();
+      }
+    });
+
+    document.getElementById("saveSettings").addEventListener("click", () => {
+      settingsMessage.textContent = "Saving settings...";
+      vscode.postMessage({
+        type: "saveChatSettings",
+        settings: collectChatSettings()
+      });
+    });
+
+    document.getElementById("openSettings").addEventListener("click", () => {
+      vscode.postMessage({ type: "openSettings" });
+    });
+
+    document.getElementById("openOutput").addEventListener("click", () => {
+      vscode.postMessage({ type: "openOutput" });
+    });
+
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const text = prompt.value.trim();
@@ -1448,6 +1821,10 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
         setApiKeyStatus(message.keys || [], message.text, message.clearInputs);
         return;
       }
+      if (message.type === "chatSettings") {
+        applyChatSettings(message.settings, message.text);
+        return;
+      }
       if (message.type === "typing") {
         startWorkingStatus();
         return;
@@ -1499,11 +1876,16 @@ function chatHtml(webview, logoPath, initialProviderMode = "cloud") {
       }
     });
 
+    applyChatSettings(initialSettings);
     vscode.postMessage({ type: "ready" });
     prompt.focus();
   </script>
 </body>
 </html>`;
+}
+
+function jsonForScript(value) {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 function getNonce() {

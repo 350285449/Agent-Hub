@@ -2,8 +2,8 @@
 
 ## Next release
 
-- Target version: `0.4.15`
-- Purpose: publish hosted cloud control by default, explicit local control selection, API key management, local model selection, fast local finalization for file edits, and shell-first workspace-agent behavior
+- Target version: `0.4.16`
+- Purpose: publish the chat Settings menu alongside hosted cloud control by default, explicit local control selection, API key management, local model selection, fast local finalization for file edits, and shell-first workspace-agent behavior
 
 ## Summary
 
@@ -37,6 +37,7 @@ This update file records the next VS Code extension release and the key change s
 - The chat UI can save provider API keys into VS Code secret storage and inject them into Agent Hub on startup.
 - The chat UI scans LM Studio and Ollama for installed local models before offering Ollama install choices with approximate storage sizes.
 - A one-command installer now packages the VSIX, detects the VS Code CLI, installs the extension, and warns when Python 3.11+ is missing.
+- The chat header now has a Settings menu for provider mode, server settings, local model selection, output access, API keys, and server actions.
 
 ## Packaging
 
@@ -57,5 +58,5 @@ The resulting `.vsix` can be published with `npm run publish` from `vscode-exten
 
 ## Notes
 
-- The current `package.json` version is `0.4.15`.
-- If you want this release to be published, run `npm run package` from `vscode-extension` and publish the resulting `0.4.15` VSIX.
+- The current `package.json` version is `0.4.16`.
+- If you want this release to be published, run `npm run package` from `vscode-extension` and publish the resulting `0.4.16` VSIX.
