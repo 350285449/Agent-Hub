@@ -18,9 +18,10 @@ from .payloads import (
 )
 from .router import AgentRouter, RouterError
 from .team_agent_runner import TeamAgentRunner
+from .version import backend_version, build_metadata, config_runtime_hash
 
 
-BACKEND_VERSION = "0.3.2"
+BACKEND_VERSION = backend_version()
 BACKEND_FEATURES = {
     "native_agent_streaming": True,
     "native_agent_tool_schemas": True,
@@ -46,6 +47,9 @@ BACKEND_FEATURES = {
     "shell_command_permission_policy": True,
     "agent_hub_model_aliases": True,
     "openai_tool_call_passthrough": True,
+    "workspace_checkpoints": True,
+    "validation_repair_loops": True,
+    "validation_rollback": True,
 }
 
 
@@ -70,6 +74,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 {
                     "status": "ok",
                     "version": BACKEND_VERSION,
+                    "build": build_metadata(),
+                    "runtime": {"config_hash": config_runtime_hash(self.server.config)},
                     "features": BACKEND_FEATURES,
                     "agents": [
                         name
@@ -425,6 +431,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     <p>This is the local Agent Hub backend. Use the VS Code extension chat for the UI, or call the HTTP endpoints directly.</p>
     <dl>
       <dt>Version</dt><dd>{BACKEND_VERSION}</dd>
+      <dt>Config hash</dt><dd><code>{config_runtime_hash(config)}</code></dd>
       <dt>Workspace</dt><dd><code>{config.workspace_dir}</code></dd>
       <dt>Shell tools</dt><dd>{str(config.allow_shell_tools).lower()}</dd>
       <dt>Free only</dt><dd>{str(config.free_only).lower()}</dd>
@@ -481,7 +488,14 @@ class AgentHubHandler(BaseHTTPRequestHandler):
 def serve(config: HubConfig) -> None:
     config.ensure_dirs()
     server = AgentHubHTTPServer((config.host, config.port), config)
-    print(f"Agent Hub listening on http://{config.host}:{config.port}")
+    build = build_metadata()
+    print(
+        "Agent Hub "
+        f"{BACKEND_VERSION} ({build.get('commit', 'unknown')}"
+        f"{', dirty' if build.get('dirty') else ''}) "
+        f"listening on http://{config.host}:{config.port}"
+    )
+    print(f"Runtime config hash: {config_runtime_hash(config)}")
     print(f"JSON inbox: {config.inbox_dir}")
     try:
         server.serve_forever()

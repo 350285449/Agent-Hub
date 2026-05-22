@@ -21,6 +21,10 @@
   "validation_mode": "basic",
   "validation_commands": [],
   "auto_validate_after_edits": true,
+  "validation_repair_attempts": 3,
+  "prefer_multi_file_patches": true,
+  "rollback_on_validation_failure": true,
+  "workspace_checkpoint_retention": 5,
   "include_raw_responses": false,
   "expose_routing_details": false,
   "default_route": [

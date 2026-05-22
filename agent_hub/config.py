@@ -109,6 +109,10 @@ class HubConfig:
     validation_mode: str = "basic"
     validation_commands: list[str] = field(default_factory=list)
     auto_validate_after_edits: bool = True
+    validation_repair_attempts: int = 3
+    prefer_multi_file_patches: bool = True
+    rollback_on_validation_failure: bool = True
+    workspace_checkpoint_retention: int = 5
 
     default_route: list[str] = field(default_factory=list)
     routes: list[RouteRule] = field(default_factory=list)
@@ -438,6 +442,8 @@ def free_local_config() -> HubConfig:
         validation_mode="basic",
         validation_commands=[],
         auto_validate_after_edits=True,
+        rollback_on_validation_failure=True,
+        workspace_checkpoint_retention=5,
         default_route=default_agent_names(),
         routes=[
             RouteRule(
@@ -584,6 +590,15 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             if isinstance(item, str) and item.strip()
         ],
         auto_validate_after_edits=_bool_with_default(raw.get("auto_validate_after_edits"), True),
+        validation_repair_attempts=int(raw.get("validation_repair_attempts", 3)),
+        prefer_multi_file_patches=_bool_with_default(raw.get("prefer_multi_file_patches"), True),
+        rollback_on_validation_failure=_bool_with_default(
+            raw.get("rollback_on_validation_failure"),
+            True,
+        ),
+        workspace_checkpoint_retention=int(
+            raw.get("workspace_checkpoint_retention", raw.get("checkpoint_retention", 5))
+        ),
         default_route=list(raw.get("default_route", agents.keys())),
         routes=routes,
         agents=agents,
@@ -657,6 +672,10 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "validation_mode": config.validation_mode,
         "validation_commands": config.validation_commands,
         "auto_validate_after_edits": config.auto_validate_after_edits,
+        "validation_repair_attempts": config.validation_repair_attempts,
+        "prefer_multi_file_patches": config.prefer_multi_file_patches,
+        "rollback_on_validation_failure": config.rollback_on_validation_failure,
+        "workspace_checkpoint_retention": config.workspace_checkpoint_retention,
         "include_raw_responses": config.include_raw_responses,
         "expose_routing_details": config.expose_routing_details,
         "default_route": config.default_route,

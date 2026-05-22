@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from dataclasses import replace
@@ -11,15 +12,17 @@ from .agent_tools import AgentToolbox, ShellPermissionCallback
 from .config import AgentConfig, HubConfig, is_free_agent
 from .models import FailoverEvent, HubRequest, HubResponse
 from .payloads import content_to_text, request_text
+from .reasoning import WorkspaceReasoningState
 from .router import AgentRouter, RouterError
 
 
 TEAM_ROLES = ("planner", "researcher", "coder", "reviewer", "fixer", "finalizer")
-READ_ONLY_TOOLS = ["list_files", "read_file", "search_files", "run_command"]
+READ_ONLY_TOOLS = ["list_files", "read_file", "search_files", "repo_map", "run_command"]
 EDIT_TOOLS = [
     "list_files",
     "read_file",
     "search_files",
+    "repo_map",
     "write_file",
     "replace_in_file",
     "apply_patch",
@@ -41,6 +44,9 @@ class TeamAgentRunner:
         shell_permission_callback: ShellPermissionCallback | None = None,
     ) -> HubResponse:
         toolbox = AgentToolbox(self.config, request)
+        session_data = self.router.session_store.load(request.session_id)
+        reasoning_state = WorkspaceReasoningState.for_request(request, session_data=session_data)
+        reasoning_state.add_active_files(_active_files_from_toolbox(toolbox))
         failover: list[FailoverEvent] = []
         phases: list[dict[str, Any]] = []
 
@@ -52,9 +58,13 @@ class TeamAgentRunner:
         )
 
         plan_candidates = _request_int(request, "plan_candidates", default=1, minimum=1, maximum=5)
-        plans = self._propose_plans(request, toolbox, plan_candidates, event_sink)
+        plans = self._propose_plans(request, toolbox, plan_candidates, event_sink, reasoning_state)
         failover.extend(event for plan in plans for event in plan["response"].failover)
         selected_plan = select_best_plan([plan["text"] for plan in plans], request, toolbox.root)
+        reasoning_state.repository_summary = {
+            **reasoning_state.repository_summary,
+            "selected_team_plan": selected_plan[:1000],
+        }
         phases.append(
             {
                 "role": "planner",
@@ -72,8 +82,10 @@ class TeamAgentRunner:
             selected_plan,
             event_sink,
             shell_permission_callback,
+            reasoning_state,
         )
         failover.extend(researcher.failover)
+        _merge_response_reasoning(reasoning_state, researcher)
         phases.append({"role": "researcher", "agent": researcher.agent, "text": researcher.text})
 
         coder = self._run_coder(
@@ -82,8 +94,10 @@ class TeamAgentRunner:
             researcher.text,
             event_sink,
             shell_permission_callback,
+            reasoning_state,
         )
         failover.extend(coder.failover)
+        _merge_response_reasoning(reasoning_state, coder)
         phases.append(_phase_from_agent_response("coder", coder))
 
         review_context = _review_context(request, selected_plan, researcher.text, coder)
@@ -92,8 +106,10 @@ class TeamAgentRunner:
             role="reviewer",
             prompt=review_context,
             event_sink=event_sink,
+            reasoning_state=reasoning_state,
         )
         failover.extend(reviewer.failover)
+        _merge_response_reasoning(reasoning_state, reviewer)
         phases.append({"role": "reviewer", "agent": reviewer.agent, "text": reviewer.text})
 
         fixer: HubResponse | None = None
@@ -104,8 +120,10 @@ class TeamAgentRunner:
                 reviewer.text,
                 event_sink,
                 shell_permission_callback,
+                reasoning_state,
             )
             failover.extend(fixer.failover)
+            _merge_response_reasoning(reasoning_state, fixer)
             phases.append(_phase_from_agent_response("fixer", fixer))
 
         finalizer_prompt = _finalizer_prompt(
@@ -121,8 +139,10 @@ class TeamAgentRunner:
             role="finalizer",
             prompt=finalizer_prompt,
             event_sink=event_sink,
+            reasoning_state=reasoning_state,
         )
         failover.extend(finalizer.failover)
+        _merge_response_reasoning(reasoning_state, finalizer)
 
         raw = dict(finalizer.raw)
         existing_metadata = raw.get("agent_hub")
@@ -133,6 +153,8 @@ class TeamAgentRunner:
             "workspace": str(toolbox.root),
             "phases": phases,
             "finalizer_agent": finalizer.agent,
+            "reasoning_state": reasoning_state.to_dict(),
+            "execution_plan": reasoning_state.execution_plan.to_dict(),
         }
         response = HubResponse(
             request_id=finalizer.request_id,
@@ -162,6 +184,7 @@ class TeamAgentRunner:
         toolbox: AgentToolbox,
         count: int,
         event_sink: AgentEventSink | None,
+        reasoning_state: WorkspaceReasoningState,
     ) -> list[dict[str, Any]]:
         agents = self._role_agents("planner", request)[:count]
         if not agents:
@@ -181,6 +204,7 @@ class TeamAgentRunner:
                 prompt=_planner_prompt(request, toolbox.root),
                 preferred_agent=agent.name,
                 event_sink=event_sink,
+                reasoning_state=reasoning_state,
             )
             score = score_plan(response.text, request, toolbox.root)
             plans.append({"response": response, "text": response.text, "score": score})
@@ -195,6 +219,7 @@ class TeamAgentRunner:
         plan: str,
         event_sink: AgentEventSink | None,
         shell_permission_callback: ShellPermissionCallback | None,
+        reasoning_state: WorkspaceReasoningState,
     ) -> HubResponse:
         prompt = _researcher_prompt(request, toolbox.root, plan)
         return AgentRunner(self.config, self.router).run(
@@ -205,6 +230,7 @@ class TeamAgentRunner:
                 allowed_tools=READ_ONLY_TOOLS,
                 max_steps=_request_int(request, "researcher_max_steps", default=4, minimum=1, maximum=20),
                 fast_write_finalize=False,
+                reasoning_state=reasoning_state,
             ),
             event_sink=event_sink,
             shell_permission_callback=shell_permission_callback,
@@ -217,6 +243,7 @@ class TeamAgentRunner:
         research: str,
         event_sink: AgentEventSink | None,
         shell_permission_callback: ShellPermissionCallback | None,
+        reasoning_state: WorkspaceReasoningState,
     ) -> HubResponse:
         prompt = _coder_prompt(request, plan, research)
         return AgentRunner(self.config, self.router).run(
@@ -237,6 +264,7 @@ class TeamAgentRunner:
                     "fast_write_finalize",
                     default=self.config.fast_write_finalize,
                 ),
+                reasoning_state=reasoning_state,
             ),
             event_sink=event_sink,
             shell_permission_callback=shell_permission_callback,
@@ -249,6 +277,7 @@ class TeamAgentRunner:
         review: str,
         event_sink: AgentEventSink | None,
         shell_permission_callback: ShellPermissionCallback | None,
+        reasoning_state: WorkspaceReasoningState,
     ) -> HubResponse:
         prompt = _fixer_prompt(request, plan, review)
         return AgentRunner(self.config, self.router).run(
@@ -263,6 +292,7 @@ class TeamAgentRunner:
                     "fast_write_finalize",
                     default=self.config.fast_write_finalize,
                 ),
+                reasoning_state=reasoning_state,
             ),
             event_sink=event_sink,
             shell_permission_callback=shell_permission_callback,
@@ -276,6 +306,7 @@ class TeamAgentRunner:
         prompt: str,
         preferred_agent: str | None = None,
         event_sink: AgentEventSink | None = None,
+        reasoning_state: WorkspaceReasoningState | None = None,
     ) -> HubResponse:
         agent_name = preferred_agent or self._role_agent_name(role, request)
         _emit(
@@ -288,12 +319,12 @@ class TeamAgentRunner:
         response = self.router.route(
             replace(
                 request,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": _with_reasoning_context(prompt, reasoning_state)}],
                 preferred_agent=agent_name,
                 use_session_history=False,
                 record_session=False,
                 stream=False,
-                raw=_role_raw(request, role),
+                raw=_role_raw(request, role, reasoning_state),
             )
         )
         _emit(
@@ -316,8 +347,9 @@ class TeamAgentRunner:
         allowed_tools: list[str],
         max_steps: int,
         fast_write_finalize: bool,
+        reasoning_state: WorkspaceReasoningState,
     ) -> HubRequest:
-        raw = _role_raw(request, role)
+        raw = _role_raw(request, role, reasoning_state)
         raw["agent_hub_allowed_tools"] = allowed_tools
         raw["agent_max_steps"] = max_steps
         raw["fast_write_finalize"] = fast_write_finalize
@@ -426,11 +458,41 @@ def _route_names(config: HubConfig, request: HubRequest) -> list[str]:
     return config.default_route
 
 
-def _role_raw(request: HubRequest, role: str) -> dict[str, Any]:
+def _role_raw(
+    request: HubRequest,
+    role: str,
+    reasoning_state: WorkspaceReasoningState | None = None,
+) -> dict[str, Any]:
     raw = dict(request.raw or {})
     raw["team_agent_role"] = role
     raw["mode"] = "group-agent"
+    if reasoning_state is not None:
+        state = reasoning_state.to_dict()
+        runtime = raw.get("agent_hub_runtime")
+        runtime = dict(runtime) if isinstance(runtime, dict) else {}
+        runtime["reasoning_state"] = state
+        raw["agent_hub_runtime"] = runtime
+        hub = raw.get("agent_hub")
+        hub = dict(hub) if isinstance(hub, dict) else {}
+        hub["reasoning_state"] = state
+        raw["agent_hub"] = hub
     return raw
+
+
+def _with_reasoning_context(
+    prompt: str,
+    reasoning_state: WorkspaceReasoningState | None,
+) -> str:
+    if reasoning_state is None:
+        return prompt
+    return "\n".join(
+        [
+            prompt,
+            "",
+            "Shared workspace reasoning state:",
+            json.dumps(reasoning_state.to_dict(), indent=2, ensure_ascii=False),
+        ]
+    )
 
 
 def _planner_prompt(request: HubRequest, root: Path) -> str:
@@ -438,7 +500,7 @@ def _planner_prompt(request: HubRequest, root: Path) -> str:
         [
             "You are the planner in an Agent Hub coding team.",
             f"Workspace root: {root}",
-            "Break the task into a concise, safe implementation plan.",
+            "Break the task into concise execution objectives with dependencies, likely files, risk, and validation.",
             "Prefer minimal scoped edits, mention likely files, and include verification.",
             "Avoid destructive rewrites and avoid duplicate workspace copies unless the user named them.",
             "",
@@ -454,7 +516,7 @@ def _researcher_prompt(request: HubRequest, root: Path, plan: str) -> str:
             "You are the researcher in an Agent Hub coding team.",
             f"Workspace root: {root}",
             "Use only read/search/list tools, and run safe inspection commands if useful.",
-            "Gather concise repository context needed by the coder. Do not edit files.",
+            "Gather concise repository context needed by the coder. Update dependency, symbol, and test relationships mentally. Do not edit files.",
             "",
             "Task:",
             request_text(request),
@@ -471,7 +533,8 @@ def _coder_prompt(request: HubRequest, plan: str, research: str) -> str:
             "You are the coder in an Agent Hub coding team.",
             "Confirm the workspace root and target path before editing.",
             "Inspect files before editing, keep changes scoped, and verify when possible.",
-            "Use write_file or replace_in_file only for the requested workspace files.",
+            "Prefer one grouped apply_patch for related edits across implementation, tests, configs, and docs.",
+            "Advance the active execution node; use write_file only for new/generated files and replace_in_file only for tiny isolated edits.",
             "",
             "Task:",
             request_text(request),
@@ -515,7 +578,7 @@ def _fixer_prompt(request: HubRequest, plan: str, review: str) -> str:
         [
             "You are the fixer in an Agent Hub coding team.",
             "Apply only the review fixes that are necessary for the user's task.",
-            "Inspect files before editing and verify when possible.",
+            "Repair the active failed execution node with the smallest grouped apply_patch that preserves prior successful work.",
             "",
             "Task:",
             request_text(request),
@@ -594,6 +657,20 @@ def _phase_from_agent_response(role: str, response: HubResponse) -> dict[str, An
         if isinstance(response.raw.get("agent_hub"), dict)
         else [],
     }
+
+
+def _merge_response_reasoning(state: WorkspaceReasoningState, response: HubResponse) -> None:
+    metadata = response.raw.get("agent_hub") if isinstance(response.raw, dict) else None
+    value = metadata.get("reasoning_state") if isinstance(metadata, dict) else None
+    if isinstance(value, dict):
+        state.merge_from(WorkspaceReasoningState.from_dict(value, task_id=state.task_id))
+
+
+def _active_files_from_toolbox(toolbox: AgentToolbox) -> list[str]:
+    try:
+        return [toolbox._relative(path) for path in toolbox._request_context_paths() if path.exists()]
+    except Exception:
+        return []
 
 
 def _review_requests_fixes(text: str) -> bool:

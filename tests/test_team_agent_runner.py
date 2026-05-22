@@ -61,6 +61,11 @@ class TeamAgentRunnerTests(unittest.TestCase):
                             model=self.agent.model,
                         )
                     if self.agent.name == "coder":
+                        if any("Tool result for write_file" in m.get("content", "") for m in request.messages):
+                            return ProviderResult(
+                                text='{"action":"final","answer":"Created TEAM.txt."}',
+                                model=self.agent.model,
+                            )
                         return ProviderResult(
                             text=(
                                 '{"action":"tool","tool":"write_file","args":'
@@ -93,8 +98,16 @@ class TeamAgentRunnerTests(unittest.TestCase):
             )
             self.assertEqual(
                 calls,
-                ["planner", "researcher", "researcher", "coder", "reviewer", "finalizer"],
+                ["planner", "researcher", "researcher", "coder", "coder", "reviewer", "finalizer"],
             )
+            state = response.raw["agent_hub"]["reasoning_state"]
+            self.assertIn("README.md", state["inspected_files"])
+            self.assertTrue(
+                any("TEAM.txt" in edit.get("files", []) for edit in state["planned_edits"])
+            )
+            self.assertTrue(response.raw["agent_hub"]["execution_plan"]["nodes"])
+            session = router.session_store.load("team")
+            self.assertIn("reasoning_state", session)
 
     def test_plan_voting_prefers_scoped_verified_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import ast
+import shutil
 import subprocess
+import tempfile
+import time
+import uuid
 import difflib
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +25,9 @@ MAX_REPLACE_CHARS = 200_000
 MAX_PATCH_CHARS = 1_000_000
 MAX_PATH_HINTS = 10
 MAX_COMMAND_TIMEOUT_SECONDS = 600
+MAX_CHECKPOINT_RETENTION = 100
+MAX_REPO_MAP_FILES = 80
+MAX_SYMBOLS_PER_FILE = 20
 
 AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
@@ -64,8 +73,20 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "repo_map",
+        "description": "Build a lightweight repository map with related files, tests, configs, and symbols before editing.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative focus path."},
+                "target": {"type": "string", "description": "File, module, or symbol to prioritize."},
+                "limit": {"type": "integer", "description": "Maximum files to return."},
+            },
+        },
+    },
+    {
         "name": "write_file",
-        "description": "Create, overwrite, or append to a workspace text file.",
+        "description": "Create, overwrite, or append to one workspace text file. Prefer apply_patch for coordinated or repair edits.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -78,7 +99,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "replace_in_file",
-        "description": "Replace exact text in a workspace text file.",
+        "description": "Replace exact text in one workspace text file. Prefer apply_patch for multi-file or validation-repair edits.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -95,7 +116,7 @@ AGENT_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "apply_patch",
-        "description": "Apply a validated multi-file patch atomically where possible.",
+        "description": "Apply a validated grouped patch across one or more files, with checkpoint rollback support.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -152,6 +173,102 @@ def agent_tool_definitions(allow_shell: bool) -> list[dict[str, Any]]:
     return tools
 
 
+def create_workspace_checkpoint(
+    root: str | Path,
+    paths: list[str | Path],
+    *,
+    state_dir: str | Path | None = None,
+    retention: int = 5,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Persist a small pre-edit snapshot for files inside the workspace."""
+
+    workspace = Path(root).expanduser().resolve()
+    unique_paths = _unique_checkpoint_paths(workspace, paths)
+    if not unique_paths:
+        raise ToolError("Cannot create a checkpoint without workspace paths")
+
+    checkpoints_dir = _checkpoint_base_dir(workspace, state_dir)
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:10]}"
+    temp_dir = Path(tempfile.mkdtemp(prefix=f".{checkpoint_id}.", dir=checkpoints_dir))
+    files_dir = temp_dir / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, Any] = {
+        "id": checkpoint_id,
+        "created_at": time.time(),
+        "root": str(workspace),
+        "reason": reason,
+        "files": [],
+    }
+    try:
+        for path in unique_paths:
+            relative = _relative_to_workspace(workspace, path)
+            entry: dict[str, Any] = {"path": relative, "exists": path.exists()}
+            if path.exists():
+                if not path.is_file():
+                    raise ToolError(f"Cannot checkpoint non-file path: {relative}")
+                snapshot_name = f"{len(manifest['files']):04d}.bin"
+                shutil.copy2(path, files_dir / snapshot_name)
+                entry["snapshot"] = f"files/{snapshot_name}"
+                entry["size"] = path.stat().st_size
+            manifest["files"].append(entry)
+
+        (temp_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        checkpoint_dir = checkpoints_dir / checkpoint_id
+        temp_dir.rename(checkpoint_dir)
+        _prune_workspace_checkpoints(checkpoints_dir, retention)
+        return _checkpoint_public_manifest(manifest, checkpoint_dir)
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+
+def restore_workspace_checkpoint(
+    checkpoint: dict[str, Any] | str | Path,
+    *,
+    root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Restore files captured by create_workspace_checkpoint."""
+
+    manifest, checkpoint_dir = _load_checkpoint_manifest(checkpoint)
+    workspace = Path(root or manifest.get("root") or ".").expanduser().resolve()
+    restored: list[str] = []
+    removed: list[str] = []
+    errors: list[dict[str, str]] = []
+    for entry in manifest.get("files", []):
+        if not isinstance(entry, dict):
+            continue
+        relative = str(entry.get("path") or "")
+        try:
+            target = _canonical_workspace_path(workspace, relative, allow_missing=True)
+            if entry.get("exists"):
+                snapshot = entry.get("snapshot")
+                if not isinstance(snapshot, str) or not snapshot:
+                    raise ToolError(f"Checkpoint entry for {relative} is missing a snapshot")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_copy_file(checkpoint_dir / snapshot, target)
+                restored.append(relative)
+            else:
+                if target.exists():
+                    if not target.is_file():
+                        raise ToolError(f"Refusing to remove non-file path during restore: {relative}")
+                    target.unlink()
+                    removed.append(relative)
+        except Exception as exc:
+            errors.append({"path": relative, "error": str(exc)})
+    return {
+        "ok": not errors,
+        "checkpoint_id": str(manifest.get("id") or ""),
+        "restored_files": restored,
+        "removed_files": removed,
+        "errors": errors,
+    }
+
+
 @dataclass(slots=True)
 class AgentToolbox:
     config: HubConfig
@@ -195,6 +312,7 @@ class AgentToolbox:
             "list_files": 'list_files args: {"path":".","pattern":"*","recursive":true,"limit":200}',
             "read_file": 'read_file args: {"path":"README.md","start_line":1,"line_count":200}',
             "search_files": 'search_files args: {"query":"needle","path":".","pattern":"*.py","limit":50}',
+            "repo_map": 'repo_map args: {"path":".","target":"module_or_file","limit":80}',
             "write_file": 'write_file args: {"path":"file.txt","content":"full file content","append":false}',
             "replace_in_file": 'replace_in_file args: {"path":"file.txt","old":"exact text","new":"replacement","expected_replacements":1}',
             "apply_patch": 'apply_patch args: {"summary":"update implementation and tests","changes":[{"path":"file.py","old":"old","new":"new","expected_replacements":1}],"validation_plan":"py_compile and tests"}',
@@ -205,6 +323,7 @@ class AgentToolbox:
             "list_files",
             "read_file",
             "search_files",
+            "repo_map",
             "write_file",
             "replace_in_file",
             "apply_patch",
@@ -222,15 +341,53 @@ class AgentToolbox:
             tools.append("run_command: unavailable because shell_command_policy is deny.")
         elif shell_policy == "ask":
             tools.append("run_command: asks the user for permission before execution.")
+        prefer_patches = _truthy(
+            _request_option(
+                self.request,
+                "prefer_multi_file_patches",
+                self.config.prefer_multi_file_patches,
+            )
+        )
+        patch_mode = (
+            "PATCH-FIRST MODE is enabled: inspect broadly, batch related edits, and use apply_patch for multi-file work and all validation repairs."
+            if prefer_patches
+            else "Patch batching is available: use apply_patch when it keeps the change safer or clearer."
+        )
+        repository_snapshot = self._repository_snapshot()
 
         return "\n".join(
             [
                 "You are an autonomous local coding agent running inside the user's workspace.",
-                "Work like a careful repository agent: inspect before editing, keep changes scoped, and verify when possible.",
-                "Use tools for file inspection, file creation, and edits. Do not invent file contents you have not inspected.",
-                "When the user asks to create, edit, fix, update, or implement something, make the requested file change before your final answer.",
-                "Use write_file to create files or rewrite a file you have read. Use replace_in_file for targeted edits.",
-                "Prefer apply_patch when a task needs multiple coordinated file changes so approval and validation can happen once.",
+                "Work like a professional code reviewer and implementer: inspect thoroughly, plan multi-file changes, and validate thoroughly.",
+                "Use tools for file inspection, file creation, and coordinated edits. Do not invent file contents you have not inspected.",
+                patch_mode,
+                "",
+                "REPOSITORY-AWARE PLANNING:",
+                "- Start non-trivial coding tasks with repo_map or list/search/read calls before editing.",
+                "- Inspect active files, neighboring files, imports/usages, related tests, configs, and public interfaces.",
+                "- Build one mental edit plan before applying changes; avoid serial one-line edits when a grouped patch is clearer.",
+                "- If a task touches behavior, look for matching tests or examples before editing.",
+                "",
+                "MULTI-FILE EDITING WORKFLOW (PREFERRED for most tasks):",
+                "1. Inspect all relevant files before planning edits.",
+                "2. If more than one file needs changes, use apply_patch with all changes together.",
+                "3. Group related changes: implementation, tests, configs, docs in one patch.",
+                "4. Include a validation plan with the patch (tests, linting, compile checks).",
+                "5. Minimize approval prompts by preparing one coherent grouped patch.",
+                "6. If validation fails, repair from the restored checkpoint with apply_patch.",
+                "",
+                "SINGLE-FILE EDITS (only for specific cases):",
+                "- Creating brand-new files (when content is provided or fully specified)",
+                "- Full file rewrites (when you've read and need to completely replace entire file)",
+                "- Tiny surgical edits (3-5 line changes in already-inspected files)",
+                "- AVOID: Stop using single-file edits after validation failures - use apply_patch for repairs",
+                "",
+                "FILE CHANGE CONSIDERATIONS:",
+                "- When fixing a bug, also update related tests and documentation",
+                "- When implementing a feature, check for config files, setup files, and examples",
+                "- When refactoring code, ensure validation runs (lint, tests, compile checks)",
+                "- Multi-file consistency is more important than single-file speed",
+                "",
                 _shell_instruction(self.allow_shell, shell_policy),
                 "Before editing, confirm the workspace root and target path from the request, active file context, or inspected files.",
                 "When the request is about the open file or folder, prefer the Current file and Current folder paths from context.",
@@ -241,6 +398,8 @@ class AgentToolbox:
                 'To use a tool: {"action":"tool","tool":"read_file","args":{"path":"README.md"}}',
                 'When finished: {"action":"final","answer":"brief summary, changed files, and verification"}',
                 f"Workspace root: {self.root}",
+                "Repository snapshot:",
+                repository_snapshot,
                 "Available tools:",
                 *[f"- {tool}" for tool in tools],
             ]
@@ -248,6 +407,8 @@ class AgentToolbox:
 
     def run(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         args = args or {}
+        checkpoint: dict[str, Any] | None = None
+        rollback_result: dict[str, Any] | None = None
         try:
             allowed = self.allowed_tool_names
             if allowed is not None and name not in allowed:
@@ -271,28 +432,44 @@ class AgentToolbox:
                     else:
                         return self._request_approval(name, args)
             
-            if name == "list_files":
-                result = self._list_files(args)
-            elif name == "read_file":
-                result = self._read_file(args)
-            elif name == "search_files":
-                result = self._search_files(args)
-            elif name == "write_file":
-                result = self._write_file(args)
-            elif name == "replace_in_file":
-                result = self._replace_in_file(args)
-            elif name == "apply_patch":
-                result = self._apply_patch(args)
-            elif name == "run_command":
-                result = self._run_command(args)
-            else:
-                raise ToolError(f"Unknown tool {name!r}")
+            if self._is_mutating_tool(name):
+                checkpoint = self._create_edit_checkpoint(name, args)
+            try:
+                if name == "list_files":
+                    result = self._list_files(args)
+                elif name == "read_file":
+                    result = self._read_file(args)
+                elif name == "search_files":
+                    result = self._search_files(args)
+                elif name == "repo_map":
+                    result = self._repo_map(args)
+                elif name == "write_file":
+                    result = self._write_file(args)
+                elif name == "replace_in_file":
+                    result = self._replace_in_file(args)
+                elif name == "apply_patch":
+                    result = self._apply_patch(args)
+                elif name == "run_command":
+                    result = self._run_command(args)
+                else:
+                    raise ToolError(f"Unknown tool {name!r}")
+            except BaseException:
+                if checkpoint is not None:
+                    rollback_result = self._restore_checkpoint_safely(checkpoint)
+                raise
             response = {"ok": True, "tool": name, "result": result}
+            if checkpoint is not None:
+                response["checkpoint"] = checkpoint
             if approval_needed and self._approval_granted():
                 response["approval_granted"] = True
             return response
         except Exception as exc:
-            return {"ok": False, "tool": name, "error": str(exc)}
+            response = {"ok": False, "tool": name, "error": str(exc)}
+            if checkpoint is not None:
+                response["checkpoint"] = checkpoint
+            if rollback_result is not None:
+                response["rollback"] = rollback_result
+            return response
 
     def _is_approval_needed(self, name: str, args: dict[str, Any]) -> bool:
         """Determine if a tool requires approval based on current approval mode."""
@@ -324,6 +501,57 @@ class AgentToolbox:
 
     def _is_mutating_tool(self, name: str) -> bool:
         return name in ("write_file", "replace_in_file", "apply_patch")
+
+    def _create_edit_checkpoint(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        paths = self._checkpoint_paths_for_edit(name, args)
+        retention = _positive_int(
+            _request_option(
+                self.request,
+                "workspace_checkpoint_retention",
+                self.config.workspace_checkpoint_retention,
+            ),
+            default=self.config.workspace_checkpoint_retention,
+            maximum=MAX_CHECKPOINT_RETENTION,
+        )
+        return create_workspace_checkpoint(
+            self.root,
+            paths,
+            state_dir=self._checkpoint_state_dir(),
+            retention=retention,
+            reason=f"before {name}",
+        )
+
+    def _checkpoint_paths_for_edit(self, name: str, args: dict[str, Any]) -> list[Path]:
+        if name == "write_file":
+            path = self._resolve_required_path(args, "path")
+            self._guard_edit_target(args.get("path"), path)
+            return [path]
+        if name == "replace_in_file":
+            path = self._resolve_required_path(args, "path", existing=True)
+            self._guard_edit_target(args.get("path"), path)
+            return [path]
+        if name == "apply_patch":
+            return [change["absolute_path"] for change in self._patch_plan(args)["changes"]]
+        return []
+
+    def _checkpoint_state_dir(self) -> Path:
+        value = _request_option(self.request, "state_dir", self.config.state_dir)
+        path = Path(value).expanduser()
+        if path.is_absolute():
+            return path.resolve()
+        return (self.root / path).resolve()
+
+    def _restore_checkpoint_safely(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return restore_workspace_checkpoint(checkpoint, root=self.root)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "checkpoint_id": str(checkpoint.get("id") or ""),
+                "restored_files": [],
+                "removed_files": [],
+                "errors": [{"path": "", "error": str(exc)}],
+            }
 
     def _is_unsafe_shell_command(self, name: str, args: dict[str, Any]) -> bool:
         if name != "run_command":
@@ -403,7 +631,11 @@ class AgentToolbox:
             "args": args,
             "affected_files": details["affected_files"],
             "risk": details["summary"],
+            "risk_level": details["risk_level"],
             "summary": details["summary"],
+            "impact": details["impact"],
+            "estimated_impact": details["estimated_impact"],
+            "file_groups": details["file_groups"],
             "patch_preview": details["patch_preview"],
             "commands": details["commands"],
             "validation_plan": details["validation_plan"],
@@ -423,6 +655,7 @@ class AgentToolbox:
                     "patch_preview": "",
                     "commands": commands,
                     "validation_plan": validation_plan,
+                    **_approval_intelligence(name, [], "", commands),
                 }
             return {
                 "affected_files": [change["path"] for change in plan["changes"]],
@@ -430,25 +663,36 @@ class AgentToolbox:
                 "patch_preview": plan["patch_preview"],
                 "commands": commands,
                 "validation_plan": validation_plan,
+                **_approval_intelligence(
+                    name,
+                    [change["path"] for change in plan["changes"]],
+                    plan["patch_preview"],
+                    commands,
+                ),
             }
         if name in {"write_file", "replace_in_file"}:
             try:
                 preview = self._single_edit_preview(name, args)
             except ToolError as exc:
                 preview = f"Invalid edit: {exc}"
+            affected_files = self._get_affected_files(name, args)
             return {
-                "affected_files": self._get_affected_files(name, args),
+                "affected_files": affected_files,
                 "summary": self._get_risk_summary(name, args),
                 "patch_preview": preview,
                 "commands": commands,
                 "validation_plan": validation_plan,
+                **_approval_intelligence(name, affected_files, preview, commands),
             }
+        affected_files: list[str] = []
+        shell_commands = [str(args.get("command", ""))] if name == "run_command" else commands
         return {
-            "affected_files": [],
+            "affected_files": affected_files,
             "summary": self._get_risk_summary(name, args),
             "patch_preview": "",
-            "commands": [str(args.get("command", ""))] if name == "run_command" else commands,
+            "commands": shell_commands,
             "validation_plan": validation_plan,
+            **_approval_intelligence(name, affected_files, "", shell_commands),
         }
 
     def _list_files(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -465,7 +709,7 @@ class AgentToolbox:
         iterator = target.rglob(pattern) if recursive else target.glob(pattern)
         files: list[dict[str, Any]] = []
         for item in iterator:
-            if self._is_skipped(item):
+            if self._is_skipped(item) or not self._is_safe_workspace_path(item):
                 continue
             files.append(self._file_info(item))
             if len(files) >= limit:
@@ -519,7 +763,7 @@ class AgentToolbox:
         for path in files:
             if len(matches) >= limit:
                 break
-            if self._is_skipped(path) or not path.is_file():
+            if self._is_skipped(path) or not self._is_safe_workspace_path(path) or not path.is_file():
                 continue
             try:
                 if path.stat().st_size > 1_000_000:
@@ -541,6 +785,163 @@ class AgentToolbox:
                         break
         return {"query": query, "matches": matches}
 
+    def _repo_map(self, args: dict[str, Any]) -> dict[str, Any]:
+        limit = _positive_int(args.get("limit"), default=MAX_REPO_MAP_FILES, maximum=300)
+        focus = self._repo_map_focus(args)
+        files = self._workspace_text_files(limit=max(limit * 4, MAX_REPO_MAP_FILES))
+        active = [self._relative(path) for path in self._request_context_paths() if path.is_file()]
+        mentioned = [
+            self._relative(path)
+            for path in self._request_mentioned_paths()
+            if path.is_file()
+        ]
+        configs = [_relative for path in files if (_relative := self._relative(path)) and _is_config_file(path)]
+        tests = [_relative for path in files if (_relative := self._relative(path)) and _is_test_file(path)]
+        related = self._related_repo_files(files, focus=focus, active_paths=[*active, *mentioned], limit=limit)
+        dependency_map, dependency_files, import_hints = _repo_dependency_map(
+            self.root,
+            related[: min(limit, 30)],
+        )
+        reverse_dependency_map = _reverse_dependency_map(
+            self.root,
+            [self._relative(path) for path in files[: min(len(files), 200)]],
+        )
+        if dependency_files:
+            related = _dedupe([*related, *dependency_files])[:limit]
+        symbol_index = _symbol_index(self.root, related[:limit])
+        symbols = {path: value for path, value in list(symbol_index.items())[:12] if value}
+        validation_targets = _repo_validation_targets(related, tests, reverse_dependency_map, dependency_files)
+        return {
+            "root": str(self.root),
+            "focus": focus,
+            "active_files": active,
+            "mentioned_files": mentioned,
+            "key_files": _dedupe([*configs[:20], *tests[:20]])[:40],
+            "related_files": related[:limit],
+            "test_files": tests[:limit],
+            "dependency_files": dependency_files[:limit],
+            "dependency_map": dependency_map,
+            "reverse_dependency_map": {
+                path: dependents
+                for path, dependents in reverse_dependency_map.items()
+                if path in related or path in dependency_files
+            },
+            "symbols": symbols,
+            "symbol_index": symbol_index,
+            "reference_hints": _reference_hints(focus, symbol_index, reverse_dependency_map),
+            "validation_targets": validation_targets,
+            "search_hints": _dedupe([*_repo_search_hints(focus, related), *import_hints])[:12],
+            "edit_guidance": (
+                "Inspect related files, then use one grouped apply_patch for coordinated edits. "
+                "Use write_file only for new generated files."
+            ),
+        }
+
+    def _repository_snapshot(self) -> str:
+        try:
+            files = self._workspace_text_files(limit=MAX_REPO_MAP_FILES)
+        except Exception:
+            return "- Repository map unavailable; use repo_map or list_files to inspect."
+        active = [self._relative(path) for path in self._request_context_paths() if path.exists()]
+        configs = [self._relative(path) for path in files if _is_config_file(path)][:10]
+        tests = [self._relative(path) for path in files if _is_test_file(path)][:10]
+        top_level = [self._relative(path) for path in files if len(path.relative_to(self.root).parts) == 1][:12]
+        lines = [
+            f"- Active files: {', '.join(active) if active else 'none'}",
+            f"- Key configs: {', '.join(configs) if configs else 'none detected'}",
+            f"- Tests: {', '.join(tests) if tests else 'none detected'}",
+            f"- Top-level files: {', '.join(top_level) if top_level else 'none detected'}",
+            "- Use repo_map with a target before non-trivial edits to find related files and tests.",
+        ]
+        return "\n".join(lines)
+
+    def _repo_map_focus(self, args: dict[str, Any]) -> str:
+        target = str(args.get("target") or "").strip()
+        path_value = str(args.get("path") or "").strip()
+        if target:
+            return target
+        if path_value and path_value != ".":
+            return path_value
+        paths = self._request_context_paths() or self._request_mentioned_paths()
+        if paths:
+            return self._relative(paths[0])
+        return _short_task_focus(self.request)
+
+    def _workspace_text_files(self, *, limit: int) -> list[Path]:
+        files: list[Path] = []
+        pending = [self.root]
+        while pending and len(files) < limit:
+            directory = pending.pop(0)
+            try:
+                children = sorted(directory.iterdir(), key=lambda path: (path.is_file(), path.name.lower()))
+            except OSError:
+                continue
+            for path in children:
+                if self._is_skipped(path) or not self._is_safe_workspace_path(path):
+                    continue
+                if path.is_dir():
+                    pending.append(path)
+                    continue
+                if _is_probably_text_file(path):
+                    files.append(path)
+                    if len(files) >= limit:
+                        break
+        return files
+
+    def _request_mentioned_paths(self) -> list[Path]:
+        paths: list[Path] = []
+        seen: set[Path] = set()
+        for token in _path_like_tokens(_request_text_for_paths(self.request)):
+            try:
+                path = self._resolve_existing(token)
+            except ToolError:
+                continue
+            if path.exists() and path not in seen:
+                seen.add(path)
+                paths.append(path)
+        return paths
+
+    def _related_repo_files(
+        self,
+        files: list[Path],
+        *,
+        focus: str,
+        active_paths: list[str],
+        limit: int,
+    ) -> list[str]:
+        scores: dict[str, float] = {}
+        focus_path = Path(focus.replace("\\", "/"))
+        focus_stem = focus_path.stem.lower() if focus_path.name else focus.lower()
+        focus_tokens = {token for token in re.split(r"[^A-Za-z0-9_]+", focus.lower()) if len(token) >= 3}
+        active_dirs = {str(Path(path).parent).replace("\\", "/") for path in active_paths}
+        for path in files:
+            relative = self._relative(path)
+            lowered = relative.lower()
+            name = path.name.lower()
+            score = 0.0
+            if relative in active_paths:
+                score += 12.0
+            if focus and focus.lower() in lowered:
+                score += 8.0
+            if focus_stem and focus_stem in path.stem.lower():
+                score += 7.0
+            if Path(relative).parent.as_posix() in active_dirs:
+                score += 4.0
+            if _is_test_file(path):
+                score += 3.0 if focus_stem and focus_stem in name else 1.0
+            if _is_config_file(path):
+                score += 2.0
+            if any(token in lowered for token in focus_tokens):
+                score += 2.0
+            if score <= 0 and len(scores) < max(20, limit // 3):
+                score = 0.1
+            if score > 0:
+                scores[relative] = score
+        return [
+            path
+            for path, _ in sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+        ][:limit]
+
     def _apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
         plan = self._patch_plan(args)
         originals: dict[Path, str | None] = {}
@@ -556,7 +957,7 @@ class AgentToolbox:
                         path.unlink()
                     continue
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(content, encoding="utf-8")
+                _atomic_write_text(path, content)
         except Exception as exc:
             for path, original in originals.items():
                 try:
@@ -565,7 +966,7 @@ class AgentToolbox:
                             path.unlink()
                     else:
                         path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_text(original, encoding="utf-8")
+                        _atomic_write_text(path, original)
                 except OSError:
                     pass
             raise ToolError(f"Patch failed and was rolled back: {exc}") from exc
@@ -739,10 +1140,10 @@ class AgentToolbox:
         append = bool(args.get("append", False))
         path.parent.mkdir(parents=True, exist_ok=True)
         if append:
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(content)
+            before = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+            _atomic_write_text(path, before + content)
         else:
-            path.write_text(content, encoding="utf-8")
+            _atomic_write_text(path, content)
         return {"path": self._relative(path), "chars": len(content), "append": append}
 
     def _replace_in_file(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -769,7 +1170,7 @@ class AgentToolbox:
                 "Read the file and provide a more exact old string."
             )
         updated = text.replace(old, new, expected_count)
-        path.write_text(updated, encoding="utf-8")
+        _atomic_write_text(path, updated)
         return {
             "path": self._relative(path),
             "replacements": expected_count,
@@ -954,7 +1355,7 @@ class AgentToolbox:
             except OSError:
                 continue
             for path in children:
-                if self._is_skipped(path):
+                if self._is_skipped(path) or not self._is_safe_workspace_path(path):
                     continue
                 if path.name.casefold() == needle:
                     matches.append(path)
@@ -995,6 +1396,13 @@ class AgentToolbox:
             parts = path.parts
         return any(part in SKIPPED_DIRS for part in parts)
 
+    def _is_safe_workspace_path(self, path: Path) -> bool:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return False
+        return resolved == self.root or resolved.is_relative_to(self.root)
+
     def _is_context_path(self, path: Path) -> bool:
         return any(path == candidate for candidate in self._request_context_paths())
 
@@ -1019,6 +1427,579 @@ class AgentToolbox:
                 texts.append(content)
         haystack = "\n".join(texts).replace("\\", "/").casefold()
         return any(needle in haystack for needle in needles)
+
+
+def _checkpoint_base_dir(root: Path, state_dir: str | Path | None) -> Path:
+    if state_dir is None:
+        base = root / ".agent-hub" / "state"
+    else:
+        base = Path(state_dir).expanduser()
+        if not base.is_absolute():
+            base = root / base
+    return base.resolve() / "workspace-checkpoints"
+
+
+def _unique_checkpoint_paths(root: Path, paths: list[str | Path]) -> list[Path]:
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for value in paths:
+        path = _canonical_workspace_path(root, value, allow_missing=True)
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+    return unique
+
+
+def _canonical_workspace_path(
+    root: Path,
+    value: str | Path,
+    *,
+    allow_missing: bool,
+) -> Path:
+    raw = Path(value).expanduser()
+    candidate = raw if raw.is_absolute() else root / raw
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        if not allow_missing:
+            raise
+        resolved = candidate.parent.resolve() / candidate.name
+    if resolved != root and not resolved.is_relative_to(root):
+        raise ToolError(f"Path escapes workspace: {value}")
+    return resolved
+
+
+def _relative_to_workspace(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix() or "."
+    except ValueError:
+        raise ToolError(f"Path escapes workspace: {path}") from None
+
+
+def _checkpoint_public_manifest(manifest: dict[str, Any], checkpoint_dir: Path) -> dict[str, Any]:
+    files = manifest.get("files", [])
+    paths = [
+        str(entry.get("path"))
+        for entry in files
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    ]
+    return {
+        "id": str(manifest.get("id") or ""),
+        "created_at": manifest.get("created_at"),
+        "root": str(manifest.get("root") or ""),
+        "reason": str(manifest.get("reason") or ""),
+        "paths": paths,
+        "checkpoint_dir": str(checkpoint_dir),
+    }
+
+
+def _load_checkpoint_manifest(
+    checkpoint: dict[str, Any] | str | Path,
+) -> tuple[dict[str, Any], Path]:
+    if isinstance(checkpoint, dict):
+        checkpoint_dir_value = checkpoint.get("checkpoint_dir") or checkpoint.get("path")
+        if not isinstance(checkpoint_dir_value, str) or not checkpoint_dir_value:
+            raise ToolError("Checkpoint metadata is missing checkpoint_dir")
+        checkpoint_dir = Path(checkpoint_dir_value).expanduser().resolve()
+    else:
+        checkpoint_dir = Path(checkpoint).expanduser().resolve()
+    manifest_path = checkpoint_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise ToolError(f"Checkpoint manifest does not exist: {checkpoint_dir}")
+    return json.loads(manifest_path.read_text(encoding="utf-8")), checkpoint_dir
+
+
+def _prune_workspace_checkpoints(checkpoints_dir: Path, retention: int) -> None:
+    keep = _positive_int(retention, default=5, maximum=MAX_CHECKPOINT_RETENTION)
+    manifests: list[tuple[float, Path]] = []
+    for child in checkpoints_dir.iterdir():
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        manifest_path = child / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            created_at = float(manifest.get("created_at", 0.0))
+        except Exception:
+            created_at = child.stat().st_mtime
+        manifests.append((created_at, child))
+    for _, child in sorted(manifests, reverse=True)[keep:]:
+        shutil.rmtree(child, ignore_errors=True)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as handle:
+            temp_name = handle.name
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _atomic_copy_file(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            delete=False,
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+        ) as handle:
+            temp_name = handle.name
+            with source.open("rb") as source_handle:
+                shutil.copyfileobj(source_handle, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, target)
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _request_text_for_paths(request: HubRequest) -> str:
+    parts: list[str] = []
+    if request.task:
+        parts.append(str(request.task))
+    if request.context:
+        parts.append(str(request.context))
+    for message in request.messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+    return "\n".join(parts)
+
+
+def _short_task_focus(request: HubRequest) -> str:
+    text = _request_text_for_paths(request)
+    words = [word for word in re.split(r"\s+", text.strip()) if word]
+    return " ".join(words[:12])[:160] or "workspace"
+
+
+def _path_like_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_./\\-])"
+        r"([A-Za-z0-9_.-]+(?:[/\\][A-Za-z0-9_.-]+)+|[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})"
+    )
+    for match in pattern.finditer(text):
+        token = match.group(1).strip().strip(".,:;()[]{}\"'")
+        if token and token not in {".", ".."} and token not in tokens:
+            tokens.append(token)
+    return tokens[:30]
+
+
+def _is_probably_text_file(path: Path) -> bool:
+    if path.name.lower() in {
+        "makefile",
+        "dockerfile",
+        "license",
+        "readme",
+    }:
+        return True
+    return path.suffix.lower() in {
+        ".bat",
+        ".cfg",
+        ".css",
+        ".env",
+        ".go",
+        ".html",
+        ".ini",
+        ".js",
+        ".json",
+        ".jsx",
+        ".md",
+        ".ps1",
+        ".py",
+        ".rs",
+        ".sh",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+
+
+def _is_config_file(path: Path) -> bool:
+    lowered = path.name.lower()
+    if lowered in {
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "requirements.txt",
+        "tox.ini",
+        "tsconfig.json",
+        "eslint.config.js",
+        "vite.config.js",
+        "webpack.config.js",
+        "agent-hub.config.json",
+    }:
+        return True
+    return path.suffix.lower() in {".toml", ".yaml", ".yml", ".ini", ".cfg"}
+
+
+def _is_test_file(path: Path) -> bool:
+    parts = {part.lower() for part in path.parts}
+    name = path.name.lower()
+    return (
+        "tests" in parts
+        or "test" in parts
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name.endswith(".test.js")
+        or name.endswith(".spec.js")
+        or name.endswith(".test.ts")
+        or name.endswith(".spec.ts")
+    )
+
+
+def _file_symbols(path: Path) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    symbols: list[str] = []
+    patterns = [
+        re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.MULTILINE),
+        re.compile(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\b", re.MULTILINE),
+        re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(", re.MULTILINE),
+        re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=", re.MULTILINE),
+    ]
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            symbol = match.group(1)
+            if symbol not in symbols:
+                symbols.append(symbol)
+            if len(symbols) >= MAX_SYMBOLS_PER_FILE:
+                return symbols
+    return symbols
+
+
+def _repo_dependency_map(root: Path, related_files: list[str]) -> tuple[dict[str, list[str]], list[str], list[str]]:
+    dependency_map: dict[str, list[str]] = {}
+    dependency_files: list[str] = []
+    import_hints: list[str] = []
+    for relative in related_files:
+        source = root / relative
+        dependencies = _file_dependencies(source)
+        resolved: list[str] = []
+        for dependency in dependencies:
+            resolved.extend(_resolve_dependency_files(root, relative, dependency))
+        resolved = _dedupe(resolved)
+        if resolved:
+            dependency_map[relative] = resolved
+            dependency_files.extend(resolved)
+        for dependency in dependencies[:4]:
+            hint = dependency.lstrip(".")
+            if hint and not hint.startswith(("/", "\\")):
+                import_hints.append(f"search_files query: {hint.split('.')[-1]}")
+    return dependency_map, _dedupe(dependency_files), _dedupe(import_hints)
+
+
+def _reverse_dependency_map(root: Path, files: list[str]) -> dict[str, list[str]]:
+    reverse: dict[str, list[str]] = {}
+    for relative in files:
+        dependencies = _file_dependencies(root / relative)
+        for dependency in dependencies:
+            for resolved in _resolve_dependency_files(root, relative, dependency):
+                reverse.setdefault(resolved, []).append(relative)
+    return {
+        path: _dedupe(dependents)[:MAX_REPO_MAP_FILES]
+        for path, dependents in reverse.items()
+        if dependents
+    }
+
+
+def _symbol_index(root: Path, files: list[str]) -> dict[str, list[str]]:
+    index: dict[str, list[str]] = {}
+    for relative in files[:MAX_REPO_MAP_FILES]:
+        path = root / relative
+        if path.suffix.lower() not in {".py", ".js", ".ts", ".tsx", ".jsx"}:
+            continue
+        symbols = _file_symbols(path)
+        if symbols:
+            index[relative] = symbols
+    return index
+
+
+def _reference_hints(
+    focus: str,
+    symbol_index: dict[str, list[str]],
+    reverse_dependency_map: dict[str, list[str]],
+) -> list[str]:
+    hints: list[str] = []
+    focus_stem = Path(focus.replace("\\", "/")).stem
+    if focus_stem:
+        hints.append(f"search_files query: {focus_stem}")
+    for path, symbols in list(symbol_index.items())[:8]:
+        for symbol in symbols[:4]:
+            hints.append(f"search_files query: {symbol}")
+        if path in reverse_dependency_map:
+            hints.extend(f"read_file path: {dependent}" for dependent in reverse_dependency_map[path][:4])
+    return _dedupe(hints)[:12]
+
+
+def _repo_validation_targets(
+    related: list[str],
+    tests: list[str],
+    reverse_dependency_map: dict[str, list[str]],
+    dependency_files: list[str],
+) -> list[str]:
+    targets: list[str] = []
+    related_names = {Path(path).stem.lower().removeprefix("test_") for path in related[:20]}
+    for test in tests:
+        stem = Path(test).stem.lower().removeprefix("test_")
+        if stem in related_names or any(name and name in stem for name in related_names):
+            targets.append(test)
+    for path in [*related[:10], *dependency_files[:10]]:
+        targets.extend(reverse_dependency_map.get(path, []))
+    targets.extend(path for path in related[:10] if _is_test_file(rootless_path(path)))
+    return _dedupe(targets)[:MAX_REPO_MAP_FILES]
+
+
+def rootless_path(path: str) -> Path:
+    return Path(path.replace("\\", "/"))
+
+
+def _file_dependencies(path: Path) -> list[str]:
+    if path.suffix.lower() == ".py":
+        return _python_dependencies(path)
+    if path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}:
+        return _javascript_dependencies(path)
+    return []
+
+
+def _python_dependencies(path: Path) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    dependencies: list[str] = []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        patterns = [
+            re.compile(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*)", re.MULTILINE),
+            re.compile(r"^\s*from\s+(\.*[A-Za-z_][A-Za-z0-9_.]*)\s+import\s+", re.MULTILINE),
+        ]
+        for pattern in patterns:
+            dependencies.extend(match.group(1) for match in pattern.finditer(text))
+        return _dedupe(dependencies)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            dependencies.extend(alias.name for alias in node.names if alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            prefix = "." * int(node.level or 0)
+            if module:
+                dependencies.append(prefix + module)
+            else:
+                dependencies.extend(prefix + alias.name for alias in node.names if alias.name)
+    return _dedupe(dependencies)
+
+
+def _javascript_dependencies(path: Path) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    patterns = [
+        re.compile(r"\bfrom\s+['\"]([^'\"]+)['\"]"),
+        re.compile(r"\bimport\s*\(\s*['\"]([^'\"]+)['\"]\s*\)"),
+        re.compile(r"\brequire\s*\(\s*['\"]([^'\"]+)['\"]\s*\)"),
+    ]
+    dependencies: list[str] = []
+    for pattern in patterns:
+        dependencies.extend(match.group(1) for match in pattern.finditer(text))
+    return _dedupe(dependencies)
+
+
+def _resolve_dependency_files(root: Path, source_relative: str, dependency: str) -> list[str]:
+    dependency = dependency.strip()
+    if not dependency:
+        return []
+    if dependency.startswith("."):
+        return _resolve_relative_dependency(root, source_relative, dependency)
+    if dependency.startswith(("/", "\\")):
+        return []
+    module_path = dependency.replace(".", "/")
+    return _existing_dependency_candidates(
+        root,
+        [
+            module_path,
+            f"{module_path}.py",
+            f"{module_path}/__init__.py",
+            f"{module_path}.js",
+            f"{module_path}.ts",
+            f"{module_path}.tsx",
+            f"{module_path}.jsx",
+        ],
+    )
+
+
+def _resolve_relative_dependency(root: Path, source_relative: str, dependency: str) -> list[str]:
+    source_dir = Path(source_relative.replace("\\", "/")).parent
+    if dependency.startswith(("./", "../")):
+        base = source_dir / dependency
+    else:
+        level = len(dependency) - len(dependency.lstrip("."))
+        remainder = dependency[level:].replace(".", "/")
+        base = source_dir
+        for _ in range(max(0, level - 1)):
+            base = base.parent
+        if remainder:
+            base = base / remainder
+    normalized = str(base).replace("\\", "/")
+    return _existing_dependency_candidates(
+        root,
+        [
+            normalized,
+            f"{normalized}.py",
+            f"{normalized}/__init__.py",
+            f"{normalized}.js",
+            f"{normalized}.ts",
+            f"{normalized}.tsx",
+            f"{normalized}.jsx",
+            f"{normalized}/index.js",
+            f"{normalized}/index.ts",
+            f"{normalized}/index.tsx",
+        ],
+    )
+
+
+def _existing_dependency_candidates(root: Path, candidates: list[str]) -> list[str]:
+    resolved: list[str] = []
+    for candidate in candidates:
+        path = (root / candidate).resolve()
+        try:
+            if path != root and not path.is_relative_to(root):
+                continue
+        except ValueError:
+            continue
+        if path.is_file():
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            resolved.append(relative)
+    return _dedupe(resolved)
+
+
+def _repo_search_hints(focus: str, related_files: list[str]) -> list[str]:
+    hints: list[str] = []
+    focus_stem = Path(focus.replace("\\", "/")).stem
+    if focus_stem:
+        hints.append(f"search_files query: {focus_stem}")
+    for path in related_files[:5]:
+        stem = Path(path).stem
+        if stem and stem != focus_stem:
+            hints.append(f"search_files query: {stem}")
+    return _dedupe(hints)[:8]
+
+
+def _approval_intelligence(
+    tool_name: str,
+    affected_files: list[str],
+    patch_preview: str,
+    commands: list[str],
+) -> dict[str, Any]:
+    additions = sum(1 for line in patch_preview.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    deletions = sum(1 for line in patch_preview.splitlines() if line.startswith("-") and not line.startswith("---"))
+    file_groups = _file_groups(affected_files)
+    risk_level = _risk_level(tool_name, affected_files, additions, deletions, commands)
+    impact_bits: list[str] = []
+    if affected_files:
+        impact_bits.append(f"{len(affected_files)} file(s)")
+    if additions or deletions:
+        impact_bits.append(f"+{additions}/-{deletions} line(s)")
+    if commands:
+        impact_bits.append(f"{len(commands)} planned command(s)")
+    if file_groups:
+        impact_bits.append("groups: " + ", ".join(group["group"] for group in file_groups[:4]))
+    return {
+        "risk_level": risk_level,
+        "impact": ", ".join(impact_bits) if impact_bits else "No file changes detected.",
+        "estimated_impact": {
+            "files": len(affected_files),
+            "additions": additions,
+            "deletions": deletions,
+            "commands": len(commands),
+        },
+        "file_groups": file_groups,
+    }
+
+
+def _file_groups(paths: list[str]) -> list[dict[str, Any]]:
+    groups: dict[str, list[str]] = {}
+    for path in paths:
+        lowered = path.lower()
+        if "/test" in lowered or lowered.startswith("test") or "\\test" in lowered:
+            group = "tests"
+        elif lowered.endswith((".md", ".txt", ".rst")):
+            group = "docs"
+        elif lowered.endswith((".json", ".toml", ".yaml", ".yml", ".ini", ".cfg")):
+            group = "config"
+        elif lowered.endswith((".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs")):
+            group = "implementation"
+        else:
+            group = "other"
+        groups.setdefault(group, []).append(path)
+    return [
+        {"group": group, "files": files}
+        for group, files in sorted(groups.items(), key=lambda item: item[0])
+    ]
+
+
+def _risk_level(
+    tool_name: str,
+    affected_files: list[str],
+    additions: int,
+    deletions: int,
+    commands: list[str],
+) -> str:
+    total_lines = additions + deletions
+    command_text = " ".join(commands).lower()
+    if tool_name == "run_command" and any(token in command_text for token in (" rm ", "git reset", "delete", "del ")):
+        return "high"
+    if len(affected_files) >= 8 or total_lines > 600:
+        return "high"
+    if len(affected_files) >= 3 or total_lines > 120 or commands:
+        return "medium"
+    return "low"
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _request_option(request: HubRequest, key: str, default: Any) -> Any:

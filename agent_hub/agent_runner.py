@@ -14,10 +14,12 @@ from .agent_tools import (
     AgentToolbox,
     ShellPermissionCallback,
     agent_tool_definitions,
+    restore_workspace_checkpoint,
     tool_result_message,
 )
 from .config import HubConfig
 from .models import FailoverEvent, HubRequest, HubResponse
+from .reasoning import WorkspaceReasoningState, reasoning_state_message
 from .router import AgentRouter
 
 
@@ -25,11 +27,13 @@ TOOL_ACTIONS = {
     "list_files",
     "read_file",
     "search_files",
+    "repo_map",
     "write_file",
     "replace_in_file",
     "apply_patch",
     "run_command",
 }
+EDIT_TOOLS = {"write_file", "replace_in_file", "apply_patch"}
 
 REQUIRED_TOOL_ARGS = {
     "read_file": ("path",),
@@ -65,13 +69,31 @@ class AgentRunner:
             request,
             shell_permission_callback=shell_permission_callback,
         )
-        messages = self._initial_messages(request, toolbox)
+        session_data = self.router.session_store.load(request.session_id)
+        reasoning_state = WorkspaceReasoningState.for_request(request, session_data=session_data)
+        reasoning_state.add_active_files(_active_files_from_toolbox(toolbox))
+        messages = self._initial_messages(
+            request,
+            toolbox,
+            reasoning_state=reasoning_state,
+            session_data=session_data,
+        )
         max_steps = _request_int(request, "agent_max_steps", self.config.agent_max_steps)
         trace: list[dict[str, Any]] = []
         failover: list[FailoverEvent] = []
         last_response: HubResponse | None = None
         max_invalid_responses = _request_int(request, "agent_max_invalid_responses", 2)
         consecutive_invalid_responses = 0
+        repair_attempts_current = _request_nonnegative_int(
+            request,
+            "validation_repair_attempts_current",
+            0,
+        )
+        repair_attempts_max = _request_nonnegative_int(
+            request,
+            "validation_repair_attempts_max",
+            self.config.validation_repair_attempts,
+        )
 
         _emit(
             event_sink,
@@ -95,7 +117,14 @@ class AgentRunner:
                 stream=False,
                 use_session_history=False,
                 record_session=False,
-                raw=_agent_step_raw(request, toolbox),
+                raw=_agent_step_raw(
+                    request,
+                    toolbox,
+                    trace=trace,
+                    repair_attempts_current=repair_attempts_current,
+                    repair_attempts_max=repair_attempts_max,
+                    reasoning_state=reasoning_state,
+                ),
             )
             response = self.router.route(step_request)
             last_response = response
@@ -121,6 +150,7 @@ class AgentRunner:
                     trace=trace,
                     failover=failover,
                     stopped=stopped,
+                    reasoning_state=reasoning_state,
                 )
                 self._record_final(request, final)
                 return final
@@ -149,8 +179,65 @@ class AgentRunner:
                     tool=tool_name,
                     args=_progress_tool_args(tool_name, args),
                 )
-                result = toolbox.run(tool_name, args)
+                result = _edit_policy_feedback(
+                    toolbox,
+                    tool_name,
+                    args,
+                    request,
+                    trace,
+                    messages,
+                ) or toolbox.run(tool_name, args)
+                if result.get("edit_policy_feedback"):
+                    reasoning_state.record_tool_result(tool_name, args, result)
+                    self.router.record_tool_result(response.agent, False)
+                    trace.append(
+                        {
+                            "step": step_number,
+                            "agent": response.agent,
+                            "provider": response.provider,
+                            "model": response.model,
+                            "tool": tool_name,
+                            "args": args,
+                            "result": result,
+                        }
+                    )
+                    _emit(
+                        event_sink,
+                        "edit_policy_feedback",
+                        message=result.get("message", "Edit policy requested a different tool."),
+                        step=step_number,
+                        tool=tool_name,
+                        recommended_tool=result.get("recommended_tool", "apply_patch"),
+                        affected_files=result.get("affected_files", []),
+                        reason=result.get("error", ""),
+                    )
+                    _emit_reasoning_state_updated(event_sink, reasoning_state)
+                    _emit(
+                        event_sink,
+                        "tool_finished",
+                        message=_tool_finished_message(step_number, tool_name, result),
+                        step=step_number,
+                        tool=tool_name,
+                        ok=False,
+                        result=_progress_tool_result(tool_name, result),
+                    )
+                    messages.append({"role": "assistant", "content": response.text})
+                    messages.append(tool_result_message(tool_name, result))
+                    continue
                 if result.get("approval_required"):
+                    _enrich_approval_with_execution(result, reasoning_state)
+                    reasoning_state.record_tool_result(tool_name, args, result)
+                    reasoning_state.record_approval(
+                        {
+                            "tool": tool_name,
+                            "affected_files": result.get("affected_files", []),
+                            "summary": result.get("summary", ""),
+                            "risk_level": result.get("risk_level", ""),
+                            "impact": result.get("impact", ""),
+                            "execution_node": result.get("execution_node"),
+                            "execution_objective": result.get("execution_objective", ""),
+                        }
+                    )
                     if result.get("patch_preview"):
                         _emit(
                             event_sink,
@@ -159,6 +246,13 @@ class AgentRunner:
                             tool=tool_name,
                             affected_files=result.get("affected_files", []),
                             summary=result.get("summary", ""),
+                            impact=result.get("impact", ""),
+                            risk_level=result.get("risk_level", ""),
+                            execution_objective=result.get("execution_objective", ""),
+                            execution_node=result.get("execution_node"),
+                            dependency_impact=result.get("dependency_impact", {}),
+                            rollback_safety=result.get("rollback_safety", ""),
+                            file_groups=result.get("file_groups", []),
                             patch_preview=result.get("patch_preview", ""),
                             commands=result.get("commands", []),
                             validation_plan=result.get("validation_plan", ""),
@@ -184,6 +278,16 @@ class AgentRunner:
                         commands=result.get("commands", []),
                         validation_plan=result.get("validation_plan", ""),
                         risk=result.get("risk", ""),
+                        risk_level=result.get("risk_level", ""),
+                        impact=result.get("impact", ""),
+                        estimated_impact=result.get("estimated_impact", {}),
+                        file_groups=result.get("file_groups", []),
+                        execution_objective=result.get("execution_objective", ""),
+                        execution_node=result.get("execution_node"),
+                        affected_execution_nodes=result.get("affected_execution_nodes", []),
+                        dependency_impact=result.get("dependency_impact", {}),
+                        repository_impact=result.get("repository_impact", {}),
+                        rollback_safety=result.get("rollback_safety", ""),
                         message=result.get("message", "Approval required before applying changes."),
                     )
                     final = self._with_agent_metadata(
@@ -193,6 +297,7 @@ class AgentRunner:
                         trace=trace,
                         failover=failover,
                         stopped=True,
+                        reasoning_state=reasoning_state,
                     )
                     self._record_final(request, final)
                     return final
@@ -225,8 +330,34 @@ class AgentRunner:
                         event_sink,
                     )
                     if validation is not None:
+                        _annotate_validation_with_execution(validation, reasoning_state)
                         result["validation"] = validation
+                        rollback = _restore_after_failed_validation(
+                            request,
+                            self.config,
+                            toolbox.root,
+                            result,
+                            event_sink,
+                        )
+                        if rollback is not None:
+                            result["rollback"] = rollback
 
+                repair_decision = _repair_decision_for_result(
+                    tool_name,
+                    result,
+                    repair_attempts_current,
+                    repair_attempts_max,
+                    reasoning_state=reasoning_state,
+                )
+                if repair_decision.get("message"):
+                    repair_attempts_current += 1
+                    result["repair"] = {
+                        "kind": repair_decision["kind"],
+                        "attempt": repair_attempts_current,
+                        "max_attempts": repair_attempts_max,
+                    }
+
+                reasoning_state.record_tool_result(tool_name, args, result)
                 self.router.record_tool_result(response.agent, result.get("ok") is not False)
                 trace.append(
                     {
@@ -251,6 +382,56 @@ class AgentRunner:
                 edit_event = _workspace_edit_event(step_number, tool_name, result)
                 if edit_event:
                     _emit(event_sink, "workspace_edit", **edit_event)
+                _emit_reasoning_state_updated(event_sink, reasoning_state)
+
+                repair_message = str(repair_decision.get("message") or "")
+                if repair_message:
+                    event_type = (
+                        "validation_repair_loop"
+                        if repair_decision.get("kind") == "validation_failure"
+                        else "edit_repair_loop"
+                    )
+                    _emit(
+                        event_sink,
+                        event_type,
+                        message=repair_decision.get(
+                            "event_message",
+                            "Edit failed; feeding back to agent for repair attempt.",
+                        ),
+                        step=step_number,
+                        tool=tool_name,
+                        attempt=repair_attempts_current,
+                        max_attempts=repair_attempts_max,
+                    )
+                    messages.append({"role": "assistant", "content": response.text})
+                    messages.append(tool_result_message(tool_name, result))
+                    messages.append({"role": "user", "content": repair_message})
+                    continue
+
+                if repair_decision.get("exhausted"):
+                    _emit(
+                        event_sink,
+                        "agent_stopped",
+                        message=repair_decision.get(
+                            "event_message",
+                            "Agent stopped after edit repair attempts were exhausted.",
+                        ),
+                        step=step_number,
+                        tool=tool_name,
+                        max_attempts=repair_attempts_max,
+                    )
+                    final = self._with_agent_metadata(
+                        response,
+                        request=request,
+                        text=_repair_exhausted_text(tool_name, result, repair_attempts_max),
+                        trace=trace,
+                        failover=failover,
+                        stopped=True,
+                        reasoning_state=reasoning_state,
+                    )
+                    self._record_final(request, final)
+                    return final
+
                 fast_final_text = _fast_tool_final_text(tool_name, result, request, self.config)
                 if fast_final_text:
                     _emit(
@@ -266,6 +447,7 @@ class AgentRunner:
                         trace=trace,
                         failover=failover,
                         stopped=False,
+                        reasoning_state=reasoning_state,
                     )
                     self._record_final(request, final)
                     return final
@@ -288,6 +470,7 @@ class AgentRunner:
                     trace=trace,
                     failover=failover,
                     stopped=False,
+                    reasoning_state=reasoning_state,
                 )
                 self._record_final(request, final)
                 return final
@@ -339,6 +522,7 @@ class AgentRunner:
                         trace=trace,
                         failover=failover,
                         stopped=True,
+                        reasoning_state=reasoning_state,
                     )
                     self._record_final(request, final)
                     return final
@@ -360,6 +544,7 @@ class AgentRunner:
                 trace=trace,
                 failover=failover,
                 stopped=False,
+                reasoning_state=reasoning_state,
             )
             self._record_final(request, final)
             return final
@@ -380,21 +565,35 @@ class AgentRunner:
             trace=trace,
             failover=failover,
             stopped=True,
+            reasoning_state=reasoning_state,
         )
         self._record_final(request, final)
         return final
 
-    def _initial_messages(self, request: HubRequest, toolbox: AgentToolbox) -> list[dict[str, Any]]:
-        request_with_history = self._with_session_history(request)
+    def _initial_messages(
+        self,
+        request: HubRequest,
+        toolbox: AgentToolbox,
+        *,
+        reasoning_state: WorkspaceReasoningState,
+        session_data: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        request_with_history = self._with_session_history(request, session_data=session_data)
         return [
-            {"role": "system", "content": toolbox.instructions()},
+            {"role": "system", "content": f"{toolbox.instructions()}\n\n{reasoning_state_message(reasoning_state)}"},
             *request_with_history.messages,
         ]
 
-    def _with_session_history(self, request: HubRequest) -> HubRequest:
+    def _with_session_history(
+        self,
+        request: HubRequest,
+        *,
+        session_data: dict[str, Any] | None = None,
+    ) -> HubRequest:
         if not request.use_session_history:
             return request
-        history = self.router.session_store.load(request.session_id).get("messages", [])
+        data = session_data if session_data is not None else self.router.session_store.load(request.session_id)
+        history = data.get("messages", [])
         if not history:
             return request
         if _is_prefix(history, request.messages):
@@ -412,6 +611,7 @@ class AgentRunner:
         trace: list[dict[str, Any]],
         failover: list[FailoverEvent],
         stopped: bool,
+        reasoning_state: WorkspaceReasoningState | None = None,
     ) -> HubResponse:
         raw = dict(response.raw) if response else {}
         existing_metadata = raw.get("agent_hub")
@@ -420,6 +620,10 @@ class AgentRunner:
             **base_metadata,
             "mode": "agent",
             "steps": trace,
+            "validation_history": _validation_history_from_trace(trace),
+            "repair_history": _repair_history_from_trace(trace),
+            "reasoning_state": reasoning_state.to_dict() if reasoning_state else None,
+            "execution_plan": reasoning_state.execution_plan.to_dict() if reasoning_state else None,
             "stopped": stopped,
         }
         if response:
@@ -468,7 +672,176 @@ def _emit(event_sink: AgentEventSink | None, event_type: str, **data: Any) -> No
         return
 
 
-def _agent_step_raw(request: HubRequest, toolbox: AgentToolbox) -> dict[str, Any]:
+def _emit_reasoning_state_updated(
+    event_sink: AgentEventSink | None,
+    state: WorkspaceReasoningState,
+) -> None:
+    _emit(
+        event_sink,
+        "reasoning_state_updated",
+        message="Workspace reasoning state updated.",
+        task_id=state.task_id,
+        active_files=state.active_files[-10:],
+        inspected_files_count=len(state.inspected_files),
+        planned_edits_count=len(state.planned_edits),
+        validation_history_count=len(state.validation_history),
+        repair_history_count=len(state.repair_history),
+        active_execution_node=state.execution_plan.active_node,
+    )
+
+
+def _active_files_from_toolbox(toolbox: AgentToolbox) -> list[str]:
+    try:
+        return [toolbox._relative(path) for path in toolbox._request_context_paths() if path.exists()]
+    except Exception:
+        return []
+
+
+def _active_execution_metadata(state: WorkspaceReasoningState) -> dict[str, Any] | None:
+    node = state.execution_plan.active()
+    if node is None:
+        return None
+    return {
+        "id": node.id,
+        "objective": node.objective,
+        "status": node.status,
+        "dependencies": node.dependencies,
+        "affected_files": node.affected_files,
+        "validation_targets": node.validation_targets,
+        "estimated_risk": node.estimated_risk,
+        "retry_count": node.retry_count,
+    }
+
+
+def _annotate_validation_with_execution(
+    validation: dict[str, Any],
+    state: WorkspaceReasoningState,
+) -> None:
+    node = state.execution_plan.active()
+    validation["execution_node"] = node.id if node else None
+    validation["execution_objective"] = node.objective if node else ""
+    validation["validation_targets"] = _validation_targets_from_state(validation, state)
+    validation["blocked_execution_nodes"] = list(state.execution_plan.blocked_nodes)
+
+
+def _validation_targets_from_state(
+    validation: dict[str, Any],
+    state: WorkspaceReasoningState,
+) -> list[str]:
+    changed = [str(path) for path in validation.get("changed_files", []) if isinstance(path, str)]
+    targets = list(changed)
+    for path in changed:
+        targets.extend(state.dependency_map.get(path, []))
+    summary = state.repository_summary
+    reverse = summary.get("reverse_dependency_map") if isinstance(summary, dict) else None
+    if isinstance(reverse, dict):
+        for path in changed:
+            values = reverse.get(path)
+            if isinstance(values, list):
+                targets.extend(str(value) for value in values if isinstance(value, str))
+    validation_targets = summary.get("validation_targets") if isinstance(summary, dict) else None
+    if isinstance(validation_targets, list):
+        targets.extend(str(value) for value in validation_targets if isinstance(value, str))
+    return _dedupe_strings(targets)[:40]
+
+
+def _enrich_approval_with_execution(
+    result: dict[str, Any],
+    state: WorkspaceReasoningState,
+) -> None:
+    node = state.execution_plan.active()
+    affected_files = [str(path) for path in result.get("affected_files", []) if isinstance(path, str)]
+    dependency_impact = _dependency_impact_for_files(state, affected_files)
+    result["execution_objective"] = node.objective if node else ""
+    result["execution_node"] = node.id if node else None
+    result["affected_execution_nodes"] = [node.id] if node else []
+    result["dependency_impact"] = dependency_impact
+    result["repository_impact"] = {
+        "affected_files": affected_files,
+        "dependent_files": dependency_impact.get("dependent_files", []),
+        "dependency_files": dependency_impact.get("dependency_files", []),
+        "estimated_risk": result.get("risk_level") or (node.estimated_risk if node else "low"),
+    }
+    result["rollback_safety"] = "pre_edit_checkpoint_required"
+
+
+def _dependency_impact_for_files(
+    state: WorkspaceReasoningState,
+    files: list[str],
+) -> dict[str, list[str]]:
+    dependency_files: list[str] = []
+    dependent_files: list[str] = []
+    for path in files:
+        dependency_files.extend(state.dependency_map.get(path, []))
+    summary = state.repository_summary
+    reverse = summary.get("reverse_dependency_map") if isinstance(summary, dict) else None
+    if isinstance(reverse, dict):
+        for path in files:
+            values = reverse.get(path)
+            if isinstance(values, list):
+                dependent_files.extend(str(value) for value in values if isinstance(value, str))
+    return {
+        "dependency_files": _dedupe_strings(dependency_files)[:30],
+        "dependent_files": _dedupe_strings(dependent_files)[:30],
+    }
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _validation_history_from_trace(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    history: list[dict[str, Any]] = []
+    for step in trace:
+        result = step.get("result")
+        if not isinstance(result, dict):
+            continue
+        validation = result.get("validation")
+        if isinstance(validation, dict):
+            history.append(
+                {
+                    "step": step.get("step"),
+                    "tool": step.get("tool"),
+                    "ok": validation.get("ok"),
+                    "mode": validation.get("mode"),
+                    "execution_node": validation.get("execution_node"),
+                    "changed_files": validation.get("changed_files", []),
+                    "validation_targets": validation.get("validation_targets", []),
+                    "failed_categories": validation.get("failed_categories", []),
+                    "checks": validation.get("checks", []),
+                }
+            )
+    return history
+
+
+def _repair_history_from_trace(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    history: list[dict[str, Any]] = []
+    for step in trace:
+        result = step.get("result")
+        if not isinstance(result, dict):
+            continue
+        repair = result.get("repair")
+        if isinstance(repair, dict):
+            history.append({"step": step.get("step"), "tool": step.get("tool"), **repair})
+    return history
+
+
+def _agent_step_raw(
+    request: HubRequest,
+    toolbox: AgentToolbox,
+    *,
+    trace: list[dict[str, Any]],
+    repair_attempts_current: int,
+    repair_attempts_max: int,
+    reasoning_state: WorkspaceReasoningState,
+) -> dict[str, Any]:
     raw = dict(request.raw or {})
     tools = agent_tool_definitions(toolbox.allow_shell)
     if toolbox.shell_command_policy == "deny":
@@ -477,7 +850,297 @@ def _agent_step_raw(request: HubRequest, toolbox: AgentToolbox) -> dict[str, Any
     if allowed is not None:
         tools = [tool for tool in tools if tool.get("name") in allowed]
     raw["agent_hub_tools"] = tools
+    runtime = raw.get("agent_hub_runtime")
+    runtime = dict(runtime) if isinstance(runtime, dict) else {}
+    runtime.update(
+        {
+            "repair_attempts_current": repair_attempts_current,
+            "repair_attempts_max": repair_attempts_max,
+            "recent_steps": _recent_step_context(trace),
+            "pending_validation": _last_failed_validation(trace),
+            "pending_checkpoint": _last_checkpoint(trace),
+            "reasoning_state": reasoning_state.to_dict(),
+            "execution_plan": reasoning_state.execution_plan.to_dict(),
+            "active_execution_node": _active_execution_metadata(reasoning_state),
+        }
+    )
+    raw["agent_hub_runtime"] = runtime
     return raw
+
+
+def _recent_step_context(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    context: list[dict[str, Any]] = []
+    for step in trace[-5:]:
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        context.append(
+            {
+                "step": step.get("step"),
+                "tool": step.get("tool"),
+                "ok": result.get("ok") is not False,
+                "changed_files": _changed_files_from_result(str(step.get("tool", "")), result),
+                "repair": result.get("repair") if isinstance(result.get("repair"), dict) else None,
+            }
+        )
+    return context
+
+
+def _last_failed_validation(trace: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for step in reversed(trace):
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        validation = result.get("validation")
+        if isinstance(validation, dict) and validation.get("ok") is False:
+            return {
+                "step": step.get("step"),
+                "tool": step.get("tool"),
+                "changed_files": validation.get("changed_files", []),
+                "failed_categories": validation.get("failed_categories", []),
+                "checks": validation.get("checks", []),
+            }
+    return None
+
+
+def _last_checkpoint(trace: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for step in reversed(trace):
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        checkpoint = result.get("checkpoint")
+        if isinstance(checkpoint, dict):
+            return {
+                "step": step.get("step"),
+                "id": checkpoint.get("id"),
+                "paths": checkpoint.get("paths", []),
+            }
+    return None
+
+
+def _edit_policy_feedback(
+    toolbox: AgentToolbox,
+    tool_name: str,
+    args: dict[str, Any],
+    request: HubRequest,
+    trace: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if tool_name == "apply_patch":
+        return _apply_patch_rewrite_policy_feedback(toolbox, args, request)
+    if tool_name not in {"write_file", "replace_in_file"}:
+        return None
+    if not _request_bool(request, "prefer_multi_file_patches", toolbox.config.prefer_multi_file_patches):
+        return None
+
+    affected = _policy_affected_files(toolbox, tool_name, args)
+    in_repair = _repair_context_active(trace, messages)
+    multi_file_task = _task_mentions_multi_file_work(request)
+    if tool_name == "write_file":
+        path = affected[0] if affected else _short_value(args.get("path"))
+        target = _policy_resolved_path(toolbox, args.get("path"))
+        append = bool(args.get("append", False))
+        existing_overwrite = bool(target and target.exists() and not append)
+        content = args.get("content")
+        content_chars = len(content) if isinstance(content, str) else 0
+        if existing_overwrite or in_repair or (multi_file_task and content_chars > 0):
+            return _edit_policy_result(
+                tool_name,
+                affected,
+                reason=(
+                    "write_file is reserved for new generated files or tiny isolated writes. "
+                    "For existing files, repairs, or multi-file work, prepare a grouped apply_patch."
+                ),
+                context={
+                    "existing_overwrite": existing_overwrite,
+                    "repair_context": in_repair,
+                    "multi_file_task": multi_file_task,
+                    "content_chars": content_chars,
+                    "target": path,
+                },
+            )
+    if tool_name == "replace_in_file":
+        old = args.get("old")
+        new = args.get("new")
+        old_chars = len(old) if isinstance(old, str) else 0
+        new_chars = len(new) if isinstance(new, str) else 0
+        try:
+            expected_replacements = int(args.get("expected_replacements", 1))
+        except (TypeError, ValueError):
+            expected_replacements = 1
+        large_replace = old_chars > 400 or new_chars > 400 or expected_replacements > 1
+        if not (in_repair or multi_file_task or large_replace):
+            return None
+        return _edit_policy_result(
+            tool_name,
+            affected,
+            reason=(
+                "replace_in_file is allowed for tiny isolated changes only. Repairs, multi-file work, "
+                "large replacements, or repeated replacements should use a grouped apply_patch."
+            ),
+            context={
+                "repair_context": in_repair,
+                "multi_file_task": multi_file_task,
+                "large_replace": large_replace,
+                "old_chars": old_chars,
+                "new_chars": new_chars,
+                "expected_replacements": expected_replacements,
+                "target": affected[0] if affected else _short_value(args.get("path")),
+            },
+        )
+    return None
+
+
+def _apply_patch_rewrite_policy_feedback(
+    toolbox: AgentToolbox,
+    args: dict[str, Any],
+    request: HubRequest,
+) -> dict[str, Any] | None:
+    changes = args.get("changes")
+    if not isinstance(changes, list):
+        return None
+    risky_files: list[str] = []
+    for item in changes:
+        if not isinstance(item, dict) or "content" not in item:
+            continue
+        path_value = item.get("path")
+        target = _policy_resolved_path(toolbox, path_value)
+        if target is None or not target.exists() or not target.is_file():
+            continue
+        content = item.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            existing_chars = len(target.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            existing_chars = 0
+        content_chars = len(content)
+        if existing_chars > 500 and content_chars >= int(existing_chars * 0.8):
+            risky_files.append(toolbox._relative(target))
+    if not risky_files or _request_allows_full_rewrite(request, args):
+        return None
+    return _edit_policy_result(
+        "apply_patch",
+        risky_files,
+        reason=(
+            "Structured apply_patch content would rewrite large existing file(s). Use old/new hunks "
+            "for surgical changes, or provide an explicit rewrite_justification/allow_full_file_rewrite."
+        ),
+        context={
+            "rewrite_risk": "high",
+            "risky_files": risky_files,
+            "change_count": len(changes),
+        },
+    )
+
+
+def _request_allows_full_rewrite(request: HubRequest, args: dict[str, Any]) -> bool:
+    if _request_bool(request, "allow_full_file_rewrite", False):
+        return True
+    justification = args.get("rewrite_justification")
+    if isinstance(justification, str) and len(justification.strip()) >= 20:
+        return True
+    text = " ".join(
+        str(value or "")
+        for value in [
+            request.task,
+            request.context,
+            *[
+                message.get("content")
+                for message in request.messages
+                if isinstance(message.get("content"), str)
+            ],
+        ]
+    ).lower()
+    return any(phrase in text for phrase in ("rewrite the entire file", "full rewrite", "replace the whole file"))
+
+
+def _edit_policy_result(
+    tool_name: str,
+    affected_files: list[str],
+    *,
+    reason: str,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "tool": tool_name,
+        "edit_policy_feedback": True,
+        "recommended_tool": "apply_patch",
+        "affected_files": affected_files,
+        "error": reason,
+        "message": (
+            "Edit policy requested a surgical apply_patch before modifying the workspace."
+            if tool_name == "apply_patch"
+            else "Edit policy requested apply_patch before modifying the workspace."
+        ),
+        "policy": {
+            "name": "patch_first",
+            "reason": reason,
+            "context": context,
+            "instructions": [
+                "Re-read relevant files if needed.",
+                "Batch related implementation, tests, docs, and config changes together.",
+                "Use apply_patch with a concise summary and validation_plan.",
+                "Avoid full-file rewrites unless the file is new or generated.",
+            ],
+        },
+    }
+
+
+def _policy_affected_files(toolbox: AgentToolbox, tool_name: str, args: dict[str, Any]) -> list[str]:
+    value = args.get("path")
+    if not isinstance(value, str) or not value.strip():
+        return []
+    path = _policy_resolved_path(toolbox, value)
+    if path is None:
+        return [value]
+    return [toolbox._relative(path)]
+
+
+def _policy_resolved_path(toolbox: AgentToolbox, value: Any) -> Path | None:
+    try:
+        return toolbox._resolve(value)
+    except Exception:
+        return None
+
+
+def _repair_context_active(trace: list[dict[str, Any]], messages: list[dict[str, Any]]) -> bool:
+    if _last_failed_validation(trace) is not None:
+        return True
+    for step in reversed(trace[-3:]):
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        if isinstance(result.get("repair"), dict) or isinstance(result.get("rollback"), dict):
+            return True
+    for message in messages[-4:]:
+        content = message.get("content")
+        if isinstance(content, str) and "Automatic repair is required" in content:
+            return True
+    return False
+
+
+def _task_mentions_multi_file_work(request: HubRequest) -> bool:
+    text = " ".join(
+        str(value or "")
+        for value in [
+            request.task,
+            request.context,
+            *[
+                message.get("content")
+                for message in request.messages
+                if isinstance(message.get("content"), str)
+            ],
+        ]
+    ).lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "multiple files",
+            "multi-file",
+            "several files",
+            "implementation and tests",
+            "tests and docs",
+            "update tests",
+            "add tests",
+            "refactor",
+            "repository-wide",
+            "repo-wide",
+        )
+    )
 
 
 def _workspace_edit_event(
@@ -555,6 +1218,8 @@ def _tool_target(tool_name: str, args: dict[str, Any]) -> str:
         query = _short_value(args.get("query"))
         path = _short_value(args.get("path", "."))
         return f"{query} in {path}" if query else path
+    if tool_name == "repo_map":
+        return _short_value(args.get("target") or args.get("path") or "workspace")
     if tool_name == "list_files":
         return _short_value(args.get("path", "."))
     if tool_name == "run_command":
@@ -579,6 +1244,9 @@ def _tool_result_summary(tool_name: str, result: dict[str, Any]) -> str:
     if tool_name == "search_files":
         matches = payload.get("matches")
         return f"{len(matches)} match(es)" if isinstance(matches, list) else ""
+    if tool_name == "repo_map":
+        related = payload.get("related_files")
+        return f"{len(related)} related file(s)" if isinstance(related, list) else ""
     if tool_name == "list_files":
         files = payload.get("files")
         return f"{len(files)} item(s)" if isinstance(files, list) else ""
@@ -630,6 +1298,7 @@ def _progress_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         "start_line",
         "line_count",
         "max_chars",
+        "target",
     }
     return {key: value for key, value in args.items() if key in allowed}
 
@@ -669,6 +1338,14 @@ def _progress_tool_result(tool_name: str, result: dict[str, Any]) -> dict[str, A
         summarized["file_count"] = len(payload["files"])
     if isinstance(payload.get("matches"), list):
         summarized["match_count"] = len(payload["matches"])
+    if isinstance(payload.get("related_files"), list):
+        summarized["related_file_count"] = len(payload["related_files"])
+    if isinstance(payload.get("test_files"), list):
+        summarized["test_file_count"] = len(payload["test_files"])
+    if isinstance(payload.get("dependency_files"), list):
+        summarized["dependency_file_count"] = len(payload["dependency_files"])
+    if isinstance(payload.get("validation_targets"), list):
+        summarized["validation_target_count"] = len(payload["validation_targets"])
     return {"ok": True, **summarized}
 
 
@@ -705,6 +1382,7 @@ def _validate_after_edit(
             "ok": True,
             "mode": mode,
             "changed_files": changed_files,
+            "validation_targets": _discover_validation_targets(root, changed_files),
             "checks": [],
             "message": "No validators were available for the changed files.",
         }
@@ -730,6 +1408,12 @@ def _validate_after_edit(
             checks.append(
                 {
                     "name": item["name"],
+                    "category": item["category"],
+                    "failure_category": _validation_failure_category(
+                        item["category"],
+                        completed.stdout,
+                        completed.stderr,
+                    ) if completed.returncode != 0 else None,
                     "command": item["display"],
                     "returncode": completed.returncode,
                     "ok": completed.returncode == 0,
@@ -741,6 +1425,8 @@ def _validate_after_edit(
             checks.append(
                 {
                     "name": item["name"],
+                    "category": item["category"],
+                    "failure_category": "command",
                     "command": item["display"],
                     "returncode": None,
                     "ok": False,
@@ -749,11 +1435,22 @@ def _validate_after_edit(
                 }
             )
     ok = all(check["ok"] for check in checks)
+    categories = sorted({str(check["category"]) for check in checks})
+    failed_categories = sorted(
+        {
+            str(check.get("failure_category") or check["category"])
+            for check in checks
+            if check.get("ok") is False
+        }
+    )
     result = {
         "ok": ok,
         "mode": mode,
         "changed_files": changed_files,
+        "validation_targets": _discover_validation_targets(root, changed_files),
         "checks": checks,
+        "categories": categories,
+        "failed_categories": failed_categories,
         "message": "Validation passed." if ok else "Validation failed.",
     }
     _emit(
@@ -794,6 +1491,7 @@ def _validation_command_plan(
         commands.append(
             {
                 "name": "py_compile",
+                "category": "syntax",
                 "command": [sys.executable, "-m", "py_compile", *py_files],
                 "display": "python -m py_compile " + " ".join(changed_files),
                 "shell": False,
@@ -804,6 +1502,7 @@ def _validation_command_plan(
         commands.append(
             {
                 "name": "unittest",
+                "category": "tests",
                 "command": [sys.executable, "-m", "unittest", "discover", "-v"],
                 "display": "python -m unittest discover -v",
                 "shell": False,
@@ -811,16 +1510,63 @@ def _validation_command_plan(
             }
         )
     for command in _request_validation_commands(request, config):
+        formatted_command = _format_validation_command(command, root, changed_files)
         commands.append(
             {
                 "name": "configured",
-                "command": command,
-                "display": command,
+                "category": _validation_command_category(command),
+                "command": formatted_command,
+                "display": formatted_command,
                 "shell": True,
                 "timeout_seconds": 600 if mode == "strict" else 300,
             }
         )
     return commands
+
+
+def _format_validation_command(command: str, root: Path, changed_files: list[str]) -> str:
+    absolute_files = [
+        str((root / path).resolve())
+        for path in changed_files
+        if (root / path).exists()
+    ]
+    relative_files = [path for path in changed_files if (root / path).exists()]
+    replacements = {
+        "{files}": subprocess.list2cmdline(absolute_files),
+        "{changed_files}": subprocess.list2cmdline(relative_files),
+        "{file}": subprocess.list2cmdline(absolute_files[:1]),
+        "{changed_file}": subprocess.list2cmdline(relative_files[:1]),
+    }
+    formatted = command
+    for token, value in replacements.items():
+        formatted = formatted.replace(token, value)
+    return formatted
+
+
+def _validation_command_category(command: str) -> str:
+    lowered = command.lower()
+    if any(name in lowered for name in ("ruff", "flake8", "pylint", "eslint", "lint")):
+        return "lint"
+    if any(name in lowered for name in ("pytest", "unittest", "npm test", "go test", "cargo test")):
+        return "tests"
+    if any(name in lowered for name in ("mypy", "pyright", "typecheck", "type-check", "tsc")):
+        return "type"
+    if any(name in lowered for name in ("py_compile", "compile")):
+        return "syntax"
+    return "command"
+
+
+def _validation_failure_category(default: str, stdout: str, stderr: str) -> str:
+    text = f"{stdout}\n{stderr}".lower()
+    if any(token in text for token in ("syntaxerror", "indentationerror", "parse error")):
+        return "syntax"
+    if any(token in text for token in ("importerror", "modulenotfounderror", "cannot import")):
+        return "import"
+    if any(token in text for token in ("typeerror", "mypy", "pyright", "tsc", "type error")):
+        return "type"
+    if any(token in text for token in ("assertionerror", "failed", "failure", "pytest", "unittest")):
+        return "tests" if default == "tests" else default
+    return default or "command"
 
 
 def _workspace_has_tests(root: Path) -> bool:
@@ -830,6 +1576,35 @@ def _workspace_has_tests(root: Path) -> bool:
         return any(root.glob("test*.py")) or any(root.glob("*_test.py"))
     except OSError:
         return False
+
+
+def _discover_validation_targets(root: Path, changed_files: list[str]) -> list[str]:
+    targets = list(changed_files)
+    changed_stems = {Path(path).stem.lower() for path in changed_files}
+    test_dirs = [root / "tests", root]
+    for directory in test_dirs:
+        if not directory.exists() or not directory.is_dir():
+            continue
+        try:
+            candidates = list(directory.rglob("test*.py")) + list(directory.rglob("*_test.py"))
+        except OSError:
+            continue
+        for path in candidates[:200]:
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            stem = path.stem.lower().removeprefix("test_").removesuffix("_test")
+            if stem in changed_stems or any(changed in stem for changed in changed_stems):
+                targets.append(relative)
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if any(changed.replace("/", ".").removesuffix(".py") in text for changed in changed_files):
+                targets.append(relative)
+    return _dedupe_strings(targets)[:40]
 
 
 def _request_validation_mode(request: HubRequest, config: HubConfig) -> str:
@@ -850,6 +1625,275 @@ def _request_validation_commands(request: HubRequest, config: HubConfig) -> list
     return []
 
 
+def _restore_after_failed_validation(
+    request: HubRequest,
+    config: HubConfig,
+    root: Path,
+    result: dict[str, Any],
+    event_sink: AgentEventSink | None,
+) -> dict[str, Any] | None:
+    validation = result.get("validation")
+    if not isinstance(validation, dict) or validation.get("ok") is not False:
+        return None
+    if not _request_bool(
+        request,
+        "rollback_on_validation_failure",
+        config.rollback_on_validation_failure,
+    ):
+        return None
+    checkpoint = result.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        rollback = {
+            "ok": False,
+            "checkpoint_id": "",
+            "restored_files": [],
+            "removed_files": [],
+            "errors": [{"path": "", "error": "No checkpoint was available for validation rollback."}],
+        }
+    else:
+        rollback = restore_workspace_checkpoint(checkpoint, root=root)
+    _emit(
+        event_sink,
+        "workspace_restored",
+        message=(
+            "Workspace restored after failed validation."
+            if rollback.get("ok")
+            else "Workspace rollback after failed validation did not fully complete."
+        ),
+        ok=rollback.get("ok"),
+        checkpoint_id=rollback.get("checkpoint_id", ""),
+        restored_files=rollback.get("restored_files", []),
+        removed_files=rollback.get("removed_files", []),
+        errors=rollback.get("errors", []),
+    )
+    return rollback
+
+
+def _repair_decision_for_result(
+    tool_name: str,
+    result: dict[str, Any],
+    repair_attempts: int,
+    max_attempts: int,
+    *,
+    reasoning_state: WorkspaceReasoningState | None = None,
+) -> dict[str, Any]:
+    if tool_name not in EDIT_TOOLS:
+        return {"message": "", "exhausted": False}
+
+    if result.get("ok") is False:
+        kind = "tool_failure"
+        failure = _edit_tool_failure_summary(tool_name, result)
+    else:
+        validation = result.get("validation")
+        if not isinstance(validation, dict) or validation.get("ok") is not False:
+            return {"message": "", "exhausted": False}
+        kind = "validation_failure"
+        failure = _validation_failure_summary(validation)
+
+    if repair_attempts >= max_attempts:
+        return {
+            "message": "",
+            "exhausted": True,
+            "kind": kind,
+            "event_message": "Agent stopped after edit repair attempts were exhausted.",
+        }
+
+    attempt = repair_attempts + 1
+    message = _repair_feedback_message(
+        tool_name=tool_name,
+        result=result,
+        kind=kind,
+        failure=failure,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        reasoning_state=reasoning_state,
+    )
+    return {
+        "message": message,
+        "exhausted": False,
+        "kind": kind,
+        "event_message": (
+            "Validation failed; feeding back to agent for repair attempt."
+            if kind == "validation_failure"
+            else "Edit tool failed; feeding back to agent for repair attempt."
+        ),
+    }
+
+
+def _repair_feedback_message(
+    *,
+    tool_name: str,
+    result: dict[str, Any],
+    kind: str,
+    failure: dict[str, Any],
+    attempt: int,
+    max_attempts: int,
+    reasoning_state: WorkspaceReasoningState | None = None,
+) -> str:
+    rollback = result.get("rollback") if isinstance(result.get("rollback"), dict) else None
+    execution_node = _active_execution_metadata(reasoning_state) if reasoning_state is not None else None
+    dependency_impact = (
+        _dependency_impact_for_files(reasoning_state, _repair_changed_files(result))
+        if reasoning_state is not None
+        else {"dependency_files": [], "dependent_files": []}
+    )
+    payload = {
+        "failure_type": kind,
+        "tool": tool_name,
+        "repair_attempt": attempt,
+        "max_attempts": max_attempts,
+        "failure": failure,
+        "execution_node": execution_node,
+        "dependency_impact": dependency_impact,
+        "prior_patch": _prior_patch_summary(result),
+        "rollback": _rollback_summary(rollback),
+        "targeted_strategy": _repair_strategy(kind, failure),
+        "instructions": [
+            "Re-read affected files when context may be stale.",
+            "Prefer apply_patch for the repair, especially when more than one file is involved.",
+            "Prepare one grouped correction and preserve formatting/style.",
+            "Do not repeat a failed edit without changing the patch or replacement target.",
+        ],
+    }
+    if rollback and rollback.get("ok"):
+        payload["workspace_state"] = "restored_to_pre_edit_checkpoint"
+    elif rollback:
+        payload["workspace_state"] = "rollback_failed_or_partial"
+    else:
+        payload["workspace_state"] = "current_edit_state_preserved"
+    return (
+        "Automatic repair is required before continuing.\n"
+        f"{json.dumps(payload, indent=2, ensure_ascii=False)}\n\n"
+        "Continue with exactly one JSON object. Use a tool call to repair the workspace, "
+        "or a final answer only if no safe repair is possible."
+    )
+
+
+def _repair_changed_files(result: dict[str, Any]) -> list[str]:
+    validation = result.get("validation")
+    if isinstance(validation, dict):
+        return [str(path) for path in validation.get("changed_files", []) if isinstance(path, str)]
+    payload = result.get("result")
+    if isinstance(payload, dict) and isinstance(payload.get("paths"), list):
+        return [str(path) for path in payload["paths"] if isinstance(path, str)]
+    if isinstance(payload, dict) and isinstance(payload.get("path"), str):
+        return [payload["path"]]
+    return []
+
+
+def _prior_patch_summary(result: dict[str, Any]) -> dict[str, Any] | None:
+    payload = result.get("result")
+    if not isinstance(payload, dict):
+        return None
+    summary = {
+        "summary": payload.get("summary", ""),
+        "paths": payload.get("paths", []),
+        "changes": payload.get("changes", []),
+    }
+    return summary if any(summary.values()) else None
+
+
+def _repair_strategy(kind: str, failure: dict[str, Any]) -> list[str]:
+    if kind == "tool_failure":
+        return [
+            "Inspect the target file and exact old text before retrying.",
+            "Use apply_patch with a smaller context if exact replacement text was stale.",
+        ]
+    categories = set(str(item) for item in failure.get("failed_categories", []))
+    strategy: list[str] = []
+    if "syntax" in categories:
+        strategy.append("Fix parser/syntax errors first and keep the correction minimal.")
+    if "import" in categories:
+        strategy.append("Check module names, package exports, and import paths before editing.")
+    if "type" in categories:
+        strategy.append("Preserve public interfaces or update all typed call sites together.")
+    if "tests" in categories:
+        strategy.append("Use the failing assertion/output to target the changed behavior.")
+    if "lint" in categories:
+        strategy.append("Prefer formatting/style-compatible edits over broad rewrites.")
+    if not strategy:
+        strategy.append("Use the failed command output to make the smallest safe correction.")
+    return strategy
+
+
+def _edit_tool_failure_summary(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "category": "edit",
+        "tool": tool_name,
+        "error": _short_value(result.get("error"), maximum=2000),
+        "checkpoint": _checkpoint_summary(result.get("checkpoint")),
+        "rollback": _rollback_summary(result.get("rollback")),
+    }
+
+
+def _validation_failure_summary(validation: dict[str, Any]) -> dict[str, Any]:
+    checks = validation.get("checks")
+    failed_checks = [
+        {
+            "name": check.get("name", "unknown"),
+            "category": check.get("category", "command"),
+            "failure_category": check.get("failure_category") or check.get("category", "command"),
+            "command": check.get("command", ""),
+            "returncode": check.get("returncode"),
+            "stdout": _short_value(check.get("stdout", ""), maximum=1200),
+            "stderr": _short_value(check.get("stderr", ""), maximum=1200),
+        }
+        for check in checks
+        if isinstance(check, dict) and check.get("ok") is False
+    ] if isinstance(checks, list) else []
+    return {
+        "category": "validation",
+        "mode": validation.get("mode"),
+        "changed_files": validation.get("changed_files", []),
+        "failed_categories": validation.get("failed_categories", []),
+        "failed_checks": failed_checks,
+    }
+
+
+def _checkpoint_summary(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "id": value.get("id", ""),
+        "paths": value.get("paths", []),
+    }
+
+
+def _rollback_summary(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "ok": value.get("ok"),
+        "checkpoint_id": value.get("checkpoint_id", ""),
+        "restored_files": value.get("restored_files", []),
+        "removed_files": value.get("removed_files", []),
+        "errors": value.get("errors", []),
+    }
+
+
+def _repair_exhausted_text(tool_name: str, result: dict[str, Any], max_attempts: int) -> str:
+    if isinstance(result.get("validation"), dict) and result["validation"].get("ok") is False:
+        summary = _validation_failure_summary(result["validation"])
+        categories = ", ".join(str(item) for item in summary.get("failed_categories", [])) or "validation"
+        rollback = _rollback_summary(result.get("rollback"))
+        rollback_text = ""
+        if rollback:
+            rollback_text = (
+                "\n\nWorkspace rollback: "
+                + ("restored to the pre-edit checkpoint." if rollback.get("ok") else "failed or partial.")
+            )
+        return (
+            f"Agent stopped because validation still failed after {max_attempts} repair attempt(s). "
+            f"Failed category: {categories}."
+            f"{rollback_text}"
+        )
+    error = _short_value(result.get("error"), maximum=500)
+    return (
+        f"Agent stopped because {tool_name} failed after {max_attempts} repair attempt(s)."
+        + (f"\n\nLast error: {error}" if error else "")
+    )
+
+
 def _fast_tool_final_text(
     tool_name: str,
     result: dict[str, Any],
@@ -858,7 +1902,12 @@ def _fast_tool_final_text(
 ) -> str:
     if not _request_bool(request, "fast_write_finalize", config.fast_write_finalize):
         return ""
+    # Never fast-finalize apply_patch; validation failures need feedback loop
     if result.get("ok") is False or tool_name not in {"write_file", "replace_in_file"}:
+        return ""
+    # If validation ran and failed, don't fast-finalize (validation failures should get feedback)
+    validation = result.get("validation")
+    if isinstance(validation, dict) and validation.get("ok") is False:
         return ""
     payload = result.get("result")
     if not isinstance(payload, dict):
@@ -1127,6 +2176,9 @@ def _malformed_tool_command_from_text(text: str) -> dict[str, Any] | None:
     query = _string_or_bare_field(args_text, "query")
     if query:
         args["query"] = query
+    target = _string_or_bare_field(args_text, "target")
+    if target:
+        args["target"] = target
     command = _string_or_bare_field(args_text, "command")
     if command:
         args["command"] = command
@@ -1197,6 +2249,17 @@ def _request_int(request: HubRequest, key: str, default: int) -> int:
     except (TypeError, ValueError):
         number = default
     return max(1, min(number, 50))
+
+
+def _request_nonnegative_int(request: HubRequest, key: str, default: int) -> int:
+    raw = request.raw or {}
+    hub_options = raw.get("agent_hub")
+    value = hub_options.get(key) if isinstance(hub_options, dict) and key in hub_options else raw.get(key)
+    try:
+        number = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        number = default
+    return max(0, min(number, 50))
 
 
 def _request_bool(request: HubRequest, key: str, default: bool) -> bool:

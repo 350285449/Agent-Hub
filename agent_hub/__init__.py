@@ -19,8 +19,10 @@ from .config import (
     normalize_provider,   # Normalize provider names
 )
 from .models import HubRequest, HubResponse, ProviderResult  # Data models for hub communication
+from .reasoning import ExecutionNode, ExecutionPlan, WorkspaceReasoningState
 from .router import AgentRouter  # Routes requests to appropriate agents
 from .team_agent_runner import TeamAgentRunner  # Runs a team of agents collaboratively
+from .version import backend_version
 
 __all__ = [
     "AgentConfig",
@@ -32,9 +34,13 @@ __all__ = [
     "HubResponse",
     "ProviderResult",
     "RouteRule",
+    "ExecutionNode",
+    "ExecutionPlan",
+    "WorkspaceReasoningState",
     "config_to_dict",
     "free_local_config",
     "is_free_agent",
     "load_config",
     "normalize_provider",
+    "backend_version",
 ]

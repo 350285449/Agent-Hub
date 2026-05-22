@@ -48,6 +48,8 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.fast_write_finalize)
         self.assertEqual(config.validation_mode, "basic")
         self.assertTrue(config.auto_validate_after_edits)
+        self.assertTrue(config.rollback_on_validation_failure)
+        self.assertEqual(config.workspace_checkpoint_retention, 5)
         self.assertTrue(is_free_agent(config.agents["local-research"]))
         self.assertTrue(is_free_agent(config.agents["codex"]))
         self.assertTrue(is_free_agent(config.agents["claude"]))

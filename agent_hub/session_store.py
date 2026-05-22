@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -41,11 +43,11 @@ class SessionStore:
                 "failover": [event.to_dict() for event in response.failover],
             }
         )
+        agent_metadata = response.raw.get("agent_hub") if isinstance(response.raw, dict) else None
+        if isinstance(agent_metadata, dict) and isinstance(agent_metadata.get("reasoning_state"), dict):
+            data["reasoning_state"] = agent_metadata["reasoning_state"]
         data["updated_at"] = int(time.time())
-        self._path(request.session_id).write_text(
-            json.dumps(data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _atomic_write_text(self._path(request.session_id), json.dumps(data, indent=2, ensure_ascii=False))
 
     def _path(self, session_id: str) -> Path:
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)[:140] or "default"
@@ -65,3 +67,28 @@ def _is_prefix(prefix: list[Message], messages: list[Message]) -> bool:
         left.get("role") == right.get("role") and left.get("content") == right.get("content")
         for left, right in zip(prefix, messages, strict=False)
     )
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as handle:
+            temp_name = handle.name
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
