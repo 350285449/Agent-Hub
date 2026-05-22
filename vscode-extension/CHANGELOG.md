@@ -4,6 +4,11 @@
 
 - No changes yet.
 
+## 0.6.0
+
+- Bumps the VS Code extension package to `0.6.0`.
+- Keeps the packaged extension metadata and runtime progress version in sync.
+
 ## 0.5.5
 
 - Bumps the VS Code extension package to `0.5.5`.
