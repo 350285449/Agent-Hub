@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub Workspace",
   "description": "Run cloud or local coding agents through Agent Hub from VS Code.",
-  "version": "0.6.7",
+  "version": "0.7.0",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
@@ -161,6 +161,17 @@
           "type": "number",
           "default": 20,
           "description": "Maximum tool steps for agent requests."
+        },
+        "agentHub.agentContextBudgetTokens": {
+          "type": "number",
+          "default": 32000,
+          "minimum": 1000,
+          "description": "Input-token budget for compacting long Agent Hub workspace-agent histories."
+        },
+        "agentHub.agentContextCompactionEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Compact old Agent Hub tool results before model calls to reduce context growth."
         },
         "agentHub.agentMode": {
           "type": "string",

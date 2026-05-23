@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import subprocess
 import sys
 import uuid
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,7 @@ from .agent_tools import (
 )
 from .config import HubConfig
 from .models import FailoverEvent, HubRequest, HubResponse
-from .reasoning import WorkspaceReasoningState, reasoning_state_message
+from .reasoning import WorkspaceReasoningState
 from .router import AgentRouter
 
 
@@ -36,6 +38,14 @@ TOOL_ACTIONS = {
 EDIT_TOOLS = {"write_file", "replace_in_file", "apply_patch"}
 CONTEXT_TOOLS = {"list_files", "read_file", "search_files", "repo_map"}
 BROAD_CONTEXT_TOOLS = {"list_files", "search_files", "repo_map"}
+DEDUPE_CONTEXT_TOOLS = {"read_file", "repo_map"}
+FULL_TOOL_RESULT_HISTORY = 2
+FULL_REPAIR_TOOL_RESULT_HISTORY = 2
+CONTEXT_BUDGET_MARGIN_TOKENS = 128
+MAX_FULL_TOOL_RESULT_CHARS = 16_000
+LARGE_READ_FILE_FULL_ONCE_CHARS = 8_000
+MAX_MEMORY_SUMMARY_TOOL_RESULTS = 10
+MAX_COMPACT_SESSION_MESSAGES = 4
 REPOSITORY_ROOT_FILE_NAMES = {
     ".dockerignore",
     ".editorconfig",
@@ -124,6 +134,234 @@ NON_EMPTY_TOOL_ARGS = {
 AgentEventSink = Callable[[dict[str, Any]], None]
 
 
+class ExecutionMemory:
+    """Ephemeral per-run memory used to build bounded model prompt views."""
+
+    def __init__(self) -> None:
+        self.entries: list[dict[str, Any]] = []
+        self._full_send_counts: dict[int, int] = {}
+
+    def record_tool_result(
+        self,
+        *,
+        step: int,
+        agent: str,
+        provider: str,
+        model: str,
+        tool: str,
+        args: dict[str, Any],
+        result: dict[str, Any],
+        repair_message: str = "",
+    ) -> None:
+        self.entries.append(
+            {
+                "kind": "tool",
+                "step": step,
+                "agent": agent,
+                "provider": provider,
+                "model": model,
+                "tool": tool,
+                "args": dict(args),
+                "result": deepcopy(result),
+                "repair_message": repair_message,
+            }
+        )
+
+    def record_invalid_response(
+        self,
+        *,
+        step: int,
+        agent: str,
+        provider: str,
+        model: str,
+        response_text: str,
+        command: dict[str, Any],
+    ) -> None:
+        self.entries.append(
+            {
+                "kind": "invalid",
+                "step": step,
+                "agent": agent,
+                "provider": provider,
+                "model": model,
+                "response_text": _short_value(response_text, maximum=800),
+                "message": _invalid_response_message(command),
+            }
+        )
+
+    def build_prompt_messages(
+        self,
+        base_messages: list[dict[str, Any]],
+        request: HubRequest,
+        router: AgentRouter,
+        trace: list[dict[str, Any]],
+        reasoning_state: WorkspaceReasoningState,
+        *,
+        previous_input_tokens: int | None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        prompt_messages = [dict(message) for message in base_messages]
+        memory_messages, memory_stats = self._memory_messages(trace, reasoning_state)
+        prompt_messages.extend(memory_messages)
+        context_usage = _prepare_agent_messages_for_step(
+            prompt_messages,
+            request,
+            router,
+            trace,
+            previous_input_tokens=previous_input_tokens,
+            pre_compacted_count=int(memory_stats.get("compacted_messages_count") or 0),
+            pre_compacted_tool_results_count=int(
+                memory_stats.get("compacted_tool_results_count") or 0
+            ),
+            pre_estimated_tokens_saved=int(memory_stats.get("estimated_tokens_saved") or 0),
+        )
+        return prompt_messages, context_usage
+
+    def _memory_messages(
+        self,
+        trace: list[dict[str, Any]],
+        reasoning_state: WorkspaceReasoningState,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        tool_indexes = [
+            index
+            for index, entry in enumerate(self.entries)
+            if entry.get("kind") == "tool"
+        ]
+        if not self.entries:
+            return [], {
+                "compacted_messages_count": 0,
+                "compacted_tool_results_count": 0,
+                "estimated_tokens_saved": 0,
+            }
+        repair_active = _repair_context_active(trace, [])
+        keep_full = FULL_REPAIR_TOOL_RESULT_HISTORY if repair_active else 2
+        full_tool_indexes = self._select_full_tool_indexes(tool_indexes, keep_full)
+        summarized_tool_indexes = [
+            index for index in tool_indexes if index not in full_tool_indexes
+        ]
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": _execution_memory_summary(
+                    self.entries,
+                    summarized_tool_indexes=summarized_tool_indexes,
+                    reasoning_state=reasoning_state,
+                    trace=trace,
+                ),
+            }
+        ]
+        for index, entry in enumerate(self.entries):
+            kind = entry.get("kind")
+            if kind == "tool" and index in full_tool_indexes:
+                tool_name = str(entry.get("tool") or "")
+                result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+                if tool_name and result:
+                    messages.append(tool_result_message(tool_name, result))
+                repair_message = str(entry.get("repair_message") or "")
+                if repair_message:
+                    messages.append({"role": "user", "content": repair_message})
+            elif kind == "invalid" and index == len(self.entries) - 1:
+                message = entry.get("message")
+                if isinstance(message, dict):
+                    messages.append(message)
+        for index in full_tool_indexes:
+            self._full_send_counts[index] = self._full_send_counts.get(index, 0) + 1
+        full_memory_messages = self._full_memory_messages()
+        estimated_saved = max(
+            0,
+            _estimated_message_tokens(full_memory_messages) - _estimated_message_tokens(messages),
+        )
+        return messages, {
+            "compacted_messages_count": len(summarized_tool_indexes),
+            "compacted_tool_results_count": len(summarized_tool_indexes),
+            "estimated_tokens_saved": estimated_saved,
+        }
+
+    def _select_full_tool_indexes(self, tool_indexes: list[int], keep_full: int) -> set[int]:
+        selected: list[int] = []
+        selected_refs: set[str] = set()
+        for index in reversed(tool_indexes):
+            if len(selected) >= keep_full:
+                break
+            entry = self.entries[index]
+            ref = _tool_entry_reference(entry)
+            if ref and ref in selected_refs:
+                continue
+            if not self._should_send_full_tool_result(index, entry):
+                continue
+            selected.append(index)
+            if ref:
+                selected_refs.add(ref)
+        return set(reversed(selected))
+
+    def _should_send_full_tool_result(self, index: int, entry: dict[str, Any]) -> bool:
+        tool_name = str(entry.get("tool") or "")
+        result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+        if not tool_name or not result:
+            return False
+        if result.get("compacted") or result.get("duplicate_context_result") or result.get("duplicate_policy_feedback"):
+            return False
+
+        validation = result.get("validation")
+        repair_message = str(entry.get("repair_message") or "")
+        immediate_failure = (
+            result.get("ok") is False
+            or result.get("edit_policy_feedback")
+            or repair_message
+            or (isinstance(validation, dict) and validation.get("ok") is False)
+        )
+        if immediate_failure:
+            return True
+
+        sent_count = self._full_send_counts.get(index, 0)
+        full_chars = _tool_result_full_chars(tool_name, result)
+        if tool_name == "repo_map":
+            if sent_count >= 1:
+                return False
+            return not any(
+                previous.get("kind") == "tool" and previous.get("tool") == "repo_map"
+                for previous in self.entries[:index]
+            ) and full_chars <= MAX_FULL_TOOL_RESULT_CHARS
+        if tool_name == "read_file":
+            if sent_count >= 1 and full_chars >= LARGE_READ_FILE_FULL_ONCE_CHARS:
+                return False
+            path = _tool_entry_path(entry)
+            content_hash = _tool_entry_content_hash(entry)
+            if path and any(
+                _tool_entry_path(previous) == path
+                and _tool_entry_content_hash(previous) == content_hash
+                and previous.get("kind") == "tool"
+                and previous.get("tool") == "read_file"
+                for previous in self.entries[:index]
+            ):
+                return False
+            return full_chars <= MAX_FULL_TOOL_RESULT_CHARS or sent_count == 0
+        if tool_name == "search_files":
+            if full_chars > MAX_FULL_TOOL_RESULT_CHARS:
+                return False
+            return sent_count < 1 or full_chars < LARGE_READ_FILE_FULL_ONCE_CHARS
+        if tool_name == "apply_patch" and full_chars > MAX_FULL_TOOL_RESULT_CHARS:
+            return False
+        return full_chars <= MAX_FULL_TOOL_RESULT_CHARS or sent_count == 0
+
+    def _full_memory_messages(self) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        for index, entry in enumerate(self.entries):
+            kind = entry.get("kind")
+            if kind == "tool":
+                tool_name = str(entry.get("tool") or "")
+                result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+                if tool_name and result:
+                    messages.append(tool_result_message(tool_name, result))
+                repair_message = str(entry.get("repair_message") or "")
+                if repair_message:
+                    messages.append({"role": "user", "content": repair_message})
+            elif kind == "invalid" and index == len(self.entries) - 1:
+                message = entry.get("message")
+                if isinstance(message, dict):
+                    messages.append(message)
+        return messages
+
+
 class AgentRunner:
     def __init__(self, config: HubConfig, router: AgentRouter | None = None) -> None:
         self.config = config
@@ -165,6 +403,12 @@ class AgentRunner:
             "validation_repair_attempts_max",
             self.config.validation_repair_attempts,
         )
+        context_tool_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        file_revisions: dict[str, int] = {}
+        workspace_revision = 0
+        policy_feedback_signatures: set[str] = set()
+        previous_input_tokens: int | None = None
+        execution_memory = ExecutionMemory()
 
         _emit(
             event_sink,
@@ -176,6 +420,50 @@ class AgentRunner:
         )
 
         for step_number in range(1, max_steps + 1):
+            step_messages, context_usage = execution_memory.build_prompt_messages(
+                messages,
+                request,
+                self.router,
+                trace,
+                reasoning_state,
+                previous_input_tokens=previous_input_tokens,
+            )
+            previous_input_tokens = context_usage["input_tokens"]
+            _emit(
+                event_sink,
+                "context_usage_updated",
+                message=_context_usage_message(context_usage),
+                step=step_number,
+                **context_usage,
+            )
+            if context_usage.get("hard_budget_exceeded"):
+                budget_tokens = context_usage.get("budget_tokens")
+                input_tokens = context_usage.get("input_tokens")
+                text = (
+                    "Agent stopped before the next model call because the compacted prompt "
+                    f"still exceeded the configured context budget ({input_tokens}/{budget_tokens} "
+                    "estimated input tokens). Narrow the request, increase "
+                    "agent_context_budget_tokens, or re-run with a more specific file range."
+                )
+                _emit(
+                    event_sink,
+                    "agent_stopped",
+                    message="Agent stopped because the compacted prompt exceeded the context budget.",
+                    step=step_number,
+                    input_tokens=input_tokens,
+                    budget_tokens=budget_tokens,
+                )
+                final = self._with_agent_metadata(
+                    last_response,
+                    request=request,
+                    text=text,
+                    trace=trace,
+                    failover=failover,
+                    stopped=True,
+                    reasoning_state=reasoning_state,
+                )
+                self._record_final(request, final)
+                return final
             _emit(
                 event_sink,
                 "model_request",
@@ -184,7 +472,7 @@ class AgentRunner:
             )
             step_request = replace(
                 request,
-                messages=messages,
+                messages=step_messages,
                 stream=False,
                 use_session_history=False,
                 record_session=False,
@@ -258,9 +546,30 @@ class AgentRunner:
                     args,
                     request,
                     trace,
-                    messages,
+                    step_messages,
                     reasoning_state,
-                ) or toolbox.run(tool_name, args)
+                )
+                if result is None:
+                    cache_key = _context_tool_cache_key(
+                        toolbox,
+                        tool_name,
+                        args,
+                        workspace_revision=workspace_revision,
+                        file_revisions=file_revisions,
+                    )
+                    cached_result = context_tool_cache.get(cache_key) if cache_key is not None else None
+                    if cached_result is not None and not _context_tool_cache_bypass(args):
+                        result = _duplicate_context_tool_result(tool_name, cached_result)
+                    else:
+                        result = toolbox.run(tool_name, args)
+                        if cache_key is not None and result.get("ok") is not False:
+                            context_tool_cache[cache_key] = deepcopy(result)
+                else:
+                    signature = _policy_feedback_signature(tool_name, result)
+                    if signature in policy_feedback_signatures:
+                        result = _duplicate_policy_feedback_result(tool_name, result)
+                    else:
+                        policy_feedback_signatures.add(signature)
                 if result.get("edit_policy_feedback"):
                     reasoning_state.record_tool_result(tool_name, args, result)
                     self.router.record_tool_result(response.agent, False)
@@ -302,8 +611,15 @@ class AgentRunner:
                         ok=False,
                         result=_progress_tool_result(tool_name, result),
                     )
-                    messages.append({"role": "assistant", "content": response.text})
-                    messages.append(tool_result_message(tool_name, result))
+                    execution_memory.record_tool_result(
+                        step=step_number,
+                        agent=response.agent,
+                        provider=response.provider,
+                        model=response.model,
+                        tool=tool_name,
+                        args=args,
+                        result=result,
+                    )
                     continue
                 if result.get("approval_required"):
                     _enrich_approval_with_execution(result, reasoning_state)
@@ -394,6 +710,11 @@ class AgentRunner:
 
                 changed_files = _changed_files_from_result(tool_name, result)
                 if changed_files:
+                    workspace_revision += 1
+                    for changed_file in changed_files:
+                        clean_changed_file = _normalize_policy_path(changed_file)
+                        if clean_changed_file:
+                            file_revisions[clean_changed_file] = file_revisions.get(clean_changed_file, 0) + 1
                     if tool_name == "apply_patch":
                         _emit(
                             event_sink,
@@ -491,9 +812,16 @@ class AgentRunner:
                         attempt=repair_attempts_current,
                         max_attempts=repair_attempts_max,
                     )
-                    messages.append({"role": "assistant", "content": response.text})
-                    messages.append(tool_result_message(tool_name, result))
-                    messages.append({"role": "user", "content": repair_message})
+                    execution_memory.record_tool_result(
+                        step=step_number,
+                        agent=response.agent,
+                        provider=response.provider,
+                        model=response.model,
+                        tool=tool_name,
+                        args=args,
+                        result=result,
+                        repair_message=repair_message,
+                    )
                     continue
 
                 if repair_decision.get("exhausted"):
@@ -539,8 +867,15 @@ class AgentRunner:
                     )
                     self._record_final(request, final)
                     return final
-                messages.append({"role": "assistant", "content": response.text})
-                messages.append(tool_result_message(tool_name, result))
+                execution_memory.record_tool_result(
+                    step=step_number,
+                    agent=response.agent,
+                    provider=response.provider,
+                    model=response.model,
+                    tool=tool_name,
+                    args=args,
+                    result=result,
+                )
                 continue
 
             if command["action"] == "final":
@@ -614,8 +949,14 @@ class AgentRunner:
                     )
                     self._record_final(request, final)
                     return final
-                messages.append({"role": "assistant", "content": response.text})
-                messages.append(_invalid_response_message(command))
+                execution_memory.record_invalid_response(
+                    step=step_number,
+                    agent=response.agent,
+                    provider=response.provider,
+                    model=response.model,
+                    response_text=response.text,
+                    command=command,
+                )
                 continue
 
             consecutive_invalid_responses = 0
@@ -668,7 +1009,7 @@ class AgentRunner:
     ) -> list[dict[str, Any]]:
         request_with_history = self._with_session_history(request, session_data=session_data)
         return [
-            {"role": "system", "content": f"{toolbox.instructions()}\n\n{reasoning_state_message(reasoning_state)}"},
+            {"role": "system", "content": f"{toolbox.instructions()}\n\n{_compact_reasoning_state_prompt(reasoning_state)}"},
             *request_with_history.messages,
         ]
 
@@ -684,11 +1025,14 @@ class AgentRunner:
         history = data.get("messages", [])
         if not history:
             return request
-        if _is_prefix(history, request.messages):
+        compact_history = _compact_session_history_messages(history, request.messages)
+        if not compact_history:
             return request
-        if _is_prefix(request.messages, history):
-            return replace(request, messages=list(history))
-        return replace(request, messages=[*history, *request.messages])
+        if _is_prefix(compact_history, request.messages):
+            return request
+        if _is_prefix(request.messages, compact_history):
+            return replace(request, messages=list(compact_history))
+        return replace(request, messages=[*compact_history, *request.messages])
 
     def _with_agent_metadata(
         self,
@@ -1407,6 +1751,8 @@ def _recent_policy_message_text(messages: list[dict[str, Any]]) -> str:
             continue
         if content.startswith("Tool result for "):
             continue
+        if content.startswith("EXECUTION MEMORY SUMMARY"):
+            continue
         parts.append(_message_task_section(content))
     return " ".join(parts)
 
@@ -1542,8 +1888,9 @@ def _agent_step_raw(
             "recent_steps": _recent_step_context(trace),
             "pending_validation": _last_failed_validation(trace),
             "pending_checkpoint": _last_checkpoint(trace),
-            "reasoning_state": reasoning_state.to_dict(),
-            "execution_plan": reasoning_state.execution_plan.to_dict(),
+            "reasoning_state": _compact_reasoning_state_payload(reasoning_state),
+            "reasoning_state_compacted": True,
+            "execution_plan": _compact_execution_plan(reasoning_state.execution_plan.to_dict()),
             "active_execution_node": _active_execution_metadata(reasoning_state),
             "context_change_bar": _context_change_bar_state(
                 request,
@@ -1555,6 +1902,1081 @@ def _agent_step_raw(
     )
     raw["agent_hub_runtime"] = runtime
     return raw
+
+
+def _execution_memory_summary(
+    entries: list[dict[str, Any]],
+    *,
+    summarized_tool_indexes: list[int],
+    reasoning_state: WorkspaceReasoningState,
+    trace: list[dict[str, Any]],
+) -> str:
+    state = reasoning_state.to_dict()
+    repository_summary = (
+        state.get("repository_summary")
+        if isinstance(state.get("repository_summary"), dict)
+        else {}
+    )
+    older_tool_summaries = [
+        _tool_memory_summary(entries[index])
+        for index in summarized_tool_indexes[-MAX_MEMORY_SUMMARY_TOOL_RESULTS:]
+        if 0 <= index < len(entries)
+    ]
+    omitted = max(0, len(summarized_tool_indexes) - len(older_tool_summaries))
+    summary: dict[str, Any] = {
+        "purpose": "compact execution memory; use with the latest full tool results below",
+        "tool_result_count": sum(1 for entry in entries if entry.get("kind") == "tool"),
+        "summarized_tool_result_count": len(summarized_tool_indexes),
+        "omitted_older_tool_result_count": omitted,
+        "current_objective": _active_execution_objective(reasoning_state),
+        "changed_files": _changed_files_from_trace(trace)[-20:],
+        "inspected_files": _string_list_like(state.get("inspected_files"))[-30:],
+        "read_files": _string_list_like(repository_summary.get("read_files"))[-30:],
+        "context_tools": _string_list_like(repository_summary.get("context_tools"))[-20:],
+        "reasoning_state_counts": _reasoning_state_counts(state),
+        "older_tool_results": older_tool_summaries,
+    }
+    latest_failure = _latest_memory_failure(entries, trace)
+    if latest_failure:
+        summary["latest_failure"] = latest_failure
+    latest_invalid = _latest_invalid_summary(entries)
+    if latest_invalid:
+        summary["latest_invalid_response"] = latest_invalid
+    return (
+        "EXECUTION MEMORY SUMMARY (ephemeral, compacted):\n"
+        f"{json.dumps(summary, indent=2, ensure_ascii=False)}\n\n"
+        "Recent full tool results and immediate repair instructions follow when needed. "
+        "Do not rely on omitted file contents; re-read with a specific range if fresh details are required."
+    )
+
+
+def _tool_memory_summary(entry: dict[str, Any]) -> dict[str, Any]:
+    tool_name = str(entry.get("tool") or "")
+    args = entry.get("args") if isinstance(entry.get("args"), dict) else {}
+    result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+    reference = _tool_result_reference(tool_name, result, args)
+    if result.get("edit_policy_feedback"):
+        return {
+            "step": entry.get("step"),
+            "tool": tool_name,
+            "ok": False,
+            "args": _progress_tool_args(tool_name, args),
+            "reference": reference,
+            "policy_feedback": True,
+            "duplicate_policy_feedback": bool(result.get("duplicate_policy_feedback")),
+            "message": result.get("message"),
+            "affected_files": result.get("affected_files", []),
+            "recommended_tool": result.get("recommended_tool"),
+        }
+    compact_result = _compact_tool_result_for_history(
+        tool_name,
+        result,
+        reason="execution_memory_summary",
+    )
+    summary: dict[str, Any] = {
+        "step": entry.get("step"),
+        "tool": tool_name,
+        "ok": result.get("ok") is not False,
+        "args": _progress_tool_args(tool_name, args),
+        "reference": reference,
+        "summary": compact_result.get("result", compact_result),
+    }
+    for key in (
+        "error",
+        "changed_files",
+        "affected_files",
+        "validation",
+        "repair",
+        "rollback",
+        "edit_policy_feedback",
+        "duplicate_policy_feedback",
+        "duplicate_context_result",
+    ):
+        if key in compact_result:
+            summary[key] = compact_result[key]
+    repair_message = str(entry.get("repair_message") or "")
+    if repair_message:
+        summary["repair_note"] = _short_value(repair_message, maximum=1000)
+    return summary
+
+
+def _tool_result_reference(
+    tool_name: str,
+    result: dict[str, Any],
+    args: dict[str, Any] | None = None,
+) -> str:
+    args = args if isinstance(args, dict) else {}
+    payload = result.get("result") if isinstance(result.get("result"), dict) else {}
+    if tool_name == "read_file":
+        path = str(payload.get("path") or args.get("path") or "")
+        start_line = payload.get("start_line") or args.get("start_line")
+        end_line = payload.get("end_line")
+        if end_line is None and start_line is not None and args.get("line_count") is not None:
+            try:
+                end_line = int(start_line) + int(args.get("line_count")) - 1
+            except (TypeError, ValueError):
+                end_line = None
+        content = payload.get("content")
+        digest = _content_hash(content) if isinstance(content, str) else ""
+        line_text = f" lines {start_line}-{end_line}" if start_line and end_line else ""
+        hash_text = f" hash {digest}" if digest else ""
+        return f"read_file {path}{line_text}{hash_text} already inspected".strip()
+    if tool_name == "repo_map":
+        focus = str(payload.get("focus") or args.get("target") or args.get("path") or ".")
+        related = _string_list_like(payload.get("related_files"))
+        tests = _string_list_like(payload.get("test_files"))
+        return f"repo_map {focus} related={len(related)} tests={len(tests)}"
+    if tool_name == "search_files":
+        query = str(payload.get("query") or args.get("query") or "")
+        matches = payload.get("matches") if isinstance(payload.get("matches"), list) else []
+        return f"search_files query={query!r} matches={len(matches)}"
+    changed = _changed_files_from_result(tool_name, result)
+    if changed:
+        return f"{tool_name} changed {', '.join(changed[:8])}"
+    return tool_name
+
+
+def _tool_entry_reference(entry: dict[str, Any]) -> str:
+    tool_name = str(entry.get("tool") or "")
+    args = entry.get("args") if isinstance(entry.get("args"), dict) else {}
+    result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+    return _tool_result_reference(tool_name, result, args)
+
+
+def _tool_entry_path(entry: dict[str, Any]) -> str:
+    args = entry.get("args") if isinstance(entry.get("args"), dict) else {}
+    result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+    payload = result.get("result") if isinstance(result.get("result"), dict) else {}
+    return _normalize_policy_path(str(payload.get("path") or args.get("path") or ""))
+
+
+def _tool_entry_content_hash(entry: dict[str, Any]) -> str:
+    result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+    payload = result.get("result") if isinstance(result.get("result"), dict) else {}
+    content = payload.get("content")
+    if isinstance(content, str):
+        return _content_hash(content)
+    compact_hash = payload.get("content_hash")
+    return str(compact_hash or "")
+
+
+def _tool_result_full_chars(tool_name: str, result: dict[str, Any]) -> int:
+    try:
+        return len(tool_result_message(tool_name, result).get("content", ""))
+    except Exception:
+        return len(json.dumps(result, ensure_ascii=False, default=str))
+
+
+def _latest_memory_failure(entries: list[dict[str, Any]], trace: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for entry in reversed(entries):
+        if entry.get("kind") != "tool":
+            continue
+        tool_name = str(entry.get("tool") or "")
+        result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+        if result.get("edit_policy_feedback"):
+            return {
+                "step": entry.get("step"),
+                "tool": tool_name,
+                "type": "policy_feedback",
+                "message": result.get("message"),
+                "error": _short_value(result.get("error"), maximum=1000),
+                "affected_files": result.get("affected_files", []),
+                "recommended_tool": result.get("recommended_tool"),
+            }
+        if result.get("ok") is False:
+            return {
+                "step": entry.get("step"),
+                "tool": tool_name,
+                "type": "tool_failure",
+                "error": _short_value(result.get("error"), maximum=1000),
+                "affected_files": result.get("affected_files", []),
+            }
+        validation = result.get("validation")
+        if isinstance(validation, dict) and validation.get("ok") is False:
+            return {
+                "step": entry.get("step"),
+                "tool": tool_name,
+                "type": "validation_failure",
+                "validation": _compact_validation_result(validation),
+                "repair": result.get("repair") if isinstance(result.get("repair"), dict) else None,
+                "rollback": _rollback_summary(result.get("rollback")),
+            }
+    failed = _last_failed_validation(trace)
+    if failed:
+        return {"type": "validation_failure", **failed}
+    return None
+
+
+def _latest_invalid_summary(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for entry in reversed(entries):
+        if entry.get("kind") == "invalid":
+            return {
+                "step": entry.get("step"),
+                "agent": entry.get("agent"),
+                "response_text": entry.get("response_text", ""),
+            }
+    return None
+
+
+def _reasoning_state_counts(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "context_score": state.get("context_score"),
+        "dependency_edges": len(state.get("dependency_edges") or []),
+        "dependency_map_entries": len(state.get("dependency_map") or {}),
+        "related_files_entries": len(state.get("related_files") or {}),
+        "validation_history": len(state.get("validation_history") or []),
+        "repair_history": len(state.get("repair_history") or []),
+        "approval_history": len(state.get("approval_history") or []),
+    }
+
+
+def _compact_reasoning_state_prompt(reasoning_state: WorkspaceReasoningState) -> str:
+    return (
+        "PERSISTENT WORKSPACE REASONING STATE (compact):\n"
+        f"{json.dumps(_compact_reasoning_state_payload(reasoning_state), indent=2, ensure_ascii=False)}"
+    )
+
+
+def _compact_reasoning_state_payload(reasoning_state: WorkspaceReasoningState) -> dict[str, Any]:
+    state = reasoning_state.to_dict()
+    repository_summary = (
+        state.get("repository_summary")
+        if isinstance(state.get("repository_summary"), dict)
+        else {}
+    )
+    plan = (
+        state.get("execution_plan")
+        if isinstance(state.get("execution_plan"), dict)
+        else reasoning_state.execution_plan.to_dict()
+    )
+    compact_plan = _compact_execution_plan(plan)
+    return {
+        "task_id": state.get("task_id"),
+        "objectives": _string_list_like(state.get("objectives"))[-5:],
+        "context_score": state.get("context_score"),
+        "active_files": _string_list_like(state.get("active_files"))[-20:],
+        "inspected_files": _string_list_like(state.get("inspected_files"))[-30:],
+        "grouped_patch_required": bool(state.get("grouped_patch_required")),
+        "repository_inspection_complete": bool(state.get("repository_inspection_complete")),
+        "repository_summary": _compact_repository_summary(repository_summary),
+        "dependency_edges_count": len(state.get("dependency_edges") or []),
+        "dependency_map_count": len(state.get("dependency_map") or {}),
+        "related_files_count": len(state.get("related_files") or {}),
+        "planned_edits": _compact_dict_list(state.get("planned_edits"), limit=5, maximum=500),
+        "planned_validations": _string_list_like(state.get("planned_validations"))[-10:],
+        "validation_history": _compact_dict_list(state.get("validation_history"), limit=5, maximum=1200),
+        "repair_history": _compact_dict_list(state.get("repair_history"), limit=5, maximum=1000),
+        "approval_history": _compact_dict_list(state.get("approval_history"), limit=5, maximum=1000),
+        "execution_plan": compact_plan,
+    }
+
+
+def _compact_execution_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    nodes = plan.get("nodes") if isinstance(plan.get("nodes"), list) else []
+    compact_nodes: list[dict[str, Any]] = []
+    for node in nodes[-8:]:
+        if not isinstance(node, dict):
+            continue
+        compact_nodes.append(
+            {
+                "id": node.get("id"),
+                "objective": _short_value(node.get("objective"), maximum=240),
+                "status": node.get("status"),
+                "affected_files": _string_list_like(node.get("affected_files"))[-10:],
+                "related_files_count": len(_string_list_like(node.get("related_files"))),
+                "impacted_files_count": len(_string_list_like(node.get("impacted_files"))),
+                "validation_targets": _string_list_like(node.get("validation_targets"))[-10:],
+                "estimated_risk": node.get("estimated_risk"),
+                "repair_strategy": _short_value(node.get("repair_strategy"), maximum=240)
+                if node.get("repair_strategy")
+                else None,
+                "retry_count": node.get("retry_count"),
+            }
+        )
+    return {
+        "active_node": plan.get("active_node"),
+        "nodes": compact_nodes,
+        "node_count": len(nodes),
+        "completed_nodes": _string_list_like(plan.get("completed_nodes"))[-20:],
+        "failed_nodes": _string_list_like(plan.get("failed_nodes"))[-20:],
+        "blocked_nodes": _string_list_like(plan.get("blocked_nodes"))[-20:],
+    }
+
+
+def _compact_repository_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in (
+        "known_files",
+        "read_files",
+        "searched_files",
+        "context_tools",
+        "validation_targets",
+        "key_files",
+        "test_files",
+        "dependency_files",
+        "related_files",
+    ):
+        values = _string_list_like(summary.get(key))
+        if values:
+            compact[key] = values[-30:]
+            compact[f"{key}_count"] = len(values)
+    for key in ("symbol_index", "dependency_map", "reverse_dependency_map"):
+        value = summary.get(key)
+        if isinstance(value, dict):
+            compact[f"{key}_count"] = len(value)
+    return compact
+
+
+def _compact_dict_list(value: Any, *, limit: int, maximum: int) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    compact: list[dict[str, Any]] = []
+    for item in value[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        compact.append(_compact_dict_value(item, maximum=maximum))
+    return compact
+
+
+def _compact_dict_value(value: dict[str, Any], *, maximum: int) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, item in value.items():
+        if isinstance(item, str):
+            compact[key] = _short_value(item, maximum=maximum)
+        elif isinstance(item, list):
+            compact[key] = [
+                _short_value(element, maximum=maximum // 2)
+                if isinstance(element, str)
+                else _compact_dict_value(element, maximum=max(120, maximum // 2))
+                if isinstance(element, dict)
+                else element
+                for element in item[-10:]
+            ]
+            if len(item) > 10:
+                compact[f"{key}_count"] = len(item)
+        elif isinstance(item, dict):
+            compact[key] = {
+                str(inner_key): (
+                    _short_value(inner_value, maximum=maximum // 2)
+                    if isinstance(inner_value, str)
+                    else inner_value
+                )
+                for inner_key, inner_value in list(item.items())[-10:]
+            }
+            if len(item) > 10:
+                compact[f"{key}_count"] = len(item)
+        else:
+            compact[key] = item
+    return compact
+
+
+def _active_execution_objective(reasoning_state: WorkspaceReasoningState) -> str:
+    try:
+        active = reasoning_state.execution_plan.active()
+    except Exception:
+        active = None
+    if active is not None:
+        return _short_value(active.objective, maximum=300)
+    objectives = list(reasoning_state.objectives or [])
+    return _short_value(objectives[-1], maximum=300) if objectives else ""
+
+
+def _prepare_agent_messages_for_step(
+    messages: list[dict[str, Any]],
+    request: HubRequest,
+    router: AgentRouter,
+    trace: list[dict[str, Any]],
+    *,
+    previous_input_tokens: int | None,
+    pre_compacted_count: int = 0,
+    pre_compacted_tool_results_count: int = 0,
+    pre_estimated_tokens_saved: int = 0,
+) -> dict[str, Any]:
+    budget_tokens = _agent_context_input_budget(request, router, messages)
+    before_tokens = _estimated_message_tokens(messages)
+    compaction_enabled = _agent_context_compaction_enabled(request, router.config)
+    compacted_messages_count = pre_compacted_count
+    compacted_tool_results_count = pre_compacted_tool_results_count
+    budget_exceeded_before = budget_tokens is not None and before_tokens > budget_tokens
+    if compaction_enabled:
+        history_compacted_count = _compact_agent_message_history(
+            messages,
+            repair_active=_repair_context_active(trace, messages),
+            budget_tokens=budget_tokens,
+        )
+        compacted_messages_count += history_compacted_count
+        compacted_tool_results_count += history_compacted_count
+    input_tokens = _estimated_message_tokens(messages)
+    estimated_tokens_saved = pre_estimated_tokens_saved + max(0, before_tokens - input_tokens)
+    tokens_added = 0 if previous_input_tokens is None else input_tokens - previous_input_tokens
+    percent_used = (
+        round((input_tokens / budget_tokens) * 100, 1)
+        if budget_tokens is not None and budget_tokens > 0
+        else None
+    )
+    hard_budget_exceeded = budget_tokens is not None and input_tokens > budget_tokens
+    if hard_budget_exceeded:
+        compaction_level = "hard_stop"
+    elif budget_exceeded_before:
+        compaction_level = "budget"
+    elif compacted_tool_results_count > 0:
+        compaction_level = "tool_results"
+    elif compacted_messages_count > 0:
+        compaction_level = "messages"
+    else:
+        compaction_level = "none"
+    return {
+        "input_tokens": input_tokens,
+        "budget_tokens": budget_tokens,
+        "percent_used": percent_used,
+        "tokens_added_since_last_step": tokens_added,
+        "compaction_enabled": compaction_enabled,
+        "compaction_triggered": compacted_messages_count > 0 or estimated_tokens_saved > 0,
+        "compaction_level": compaction_level,
+        "compacted_messages_count": compacted_messages_count,
+        "compacted_tool_results_count": compacted_tool_results_count,
+        "estimated_tokens_saved": estimated_tokens_saved,
+        "largest_context_sources": _largest_context_sources(messages),
+        "warning_level": _context_warning_level(percent_used),
+        "budget_exceeded_before_compaction": budget_exceeded_before,
+        "budget_exceeded_after_compaction": hard_budget_exceeded,
+        "hard_budget_exceeded": hard_budget_exceeded,
+        "input_tokens_before_compaction": before_tokens,
+    }
+
+
+def _agent_context_input_budget(
+    request: HubRequest,
+    router: AgentRouter,
+    messages: list[dict[str, Any]],
+) -> int | None:
+    override = _request_positive_int_option(request, "agent_context_budget_tokens")
+    if override is None:
+        override = _request_positive_int_option(request, "context_budget_tokens")
+    if override is not None:
+        return override
+    configured = getattr(router.config, "agent_context_budget_tokens", None)
+    try:
+        configured_budget = int(configured) if configured is not None else 0
+    except (TypeError, ValueError):
+        configured_budget = 0
+
+    try:
+        candidates = router._candidate_agents(replace(request, messages=messages))
+    except Exception:
+        candidates = []
+    budgets: list[int] = []
+    for agent in candidates:
+        if agent.context_window is None:
+            continue
+        output_tokens = _agent_output_budget(request, agent)
+        budgets.append(max(1, int(agent.context_window) - output_tokens))
+    model_budget = min(budgets) if budgets else None
+    if configured_budget > 0 and model_budget is not None:
+        return min(configured_budget, model_budget)
+    if configured_budget > 0:
+        return configured_budget
+    return model_budget
+
+
+def _agent_context_compaction_enabled(request: HubRequest, config: HubConfig) -> bool:
+    return _request_bool(
+        request,
+        "agent_context_compaction_enabled",
+        getattr(config, "agent_context_compaction_enabled", True),
+    )
+
+
+def _agent_output_budget(request: HubRequest, agent: Any) -> int:
+    value = request.max_tokens if request.max_tokens is not None else getattr(agent, "max_tokens", None)
+    try:
+        return max(0, int(value if value is not None else 4096))
+    except (TypeError, ValueError):
+        return 4096
+
+
+def _compact_agent_message_history(
+    messages: list[dict[str, Any]],
+    *,
+    repair_active: bool,
+    budget_tokens: int | None,
+) -> int:
+    compacted = 0
+    keep_full = FULL_REPAIR_TOOL_RESULT_HISTORY if repair_active else FULL_TOOL_RESULT_HISTORY
+    tool_messages = _tool_result_messages(messages)
+    for item in tool_messages[:-keep_full]:
+        if _compact_tool_message(messages, item, reason="old_tool_result"):
+            compacted += 1
+    compacted += _remove_old_assistant_tool_messages(messages, keep_full=keep_full)
+
+    if budget_tokens is None:
+        return compacted
+    budget = max(1, budget_tokens - CONTEXT_BUDGET_MARGIN_TOKENS)
+    while _estimated_message_tokens(messages) > budget:
+        if not _compact_largest_tool_message(messages):
+            if not _compact_system_message(messages):
+                break
+        compacted += 1
+    compacted += _remove_old_assistant_tool_messages(messages, keep_full=keep_full)
+    return compacted
+
+
+def _context_usage_message(context_usage: dict[str, Any]) -> str:
+    input_tokens = int(context_usage.get("input_tokens") or 0)
+    budget_tokens = context_usage.get("budget_tokens")
+    percent_used = context_usage.get("percent_used")
+    delta = int(context_usage.get("tokens_added_since_last_step") or 0)
+    compacted = int(context_usage.get("compacted_messages_count") or 0)
+    if isinstance(budget_tokens, int) and budget_tokens > 0:
+        budget_text = f"{input_tokens}/{budget_tokens} tokens"
+        percent_text = f"{percent_used}% used" if percent_used is not None else "budgeted"
+    else:
+        budget_text = f"{input_tokens} tokens"
+        percent_text = "no budget"
+    delta_text = f"+{delta}" if delta >= 0 else str(delta)
+    level = str(context_usage.get("compaction_level") or "none")
+    warning = str(context_usage.get("warning_level") or "normal")
+    if compacted:
+        return (
+            f"Context {percent_text} ({budget_text}, {delta_text} since last step; "
+            f"compacted {compacted}; level {level}; {warning})."
+        )
+    return f"Context {percent_text} ({budget_text}, {delta_text} since last step)."
+
+
+def _tool_result_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    parsed: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        tool_result = _parse_tool_result_message(content)
+        if tool_result is None:
+            continue
+        parsed.append({"index": index, **tool_result, "content_chars": len(content)})
+    return parsed
+
+
+def _remove_old_assistant_tool_messages(messages: list[dict[str, Any]], *, keep_full: int) -> int:
+    removed = 0
+    tool_messages = _tool_result_messages(messages)
+    for item in reversed(tool_messages[:-keep_full]):
+        index = item.get("index")
+        if not isinstance(index, int) or index <= 0 or index > len(messages) - 1:
+            continue
+        previous = messages[index - 1]
+        if not _assistant_tool_call_message(previous):
+            continue
+        del messages[index - 1]
+        removed += 1
+    return removed
+
+
+def _assistant_tool_call_message(message: dict[str, Any]) -> bool:
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    content = message.get("content")
+    if not isinstance(content, str):
+        return False
+    text = content.strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        return False
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and payload.get("action") in TOOL_ACTIONS | {"tool"}
+
+
+def _parse_tool_result_message(content: str) -> dict[str, Any] | None:
+    if not content.startswith("Tool result for "):
+        return None
+    header, separator, rest = content.partition(":\n")
+    if not separator:
+        return None
+    tool_name = header.removeprefix("Tool result for ").strip()
+    json_text = rest.split("\n\nContinue with", 1)[0].strip()
+    if not tool_name or not json_text:
+        return None
+    try:
+        result = json.loads(json_text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(result, dict):
+        return None
+    return {"tool": tool_name, "result": result}
+
+
+def _compact_tool_message(messages: list[dict[str, Any]], item: dict[str, Any], *, reason: str) -> bool:
+    result = item.get("result")
+    if not isinstance(result, dict) or result.get("compacted"):
+        return False
+    index = item.get("index")
+    if not isinstance(index, int) or index < 0 or index >= len(messages):
+        return False
+    tool_name = str(item.get("tool") or result.get("tool") or "")
+    if not tool_name:
+        return False
+    messages[index] = tool_result_message(
+        tool_name,
+        _compact_tool_result_for_history(tool_name, result, reason=reason),
+    )
+    return True
+
+
+def _compact_largest_tool_message(messages: list[dict[str, Any]]) -> bool:
+    candidates = [
+        item
+        for item in _tool_result_messages(messages)
+        if isinstance(item.get("result"), dict) and not item["result"].get("compacted")
+    ]
+    if not candidates:
+        return False
+    largest = max(candidates, key=lambda item: int(item.get("content_chars") or 0))
+    return _compact_tool_message(messages, largest, reason="context_budget")
+
+
+def _compact_system_message(messages: list[dict[str, Any]]) -> bool:
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or "agent_system_compacted" in content:
+            continue
+        if "You are an autonomous local coding agent" not in content:
+            continue
+        workspace = _regex_first(content, r"Workspace root:\s*(.+)")
+        tools = _system_available_tools(content)
+        reasoning = ""
+        marker = "PERSISTENT WORKSPACE REASONING STATE (compact):"
+        if marker in content:
+            reasoning = content.split(marker, 1)[1].strip()
+        compact_lines = [
+            "agent_system_compacted: true",
+            "You are an autonomous local coding agent inside the user's workspace.",
+            "Inspect files before editing. Prefer apply_patch for coordinated edits and repairs.",
+            "Reply with exactly one JSON object and no Markdown.",
+            'Use {"action":"tool","tool":"read_file","args":{"path":"README.md"}} or {"action":"final","answer":"..."} only.',
+        ]
+        if workspace:
+            compact_lines.append(f"Workspace root: {workspace}")
+        if tools:
+            compact_lines.append("Available tools: " + ", ".join(tools[:12]))
+        if reasoning:
+            compact_lines.append("Compact reasoning state:")
+            compact_lines.append(_short_value(reasoning, maximum=600))
+        messages[index] = {"role": "system", "content": "\n".join(compact_lines)}
+        return True
+    return False
+
+
+def _regex_first(text: str, pattern: str) -> str:
+    match = re.search(pattern, text)
+    return match.group(1).strip() if match else ""
+
+
+def _system_available_tools(content: str) -> list[str]:
+    _, _, tail = content.partition("Available tools:")
+    if not tail:
+        return []
+    tools: list[str] = []
+    for line in tail.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        tools.append(stripped[2:].strip())
+    return _dedupe_strings(tools)
+
+
+def _compact_tool_result_for_history(
+    tool_name: str,
+    result: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    if result.get("compacted"):
+        return result
+    payload = result.get("result") if isinstance(result.get("result"), dict) else {}
+    compact: dict[str, Any] = {
+        "ok": result.get("ok") is not False,
+        "tool": result.get("tool") or tool_name,
+        "compacted": True,
+        "compact_reason": reason,
+    }
+    for key in (
+        "edit_policy_feedback",
+        "context_change_bar_feedback",
+        "duplicate_context_result",
+        "duplicate_policy_feedback",
+        "grouped_patch_required",
+        "recommended_tool",
+        "affected_files",
+        "message",
+    ):
+        if key in result:
+            compact[key] = result[key]
+    changed_files = _changed_files_from_result(tool_name, result)
+    if changed_files:
+        compact["changed_files"] = changed_files
+    if result.get("ok") is False and result.get("error"):
+        compact["error"] = _short_value(result.get("error"), maximum=500)
+    if payload:
+        compact["result"] = _compact_tool_payload(tool_name, payload)
+    validation = result.get("validation")
+    if isinstance(validation, dict):
+        compact["validation"] = _compact_validation_result(validation)
+    repair = result.get("repair")
+    if isinstance(repair, dict):
+        compact["repair"] = repair
+    rollback = result.get("rollback")
+    if isinstance(rollback, dict):
+        compact["rollback"] = _rollback_summary(rollback)
+    checkpoint = result.get("checkpoint")
+    if isinstance(checkpoint, dict):
+        compact["checkpoint"] = _checkpoint_summary(checkpoint)
+    policy = result.get("policy")
+    if isinstance(policy, dict):
+        compact["policy"] = _compact_policy_result(policy)
+    return compact
+
+
+def _compact_tool_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if tool_name == "read_file":
+        path = str(payload.get("path") or "")
+        start_line = payload.get("start_line")
+        end_line = payload.get("end_line")
+        total_lines = payload.get("total_lines")
+        chars = payload.get("chars")
+        content = payload.get("content")
+        return {
+            "path": path,
+            "summary": _read_file_compact_summary(
+                path,
+                start_line,
+                end_line,
+                total_lines,
+                chars,
+                content,
+            ),
+            "chars": chars,
+            "start_line": start_line,
+            "end_line": end_line,
+            "total_lines": total_lines,
+            "truncated": payload.get("truncated"),
+            "content_hash": _content_hash(content) if isinstance(content, str) else "",
+            "content_omitted": True,
+        }
+    if tool_name == "search_files":
+        matches = payload.get("matches") if isinstance(payload.get("matches"), list) else []
+        paths = _dedupe_strings(
+            [
+                str(item.get("path"))
+                for item in matches
+                if isinstance(item, dict) and isinstance(item.get("path"), str)
+            ]
+        )
+        return {
+            "query": payload.get("query"),
+            "match_count": len(matches),
+            "matched_files": paths[:30],
+            "matches": matches[:10],
+            "summary": "Search results compacted; matched paths and first matches retained.",
+        }
+    if tool_name == "repo_map":
+        related = _string_list_like(payload.get("related_files"))
+        tests = _string_list_like(payload.get("test_files"))
+        dependencies = _string_list_like(payload.get("dependency_files"))
+        validation_targets = _string_list_like(payload.get("validation_targets"))
+        return {
+            "root": payload.get("root"),
+            "focus": payload.get("focus"),
+            "active_files": _string_list_like(payload.get("active_files"))[:20],
+            "mentioned_files": _string_list_like(payload.get("mentioned_files"))[:20],
+            "key_files": _string_list_like(payload.get("key_files"))[:20],
+            "related_files": related[:30],
+            "related_file_count": len(related),
+            "test_files": tests[:30],
+            "test_file_count": len(tests),
+            "dependency_files": dependencies[:30],
+            "dependency_file_count": len(dependencies),
+            "validation_targets": validation_targets[:30],
+            "validation_target_count": len(validation_targets),
+            "search_hints": _string_list_like(payload.get("search_hints"))[:12],
+            "summary": "Repository map compacted; file lists and counts retained.",
+        }
+    if tool_name == "apply_patch":
+        patch_preview = payload.get("patch_preview")
+        return {
+            "paths": _string_list_like(payload.get("paths"))[:30],
+            "changes": _compact_patch_changes(payload.get("changes")),
+            "summary": _short_value(payload.get("summary"), maximum=500),
+            "patch_preview_hash": _content_hash(patch_preview)
+            if isinstance(patch_preview, str)
+            else "",
+            "patch_preview_chars": len(patch_preview) if isinstance(patch_preview, str) else 0,
+            "patch_preview_omitted": True,
+        }
+    if tool_name == "run_command":
+        return {
+            "command": payload.get("command"),
+            "cwd": payload.get("cwd"),
+            "returncode": payload.get("returncode"),
+            "stdout": _short_value(payload.get("stdout"), maximum=1000),
+            "stderr": _short_value(payload.get("stderr"), maximum=1000),
+            "stdout_truncated": payload.get("stdout_truncated"),
+            "stderr_truncated": payload.get("stderr_truncated"),
+        }
+    summarized = _progress_tool_result(tool_name, {"ok": True, "result": payload})
+    summarized.pop("ok", None)
+    if isinstance(payload.get("files"), list):
+        summarized["files"] = payload["files"][:20]
+    if isinstance(payload.get("matches"), list):
+        summarized["matches"] = payload["matches"][:20]
+    return summarized or {"summary": "Tool result compacted."}
+
+
+def _compact_patch_changes(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    changes: list[dict[str, Any]] = []
+    for item in value[:30]:
+        if not isinstance(item, dict):
+            continue
+        changes.append(
+            {
+                "path": item.get("path"),
+                "action": item.get("action"),
+                "chars": item.get("chars"),
+            }
+        )
+    return changes
+
+
+def _read_file_compact_summary(
+    path: str,
+    start_line: Any,
+    end_line: Any,
+    total_lines: Any,
+    chars: Any,
+    content: Any = None,
+) -> str:
+    line_bits = []
+    if start_line is not None and end_line is not None:
+        line_bits.append(f"lines {start_line}-{end_line}")
+    if total_lines is not None:
+        line_bits.append(f"{total_lines} total lines")
+    if chars is not None:
+        line_bits.append(f"{chars} chars returned")
+    if isinstance(content, str):
+        line_bits.append(f"sha256:{_content_hash(content)}")
+    details = ", ".join(line_bits) if line_bits else "content previously returned"
+    return f"{path}: {details}; content omitted from compacted history."
+
+
+def _content_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
+def _compact_validation_result(validation: dict[str, Any]) -> dict[str, Any]:
+    checks = validation.get("checks")
+    failed_checks = [
+        {
+            "name": check.get("name"),
+            "category": check.get("category"),
+            "failure_category": check.get("failure_category"),
+            "command": check.get("command"),
+            "returncode": check.get("returncode"),
+            "stdout": _short_value(check.get("stdout"), maximum=2000),
+            "stderr": _short_value(check.get("stderr"), maximum=2000),
+        }
+        for check in checks
+        if isinstance(check, dict) and check.get("ok") is False
+    ] if isinstance(checks, list) else []
+    return {
+        "ok": validation.get("ok"),
+        "mode": validation.get("mode"),
+        "changed_files": validation.get("changed_files", []),
+        "validation_targets": validation.get("validation_targets", []),
+        "failed_categories": validation.get("failed_categories", []),
+        "failed_checks": failed_checks,
+        "message": validation.get("message"),
+    }
+
+
+def _compact_policy_result(policy: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        "name": policy.get("name"),
+        "reason": _short_value(policy.get("reason"), maximum=500),
+        "instructions": _string_list_like(policy.get("instructions"))[:4],
+    }
+    context = policy.get("context")
+    if isinstance(context, dict):
+        compact["context"] = {
+            key: value
+            for key, value in context.items()
+            if key in {
+                "target",
+                "repair_context",
+                "multi_file_task",
+                "grouped_patch_required",
+                "projected_changed_files",
+                "impacted_files",
+                "risky_files",
+                "rewrite_risk",
+            }
+        }
+    return compact
+
+
+def _estimated_message_tokens(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for message in messages:
+        role = str(message.get("role", "user"))
+        content = str(message.get("content", ""))
+        total += max(1, (len(role) + len(content) + 3) // 4) + 4
+    return max(1, total)
+
+
+def _largest_context_sources(messages: list[dict[str, Any]], *, limit: int = 5) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user")
+        content = str(message.get("content") or "")
+        sources.append(
+            {
+                "index": index,
+                "role": role,
+                "tokens": _estimated_message_tokens([message]),
+                "label": _context_source_label(content),
+            }
+        )
+    sources.sort(key=lambda item: int(item.get("tokens") or 0), reverse=True)
+    return sources[:limit]
+
+
+def _context_source_label(content: str) -> str:
+    if content.startswith("Tool result for "):
+        header = content.split(":\n", 1)[0]
+        return header[:120]
+    if content.startswith("EXECUTION MEMORY SUMMARY"):
+        return "execution_memory_summary"
+    if content.startswith("PERSISTENT WORKSPACE REASONING STATE"):
+        return "compact_reasoning_state"
+    if "You are an autonomous local coding agent" in content:
+        return "agent_system_instructions"
+    return _short_value(content.replace("\n", " "), maximum=120)
+
+
+def _context_warning_level(percent_used: Any) -> str:
+    try:
+        percent = float(percent_used)
+    except (TypeError, ValueError):
+        return "normal"
+    if percent >= 95:
+        return "critical"
+    if percent >= 75:
+        return "warn"
+    return "normal"
+
+
+def _context_tool_cache_key(
+    toolbox: AgentToolbox,
+    tool_name: str,
+    args: dict[str, Any],
+    *,
+    workspace_revision: int,
+    file_revisions: dict[str, int],
+) -> tuple[Any, ...] | None:
+    if tool_name not in DEDUPE_CONTEXT_TOOLS:
+        return None
+    if _context_tool_cache_bypass(args):
+        return None
+    if tool_name == "read_file":
+        path = _context_cache_path(toolbox, args.get("path"))
+        if not path:
+            return None
+        return (
+            "read_file",
+            path,
+            args.get("start_line"),
+            args.get("line_count"),
+            args.get("max_chars"),
+            file_revisions.get(path, 0),
+        )
+    focus = str(args.get("target") or args.get("path") or ".").strip() or "."
+    return (
+        "repo_map",
+        _normalize_policy_path(focus),
+        args.get("limit"),
+        workspace_revision,
+    )
+
+
+def _context_cache_path(toolbox: AgentToolbox, value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    target = _policy_resolved_path(toolbox, value)
+    if target is not None:
+        try:
+            return _normalize_policy_path(toolbox._relative(target))
+        except Exception:
+            pass
+    return _normalize_policy_path(value)
+
+
+def _context_tool_cache_bypass(args: dict[str, Any]) -> bool:
+    return any(_truthy_like(args.get(key)) for key in ("force", "refresh", "reread", "reload"))
+
+
+def _duplicate_context_tool_result(tool_name: str, cached_result: dict[str, Any]) -> dict[str, Any]:
+    result = _compact_tool_result_for_history(
+        tool_name,
+        deepcopy(cached_result),
+        reason="duplicate_context_result",
+    )
+    result["duplicate_context_result"] = True
+    result["message"] = (
+        f"{tool_name} returned cached context; identical rereads are compacted to keep "
+        "the agent history bounded. Request a specific line range or pass refresh=true if fresh content is required."
+    )
+    return result
+
+
+def _policy_feedback_signature(tool_name: str, result: dict[str, Any]) -> str:
+    payload = {
+        "tool": tool_name,
+        "affected_files": result.get("affected_files", []),
+        "recommended_tool": result.get("recommended_tool"),
+        "error": result.get("error"),
+        "policy_name": result.get("policy", {}).get("name") if isinstance(result.get("policy"), dict) else None,
+    }
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+
+
+def _duplicate_policy_feedback_result(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "tool": tool_name,
+        "edit_policy_feedback": True,
+        "duplicate_policy_feedback": True,
+        "recommended_tool": result.get("recommended_tool", "apply_patch"),
+        "affected_files": result.get("affected_files", []),
+        "grouped_patch_required": result.get("grouped_patch_required", False),
+        "message": "Repeated identical edit-policy feedback was compacted; use apply_patch before retrying.",
+        "error": "Repeated identical edit-policy feedback omitted from agent history.",
+        "policy": {
+            "name": "patch_first",
+            "duplicate": True,
+            "instructions": [
+                "Use apply_patch with a concise summary and validation_plan.",
+                "Do not repeat the same blocked edit tool call.",
+            ],
+        },
+    }
 
 
 def _recent_step_context(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3021,8 +4443,8 @@ def _validation_failure_summary(validation: dict[str, Any]) -> dict[str, Any]:
             "failure_category": check.get("failure_category") or check.get("category", "command"),
             "command": check.get("command", ""),
             "returncode": check.get("returncode"),
-            "stdout": _short_value(check.get("stdout", ""), maximum=1200),
-            "stderr": _short_value(check.get("stderr", ""), maximum=1200),
+            "stdout": _short_value(check.get("stdout", ""), maximum=4000),
+            "stderr": _short_value(check.get("stderr", ""), maximum=4000),
         }
         for check in checks
         if isinstance(check, dict) and check.get("ok") is False
@@ -3519,6 +4941,25 @@ def _bool_field(text: str, key: str) -> bool | None:
     return match.group(1).lower() == "true" if match else None
 
 
+def _request_positive_int_option(request: HubRequest, key: str) -> int | None:
+    value = _request_option(request, key, None)
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _truthy_like(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _request_int(request: HubRequest, key: str, default: int) -> int:
     raw = request.raw or {}
     hub_options = raw.get("agent_hub")
@@ -3558,6 +4999,72 @@ def _request_option(request: HubRequest, key: str, default: Any) -> Any:
     if isinstance(hub_options, dict) and key in hub_options:
         return hub_options[key]
     return raw.get(key, default)
+
+
+def _compact_session_history_messages(
+    history: list[dict[str, Any]],
+    current_messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, str]] = []
+    for message in history:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        content = message.get("content")
+        if role not in {"user", "assistant", "system"} or not isinstance(content, str):
+            continue
+        if _session_history_content_is_tool_noise(content):
+            continue
+        cleaned.append({"role": role, "content": _short_value(content, maximum=1200)})
+    if not cleaned:
+        return []
+
+    last_user = next((message for message in reversed(cleaned) if message["role"] == "user"), None)
+    last_assistant = next(
+        (message for message in reversed(cleaned) if message["role"] == "assistant"),
+        None,
+    )
+    compact: list[dict[str, str]] = []
+    if last_user:
+        compact.append(
+            {
+                "role": "user",
+                "content": "Prior session request (compact): " + last_user["content"],
+            }
+        )
+    if last_assistant:
+        compact.append(
+            {
+                "role": "assistant",
+                "content": "Prior session answer (compact): " + last_assistant["content"],
+            }
+        )
+    for message in cleaned[-MAX_COMPACT_SESSION_MESSAGES:]:
+        if message not in compact:
+            compact.append(message)
+    current_texts = {
+        str(message.get("content") or "")
+        for message in current_messages
+        if isinstance(message, dict)
+    }
+    return [
+        message
+        for message in compact[-MAX_COMPACT_SESSION_MESSAGES:]
+        if message["content"] not in current_texts
+    ]
+
+
+def _session_history_content_is_tool_noise(content: str) -> bool:
+    text = content.strip()
+    if text.startswith("Tool result for "):
+        return True
+    if text.startswith("EXECUTION MEMORY SUMMARY"):
+        return True
+    if "Continue with exactly one JSON object" in text:
+        return True
+    if _assistant_tool_call_message({"role": "assistant", "content": text}):
+        return True
+    return False
 
 
 def _is_prefix(prefix: list[dict], messages: list[dict]) -> bool:

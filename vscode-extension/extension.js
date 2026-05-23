@@ -13,7 +13,7 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let lastActiveTextEditor = null;
-const EXTENSION_VERSION = "0.6.7";
+const EXTENSION_VERSION = "0.7.0";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
@@ -263,6 +263,8 @@ const REQUIRED_BACKEND_FEATURES = [
   "workspace_shell_commands",
   "file_write_tools",
   "fast_write_finalize",
+  "agent_context_compaction",
+  "context_usage_bar",
   "team_agent_mode",
   "provider_presets"
 ];
@@ -367,6 +369,8 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
     body.allow_shell_tools = config.allowShellTools;
     body.agent_max_steps = config.agentMaxSteps;
     body.coder_max_steps = config.agentMaxSteps;
+    body.agent_context_budget_tokens = config.agentContextBudgetTokens;
+    body.agent_context_compaction_enabled = config.agentContextCompactionEnabled;
     body.group_agent = {
       plan_candidates: config.groupPlanCandidates
     };
@@ -1212,6 +1216,8 @@ async function sendChatTurn(panel, message) {
     allow_shell_tools: config.allowShellTools,
     agent_max_steps: config.agentMaxSteps,
     coder_max_steps: config.agentMaxSteps,
+    agent_context_budget_tokens: config.agentContextBudgetTokens,
+    agent_context_compaction_enabled: config.agentContextCompactionEnabled,
     group_agent: {
       plan_candidates: config.groupPlanCandidates
     },
@@ -4340,6 +4346,8 @@ async function runCodingAgent() {
     extra: {
       allow_shell_tools: config.allowShellTools,
       agent_max_steps: config.agentMaxSteps,
+      agent_context_budget_tokens: config.agentContextBudgetTokens,
+      agent_context_compaction_enabled: config.agentContextCompactionEnabled,
       workspace_dir: workspace || "."
     }
   });
@@ -4413,6 +4421,8 @@ async function sendAgentRequest({ task, context, route, agentMode = true, extra 
     task,
     context,
     max_tokens: config.maxTokens,
+    agent_context_budget_tokens: config.agentContextBudgetTokens,
+    agent_context_compaction_enabled: config.agentContextCompactionEnabled,
     group_agent: {
       plan_candidates: config.groupPlanCandidates
     },
@@ -4780,6 +4790,8 @@ function settings() {
     agentMode: normalizeAgentMode(config.get("agentMode", "agent")),
     groupPlanCandidates: config.get("groupPlanCandidates", 1),
     agentMaxSteps: config.get("agentMaxSteps", 20),
+    agentContextBudgetTokens: config.get("agentContextBudgetTokens", 32000),
+    agentContextCompactionEnabled: config.get("agentContextCompactionEnabled", true),
     allowShellTools: config.get("allowShellTools", true),
     maxTokens: config.get("maxTokens", 1200),
     autoStart: config.get("autoStart", true)
@@ -4951,10 +4963,31 @@ function progressTextFromEvent(event) {
   if (type === "final" || type === "done") {
     return "";
   }
+  if (type === "context_usage_updated") {
+    return contextUsageProgressText(event.data);
+  }
   if (typeof event.data.message === "string" && event.data.message.trim()) {
     return event.data.message.trim();
   }
   return "";
+}
+
+function contextUsageProgressText(data) {
+  const inputTokens = Number(data.input_tokens || 0);
+  const budgetTokens = Number(data.budget_tokens || 0);
+  const percent = Number(data.percent_used || (budgetTokens > 0 ? (inputTokens / budgetTokens) * 100 : 0));
+  const clamped = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
+  const width = 18;
+  const filled = Math.max(0, Math.min(width, Math.round((clamped / 100) * width)));
+  const bar = "#".repeat(filled) + "-".repeat(width - filled);
+  const delta = Number(data.tokens_added_since_last_step || 0);
+  const deltaText = `${delta >= 0 ? "+" : ""}${delta}`;
+  const compactions = Number(data.compaction_count || data.compacted_messages_count || 0);
+  const saved = Number(data.estimated_tokens_saved || 0);
+  const warning = data.warning_level && data.warning_level !== "normal" ? ` ${data.warning_level}` : "";
+  const budgetText = budgetTokens > 0 ? `${inputTokens}/${budgetTokens}` : `${inputTokens}`;
+  const compactText = compactions > 0 ? ` compacted ${compactions}, saved ~${saved}` : " no compaction";
+  return `Context [${bar}] ${clamped.toFixed(1)}% (${budgetText} tokens, ${deltaText})${compactText}${warning}`;
 }
 
 function requestEventStream(method, pathname, body, callbacks = {}) {

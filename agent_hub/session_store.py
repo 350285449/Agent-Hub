@@ -34,6 +34,22 @@ class SessionStore:
 
         if not _same_message_at_tail(data["messages"], {"role": "assistant", "content": response.text}):
             data["messages"].append({"role": "assistant", "content": response.text})
+        # Ensure agent_hub dict exists in raw
+        if isinstance(response.raw, dict):
+            agent_hub = response.raw.setdefault("agent_hub", {})
+            # Initialize session_models list if not present
+            session_models = agent_hub.setdefault("session_models", [])
+            # Helper to add a model record
+            def add_model_record(agent, provider, model, failed=False):
+                record = {"agent": agent, "provider": provider, "model": model, "failed": failed}
+                if record not in session_models:
+                    session_models.append(record)
+            # Add failover events
+            for event in response.failover:
+                add_model_record(event.agent, event.provider, event.model, failed=True)
+            # Add the successful response
+            add_model_record(response.agent, response.provider, response.model, failed=False)
+
         data.setdefault("events", []).append(
             {
                 "time": int(time.time()),

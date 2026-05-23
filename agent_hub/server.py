@@ -51,6 +51,8 @@ BACKEND_FEATURES = {
     "validation_repair_loops": True,
     "validation_rollback": True,
     "context_change_bar": True,
+    "agent_context_compaction": True,
+    "context_usage_bar": True,
     "strict_repository_context": True,
     "grouped_patch_enforcement": True,
     "repository_context_scoring": True,
@@ -101,6 +103,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                         "enabled": self.server.config.context_change_bar_enabled,
                         "mode": self.server.config.context_change_bar_mode,
                         "threshold": self.server.config.context_change_bar_threshold,
+                    },
+                    "agent_context_compaction": {
+                        "enabled": self.server.config.agent_context_compaction_enabled,
+                        "budget_tokens": self.server.config.agent_context_budget_tokens,
                     },
                     "repository_context_scoring": {
                         "enabled": self.server.config.context_change_bar_enabled,

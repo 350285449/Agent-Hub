@@ -27,6 +27,8 @@ class ServerCompatibilityTests(unittest.TestCase):
         self.assertTrue(BACKEND_FEATURES["strict_repository_context"])
         self.assertTrue(BACKEND_FEATURES["grouped_patch_enforcement"])
         self.assertTrue(BACKEND_FEATURES["repository_context_scoring"])
+        self.assertTrue(BACKEND_FEATURES["agent_context_compaction"])
+        self.assertTrue(BACKEND_FEATURES["context_usage_bar"])
 
     def test_health_includes_context_enforcement_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -36,6 +38,8 @@ class ServerCompatibilityTests(unittest.TestCase):
                 workspace_dir=root,
                 context_change_bar_mode="strict",
                 context_change_bar_threshold=5,
+                agent_context_budget_tokens=16000,
+                agent_context_compaction_enabled=True,
                 prefer_multi_file_patches=True,
                 default_route=["echo"],
                 agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
@@ -53,6 +57,8 @@ class ServerCompatibilityTests(unittest.TestCase):
 
             self.assertEqual(data["context_change_bar"]["mode"], "strict")
             self.assertEqual(data["context_change_bar"]["threshold"], 5)
+            self.assertTrue(data["agent_context_compaction"]["enabled"])
+            self.assertEqual(data["agent_context_compaction"]["budget_tokens"], 16000)
             self.assertTrue(data["grouped_patch_enforcement"]["enabled"])
             self.assertEqual(data["repository_context_scoring"]["strict_minimum"], 6)
             self.assertTrue(data["features"]["repository_context_scoring"])

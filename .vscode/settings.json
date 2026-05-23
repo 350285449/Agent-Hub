@@ -10,6 +10,6 @@
     "agentHub.groupPlanCandidates": 1,
     "agentHub.agentMaxSteps": 50,
     "agentHub.allowShellTools": true,
-    "agentHub.maxTokens": 32000,
+    "agentHub.maxTokens": 64000,
     "agentHub.autoStart": true
 }

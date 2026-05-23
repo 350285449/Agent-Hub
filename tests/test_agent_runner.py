@@ -9,8 +9,8 @@ from pathlib import Path
 from agent_hub.agent_tools import AgentToolbox, create_workspace_checkpoint, restore_workspace_checkpoint
 from agent_hub.agent_runner import AgentRunner, _is_repository_file_path
 from agent_hub.config import AgentConfig, HubConfig
-from agent_hub.models import HubRequest, ProviderResult
-from agent_hub.router import AgentRouter
+from agent_hub.models import HubRequest, HubResponse, ProviderResult
+from agent_hub.router import AgentRouter, estimate_input_tokens
 from agent_hub.providers import ProviderError
 
 
@@ -2522,6 +2522,10 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertEqual(response.text, "Repaired.")
             self.assertEqual((root / "bad.py").read_text(encoding="utf-8"), "VALUE = 2\n")
             self.assertIn("restored_to_pre_edit_checkpoint", seen_messages[1][-1]["content"])
+            repair_prompt = "\n".join(str(message.get("content", "")) for message in seen_messages[1])
+            self.assertIn('"failure_type": "validation_failure"', repair_prompt)
+            self.assertIn('"failed_categories"', repair_prompt)
+            self.assertIn("SyntaxError", repair_prompt)
             event_types = [event["type"] for event in events]
             self.assertIn("workspace_restored", event_types)
             self.assertIn("validation_repair_loop", event_types)
@@ -2687,6 +2691,562 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertEqual((root / "app.py").read_text(encoding="utf-8"), "VALUE = 1\n")
             self.assertIn('"failure_type": "tool_failure"', seen_messages[1][-1]["content"])
             self.assertIn("edit_repair_loop", [event["type"] for event in events])
+
+    def test_repeated_read_file_uses_cached_compact_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "big.txt").write_text("".join(f"line-{index:04d}\n" for index in range(2000)), encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                agent_max_steps=5,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+            read_calls = 0
+            token_counts: list[int] = []
+            message_counts: list[int] = []
+            original_read_file = AgentToolbox._read_file
+
+            def counting_read_file(toolbox: AgentToolbox, args: dict) -> dict:
+                nonlocal read_calls
+                read_calls += 1
+                return original_read_file(toolbox, args)
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    token_counts.append(estimate_input_tokens(request))
+                    message_counts.append(len(request.messages))
+                    if calls <= 4:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"read_file","args":{"path":"big.txt"}}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(text='{"action":"final","answer":"Done."}', model=self.agent.model)
+
+            AgentToolbox._read_file = counting_read_file
+            try:
+                response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                    HubRequest(session_id="agent", messages=[{"role": "user", "content": "Read big.txt"}])
+                )
+            finally:
+                AgentToolbox._read_file = original_read_file
+
+            self.assertEqual(response.text, "Done.")
+            self.assertEqual(read_calls, 1)
+            self.assertLess(token_counts[-1] - token_counts[1], 5000)
+            self.assertLessEqual(max(message_counts), message_counts[1] + 2)
+            duplicates = [
+                step for step in response.raw["agent_hub"]["steps"]
+                if step["result"].get("duplicate_context_result")
+            ]
+            self.assertEqual(len(duplicates), 3)
+
+    def test_repeated_repo_map_uses_compact_references(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("from helper import value\nprint(value)\n", encoding="utf-8")
+            (root / "helper.py").write_text("value = 1\n", encoding="utf-8")
+            (root / "test_app.py").write_text("from app import value\n", encoding="utf-8")
+            for index in range(30):
+                (root / f"module_{index}.py").write_text(f"VALUE_{index} = {index}\n", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                agent_max_steps=5,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+            repo_map_calls = 0
+            token_counts: list[int] = []
+            seen_messages: list[list[dict]] = []
+            original_repo_map = AgentToolbox._repo_map
+
+            def counting_repo_map(toolbox: AgentToolbox, args: dict) -> dict:
+                nonlocal repo_map_calls
+                repo_map_calls += 1
+                return original_repo_map(toolbox, args)
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    token_counts.append(estimate_input_tokens(request))
+                    seen_messages.append(list(request.messages))
+                    if calls <= 4:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"repo_map","args":{"target":"app.py"}}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(text='{"action":"final","answer":"Done."}', model=self.agent.model)
+
+            AgentToolbox._repo_map = counting_repo_map
+            try:
+                response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                    HubRequest(session_id="agent", messages=[{"role": "user", "content": "Map app.py repeatedly"}])
+                )
+            finally:
+                AgentToolbox._repo_map = original_repo_map
+
+            self.assertEqual(response.text, "Done.")
+            self.assertEqual(repo_map_calls, 1)
+            self.assertLess(token_counts[-1] - token_counts[1], 3000)
+            final_prompt = "\n".join(str(message.get("content", "")) for message in seen_messages[-1])
+            self.assertIn("repo_map app.py", final_prompt)
+            self.assertIn("duplicate_context_result", final_prompt)
+
+    def test_repeated_policy_failures_do_not_duplicate_identical_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                context_change_bar_mode="off",
+                agent_max_steps=4,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+            seen_messages: list[list[dict]] = []
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    seen_messages.append(list(request.messages))
+                    if calls <= 3:
+                        return ProviderResult(
+                            text=(
+                                '{"action":"tool","tool":"write_file","args":'
+                                '{"path":"app.py","content":"VALUE = 2\\n"}}'
+                            ),
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(text='{"action":"final","answer":"Done."}', model=self.agent.model)
+
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(session_id="agent", messages=[{"role": "user", "content": "Update app.py"}])
+            )
+
+            self.assertEqual(response.text, "Done.")
+            last_prompt = "\n".join(str(message.get("content", "")) for message in seen_messages[-1])
+            self.assertLessEqual(last_prompt.count("write_file is reserved for new generated files"), 2)
+            self.assertIn("duplicate_policy_feedback", last_prompt)
+
+    def test_old_tool_results_compact_and_recent_results_remain_full(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for index in range(4):
+                (root / f"file{index}.txt").write_text(f"unique-content-{index}\n", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                agent_max_steps=6,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+            seen_messages: list[list[dict]] = []
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    seen_messages.append(list(request.messages))
+                    if calls <= 4:
+                        return ProviderResult(
+                            text=json.dumps(
+                                {
+                                    "action": "tool",
+                                    "tool": "read_file",
+                                    "args": {"path": f"file{calls - 1}.txt"},
+                                }
+                            ),
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(text='{"action":"final","answer":"Done."}', model=self.agent.model)
+
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(session_id="agent", messages=[{"role": "user", "content": "Read files"}])
+            )
+
+            self.assertEqual(response.text, "Done.")
+            final_prompt = "\n".join(str(message.get("content", "")) for message in seen_messages[-1])
+            self.assertIn("content_omitted", final_prompt)
+            self.assertIn("content_hash", final_prompt)
+            self.assertNotIn("unique-content-0", final_prompt)
+            self.assertNotIn("unique-content-1", final_prompt)
+            self.assertIn("unique-content-2", final_prompt)
+            self.assertIn("unique-content-3", final_prompt)
+
+    def test_context_usage_updated_event_is_emitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "note.txt").write_text("hello\n", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"read_file","args":{"path":"note.txt"}}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(text='{"action":"final","answer":"Done."}', model=self.agent.model)
+
+            events: list[dict] = []
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(session_id="agent", messages=[{"role": "user", "content": "Read note"}]),
+                event_sink=events.append,
+            )
+
+            self.assertEqual(response.text, "Done.")
+            usage_events = [event for event in events if event["type"] == "context_usage_updated"]
+            self.assertGreaterEqual(len(usage_events), 2)
+            expected_fields = {
+                "input_tokens",
+                "budget_tokens",
+                "percent_used",
+                "tokens_added_since_last_step",
+                "compaction_triggered",
+                "compaction_level",
+                "compacted_messages_count",
+                "compacted_tool_results_count",
+                "estimated_tokens_saved",
+                "largest_context_sources",
+                "warning_level",
+            }
+            self.assertTrue(expected_fields.issubset(usage_events[0]))
+            self.assertIn("tokens_added_since_last_step", usage_events[1])
+
+    def test_context_compaction_triggers_when_budget_is_exceeded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "big.txt").write_text("x" * 20_000, encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                        context_window=10_000,
+                        max_tokens=1000,
+                    )
+                },
+            )
+            calls = 0
+            seen_messages: list[list[dict]] = []
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    seen_messages.append(list(request.messages))
+                    if calls == 1:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"read_file","args":{"path":"big.txt"}}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(text='{"action":"final","answer":"Done."}', model=self.agent.model)
+
+            events: list[dict] = []
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Read big"}],
+                    raw={"agent_context_budget_tokens": 1200},
+                ),
+                event_sink=events.append,
+            )
+
+            self.assertEqual(response.text, "Done.")
+            usage_events = [event for event in events if event["type"] == "context_usage_updated"]
+            self.assertTrue(any(event["compaction_triggered"] for event in usage_events))
+            self.assertTrue(any(event["compacted_messages_count"] > 0 for event in usage_events))
+            final_prompt = "\n".join(str(message.get("content", "")) for message in seen_messages[-1])
+            self.assertIn("content_omitted", final_prompt)
+
+    def test_session_history_does_not_inject_old_tool_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            router = AgentRouter(config)
+            huge_tool_output = "Tool result for read_file:\n" + ("old file contents\n" * 2000)
+            router.session_store.record_turn(
+                HubRequest(
+                    session_id="agent",
+                    messages=[
+                        {"role": "user", "content": "Old request"},
+                        {"role": "user", "content": huge_tool_output},
+                    ],
+                ),
+                HubResponse(
+                    request_id="test",
+                    session_id="agent",
+                    agent="local",
+                    provider="test",
+                    model="test",
+                    text="Old answer",
+                ),
+            )
+            seen_messages: list[list[dict]] = []
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    seen_messages.append(list(request.messages))
+                    return ProviderResult(text='{"action":"final","answer":"Done."}', model=self.agent.model)
+
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider, session_store=router.session_store)).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "New request"}],
+                    use_session_history=True,
+                )
+            )
+
+            self.assertEqual(response.text, "Done.")
+            prompt = "\n".join(str(message.get("content", "")) for message in seen_messages[0])
+            self.assertIn("Prior session", prompt)
+            self.assertIn("Old answer", prompt)
+            self.assertNotIn("Tool result for read_file", prompt)
+            self.assertNotIn("old file contents", prompt)
+
+    def test_provider_is_not_called_when_prompt_exceeds_hard_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    return ProviderResult(text='{"action":"final","answer":"Should not run."}', model=self.agent.model)
+
+            events: list[dict] = []
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Do work"}],
+                    raw={"agent_context_budget_tokens": 50},
+                ),
+                event_sink=events.append,
+            )
+
+            self.assertEqual(calls, 0)
+            self.assertIn("exceeded the configured context budget", response.text)
+            usage_events = [event for event in events if event["type"] == "context_usage_updated"]
+            self.assertTrue(usage_events)
+            self.assertTrue(usage_events[0]["hard_budget_exceeded"])
+            self.assertEqual(usage_events[0]["compaction_level"], "hard_stop")
+
+    def test_repair_loop_context_stays_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("VALUE = 1\n" + ("# context\n" * 7000), encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                context_change_bar_mode="off",
+                agent_max_steps=6,
+                validation_repair_attempts=3,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                        context_window=12_000,
+                        max_tokens=1000,
+                    )
+                },
+            )
+            calls = 0
+            token_counts: list[int] = []
+            seen_messages: list[list[dict]] = []
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    token_counts.append(estimate_input_tokens(request))
+                    seen_messages.append(list(request.messages))
+                    if calls == 1:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"read_file","args":{"path":"app.py"}}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text=(
+                            '{"action":"tool","tool":"apply_patch","args":'
+                            '{"summary":"Bad repair","changes":['
+                            '{"path":"app.py","old":"MISSING","new":"VALUE = 2"}]}}'
+                        ),
+                        model=self.agent.model,
+                    )
+
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Repair app.py"}],
+                    raw={"agent_context_budget_tokens": 9000},
+                )
+            )
+
+            self.assertIn("repair attempt", response.text)
+            self.assertLessEqual(max(token_counts), 9000)
+            last_prompt = "\n".join(str(message.get("content", "")) for message in seen_messages[-1])
+            self.assertIn("content_omitted", last_prompt)
+
+    def test_long_agent_runs_remain_under_configured_context_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "big.txt").write_text("".join(f"payload-{index:04d}\n" for index in range(7000)), encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                agent_max_steps=12,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                        context_window=12_000,
+                        max_tokens=1000,
+                    )
+                },
+            )
+            calls = 0
+            token_counts: list[int] = []
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    token_counts.append(estimate_input_tokens(request))
+                    if calls <= 10:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"read_file","args":{"path":"big.txt"}}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(text='{"action":"final","answer":"Done."}', model=self.agent.model)
+
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(session_id="agent", messages=[{"role": "user", "content": "Read repeatedly"}])
+            )
+
+            self.assertEqual(response.text, "Done.")
+            self.assertTrue(token_counts)
+            self.assertLessEqual(max(token_counts) + 1000, 12_000)
 
     def test_workspace_checkpoint_restore_restores_and_removes_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

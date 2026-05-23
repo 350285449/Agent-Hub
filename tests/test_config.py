@@ -55,6 +55,8 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.context_change_bar_enabled)
         self.assertEqual(config.context_change_bar_threshold, 3)
         self.assertEqual(config.context_change_bar_mode, "light")
+        self.assertTrue(config.agent_context_compaction_enabled)
+        self.assertEqual(config.agent_context_budget_tokens, 32_000)
         self.assertTrue(is_free_agent(config.agents["local-research"]))
         self.assertTrue(is_free_agent(config.agents["codex"]))
         self.assertTrue(is_free_agent(config.agents["claude"]))
@@ -90,6 +92,8 @@ class ConfigTests(unittest.TestCase):
                 "context_change_bar_enabled": False,
                 "context_change_bar_threshold": 7,
                 "context_change_bar_mode": "strict",
+                "agent_context_budget_tokens": 12345,
+                "agent_context_compaction_enabled": False,
                 "prefer_multi_file_patches": False,
                 "agents": [],
             }
@@ -98,12 +102,16 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.context_change_bar_enabled)
         self.assertEqual(config.context_change_bar_threshold, 7)
         self.assertEqual(config.context_change_bar_mode, "strict")
+        self.assertEqual(config.agent_context_budget_tokens, 12345)
+        self.assertFalse(config.agent_context_compaction_enabled)
         self.assertFalse(config.prefer_multi_file_patches)
 
         data = config_to_dict(config)
         self.assertFalse(data["context_change_bar_enabled"])
         self.assertEqual(data["context_change_bar_threshold"], 7)
         self.assertEqual(data["context_change_bar_mode"], "strict")
+        self.assertEqual(data["agent_context_budget_tokens"], 12345)
+        self.assertFalse(data["agent_context_compaction_enabled"])
         self.assertFalse(data["prefer_multi_file_patches"])
 
     def test_cloud_agents_can_be_configured_from_environment(self) -> None:

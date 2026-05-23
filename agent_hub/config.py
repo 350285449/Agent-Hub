@@ -95,6 +95,8 @@ class HubConfig:
     workspace_dir: Path = Path(".")
 
     agent_max_steps: int = 8
+    agent_context_budget_tokens: int = 32_000
+    agent_context_compaction_enabled: bool = True
     allow_shell_tools: bool = True
     shell_command_policy: str = "allow"
     free_only: bool = True
@@ -435,6 +437,8 @@ def free_local_config() -> HubConfig:
     return HubConfig(
         workspace_dir=Path("."),
         agent_max_steps=8,
+        agent_context_budget_tokens=32_000,
+        agent_context_compaction_enabled=True,
         allow_shell_tools=True,
         shell_command_policy="allow",
         free_only=True,
@@ -568,6 +572,13 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         archive_dir=Path(raw.get("archive_dir", ".agent-hub/archive")),
         workspace_dir=Path(raw.get("workspace_dir", ".")),
         agent_max_steps=int(raw.get("agent_max_steps", 8)),
+        agent_context_budget_tokens=_normalize_agent_context_budget(
+            raw.get("agent_context_budget_tokens", 32_000)
+        ),
+        agent_context_compaction_enabled=_bool_with_default(
+            raw.get("agent_context_compaction_enabled"),
+            True,
+        ),
         allow_shell_tools=_bool_with_default(raw.get("allow_shell_tools"), True),
         shell_command_policy=_normalize_shell_command_policy(
             raw.get("shell_command_policy", raw.get("shell_tools_policy", "allow"))
@@ -671,6 +682,8 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "archive_dir": str(config.archive_dir),
         "workspace_dir": str(config.workspace_dir),
         "agent_max_steps": config.agent_max_steps,
+        "agent_context_budget_tokens": config.agent_context_budget_tokens,
+        "agent_context_compaction_enabled": config.agent_context_compaction_enabled,
         "allow_shell_tools": config.allow_shell_tools,
         "shell_command_policy": config.shell_command_policy,
         "free_only": config.free_only,
@@ -873,6 +886,14 @@ def _normalize_context_change_bar_threshold(value: Any) -> int:
     except (TypeError, ValueError):
         number = 3
     return max(0, min(number, 50))
+
+
+def _normalize_agent_context_budget(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 32_000
+    return max(1_000, min(number, 1_000_000))
 
 
 def _expand_env_string(value: Any) -> Any:
