@@ -47,6 +47,9 @@ BACKEND_FEATURES = {
     "shell_command_permission_policy": True,
     "agent_hub_model_aliases": True,
     "openai_tool_call_passthrough": True,
+    "anthropic_messages_compatibility": True,
+    "anthropic_tool_use_passthrough": True,
+    "local_dummy_auth_compatibility": True,
     "workspace_checkpoints": True,
     "validation_repair_loops": True,
     "validation_rollback": True,
@@ -75,10 +78,11 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     server: AgentHubHTTPServer
 
     def do_GET(self) -> None:
-        if self.path in {"/", ""}:
+        path = _request_path(self.path)
+        if path in {"/", ""}:
             self._send_html(self._root_html())
             return
-        if self.path == "/health":
+        if path == "/health":
             self._send_json(
                 {
                     "status": "ok",
@@ -141,7 +145,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 }
             )
             return
-        if self.path in {"/v1/models", "/api/v1/models"}:
+        if path in {"/v1/models", "/api/v1/models"}:
             self._send_json(
                 {
                     "object": "list",
@@ -151,6 +155,23 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"error": "not found"}, status=404)
 
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self._send_common_headers()
+        self.send_header(
+            "Access-Control-Allow-Methods",
+            "GET, POST, OPTIONS",
+        )
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            (
+                "Authorization, Content-Type, X-API-Key, API-Key, "
+                "Anthropic-Version, Anthropic-Beta, X-Agent-Hub-Session-ID, "
+                "X-Session-ID, X-Conversation-ID, X-Thread-ID"
+            ),
+        )
+        self.end_headers()
+
     def do_POST(self) -> None:
         try:
             payload = self._read_json()
@@ -158,7 +179,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=400)
             return
 
-        if self.path in {"/agent", "/v1/agent"}:
+        path = _request_path(self.path)
+        if path in {"/agent", "/v1/agent"}:
             self._handle_payload(
                 payload,
                 api_shape="native",
@@ -166,34 +188,34 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 agent_mode_default=True,
             )
             return
-        if self.path in {"/v1/recommend-model", "/api/v1/recommend-model"}:
+        if path in {"/v1/recommend-model", "/api/v1/recommend-model"}:
             self._handle_recommendation(payload)
             return
-        if self.path in {"/api/v1/chat/completions", "/openrouter/v1/chat/completions"}:
+        if path in {"/api/v1/chat/completions", "/openrouter/v1/chat/completions"}:
             self._handle_payload(
                 payload,
                 api_shape="openai-chat",
                 response_shape="openai-chat",
             )
             return
-        if self.path == "/v1/route":
+        if path == "/v1/route":
             self._handle_payload(payload, api_shape="native", response_shape="native")
             return
-        if self.path == "/v1/chat/completions":
+        if path == "/v1/chat/completions":
             self._handle_payload(
                 payload,
                 api_shape="openai-chat",
                 response_shape="openai-chat",
             )
             return
-        if self.path == "/v1/responses":
+        if path == "/v1/responses":
             self._handle_payload(
                 payload,
                 api_shape="openai-responses",
                 response_shape="openai-responses",
             )
             return
-        if self.path == "/v1/messages":
+        if path == "/v1/messages":
             self._handle_payload(
                 payload,
                 api_shape="anthropic-messages",
@@ -203,6 +225,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, status=404)
 
     def _handle_recommendation(self, payload: dict[str, Any]) -> None:
+        payload = _payload_with_header_metadata(payload, self.headers)
         request = request_from_payload(payload, api_shape="native")
         limit = _positive_int(payload.get("limit"), default=5, maximum=25)
         prefer = payload.get("prefer")
@@ -235,6 +258,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         response_shape: str,
         agent_mode_default: bool = False,
     ) -> None:
+        payload = _payload_with_header_metadata(payload, self.headers)
         request = request_from_payload(payload, api_shape=api_shape)
         _apply_model_routing(self.server.config, request)
         if response_shape == "native" and request.stream:
@@ -307,6 +331,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self._send_common_headers()
         self.end_headers()
 
         client_connected = True
@@ -399,6 +424,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self._send_common_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -407,8 +433,13 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._send_common_headers()
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_common_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
 
     def _root_html(self) -> str:
         config = self.server.config
@@ -499,6 +530,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self._send_common_headers()
         self.end_headers()
         for event in openai_stream_events(
             response,
@@ -512,6 +544,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self._send_common_headers()
         self.end_headers()
         for name, event in anthropic_stream_events(
             response,
@@ -525,6 +558,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self._send_common_headers()
         self.end_headers()
         for event in openai_response_stream_events(
             response,
@@ -624,16 +658,16 @@ def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:
     for agent in config.agents.values():
         if not agent.enabled:
             continue
-        for model_id in (agent.name, agent.model):
+        for model_id in (f"agent:{agent.name}", agent.name, agent.model):
             if model_id in seen:
                 continue
             rows.append(
                 {
                     "id": model_id,
                     "object": "model",
-                    "owned_by": agent.provider,
+                    "owned_by": "agent-hub" if model_id.startswith("agent:") else agent.provider,
                     "agent_hub": {
-                        "type": "agent",
+                        "type": "agent_alias" if model_id.startswith("agent:") else "agent",
                         "agent": agent.name,
                         "provider_type": agent.provider_type,
                         "free": agent.free,
@@ -657,6 +691,20 @@ def _apply_model_routing(config: HubConfig, request: HubRequest) -> None:
     if not isinstance(model, str) or not model.strip():
         return
     normalized = model.strip().lower()
+    if request.route is None and normalized in ROUTE_MODEL_ALIASES:
+        request.route = ROUTE_MODEL_ALIASES[normalized]
+        return
+    for prefix in ("agent:", "agent-hub-agent:"):
+        if request.preferred_agent is None and normalized.startswith(prefix):
+            agent_name = model.strip()[len(prefix) :].strip()
+            if agent_name:
+                request.preferred_agent = agent_name
+                return
+    if request.route is None and normalized.startswith("agent-hub/"):
+        route_name = normalized.split("/", 1)[1].strip()
+        if route_name:
+            request.route = route_name
+            return
     route_names = {route.name.lower(): route.name for route in config.routes}
     if request.route is None and normalized in route_names:
         request.route = route_names[normalized]
@@ -706,3 +754,33 @@ def _positive_int(value: Any, *, default: int, maximum: int) -> int:
     except (TypeError, ValueError):
         number = default
     return max(1, min(number, maximum))
+
+
+def _request_path(path: str) -> str:
+    return path.split("?", 1)[0]
+
+
+def _payload_with_header_metadata(payload: dict[str, Any], headers: Any) -> dict[str, Any]:
+    metadata = dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else {}
+    for header_name, key in (
+        ("X-Agent-Hub-Session-ID", "session_id"),
+        ("X-Session-ID", "session_id"),
+        ("X-Conversation-ID", "conversation_id"),
+        ("X-Thread-ID", "thread_id"),
+    ):
+        value = headers.get(header_name)
+        if isinstance(value, str) and value.strip() and not _has_session_key(metadata):
+            metadata[key] = value.strip()
+            break
+    if not metadata:
+        return payload
+    copied = dict(payload)
+    copied["metadata"] = metadata
+    return copied
+
+
+def _has_session_key(data: dict[str, Any]) -> bool:
+    return any(
+        isinstance(data.get(key), str) and str(data.get(key)).strip()
+        for key in ("session_id", "conversation_id", "thread_id")
+    )

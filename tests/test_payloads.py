@@ -5,6 +5,7 @@ import unittest
 from agent_hub.models import HubResponse
 from agent_hub.payloads import (
     anthropic_message_response,
+    anthropic_stream_events,
     openai_chat_response,
     openai_stream_events,
     openai_response_response,
@@ -198,6 +199,53 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(events[0]["choices"][0]["delta"]["tool_calls"][0]["id"], "call_1")
         self.assertEqual(responses["output"][0]["type"], "function_call")
         self.assertEqual(responses["output"][0]["name"], "read_file")
+
+    def test_anthropic_response_preserves_tool_use_from_openai_raw(self) -> None:
+        response = HubResponse(
+            request_id="hub-1",
+            session_id="s1",
+            agent="groq",
+            provider="openai-compatible",
+            model="internal-model",
+            public_model="agent-hub-coding",
+            text="",
+            raw={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": "{\"path\":\"README.md\"}",
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            finish_reason="tool_calls",
+        )
+
+        shaped = anthropic_message_response(response)
+        events = anthropic_stream_events(response)
+
+        self.assertEqual(shaped["content"][0]["type"], "tool_use")
+        self.assertEqual(shaped["content"][0]["name"], "read_file")
+        self.assertEqual(shaped["content"][0]["input"]["path"], "README.md")
+        self.assertEqual(shaped["stop_reason"], "tool_use")
+        self.assertTrue(
+            any(
+                event[1].get("delta", {}).get("type") == "input_json_delta"
+                for event in events
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from typing import Any
@@ -89,8 +90,8 @@ def request_from_native(payload: dict[str, Any]) -> HubRequest:
 
 
 def request_from_openai_chat(payload: dict[str, Any]) -> HubRequest:
-    metadata = dict(payload.get("metadata", {}))
-    hub_options = dict(payload.get("agent_hub", {}))
+    metadata = _dict_value(payload.get("metadata"))
+    hub_options = _dict_value(payload.get("agent_hub"))
     model_route, model_agent = _routing_from_model(payload.get("model"))
     return HubRequest(
         messages=_message_list(payload.get("messages")),
@@ -108,8 +109,8 @@ def request_from_openai_chat(payload: dict[str, Any]) -> HubRequest:
 
 
 def request_from_openai_responses(payload: dict[str, Any]) -> HubRequest:
-    metadata = dict(payload.get("metadata", {}))
-    hub_options = dict(payload.get("agent_hub", {}))
+    metadata = _dict_value(payload.get("metadata"))
+    hub_options = _dict_value(payload.get("agent_hub"))
     model_route, model_agent = _routing_from_model(payload.get("model"))
     messages = _responses_input_messages(payload.get("input"))
     instructions = payload.get("instructions")
@@ -131,8 +132,8 @@ def request_from_openai_responses(payload: dict[str, Any]) -> HubRequest:
 
 
 def request_from_anthropic_messages(payload: dict[str, Any]) -> HubRequest:
-    metadata = dict(payload.get("metadata", {}))
-    hub_options = dict(payload.get("agent_hub", {}))
+    metadata = _dict_value(payload.get("metadata"))
+    hub_options = _dict_value(payload.get("agent_hub"))
     model_route, model_agent = _routing_from_model(payload.get("model"))
     messages = _message_list(payload.get("messages"))
     system = payload.get("system")
@@ -169,7 +170,8 @@ def openai_chat_response(
         "content": response.text,
     }
     if tool_calls:
-        message["content"] = raw_message.get("content") if isinstance(raw_message, dict) else None
+        raw_content = raw_message.get("content") if isinstance(raw_message, dict) else None
+        message["content"] = raw_content if raw_content is not None else (response.text or None)
         message["tool_calls"] = tool_calls
     if isinstance(function_call, dict):
         message["function_call"] = function_call
@@ -198,18 +200,17 @@ def anthropic_message_response(
     include_routing_details: bool = False,
 ) -> dict[str, Any]:
     model = response.public_model or response.model
+    content = _anthropic_content_blocks(response)
     data: dict[str, Any] = {
         "id": f"msg_{response.request_id}",
         "type": "message",
         "role": "assistant",
-        "content": [
-            {
-                "type": "text",
-                "text": response.text,
-            }
-        ],
+        "content": content,
         "model": model,
-        "stop_reason": _anthropic_stop_reason(response.finish_reason),
+        "stop_reason": _anthropic_stop_reason(
+            response.finish_reason,
+            has_tool_use=any(block.get("type") == "tool_use" for block in content),
+        ),
         "stop_sequence": None,
         "usage": response.usage,
     }
@@ -275,9 +276,12 @@ def openai_stream_events(
     chunk_id = f"chatcmpl-{response.request_id}"
     model = response.public_model or response.model
     tool_calls = _openai_tool_calls_from_raw(response.raw)
+    function_call = _openai_function_call_from_raw(response.raw)
     delta: dict[str, Any] = {"role": "assistant"}
     if tool_calls:
         delta["tool_calls"] = tool_calls
+    elif function_call:
+        delta["function_call"] = function_call
     else:
         delta["content"] = response.text
     first_event: dict[str, Any] = {
@@ -306,7 +310,10 @@ def openai_stream_events(
                 {
                     "index": 0,
                     "delta": {},
-                    "finish_reason": response.finish_reason or ("tool_calls" if tool_calls else "stop"),
+                    "finish_reason": (
+                        response.finish_reason
+                        or ("tool_calls" if tool_calls else "function_call" if delta.get("function_call") else "stop")
+                    ),
                 }
             ],
         },
@@ -322,35 +329,82 @@ def anthropic_stream_events(
         response,
         include_routing_details=include_routing_details,
     )
-    return [
-        ("message_start", {"type": "message_start", "message": message}),
-        (
-            "content_block_start",
-            {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""},
-            },
-        ),
-        (
-            "content_block_delta",
-            {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "text_delta", "text": response.text},
-            },
-        ),
-        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
-        (
-            "message_delta",
-            {
-                "type": "message_delta",
-                "delta": {"stop_reason": _anthropic_stop_reason(response.finish_reason)},
-                "usage": response.usage,
-            },
-        ),
-        ("message_stop", {"type": "message_stop"}),
+    started = dict(message)
+    started["content"] = []
+    started["stop_reason"] = None
+    events: list[tuple[str, dict[str, Any]]] = [
+        ("message_start", {"type": "message_start", "message": started}),
     ]
+    for index, block in enumerate(message["content"]):
+        block_type = block.get("type")
+        if block_type == "tool_use":
+            input_payload = block.get("input") if isinstance(block.get("input"), dict) else {}
+            events.extend(
+                [
+                    (
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": block.get("id") or f"toolu_{index}",
+                                "name": block.get("name") or "",
+                                "input": {},
+                            },
+                        },
+                    ),
+                    (
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": json_dumps_compact(input_payload),
+                            },
+                        },
+                    ),
+                    ("content_block_stop", {"type": "content_block_stop", "index": index}),
+                ]
+            )
+            continue
+        text = str(block.get("text") or "")
+        events.extend(
+            [
+                (
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": index,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                ),
+                (
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {"type": "text_delta", "text": text},
+                    },
+                ),
+                ("content_block_stop", {"type": "content_block_stop", "index": index}),
+            ]
+        )
+    events.extend(
+        [
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": message["stop_reason"]},
+                    "usage": response.usage,
+                },
+            ),
+            ("message_stop", {"type": "message_stop"}),
+        ]
+    )
+    return events
 
 
 def openai_response_stream_events(
@@ -426,6 +480,89 @@ def _openai_tool_calls_from_raw(raw: dict[str, Any]) -> list[dict[str, Any]]:
     return _gemini_tool_calls(raw)
 
 
+def _anthropic_content_blocks(response: HubResponse) -> list[dict[str, Any]]:
+    raw_content = _anthropic_content_from_raw(response.raw)
+    if raw_content:
+        return raw_content
+    tool_uses = _anthropic_tool_uses_from_raw(response.raw)
+    if tool_uses:
+        blocks: list[dict[str, Any]] = []
+        if response.text:
+            blocks.append({"type": "text", "text": response.text})
+        blocks.extend(tool_uses)
+        return blocks
+    return [{"type": "text", "text": response.text}]
+
+
+def _anthropic_content_from_raw(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    content = raw.get("content") if isinstance(raw, dict) else None
+    if not isinstance(content, list):
+        return []
+    blocks: list[dict[str, Any]] = []
+    for index, item in enumerate(content):
+        if not isinstance(item, dict):
+            continue
+        block_type = item.get("type")
+        if block_type == "text":
+            blocks.append({"type": "text", "text": str(item.get("text") or "")})
+        elif block_type == "tool_use" and isinstance(item.get("name"), str):
+            input_payload = item.get("input") if isinstance(item.get("input"), dict) else {}
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": str(item.get("id") or f"toolu_{index}"),
+                    "name": item["name"],
+                    "input": input_payload,
+                }
+            )
+    return blocks
+
+
+def _anthropic_tool_uses_from_raw(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    direct = [
+        block
+        for block in _anthropic_content_from_raw(raw)
+        if block.get("type") == "tool_use"
+    ]
+    if direct:
+        return direct
+
+    calls = _openai_message_tool_calls(raw)
+    function_call = _openai_function_call_from_raw(raw)
+    if not calls and function_call:
+        calls = [
+            {
+                "id": "call_0",
+                "type": "function",
+                "function": function_call,
+            }
+        ]
+    if not calls:
+        calls = _gemini_tool_calls(raw)
+    blocks: list[dict[str, Any]] = []
+    for index, call in enumerate(calls):
+        block = _openai_tool_call_to_anthropic(call, index)
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def _openai_tool_call_to_anthropic(call: dict[str, Any], index: int) -> dict[str, Any] | None:
+    function = call.get("function") if isinstance(call, dict) else None
+    if not isinstance(function, dict):
+        return None
+    name = function.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    arguments = function.get("arguments", {})
+    return {
+        "type": "tool_use",
+        "id": str(call.get("id") or f"toolu_{index}"),
+        "name": name,
+        "input": _json_object(arguments),
+    }
+
+
 def _openai_message_tool_calls(raw: dict[str, Any]) -> list[dict[str, Any]]:
     choice = _first_choice(raw)
     message = choice.get("message") if isinstance(choice.get("message"), dict) else None
@@ -435,6 +572,15 @@ def _openai_message_tool_calls(raw: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(tool_calls, list):
         return [call for call in tool_calls if isinstance(call, dict)]
     return []
+
+
+def _openai_function_call_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
+    choice = _first_choice(raw)
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else None
+    if not isinstance(message, dict):
+        return None
+    function_call = message.get("function_call")
+    return function_call if isinstance(function_call, dict) else None
 
 
 def _anthropic_tool_calls(raw: dict[str, Any]) -> list[dict[str, Any]]:
@@ -491,9 +637,19 @@ def _gemini_tool_calls(raw: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def json_dumps_compact(value: Any) -> str:
-    import json
-
     return json.dumps(value if isinstance(value, dict) else {}, separators=(",", ":"), ensure_ascii=False)
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _add_research_metadata(data: dict[str, Any], response: HubResponse) -> None:
@@ -514,6 +670,10 @@ def _session_id(*sources: dict[str, Any]) -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return uuid.uuid4().hex
+
+
+def _dict_value(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _message_list(value: Any) -> list[Message]:
@@ -573,9 +733,13 @@ def _responses_content_text(value: Any) -> str:
     return content_to_text(value)
 
 
-def _anthropic_stop_reason(reason: str | None) -> str:
+def _anthropic_stop_reason(reason: str | None, *, has_tool_use: bool = False) -> str:
+    if has_tool_use:
+        return "tool_use"
     if reason in {"max_tokens", "stop_sequence", "tool_use", "end_turn"}:
         return reason
+    if reason in {"tool_calls", "function_call"}:
+        return "tool_use"
     if reason == "length":
         return "max_tokens"
     return "end_turn"

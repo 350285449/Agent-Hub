@@ -990,9 +990,13 @@ def _request_has_tools(request: HubRequest) -> bool:
     raw = request.raw if isinstance(request.raw, dict) else {}
     if isinstance(raw.get("tools"), list) and raw["tools"]:
         return True
+    if isinstance(raw.get("functions"), list) and raw["functions"]:
+        return True
     if isinstance(raw.get("agent_hub_tools"), list) and raw["agent_hub_tools"]:
         return True
     if isinstance(raw.get("tool_choice"), (str, dict)):
+        return True
+    if isinstance(raw.get("function_call"), (str, dict)):
         return True
     hub_options = raw.get("agent_hub")
     return isinstance(hub_options, dict) and bool(hub_options.get("agent_mode"))

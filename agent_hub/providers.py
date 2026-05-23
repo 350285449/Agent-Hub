@@ -191,6 +191,8 @@ class OpenAIChatProvider:
             request.raw,
             {
                 "frequency_penalty",
+                "function_call",
+                "functions",
                 "logit_bias",
                 "logprobs",
                 "metadata",
@@ -213,12 +215,23 @@ class OpenAIChatProvider:
                 "user",
             },
         )
-        agent_tools = _agent_hub_tool_specs(request)
-        if agent_tools:
+        agent_tools = _request_tool_specs(request)
+        legacy_functions = (
+            not _agent_hub_tool_specs(request)
+            and "tools" not in request.raw
+            and isinstance(request.raw.get("functions"), list)
+        )
+        if agent_tools and not legacy_functions:
             payload["tools"] = _openai_tool_specs(agent_tools)
-            payload.setdefault("tool_choice", "auto")
+            converted_choice = _openai_tool_choice(
+                request.raw.get("tool_choice", request.raw.get("function_call"))
+            )
+            if converted_choice is not None:
+                payload["tool_choice"] = converted_choice
+            else:
+                payload.setdefault("tool_choice", "auto")
         payload["model"] = self.agent.model
-        payload["messages"] = request.messages
+        payload["messages"] = _openai_messages(request.messages)
         if request.max_tokens is not None:
             if "max_completion_tokens" in request.raw:
                 payload["max_completion_tokens"] = request.max_tokens
@@ -385,6 +398,11 @@ class AnthropicMessagesProvider:
         agent_tools = _request_tool_specs(request)
         if agent_tools:
             payload["tools"] = _anthropic_tool_specs(agent_tools)
+            converted_choice = _anthropic_tool_choice(
+                request.raw.get("tool_choice", request.raw.get("function_call"))
+            )
+            if converted_choice is not None:
+                payload["tool_choice"] = converted_choice
         system_parts: list[str] = []
         messages: list[dict[str, Any]] = []
         for message in request.messages:
@@ -394,13 +412,26 @@ class AnthropicMessagesProvider:
                 text = content_to_text(content)
                 if text:
                     system_parts.append(text)
-            elif role in {"assistant", "user"}:
-                messages.append({"role": role, "content": content})
+            elif role == "assistant":
+                messages.append({"role": "assistant", "content": _anthropic_assistant_content(message)})
+            elif role == "user":
+                messages.append({"role": "user", "content": _anthropic_user_content(content)})
             elif role == "tool":
                 messages.append(
                     {
                         "role": "user",
-                        "content": f"Tool result:\n{content_to_text(content)}",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": str(
+                                    message.get("tool_call_id")
+                                    or message.get("tool_use_id")
+                                    or message.get("name")
+                                    or "call_0"
+                                ),
+                                "content": content_to_text(content),
+                            }
+                        ],
                     }
                 )
         if not messages:
@@ -535,26 +566,281 @@ def _request_tool_specs(request: HubRequest) -> list[dict[str, Any]]:
 
 def _openai_request_tool_specs(request: HubRequest) -> list[dict[str, Any]]:
     tools = request.raw.get("tools") if isinstance(request.raw, dict) else None
-    if not isinstance(tools, list):
-        return []
     specs: list[dict[str, Any]] = []
-    for tool in tools:
-        if not isinstance(tool, dict):
+    if isinstance(tools, list):
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            function = tool.get("function") if tool.get("type") == "function" else tool
+            spec = _tool_spec_from_function(function)
+            if spec:
+                specs.append(spec)
+    functions = request.raw.get("functions") if isinstance(request.raw, dict) else None
+    if isinstance(functions, list):
+        for function in functions:
+            spec = _tool_spec_from_function(function)
+            if spec:
+                specs.append(spec)
+    return specs
+
+
+def _tool_spec_from_function(function: Any) -> dict[str, Any] | None:
+    if not isinstance(function, dict):
+        return None
+    name = function.get("name")
+    parameters = (
+        function.get("parameters")
+        or function.get("input_schema")
+        or {"type": "object", "properties": {}}
+    )
+    if isinstance(name, str) and isinstance(parameters, dict):
+        return {
+            "name": name,
+            "description": str(function.get("description") or ""),
+            "parameters": parameters,
+        }
+    return None
+
+
+def _openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role", "user"))
+        content = message.get("content", "")
+        if role == "assistant":
+            tool_calls = _openai_tool_calls_from_message(message)
+            text = content_to_text(content)
+            item: dict[str, Any] = {
+                "role": "assistant",
+                "content": None if tool_calls and not text else text,
+            }
+            if tool_calls:
+                item["tool_calls"] = tool_calls
+            function_call = message.get("function_call")
+            if isinstance(function_call, dict):
+                item["function_call"] = function_call
+            normalized.append(item)
             continue
-        function = tool.get("function") if tool.get("type") == "function" else tool
-        if not isinstance(function, dict):
-            continue
-        name = function.get("name")
-        parameters = function.get("parameters", {"type": "object", "properties": {}})
-        if isinstance(name, str) and isinstance(parameters, dict):
-            specs.append(
+        if role == "tool":
+            normalized.append(
                 {
-                    "name": name,
-                    "description": str(function.get("description") or ""),
-                    "parameters": parameters,
+                    "role": "tool",
+                    "tool_call_id": str(
+                        message.get("tool_call_id")
+                        or message.get("tool_use_id")
+                        or message.get("name")
+                        or "call_0"
+                    ),
+                    "content": content_to_text(content),
                 }
             )
-    return specs
+            continue
+        if role == "user":
+            text, tool_results = _openai_user_parts_from_anthropic(content)
+            for result in tool_results:
+                normalized.append(result)
+            if text:
+                normalized.append({"role": "user", "content": text})
+            if text or tool_results:
+                continue
+        normalized.append({"role": role, "content": content})
+    return normalized
+
+
+def _openai_user_parts_from_anthropic(content: Any) -> tuple[str, list[dict[str, Any]]]:
+    if not isinstance(content, list):
+        return "", []
+    text_parts: list[str] = []
+    tool_results: list[dict[str, Any]] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "tool_result":
+            tool_results.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(
+                        item.get("tool_use_id")
+                        or item.get("tool_call_id")
+                        or item.get("id")
+                        or "call_0"
+                    ),
+                    "content": content_to_text(item.get("content")),
+                }
+            )
+        elif item_type in {"text", "input_text"}:
+            text = item.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+    return "\n".join(part for part in text_parts if part), tool_results
+
+
+def _openai_tool_calls_from_message(message: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_calls = message.get("tool_calls")
+    if isinstance(raw_calls, list) and raw_calls:
+        return [call for call in raw_calls if isinstance(call, dict)]
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    calls: list[dict[str, Any]] = []
+    for index, item in enumerate(content):
+        if not isinstance(item, dict) or item.get("type") != "tool_use":
+            continue
+        name = item.get("name")
+        if not isinstance(name, str):
+            continue
+        calls.append(
+            {
+                "id": str(item.get("id") or f"call_{index}"),
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(
+                        item.get("input") if isinstance(item.get("input"), dict) else {},
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ),
+                },
+            }
+        )
+    return calls
+
+
+def _anthropic_user_content(content: Any) -> Any:
+    if not isinstance(content, list):
+        return content
+    blocks: list[dict[str, Any]] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "tool_result":
+            blocks.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": str(
+                        item.get("tool_use_id")
+                        or item.get("tool_call_id")
+                        or item.get("id")
+                        or "call_0"
+                    ),
+                    "content": content_to_text(item.get("content")),
+                }
+            )
+        elif item_type in {"text", "input_text"} and isinstance(item.get("text"), str):
+            blocks.append({"type": "text", "text": item["text"]})
+    return blocks if blocks else content_to_text(content)
+
+
+def _anthropic_assistant_content(message: dict[str, Any]) -> Any:
+    content = message.get("content", "")
+    blocks: list[dict[str, Any]] = []
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "tool_use" and isinstance(item.get("name"), str):
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": str(item.get("id") or f"toolu_{len(blocks)}"),
+                        "name": item["name"],
+                        "input": item.get("input") if isinstance(item.get("input"), dict) else {},
+                    }
+                )
+            elif item_type in {"text", "output_text"} and isinstance(item.get("text"), str):
+                blocks.append({"type": "text", "text": item["text"]})
+    else:
+        text = content_to_text(content)
+        if text:
+            blocks.append({"type": "text", "text": text})
+
+    raw_tool_calls = message.get("tool_calls")
+    tool_calls = raw_tool_calls if isinstance(raw_tool_calls, list) else []
+    for call in tool_calls:
+        function = call.get("function") if isinstance(call, dict) else None
+        if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+            continue
+        blocks.append(
+            {
+                "type": "tool_use",
+                "id": str(call.get("id") or f"toolu_{len(blocks)}"),
+                "name": function["name"],
+                "input": _json_object(function.get("arguments")),
+            }
+        )
+
+    function_call = message.get("function_call")
+    if isinstance(function_call, dict) and isinstance(function_call.get("name"), str):
+        blocks.append(
+            {
+                "type": "tool_use",
+                "id": "function_call",
+                "name": function_call["name"],
+                "input": _json_object(function_call.get("arguments")),
+            }
+        )
+    return blocks if blocks else ""
+
+
+def _openai_tool_choice(value: Any) -> Any:
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered == "any":
+            return "required"
+        if lowered in {"auto", "none", "required"}:
+            return lowered
+    if not isinstance(value, dict):
+        return None
+    choice_type = value.get("type")
+    if choice_type == "tool" and isinstance(value.get("name"), str):
+        return {"type": "function", "function": {"name": value["name"]}}
+    if choice_type == "function" and isinstance(value.get("function"), dict):
+        return value
+    if isinstance(value.get("name"), str):
+        return {"type": "function", "function": {"name": value["name"]}}
+    if choice_type in {"auto", "none", "required"}:
+        return choice_type
+    if choice_type == "any":
+        return "required"
+    return None
+
+
+def _anthropic_tool_choice(value: Any) -> Any:
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered == "required":
+            return {"type": "any"}
+        if lowered in {"auto", "none", "any"}:
+            return {"type": lowered}
+    if not isinstance(value, dict):
+        return None
+    choice_type = value.get("type")
+    if choice_type == "function":
+        function = value.get("function")
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            return {"type": "tool", "name": function["name"]}
+    if choice_type == "tool" and isinstance(value.get("name"), str):
+        return {"type": "tool", "name": value["name"]}
+    if isinstance(value.get("name"), str):
+        return {"type": "tool", "name": value["name"]}
+    if choice_type in {"auto", "none", "any"}:
+        return {"type": choice_type}
+    return None
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _openai_tool_specs(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -127,6 +127,25 @@ python -m agent_hub local-models
 
 After changing provider settings, restart the Agent-Hub server.
 
+## External Coding Agents
+
+Claude Code / Anthropic-compatible clients:
+
+```text
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+ANTHROPIC_AUTH_TOKEN=local-agent-hub-token
+Model: agent-hub-coding
+```
+
+Cline / RooCode / OpenCode:
+
+```text
+Provider: OpenAI Compatible
+Base URL: http://127.0.0.1:8787/v1
+API Key: local-agent-hub-token
+Model: agent-hub-coding
+```
+
 ## Development
 
 To test the extension from source:

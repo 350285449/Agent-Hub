@@ -6,6 +6,7 @@ from unittest.mock import patch
 from agent_hub.config import AgentConfig
 from agent_hub.models import HubRequest
 from agent_hub.providers import (
+    AnthropicMessagesProvider,
     OpenAIChatProvider,
     GeminiProvider,
     LocalResearchProvider,
@@ -229,6 +230,164 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(payload["tools"][0]["type"], "function")
         self.assertEqual(payload["tools"][0]["function"]["name"], "read_file")
         self.assertEqual(payload["tool_choice"], "auto")
+
+    def test_openai_provider_preserves_legacy_functions(self) -> None:
+        agent = AgentConfig(
+            name="ollama",
+            provider="openai-compatible",
+            model="tool-test",
+            base_url="http://127.0.0.1:11434",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "Read a file"}],
+            raw={
+                "functions": [
+                    {
+                        "name": "read_file",
+                        "description": "Read a workspace file.",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+                "function_call": {"name": "read_file"},
+            },
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.return_value = {
+                "choices": [{"message": {"content": "Done"}, "finish_reason": "stop"}],
+                "usage": {},
+            }
+            OpenAIChatProvider(agent).complete(request)
+
+        payload = post_json.call_args.kwargs["payload"]
+        self.assertEqual(payload["functions"][0]["name"], "read_file")
+        self.assertEqual(payload["function_call"]["name"], "read_file")
+        self.assertNotIn("tools", payload)
+
+    def test_openai_provider_translates_anthropic_tools_and_results(self) -> None:
+        agent = AgentConfig(
+            name="ollama",
+            provider="openai-compatible",
+            model="tool-test",
+            base_url="http://127.0.0.1:11434",
+        )
+        request = HubRequest(
+            session_id="s",
+            api_shape="anthropic-messages",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "read_file",
+                            "input": {"path": "README.md"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": "file text",
+                        }
+                    ],
+                },
+            ],
+            raw={
+                "tools": [
+                    {
+                        "name": "read_file",
+                        "description": "Read a workspace file.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                        },
+                    }
+                ],
+                "tool_choice": {"type": "tool", "name": "read_file"},
+            },
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.return_value = {
+                "choices": [{"message": {"content": "Done"}, "finish_reason": "stop"}],
+                "usage": {},
+            }
+            OpenAIChatProvider(agent).complete(request)
+
+        payload = post_json.call_args.kwargs["payload"]
+        self.assertEqual(payload["tools"][0]["function"]["parameters"]["properties"]["path"]["type"], "string")
+        self.assertEqual(payload["tool_choice"]["function"]["name"], "read_file")
+        self.assertEqual(payload["messages"][0]["tool_calls"][0]["function"]["name"], "read_file")
+        self.assertEqual(payload["messages"][1]["role"], "tool")
+        self.assertEqual(payload["messages"][1]["tool_call_id"], "call_1")
+
+    def test_anthropic_provider_translates_openai_tools_and_results(self) -> None:
+        agent = AgentConfig(
+            name="claude",
+            provider="anthropic",
+            model="claude-test",
+            api_key="key",
+        )
+        request = HubRequest(
+            session_id="s",
+            api_shape="openai-chat",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"README.md\"}",
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "file text",
+                },
+            ],
+            raw={
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": {"type": "function", "function": {"name": "read_file"}},
+            },
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.return_value = {
+                "content": [{"type": "text", "text": "Done"}],
+                "usage": {},
+                "stop_reason": "end_turn",
+            }
+            AnthropicMessagesProvider(agent).complete(request)
+
+        payload = post_json.call_args.kwargs["payload"]
+        self.assertEqual(payload["tools"][0]["input_schema"]["properties"]["path"]["type"], "string")
+        self.assertEqual(payload["tool_choice"]["type"], "tool")
+        self.assertEqual(payload["messages"][0]["content"][0]["type"], "tool_use")
+        self.assertEqual(payload["messages"][1]["content"][0]["type"], "tool_result")
 
     def test_gemini_provider_translates_agent_hub_tools(self) -> None:
         agent = AgentConfig(

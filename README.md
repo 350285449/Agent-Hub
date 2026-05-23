@@ -302,12 +302,20 @@ Start Agent-Hub first:
 python -m agent_hub serve --watch-inbox
 ```
 
+Claude Code / Anthropic-compatible clients:
+
+```text
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+ANTHROPIC_AUTH_TOKEN=local-agent-hub-token
+Model: agent-hub-coding
+```
+
 For Cline or any OpenAI-compatible coding extension:
 
 ```text
-API provider: OpenAI Compatible
+Provider: OpenAI Compatible
 Base URL: http://127.0.0.1:8787/v1
-API key: agent-hub
+API Key: local-agent-hub-token
 Model: agent-hub-coding
 Streaming: on or off
 ```
@@ -323,7 +331,7 @@ endpoint, use the same settings:
 ```text
 Base URL: http://127.0.0.1:8787/v1
 Model: agent-hub-coding
-API key: agent-hub
+API key: local-agent-hub-token
 ```
 
 For tools that use the Anthropic Messages API shape instead, point their
@@ -333,7 +341,7 @@ Anthropic-compatible base URL at the local server and keep the same model alias:
 Base URL: http://127.0.0.1:8787
 Messages endpoint: /v1/messages
 Model: agent-hub-coding
-API key: agent-hub
+API key: local-agent-hub-token
 ```
 
 For tools that use the OpenAI Responses API shape:
@@ -342,7 +350,7 @@ For tools that use the OpenAI Responses API shape:
 Base URL: http://127.0.0.1:8787/v1
 Responses endpoint: /responses
 Model: agent-hub-coding
-API key: agent-hub
+API key: local-agent-hub-token
 ```
 
 Agent-Hub accepts OpenAI Chat Completions, OpenAI Responses, Anthropic Messages,

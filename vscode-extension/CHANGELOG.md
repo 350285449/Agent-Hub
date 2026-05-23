@@ -2,7 +2,14 @@
 
 ## Unreleased
 
-- No changes yet.
+No changes yet.
+
+## 0.7.1
+
+- Adds Claude Code, Cline, RooCode, OpenCode, and Cursor-style local gateway compatibility.
+- Preserves OpenAI tool calls and Anthropic `tool_use`/`tool_result` blocks across routed providers.
+- Documents external coding-agent setup values for the local Agent Hub server.
+- Packages the local model gateway compatibility updates.
 
 ## 0.6.5
 
