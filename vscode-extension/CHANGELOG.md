@@ -4,6 +4,11 @@
 
 - No changes yet.
 
+## 0.6.5
+
+- Bumps the VS Code extension package to `0.6.5`.
+- Bundles the latest Agent Hub backend context enforcement updates.
+
 ## 0.6.0
 
 - Bumps the VS Code extension package to `0.6.0`.

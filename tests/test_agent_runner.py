@@ -232,6 +232,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 agents={
                     "local": AgentConfig(
@@ -285,6 +286,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["gemini"],
                 agents={
                     "gemini": AgentConfig(
@@ -344,6 +346,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 agents={
                     "local": AgentConfig(
@@ -394,6 +397,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 agents={
                     "local": AgentConfig(
@@ -449,6 +453,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 validation_mode="basic",
                 auto_validate_after_edits=True,
@@ -504,6 +509,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 validation_mode="basic",
                 agents={
@@ -1157,6 +1163,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 approval_mode="ask",
                 default_route=["local"],
                 agents={
@@ -1206,6 +1213,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 approval_mode="ask",
                 default_route=["local"],
                 agents={
@@ -1530,6 +1538,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 validation_mode="basic",
                 auto_validate_after_edits=True,
@@ -1630,8 +1639,10 @@ class AgentRunnerTests(unittest.TestCase):
                         model=self.agent.model,
                     )
 
+            events: list[dict] = []
             response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
-                HubRequest(session_id="agent", messages=[{"role": "user", "content": "Update app.py"}])
+                HubRequest(session_id="agent", messages=[{"role": "user", "content": "Update app.py"}]),
+                event_sink=events.append,
             )
 
             self.assertEqual(response.text, "Stopped before editing.")
@@ -1643,6 +1654,195 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertIn("search_files", first["policy"]["instructions"][1])
             self.assertIn("read_file", first["policy"]["instructions"][1])
             self.assertIn("Context change bar blocked", seen_messages[1][-1]["content"])
+            event_types = [event["type"] for event in events]
+            self.assertIn("context_score_updated", event_types)
+            self.assertIn("context_bar_blocked", event_types)
+            self.assertIn("repository_inspection_required", event_types)
+
+    def test_strict_mode_allows_edit_after_repository_inspection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app.py"
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                context_change_bar_mode="strict",
+                auto_validate_after_edits=False,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"repo_map","args":{"target":"app.py"}}',
+                            model=self.agent.model,
+                        )
+                    if calls == 2:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"search_files","args":{"query":"VALUE","path":"."}}',
+                            model=self.agent.model,
+                        )
+                    if calls == 3:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"read_file","args":{"path":"app.py"}}',
+                            model=self.agent.model,
+                        )
+                    if calls == 4:
+                        return ProviderResult(
+                            text=(
+                                '{"action":"tool","tool":"apply_patch","args":'
+                                '{"summary":"Update app","changes":['
+                                '{"path":"app.py","old":"VALUE = 1","new":"VALUE = 2"}]}}'
+                            ),
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text='{"action":"final","answer":"Updated after inspection."}',
+                        model=self.agent.model,
+                    )
+
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(session_id="agent", messages=[{"role": "user", "content": "Update app.py"}])
+            )
+
+            self.assertEqual(response.text, "Updated after inspection.")
+            self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 2\n")
+            state = response.raw["agent_hub"]["reasoning_state"]
+            self.assertGreaterEqual(state["context_score"], 6)
+            self.assertEqual(response.raw["agent_hub"]["steps"][3]["tool"], "apply_patch")
+
+    def test_reviewer_rejects_unread_file_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app.py"
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                context_change_bar_mode="strict",
+                auto_validate_after_edits=False,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"repo_map","args":{"target":"app.py"}}',
+                            model=self.agent.model,
+                        )
+                    if calls == 2:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"search_files","args":{"query":"VALUE","path":"."}}',
+                            model=self.agent.model,
+                        )
+                    if calls == 3:
+                        return ProviderResult(
+                            text=(
+                                '{"action":"tool","tool":"apply_patch","args":'
+                                '{"summary":"Review edit","changes":['
+                                '{"path":"app.py","old":"VALUE = 1","new":"VALUE = 2"}]}}'
+                            ),
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text='{"action":"final","answer":"Reviewer stopped unread edit."}',
+                        model=self.agent.model,
+                    )
+
+            events: list[dict] = []
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(
+                    session_id="agent",
+                    messages=[{"role": "user", "content": "Review and update app.py"}],
+                    raw={"team_agent_role": "reviewer"},
+                ),
+                event_sink=events.append,
+            )
+
+            self.assertEqual(response.text, "Reviewer stopped unread edit.")
+            self.assertEqual(target.read_text(encoding="utf-8"), "VALUE = 1\n")
+            feedback = response.raw["agent_hub"]["steps"][2]["result"]
+            self.assertTrue(feedback["reviewer_rejected_unread_edit"])
+            self.assertIn("Reviewer rejected edits against unread file", feedback["error"])
+            self.assertIn("reviewer_rejected_unread_edit", [event["type"] for event in events])
+
+    def test_reasoning_state_persists_context_score(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"repo_map","args":{"target":"app.py"}}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(
+                        text='{"action":"final","answer":"Inspected."}',
+                        model=self.agent.model,
+                    )
+
+            router = AgentRouter(config, provider_factory=Provider)
+            response = AgentRunner(config, router).run(
+                HubRequest(session_id="agent", messages=[{"role": "user", "content": "Inspect app.py"}])
+            )
+
+            state = response.raw["agent_hub"]["reasoning_state"]
+            self.assertGreaterEqual(state["context_score"], 4)
+            self.assertTrue(state["repository_inspection_complete"])
+            session = router.session_store.load("agent")
+            self.assertEqual(session["reasoning_state"]["context_score"], state["context_score"])
 
     def test_multi_file_task_prefers_apply_patch_after_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1788,6 +1988,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 validation_mode="basic",
                 auto_validate_after_edits=True,
@@ -1937,6 +2138,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 fast_write_finalize=True,  # Enabled, but should not apply to apply_patch
                 agents={
@@ -1994,6 +2196,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 agents={
                     "local": AgentConfig(
@@ -2059,6 +2262,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 agents={
                     "local": AgentConfig(
@@ -2118,6 +2322,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 agents={
                     "local": AgentConfig(
@@ -2189,6 +2394,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 agents={
                     "local": AgentConfig(
@@ -2248,6 +2454,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 validation_mode="basic",
                 validation_repair_attempts=2,
@@ -2314,6 +2521,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["primary", "backup"],
                 validation_mode="basic",
                 validation_repair_attempts=2,
@@ -2419,6 +2627,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                context_change_bar_mode="off",
                 default_route=["local"],
                 validation_repair_attempts=1,
                 agents={

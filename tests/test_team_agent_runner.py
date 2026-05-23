@@ -38,6 +38,7 @@ class TeamAgentRunnerTests(unittest.TestCase):
                 },
             )
             calls: list[str] = []
+            test_case = self
 
             class Provider:
                 def __init__(self, agent: AgentConfig) -> None:
@@ -51,16 +52,19 @@ class TeamAgentRunnerTests(unittest.TestCase):
                             model=self.agent.model,
                         )
                     if self.agent.name == "researcher":
-                        if any("Tool result for read_file" in m.get("content", "") for m in request.messages):
+                        if any("Tool result for repo_map" in m.get("content", "") for m in request.messages):
                             return ProviderResult(
-                                text='{"action":"final","answer":"README.md contains the demo heading."}',
+                                text='{"action":"final","answer":"README.md is a top-level documentation file."}',
                                 model=self.agent.model,
                             )
                         return ProviderResult(
-                            text='{"action":"tool","tool":"read_file","args":{"path":"README.md"}}',
+                            text='{"action":"tool","tool":"repo_map","args":{"target":"README.md"}}',
                             model=self.agent.model,
                         )
                     if self.agent.name == "coder":
+                        state = request.raw["agent_hub_runtime"]["reasoning_state"]
+                        test_case.assertGreaterEqual(state["context_score"], 4)
+                        test_case.assertTrue(state["repository_inspection_complete"])
                         if any("Tool result for write_file" in m.get("content", "") for m in request.messages):
                             return ProviderResult(
                                 text='{"action":"final","answer":"Created TEAM.txt."}',
@@ -102,6 +106,8 @@ class TeamAgentRunnerTests(unittest.TestCase):
             )
             state = response.raw["agent_hub"]["reasoning_state"]
             self.assertIn("README.md", state["inspected_files"])
+            self.assertGreaterEqual(state["context_score"], 4)
+            self.assertTrue(state["repository_inspection_complete"])
             self.assertTrue(
                 any("TEAM.txt" in edit.get("files", []) for edit in state["planned_edits"])
             )

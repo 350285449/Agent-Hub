@@ -19,6 +19,7 @@ from .models import HubRequest
 
 
 SKIPPED_DIRS = {".agent-hub", ".git", ".hg", ".svn", ".venv", "__pycache__", "node_modules"}
+RUNTIME_DIR_OPTIONS = ("state_dir", "inbox_dir", "outbox_dir", "archive_dir")
 MAX_FILE_CHARS = 80_000
 MAX_TOOL_OUTPUT_CHARS = 20_000
 MAX_REPLACE_CHARS = 200_000
@@ -1431,7 +1432,9 @@ class AgentToolbox:
             parts = path.relative_to(self.root).parts
         except ValueError:
             parts = path.parts
-        return any(part in SKIPPED_DIRS for part in parts)
+        if any(part in SKIPPED_DIRS for part in parts):
+            return True
+        return self._is_runtime_path(path)
 
     def _is_safe_workspace_path(self, path: Path) -> bool:
         try:
@@ -1439,6 +1442,26 @@ class AgentToolbox:
         except OSError:
             return False
         return resolved == self.root or resolved.is_relative_to(self.root)
+
+    def _is_runtime_path(self, path: Path) -> bool:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return False
+        for runtime_root in self._runtime_roots():
+            if resolved == runtime_root or resolved.is_relative_to(runtime_root):
+                return True
+        return False
+
+    def _runtime_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        for key in RUNTIME_DIR_OPTIONS:
+            default = getattr(self.config, key)
+            value = _request_option(self.request, key, default)
+            root = _workspace_relative_config_path(self.root, value)
+            if root is not None:
+                roots.append(root)
+        return _dedupe_paths(roots)
 
     def _is_context_path(self, path: Path) -> bool:
         return any(path == candidate for candidate in self._request_context_paths())
@@ -1512,6 +1535,28 @@ def _relative_to_workspace(root: Path, path: Path) -> str:
         return path.relative_to(root).as_posix() or "."
     except ValueError:
         raise ToolError(f"Path escapes workspace: {path}") from None
+
+
+def _workspace_relative_config_path(root: Path, value: Any) -> Path | None:
+    if value is None:
+        return None
+    try:
+        path = Path(value).expanduser()
+        resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
+    except (OSError, TypeError, ValueError):
+        return None
+    return resolved if resolved == root or resolved.is_relative_to(root) else None
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        result.append(path)
+    return result
 
 
 def _checkpoint_public_manifest(manifest: dict[str, Any], checkpoint_dir: Path) -> dict[str, Any]:

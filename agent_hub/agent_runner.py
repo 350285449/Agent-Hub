@@ -204,6 +204,13 @@ class AgentRunner:
                             "result": result,
                         }
                     )
+                    _emit_context_telemetry(
+                        event_sink,
+                        request,
+                        self.config,
+                        result,
+                        reasoning_state,
+                    )
                     _emit(
                         event_sink,
                         "edit_policy_feedback",
@@ -372,6 +379,13 @@ class AgentRunner:
                         "args": args,
                         "result": result,
                     }
+                )
+                _emit_context_telemetry(
+                    event_sink,
+                    request,
+                    self.config,
+                    result,
+                    reasoning_state,
                 )
                 _emit(
                     event_sink,
@@ -686,11 +700,130 @@ def _emit_reasoning_state_updated(
         task_id=state.task_id,
         active_files=state.active_files[-10:],
         inspected_files_count=len(state.inspected_files),
+        context_score=state.context_score,
+        grouped_patch_required=state.grouped_patch_required,
+        repository_inspection_complete=state.repository_inspection_complete,
+        repository_graph_nodes=len(_repository_graph_nodes(state)),
+        repository_graph_edges=len(state.dependency_edges),
         planned_edits_count=len(state.planned_edits),
         validation_history_count=len(state.validation_history),
         repair_history_count=len(state.repair_history),
         active_execution_node=state.execution_plan.active_node,
     )
+
+
+def _emit_context_telemetry(
+    event_sink: AgentEventSink | None,
+    request: HubRequest,
+    config: HubConfig,
+    result: dict[str, Any],
+    state: WorkspaceReasoningState,
+) -> None:
+    policy = result.get("policy") if isinstance(result.get("policy"), dict) else {}
+    affected_files = _string_list_like(result.get("affected_files"))
+    if not affected_files:
+        affected_files = _changed_files_from_result(str(result.get("tool") or ""), result)
+    recommended_tools = _string_list_like(policy.get("recommended_tools"))
+    threshold = policy.get("threshold")
+    if not isinstance(threshold, int):
+        threshold = _context_score_threshold(_request_context_change_bar_mode(request, config))
+    score = _context_score(state)
+    _emit(
+        event_sink,
+        "context_score_updated",
+        message=f"Repository context score is {score}.",
+        score=score,
+        threshold=threshold,
+        affected_files=affected_files,
+        recommended_tools=recommended_tools,
+    )
+    if result.get("context_change_bar_feedback"):
+        _emit(
+            event_sink,
+            "context_bar_blocked",
+            message="Context change bar blocked an edit before sufficient repository inspection.",
+            score=score,
+            threshold=threshold,
+            affected_files=affected_files,
+            recommended_tools=recommended_tools or ["repo_map", "search_files", "read_file"],
+        )
+        _emit(
+            event_sink,
+            "repository_inspection_required",
+            message="Repository inspection is required before editing.",
+            score=score,
+            threshold=threshold,
+            affected_files=affected_files,
+            recommended_tools=recommended_tools or ["repo_map", "search_files", "read_file"],
+        )
+    if result.get("grouped_patch_required"):
+        _emit(
+            event_sink,
+            "grouped_patch_required",
+            message="Grouped apply_patch is required for this workspace change.",
+            score=score,
+            threshold=threshold,
+            affected_files=affected_files,
+            recommended_tools=["apply_patch"],
+        )
+    if result.get("reviewer_rejected_unread_edit"):
+        _emit(
+            event_sink,
+            "reviewer_rejected_unread_edit",
+            message="Reviewer rejected an edit against unread file(s).",
+            score=score,
+            threshold=threshold,
+            affected_files=affected_files,
+            recommended_tools=recommended_tools or ["read_file"],
+        )
+    graph_nodes = _repository_graph_nodes(state)
+    if graph_nodes or state.dependency_edges:
+        _emit(
+            event_sink,
+            "repository_graph_updated",
+            message="Repository graph updated.",
+            graph_node_count=len(graph_nodes),
+            graph_edge_count=len(state.dependency_edges),
+            impacted_files=_dedupe_strings(
+                [path for files in state.impacted_files.values() for path in files]
+            )[:30],
+            context_score=score,
+        )
+    for edge in state.dependency_edges[-5:]:
+        _emit(
+            event_sink,
+            "related_file_detected",
+            message="Related file relationship detected.",
+            source_file=edge.get("source", ""),
+            related_file=edge.get("target", ""),
+            relation_type=edge.get("relation", ""),
+            impacted_files=state.impacted_files_for(str(edge.get("source") or ""))[:20],
+            context_score=score,
+        )
+    policy_missing = " ".join(_string_list_like(policy.get("missing_context")))
+    if "unread_dependency" in policy_missing or "unread_related_test" in policy_missing:
+        _emit(
+            event_sink,
+            "unread_dependency_blocked",
+            message="Repository graph blocked an edit with unread related files.",
+            score=score,
+            threshold=threshold,
+            affected_files=affected_files,
+            impacted_files=_string_list_like(policy.get("impacted_files")),
+            recommended_tools=recommended_tools or ["read_file"],
+        )
+    if result.get("reviewer_rejection_reasons"):
+        _emit(
+            event_sink,
+            "reviewer_rejected_patch",
+            message="Reviewer rejected patch strategy or repository coverage.",
+            score=score,
+            threshold=threshold,
+            affected_files=affected_files,
+            impacted_files=_string_list_like(policy.get("impacted_files")),
+            rejection_reasons=_string_list_like(result.get("reviewer_rejection_reasons")),
+            recommended_tools=recommended_tools or ["read_file", "apply_patch"],
+        )
 
 
 def _active_files_from_toolbox(toolbox: AgentToolbox) -> list[str]:
@@ -711,6 +844,10 @@ def _active_execution_metadata(state: WorkspaceReasoningState) -> dict[str, Any]
         "dependencies": node.dependencies,
         "affected_files": node.affected_files,
         "validation_targets": node.validation_targets,
+        "related_files": node.related_files,
+        "impacted_files": node.impacted_files,
+        "repository_dependencies": node.repository_dependencies,
+        "inspection_requirements": node.inspection_requirements,
         "estimated_risk": node.estimated_risk,
         "retry_count": node.retry_count,
     }
@@ -735,6 +872,8 @@ def _validation_targets_from_state(
     targets = list(changed)
     for path in changed:
         targets.extend(state.dependency_map.get(path, []))
+        targets.extend(state.related_tests.get(path, []))
+        targets.extend(state.impacted_files_for(path))
     summary = state.repository_summary
     reverse = summary.get("reverse_dependency_map") if isinstance(summary, dict) else None
     if isinstance(reverse, dict):
@@ -774,8 +913,12 @@ def _dependency_impact_for_files(
 ) -> dict[str, list[str]]:
     dependency_files: list[str] = []
     dependent_files: list[str] = []
+    known = _known_repository_files(state)
+    sources = {_normalize_policy_path(path) for path in files}
     for path in files:
         dependency_files.extend(state.dependency_map.get(path, []))
+        dependency_files.extend(_graph_related_repository_files(state, path))
+        dependent_files.extend(state.impacted_files_for(path))
     summary = state.repository_summary
     reverse = summary.get("reverse_dependency_map") if isinstance(summary, dict) else None
     if isinstance(reverse, dict):
@@ -784,8 +927,16 @@ def _dependency_impact_for_files(
             if isinstance(values, list):
                 dependent_files.extend(str(value) for value in values if isinstance(value, str))
     return {
-        "dependency_files": _dedupe_strings(dependency_files)[:30],
-        "dependent_files": _dedupe_strings(dependent_files)[:30],
+        "dependency_files": [
+            path
+            for path in _repository_file_paths(dependency_files, known_files=known)
+            if path not in sources
+        ][:30],
+        "dependent_files": [
+            path
+            for path in _repository_file_paths(dependent_files, known_files=known)
+            if path not in sources
+        ][:30],
     }
 
 
@@ -798,6 +949,454 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _string_list_like(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str) and item.strip()]
+
+
+def _context_tools_used(
+    trace: list[dict[str, Any]],
+    reasoning_state: WorkspaceReasoningState | None,
+) -> list[str]:
+    tools: list[str] = []
+    if reasoning_state is not None:
+        summary = reasoning_state.repository_summary
+        if isinstance(summary, dict):
+            tools.extend(_string_list_like(summary.get("context_tools")))
+    for step in trace:
+        tool = str(step.get("tool") or "")
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        if tool in CONTEXT_TOOLS and result.get("ok") is not False:
+            tools.append(tool)
+    return _dedupe_strings(tools)
+
+
+def _read_files_used(
+    trace: list[dict[str, Any]],
+    reasoning_state: WorkspaceReasoningState | None,
+) -> list[str]:
+    files: list[str] = []
+    if reasoning_state is not None:
+        summary = reasoning_state.repository_summary
+        if isinstance(summary, dict):
+            files.extend(_string_list_like(summary.get("read_files")))
+    for step in trace:
+        if str(step.get("tool") or "") != "read_file":
+            continue
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        payload = result.get("result") if isinstance(result.get("result"), dict) else {}
+        if result.get("ok") is not False and isinstance(payload.get("path"), str):
+            files.append(payload["path"])
+    return _dedupe_strings([_normalize_policy_path(path) for path in files if path])
+
+
+def _existing_affected_files(toolbox: AgentToolbox, affected_files: list[str]) -> list[str]:
+    existing: list[str] = []
+    for path in affected_files:
+        target = _policy_resolved_path(toolbox, path)
+        if target is None or not target.exists() or not target.is_file():
+            continue
+        existing.append(toolbox._relative(target))
+    return _dedupe_strings(existing)
+
+
+def _repository_graph_nodes(reasoning_state: WorkspaceReasoningState) -> list[str]:
+    known = _strong_known_repository_files(reasoning_state)
+    return _repository_file_paths(_raw_repository_graph_nodes(reasoning_state), known_files=known)[:200]
+
+
+def _known_repository_files(reasoning_state: WorkspaceReasoningState) -> set[str]:
+    known = _strong_known_repository_files(reasoning_state)
+    graph_files = _repository_file_paths(_raw_repository_graph_nodes(reasoning_state), known_files=known)
+    return set(graph_files) | known
+
+
+def _raw_repository_graph_nodes(reasoning_state: WorkspaceReasoningState) -> list[str]:
+    nodes: list[str] = []
+    nodes.extend(reasoning_state.inspected_files)
+    nodes.extend(reasoning_state.active_files)
+    nodes.extend(reasoning_state.repository_summary_files())
+    for edge in reasoning_state.dependency_edges:
+        nodes.append(str(edge.get("source") or ""))
+        nodes.append(str(edge.get("target") or ""))
+    for mapping in (
+        reasoning_state.related_files,
+        reasoning_state.related_tests,
+        reasoning_state.related_configs,
+        reasoning_state.related_docs,
+        reasoning_state.impacted_files,
+        reasoning_state.dependency_map,
+    ):
+        for source, targets in mapping.items():
+            nodes.append(source)
+            nodes.extend(targets)
+    return nodes
+
+
+def _strong_known_repository_files(reasoning_state: WorkspaceReasoningState) -> set[str]:
+    candidates: list[str] = []
+    candidates.extend(reasoning_state.inspected_files)
+    candidates.extend(reasoning_state.active_files)
+    candidates.extend(reasoning_state.repository_summary_files())
+    candidates.extend(_read_files_used([], reasoning_state))
+    candidates.extend(reasoning_state.dependency_map.keys())
+    for dependencies in reasoning_state.dependency_map.values():
+        candidates.extend(dependencies)
+    summary = reasoning_state.repository_summary
+    if isinstance(summary, dict):
+        for key in ("symbol_index", "reverse_dependency_map"):
+            value = summary.get(key)
+            if isinstance(value, dict):
+                candidates.extend(str(path) for path in value.keys())
+                for targets in value.values():
+                    if isinstance(targets, list):
+                        candidates.extend(str(path) for path in targets if isinstance(path, str))
+    for node in reasoning_state.execution_plan.nodes:
+        candidates.extend(node.affected_files)
+        candidates.extend(node.related_files)
+        candidates.extend(node.impacted_files)
+        candidates.extend(node.repository_dependencies)
+        candidates.extend(node.validation_targets)
+    return {
+        clean
+        for clean in (_normalize_policy_path(path) for path in candidates if path)
+        if clean and not _is_internal_runtime_policy_path(clean)
+    }
+
+
+def _repository_file_paths(paths: list[str], *, known_files: set[str]) -> list[str]:
+    return _dedupe_strings(
+        [
+            clean
+            for path in paths
+            if (clean := _normalize_policy_path(path))
+            and _is_repository_file_path(clean, known_files=known_files)
+        ]
+    )
+
+
+def _is_repository_file_path(path: str, *, known_files: set[str]) -> bool:
+    clean = _normalize_policy_path(path)
+    if not clean or clean in {".", ".."} or _is_internal_runtime_policy_path(clean):
+        return False
+    if clean in known_files:
+        return True
+    name = clean.rsplit("/", 1)[-1]
+    return "/" in clean or "." in name
+
+
+def _is_internal_runtime_policy_path(path: str) -> bool:
+    clean = _normalize_policy_path(path).lower()
+    if clean.startswith(".agent-hub/") or clean == ".agent-hub":
+        return True
+    if clean in {"state", "state/provider_health.json"}:
+        return True
+    return clean.startswith(("state/sessions/", "state/workspace-checkpoints/"))
+
+
+def _graph_related_repository_files(
+    reasoning_state: WorkspaceReasoningState,
+    path: str,
+) -> list[str]:
+    clean = _normalize_policy_path(path)
+    if not clean:
+        return []
+    known = _known_repository_files(reasoning_state)
+    related = [
+        *reasoning_state.related_files_for(clean),
+        *reasoning_state.impacted_files_for(clean),
+    ]
+    return [
+        related_path
+        for related_path in _repository_file_paths(related, known_files=known)
+        if related_path != clean
+    ]
+
+
+def _related_tests_for_files(reasoning_state: WorkspaceReasoningState, files: list[str]) -> list[str]:
+    related: list[str] = []
+    for path in files:
+        clean = _normalize_policy_path(path)
+        related.extend(reasoning_state.related_tests.get(clean, []))
+        related.extend(
+            target
+            for target in reasoning_state.related_files_for(clean)
+            if _is_test_context_file(target)
+        )
+    return _dedupe_strings([_normalize_policy_path(path) for path in related if path])
+
+
+def _related_configs_for_files(reasoning_state: WorkspaceReasoningState, files: list[str]) -> list[str]:
+    related: list[str] = []
+    for path in files:
+        clean = _normalize_policy_path(path)
+        related.extend(reasoning_state.related_configs.get(clean, []))
+        related.extend(
+            target
+            for target in reasoning_state.related_files_for(clean)
+            if _is_config_context_file(target)
+        )
+    return _dedupe_strings([_normalize_policy_path(path) for path in related if path])
+
+
+def _related_dependencies_for_files(reasoning_state: WorkspaceReasoningState, files: list[str]) -> list[str]:
+    related: list[str] = []
+    known = _known_repository_files(reasoning_state)
+    for path in files:
+        clean = _normalize_policy_path(path)
+        related.extend(reasoning_state.dependency_map.get(clean, []))
+        for edge in reasoning_state.dependency_edges:
+            if edge.get("relation") != "imports":
+                continue
+            source = _normalize_policy_path(str(edge.get("source") or ""))
+            target = _normalize_policy_path(str(edge.get("target") or ""))
+            if source == clean:
+                related.append(target)
+            elif target == clean:
+                related.append(source)
+    sources = {_normalize_policy_path(path) for path in files}
+    return [
+        path
+        for path in _repository_file_paths(related, known_files=known)
+        if path not in sources
+    ]
+
+
+def _impacted_files_for_files(reasoning_state: WorkspaceReasoningState, files: list[str]) -> list[str]:
+    impacted: list[str] = []
+    known = _known_repository_files(reasoning_state)
+    for path in files:
+        impacted.extend(reasoning_state.impacted_files_for(path))
+    sources = {_normalize_policy_path(path) for path in files}
+    return [
+        path
+        for path in _repository_file_paths(impacted, known_files=known)
+        if path not in sources
+    ]
+
+
+def _hallucinated_edit_files(
+    toolbox: AgentToolbox,
+    tool_name: str,
+    args: dict[str, Any],
+    affected_files: list[str],
+    reasoning_state: WorkspaceReasoningState,
+) -> list[str]:
+    known = _known_repository_files(reasoning_state)
+    hallucinated: list[str] = []
+    for path in affected_files:
+        clean = _normalize_policy_path(path)
+        target = _policy_resolved_path(toolbox, clean)
+        exists = bool(target and target.exists())
+        if exists:
+            if known and clean not in known:
+                hallucinated.append(clean)
+            continue
+        if _is_intentional_new_file(tool_name, args, clean):
+            continue
+        hallucinated.append(clean)
+    return _dedupe_strings(hallucinated)
+
+
+def _is_intentional_new_file(tool_name: str, args: dict[str, Any], path: str) -> bool:
+    if tool_name == "write_file":
+        return bool(args.get("content")) and not bool(args.get("append", False))
+    if tool_name != "apply_patch":
+        return False
+    changes = args.get("changes")
+    if isinstance(changes, list):
+        for item in changes:
+            if not isinstance(item, dict) or _normalize_policy_path(str(item.get("path") or "")) != path:
+                continue
+            return isinstance(item.get("content"), str) and "old" not in item
+    patch = args.get("patch")
+    return isinstance(patch, str) and f"+++ b/{path}" in patch and "--- /dev/null" in patch
+
+
+def _is_test_context_file(path: str) -> bool:
+    lowered = _normalize_policy_path(path).lower()
+    name = lowered.rsplit("/", 1)[-1]
+    return "/test" in lowered or name.startswith("test_") or name.endswith("_test.py")
+
+
+def _is_config_context_file(path: str) -> bool:
+    lowered = _normalize_policy_path(path).lower()
+    name = lowered.rsplit("/", 1)[-1]
+    return name in {
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "requirements.txt",
+        "tox.ini",
+        "tsconfig.json",
+        "agent-hub.config.json",
+    } or lowered.endswith((".json", ".toml", ".yaml", ".yml", ".ini", ".cfg"))
+
+
+def _has_graph_related_files(reasoning_state: WorkspaceReasoningState, files: list[str]) -> bool:
+    return any(_graph_related_repository_files(reasoning_state, path) for path in files)
+
+
+def _fragmented_write_chain_active(
+    trace: list[dict[str, Any]],
+    affected_files: list[str],
+    reasoning_state: WorkspaceReasoningState,
+) -> bool:
+    prior_write_files: list[str] = []
+    for step in trace:
+        if str(step.get("tool") or "") != "write_file":
+            continue
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        prior_write_files.extend(_changed_files_from_result("write_file", result))
+        prior_write_files.extend(_string_list_like(result.get("affected_files")))
+    if not prior_write_files:
+        return False
+    for path in affected_files:
+        related = set(_graph_related_repository_files(reasoning_state, path))
+        if related & set(prior_write_files):
+            return True
+    return False
+
+
+def _has_related_context_read(
+    read_files: list[str],
+    existing_targets: list[str],
+    reasoning_state: WorkspaceReasoningState,
+) -> bool:
+    read_set = {_normalize_policy_path(path) for path in read_files}
+    target_set = {_normalize_policy_path(path) for path in existing_targets}
+    if len(target_set) > 1 and target_set.issubset(read_set):
+        return True
+    if any(_is_context_support_file(path) and path not in target_set for path in read_set):
+        return True
+    related: set[str] = set()
+    for files in reasoning_state.related_files.values():
+        related.update(_normalize_policy_path(path) for path in _string_list_like(files))
+    summary = reasoning_state.repository_summary
+    if isinstance(summary, dict):
+        for key in ("key_files", "validation_targets", "searched_files"):
+            related.update(_normalize_policy_path(path) for path in _string_list_like(summary.get(key)))
+    return bool((read_set & related) - target_set)
+
+
+def _has_impl_and_support_files(files: list[str]) -> bool:
+    clean = [_normalize_policy_path(path) for path in files if path]
+    return any(_is_context_support_file(path) for path in clean) and any(
+        not _is_context_support_file(path) for path in clean
+    )
+
+
+def _reviewer_requested_fixes(request: HubRequest, messages: list[dict[str, Any]]) -> bool:
+    if _team_role(request) == "fixer":
+        return True
+    text = " ".join(_message_texts(messages[-6:])).lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "review feedback",
+            "required fixes",
+            "blocking issue",
+            "reviewer requested",
+            "fix the review",
+        )
+    )
+
+
+def _message_texts(messages: list[dict[str, Any]]) -> list[str]:
+    return [
+        str(message.get("content"))
+        for message in messages
+        if isinstance(message, dict) and isinstance(message.get("content"), str)
+    ]
+
+
+def _recent_policy_message_text(messages: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "system":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        if content.startswith("Tool result for "):
+            continue
+        parts.append(_message_task_section(content))
+    return " ".join(parts)
+
+
+def _execution_plan_files(reasoning_state: WorkspaceReasoningState) -> list[str]:
+    files: list[str] = []
+    for node in reasoning_state.execution_plan.nodes:
+        if node.id.endswith("-inspect"):
+            continue
+        files.extend(node.affected_files)
+    for edit in reasoning_state.planned_edits:
+        value = edit.get("files")
+        if isinstance(value, list):
+            files.extend(str(path) for path in value if isinstance(path, str))
+    return _dedupe_strings([_normalize_policy_path(path) for path in files if path])
+
+
+def _execution_plan_validation_targets(reasoning_state: WorkspaceReasoningState) -> list[str]:
+    files: list[str] = []
+    for node in reasoning_state.execution_plan.nodes:
+        if node.id.endswith("-inspect"):
+            continue
+        files.extend(node.validation_targets)
+    for validation in reasoning_state.validation_history:
+        value = validation.get("validation_targets")
+        if isinstance(value, list):
+            files.extend(str(path) for path in value if isinstance(path, str))
+    return _dedupe_strings([_normalize_policy_path(path) for path in files if path])
+
+
+def _team_role(request: HubRequest) -> str:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    role = raw.get("team_agent_role")
+    if not role and isinstance(raw.get("agent_hub"), dict):
+        role = raw["agent_hub"].get("role")
+    return str(role or "").strip().lower()
+
+
+def _path_like_tokens(text: str) -> list[str]:
+    tokens = re.findall(
+        r"(?<![\w.-])(?:[\w.-]+[\\/])*[\w.-]+\.[A-Za-z0-9]{1,10}(?![\w.-])",
+        text,
+    )
+    return _dedupe_strings([_normalize_policy_path(token) for token in tokens])
+
+
+def _normalize_policy_path(path: str) -> str:
+    value = str(path or "").replace("\\", "/").strip()
+    while value.startswith("./"):
+        value = value[2:]
+    return value
+
+
+def _is_context_support_file(path: str) -> bool:
+    lowered = _normalize_policy_path(path).lower()
+    name = lowered.rsplit("/", 1)[-1]
+    if "/test" in lowered or name.startswith("test_") or name.endswith("_test.py"):
+        return True
+    if name in {
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "requirements.txt",
+        "tox.ini",
+        "tsconfig.json",
+        "agent-hub.config.json",
+        "readme.md",
+    }:
+        return True
+    return lowered.endswith((".md", ".rst", ".txt", ".json", ".toml", ".yaml", ".yml", ".ini", ".cfg"))
 
 
 def _validation_history_from_trace(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -935,6 +1534,10 @@ def _context_change_bar_state(
         "enabled": _context_change_bar_enabled(request, config),
         "mode": _request_context_change_bar_mode(request, config),
         "threshold": _request_context_change_bar_threshold(request, config),
+        "score": _context_score(reasoning_state) if reasoning_state else 0,
+        "minimum_score": _context_score_threshold(_request_context_change_bar_mode(request, config)),
+        "repository_graph_nodes": len(_repository_graph_nodes(reasoning_state)) if reasoning_state else 0,
+        "repository_graph_edges": len(reasoning_state.dependency_edges) if reasoning_state else 0,
         "inspected_files": inspected_files,
         "changed_files": changed_files,
         "repo_context_tools": [step["tool"] for step in context_steps],
@@ -944,67 +1547,372 @@ def _context_change_bar_state(
     }
 
 
+def _context_score(reasoning_state: WorkspaceReasoningState | None) -> int:
+    if reasoning_state is None:
+        return 0
+    try:
+        return max(0, int(reasoning_state.context_score or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _context_score_threshold(mode: str) -> int:
+    if mode == "strict":
+        return 6
+    if mode == "light":
+        return 3
+    return 0
+
+
+def _has_sufficient_context(
+    toolbox: AgentToolbox,
+    request: HubRequest,
+    trace: list[dict[str, Any]],
+    *,
+    tool_name: str,
+    args: dict[str, Any],
+    messages: list[dict[str, Any]],
+    reasoning_state: WorkspaceReasoningState,
+    affected_files: list[str],
+    multi_file_task: bool,
+) -> dict[str, Any]:
+    mode = _request_context_change_bar_mode(request, toolbox.config)
+    score_threshold = _context_score_threshold(mode)
+    changed_threshold = _request_context_change_bar_threshold(request, toolbox.config)
+    score = _context_score(reasoning_state)
+    context_tools = _context_tools_used(trace, reasoning_state)
+    read_files = _read_files_used(trace, reasoning_state)
+    inspected_files = _inspected_files_from_trace(trace, reasoning_state)
+    changed_files = _changed_files_from_trace(trace)
+    projected_changed_files = _dedupe_strings([*changed_files, *affected_files])
+    existing_targets = _existing_affected_files(toolbox, affected_files)
+    impacted_files = _impacted_files_for_files(reasoning_state, affected_files)
+    related_tests = _related_tests_for_files(reasoning_state, existing_targets or affected_files)
+    related_configs = _related_configs_for_files(reasoning_state, existing_targets or affected_files)
+    related_dependencies = _related_dependencies_for_files(reasoning_state, existing_targets or affected_files)
+    hallucinated_files = _hallucinated_edit_files(
+        toolbox,
+        tool_name,
+        args,
+        affected_files,
+        reasoning_state,
+    )
+    missing: list[str] = []
+
+    if not _context_change_bar_enabled(request, toolbox.config):
+        return {
+            "ok": True,
+            "score": score,
+            "threshold": score_threshold,
+            "changed_file_threshold": changed_threshold,
+            "missing_context": missing,
+            "inspected_files": inspected_files,
+            "read_files": read_files,
+            "context_tools": context_tools,
+            "changed_files": changed_files,
+            "projected_changed_files": projected_changed_files,
+            "existing_targets": existing_targets,
+            "impacted_files": impacted_files,
+            "related_tests": related_tests,
+            "related_configs": related_configs,
+            "related_dependencies": related_dependencies,
+            "hallucinated_files": hallucinated_files,
+        }
+
+    if not context_tools:
+        missing.append(
+            "Inspect repository structure before editing: no repo_map, list_files, search_files, or read_file has run yet."
+        )
+
+    if mode == "light":
+        if score < score_threshold:
+            missing.append(
+                f"Context score {score} is below light minimum {score_threshold}; use repo_map, search_files, or read_file."
+            )
+    elif mode == "strict":
+        if score < score_threshold:
+            missing.append(
+                f"Context score {score} is below strict minimum {score_threshold}; use repo_map or search_files, then read_file."
+            )
+        if not ({"repo_map", "search_files"} & set(context_tools)):
+            missing.append("Strict mode requires repo_map or search_files before editing.")
+        unread_targets = [path for path in existing_targets if path not in read_files]
+        if unread_targets:
+            missing.append("Target file has not been inspected yet: " + ", ".join(unread_targets))
+        if multi_file_task and not _has_related_context_read(read_files, existing_targets, reasoning_state):
+            missing.append("Read related tests before modifying implementation.")
+        unread_tests = [path for path in related_tests if path not in read_files]
+        if unread_tests:
+            missing.append("unread_related_test: " + ", ".join(unread_tests))
+        unread_configs = [path for path in related_configs if path not in read_files]
+        if unread_configs:
+            missing.append("impacted config unread: " + ", ".join(unread_configs))
+        unread_dependencies = [path for path in related_dependencies if path not in read_files]
+        if unread_dependencies:
+            missing.append("unread_dependency: " + ", ".join(unread_dependencies))
+        if multi_file_task and not reasoning_state.dependency_edges:
+            missing.append("repository graph incomplete in strict mode; run repo_map or search_files.")
+
+    if multi_file_task and not _has_recent_repo_context(trace, reasoning_state):
+        missing.append(
+            "Multi-file task needs recent repository context; run repo_map, search_files, or read_file before editing."
+        )
+    if hallucinated_files and (mode == "strict" or _team_role(request) in {"reviewer", "fixer"}):
+        missing.append("hallucinated_file_edit: " + ", ".join(hallucinated_files))
+    if (
+        changed_threshold > 0
+        and len(projected_changed_files) > changed_threshold
+        and not _has_recent_repo_context(trace, reasoning_state)
+    ):
+        missing.append(
+            f"Changed files exceed context change threshold {changed_threshold}; refresh context with repo_map, search_files, or read_file."
+        )
+    if _repair_context_active(trace, messages) and not ({"repo_map", "search_files"} & set(context_tools)):
+        missing.append("Validation repair needs repository context before editing; use repo_map or search_files.")
+
+    return {
+        "ok": not missing,
+        "score": score,
+        "threshold": score_threshold,
+        "changed_file_threshold": changed_threshold,
+        "missing_context": _dedupe_strings(missing),
+        "inspected_files": inspected_files,
+        "read_files": read_files,
+        "context_tools": context_tools,
+        "changed_files": changed_files,
+        "projected_changed_files": projected_changed_files,
+        "existing_targets": existing_targets,
+        "impacted_files": impacted_files,
+        "related_tests": related_tests,
+        "related_configs": related_configs,
+        "related_dependencies": related_dependencies,
+        "hallucinated_files": hallucinated_files,
+    }
+
+
+def _is_multi_file_task(
+    request: HubRequest,
+    trace: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    reasoning_state: WorkspaceReasoningState | None,
+    affected_files: list[str],
+) -> bool:
+    if len(_dedupe_strings(affected_files)) > 1:
+        return True
+    if reasoning_state and reasoning_state.grouped_patch_required:
+        return True
+    if reasoning_state and _has_graph_related_files(reasoning_state, affected_files):
+        return True
+    if reasoning_state and len(_impacted_files_for_files(reasoning_state, affected_files)) > 1:
+        return True
+    text = " ".join(
+        [
+            _task_policy_text(request),
+            _recent_policy_message_text(messages[-8:]),
+        ]
+    ).lower()
+    if any(
+        phrase in text
+        for phrase in (
+            "multiple files",
+            "multi-file",
+            "several files",
+            "many files",
+            "multiple modules",
+            "tests",
+            "docs",
+            "documentation",
+            "config",
+            "configuration",
+            "migration",
+            "refactor",
+            "integration",
+            "validation repair",
+            "repair loop",
+            "patch",
+            "workspace-wide",
+            "repository-wide",
+            "repo-wide",
+            "across",
+            "reviewer requested",
+            "required fixes",
+        )
+    ):
+        return True
+    if re.search(r"\band\b", text):
+        return True
+    if len(_path_like_tokens(text)) > 1:
+        return True
+    if _repair_context_active(trace, messages):
+        return True
+    if len(_changed_files_from_trace(trace)) > 1:
+        return True
+    if reasoning_state is not None:
+        if len(_execution_plan_files(reasoning_state)) > 1:
+            return True
+        if len(_execution_plan_validation_targets(reasoning_state)) > 1:
+            return True
+        if _team_role(request) in {"reviewer", "fixer"} and reasoning_state.related_files:
+            return True
+    return False
+
+
+def _reviewer_unread_files(
+    toolbox: AgentToolbox,
+    request: HubRequest,
+    affected_files: list[str],
+    reasoning_state: WorkspaceReasoningState,
+) -> list[str]:
+    if _team_role(request) != "reviewer":
+        return []
+    if not _context_change_bar_enabled(request, toolbox.config):
+        return []
+    read_files = set(_read_files_used([], reasoning_state))
+    return [path for path in _existing_affected_files(toolbox, affected_files) if path not in read_files]
+
+
+def _reviewer_rejection_reasons(
+    toolbox: AgentToolbox,
+    request: HubRequest,
+    tool_name: str,
+    args: dict[str, Any],
+    affected_files: list[str],
+    multi_file_task: bool,
+    sufficiency: dict[str, Any],
+    reasoning_state: WorkspaceReasoningState,
+) -> list[str]:
+    if _team_role(request) != "reviewer":
+        return []
+    reasons: list[str] = []
+    read_files = set(_read_files_used([], reasoning_state))
+    for path in _string_list_like(sufficiency.get("related_tests")):
+        if path not in read_files:
+            reasons.append("unread_related_test")
+    for path in _string_list_like(sufficiency.get("related_dependencies")):
+        if path not in read_files:
+            reasons.append("unread_dependency")
+    if _string_list_like(sufficiency.get("hallucinated_files")):
+        reasons.append("hallucinated_file_edit")
+    related_tests = set(_string_list_like(sufficiency.get("related_tests")))
+    if related_tests and not (related_tests & set(affected_files)):
+        reasons.append("missing_validation_target")
+    if tool_name in {"write_file", "replace_in_file"} and (
+        multi_file_task or _has_graph_related_files(reasoning_state, affected_files)
+    ):
+        reasons.append("fragmented_patch_strategy")
+    if tool_name == "apply_patch" and _has_graph_related_files(reasoning_state, affected_files):
+        impacted = set(_string_list_like(sufficiency.get("impacted_files")))
+        if len(impacted - set(affected_files)) > 0 and related_tests and not (related_tests & set(affected_files)):
+            reasons.append("fragmented_patch_strategy")
+    if _hallucinated_edit_files(toolbox, tool_name, args, affected_files, reasoning_state):
+        reasons.append("hallucinated_file_edit")
+    return _dedupe_strings(reasons)
+
+
+def _recommended_context_tools(sufficiency: dict[str, Any], affected_files: list[str]) -> list[str]:
+    tools: list[str] = []
+    context_tools = set(_string_list_like(sufficiency.get("context_tools")))
+    if not ({"repo_map", "search_files"} & context_tools):
+        tools.extend(["repo_map", "search_files"])
+    if affected_files or sufficiency.get("existing_targets"):
+        tools.append("read_file")
+    if not tools:
+        tools.append("repo_map")
+    return _dedupe_strings(tools)
+
+
 def _context_change_bar_feedback(
     toolbox: AgentToolbox,
     tool_name: str,
     args: dict[str, Any],
     request: HubRequest,
     trace: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
     reasoning_state: WorkspaceReasoningState,
 ) -> dict[str, Any] | None:
-    if tool_name not in EDIT_TOOLS or not _context_change_bar_enabled(request, toolbox.config):
+    if tool_name not in EDIT_TOOLS:
         return None
 
     mode = _request_context_change_bar_mode(request, toolbox.config)
-    threshold = _request_context_change_bar_threshold(request, toolbox.config)
-    state = _context_change_bar_state(request, toolbox.config, trace, reasoning_state)
     affected = _policy_affected_files(toolbox, tool_name, args)
-    inspected = [str(path) for path in state.get("inspected_files", []) if isinstance(path, str)]
-    changed = [str(path) for path in state.get("changed_files", []) if isinstance(path, str)]
-    projected_changed = _dedupe_strings([*changed, *affected])
-    has_context = bool(state.get("repo_context_tools")) or bool(inspected)
-    has_broad_context = bool(state.get("broad_context_tools"))
-    task_needs_context = _task_mentions_multi_file_work(request)
-    exceeds_threshold = len(projected_changed) > threshold
-    missing: list[str] = []
-
-    if not has_context and (mode == "strict" or task_needs_context or exceeds_threshold):
-        missing.append(
-            "no repository inspection has run yet: missing repo_map, list_files, search_files, or read_file context"
-        )
-    if task_needs_context and not has_broad_context:
-        missing.append(
-            "task mentions multiple files/modules/tests/config/docs but related repository context is missing"
-        )
-    if exceeds_threshold and not bool(state.get("recent_context")):
-        missing.append(
-            f"changed files would exceed threshold {threshold} without a fresh repo context pass"
-        )
+    multi_file_task = _is_multi_file_task(request, trace, messages, reasoning_state, affected)
+    reviewer_unread = _reviewer_unread_files(toolbox, request, affected, reasoning_state)
+    sufficiency = _has_sufficient_context(
+        toolbox,
+        request,
+        trace,
+        tool_name=tool_name,
+        args=args,
+        messages=messages,
+        reasoning_state=reasoning_state,
+        affected_files=affected,
+        multi_file_task=multi_file_task,
+    )
+    missing = list(sufficiency["missing_context"])
+    if reviewer_unread:
+        missing.append("Reviewer rejected edits against unread file(s): " + ", ".join(reviewer_unread))
+    reviewer_reasons = _reviewer_rejection_reasons(
+        toolbox,
+        request,
+        tool_name,
+        args,
+        affected,
+        multi_file_task,
+        sufficiency,
+        reasoning_state,
+    )
+    if reviewer_reasons:
+        missing.append("reviewer_rejected_patch: " + ", ".join(reviewer_reasons))
 
     if not missing:
         return None
 
+    impacted_files = _string_list_like(sufficiency.get("impacted_files"))
+    grouped_required = (
+        multi_file_task
+        or len(affected) > 1
+        or _repair_context_active(trace, messages)
+        or len(_dedupe_strings([*affected, *impacted_files])) > 1
+        or _has_graph_related_files(reasoning_state, affected)
+        or bool(reviewer_reasons)
+    )
+    recommended_tools = _recommended_context_tools(sufficiency, affected)
     return {
         "ok": False,
         "tool": tool_name,
         "edit_policy_feedback": True,
         "context_change_bar_feedback": True,
-        "recommended_tool": "repo_map",
+        "grouped_patch_required": grouped_required,
+        "reviewer_rejected_unread_edit": bool(reviewer_unread),
+        "reviewer_rejection_reasons": reviewer_reasons,
+        "recommended_tool": recommended_tools[0] if recommended_tools else "repo_map",
         "affected_files": affected,
         "error": "Context change bar blocked the edit: " + "; ".join(missing),
         "message": "Context change bar blocked this edit until repository context is gathered.",
         "policy": {
             "name": "context_change_bar",
             "mode": mode,
-            "threshold": threshold,
+            "score": sufficiency["score"],
+            "threshold": sufficiency["threshold"],
+            "changed_file_threshold": sufficiency["changed_file_threshold"],
             "missing_context": missing,
-            "inspected_files": inspected,
-            "changed_files": changed,
-            "projected_changed_files": projected_changed,
+            "inspected_files": sufficiency["inspected_files"],
+            "read_files": sufficiency["read_files"],
+            "context_tools": sufficiency["context_tools"],
+            "changed_files": sufficiency["changed_files"],
+            "projected_changed_files": sufficiency["projected_changed_files"],
+            "impacted_files": impacted_files,
+            "related_tests": sufficiency["related_tests"],
+            "related_configs": sufficiency["related_configs"],
+            "related_dependencies": sufficiency["related_dependencies"],
+            "hallucinated_files": sufficiency["hallucinated_files"],
+            "multi_file_task": multi_file_task,
+            "recommended_tools": recommended_tools,
             "instructions": [
-                "Run repo_map for the target module or file to find related implementation, tests, config, and docs.",
+                "Inspect repository structure before editing with repo_map.",
                 "Use search_files for usages/imports and read_file for files you plan to edit.",
-                "Then use apply_patch for grouped implementation, tests, docs, and config changes.",
+                "Read related tests before modifying implementation.",
+                "Use apply_patch for coordinated multi-file changes.",
             ],
         },
     }
@@ -1025,6 +1933,7 @@ def _edit_policy_feedback(
         args,
         request,
         trace,
+        messages,
         reasoning_state,
     )
     if context_feedback is not None:
@@ -1038,15 +1947,33 @@ def _edit_policy_feedback(
 
     affected = _policy_affected_files(toolbox, tool_name, args)
     in_repair = _repair_context_active(trace, messages)
-    multi_file_task = _task_mentions_multi_file_work(request)
+    multi_file_task = _is_multi_file_task(request, trace, messages, reasoning_state, affected)
+    impacted_files = _impacted_files_for_files(reasoning_state, affected)
+    projected_changed = _dedupe_strings([*_changed_files_from_trace(trace), *affected])
+    grouped_required = (
+        multi_file_task
+        or in_repair
+        or len(projected_changed) > 1
+        or _has_impl_and_support_files(projected_changed)
+        or _reviewer_requested_fixes(request, messages)
+        or _has_graph_related_files(reasoning_state, affected)
+        or len(_dedupe_strings([*affected, *impacted_files])) > 1
+    )
     if tool_name == "write_file":
         path = affected[0] if affected else _short_value(args.get("path"))
         target = _policy_resolved_path(toolbox, args.get("path"))
         append = bool(args.get("append", False))
         existing_overwrite = bool(target and target.exists() and not append)
+        entirely_new = bool(target and not target.exists())
         content = args.get("content")
         content_chars = len(content) if isinstance(content, str) else 0
-        if existing_overwrite or in_repair or (multi_file_task and content_chars > 0):
+        fragmented_chain = _fragmented_write_chain_active(trace, affected, reasoning_state)
+        if (
+            existing_overwrite
+            or in_repair
+            or fragmented_chain
+            or (grouped_required and not entirely_new and content_chars > 0)
+        ):
             return _edit_policy_result(
                 tool_name,
                 affected,
@@ -1058,9 +1985,14 @@ def _edit_policy_feedback(
                     "existing_overwrite": existing_overwrite,
                     "repair_context": in_repair,
                     "multi_file_task": multi_file_task,
+                    "grouped_patch_required": grouped_required,
+                    "projected_changed_files": projected_changed,
+                    "impacted_files": impacted_files,
+                    "fragmented_write_chain": fragmented_chain,
                     "content_chars": content_chars,
                     "target": path,
                 },
+                grouped_patch_required=grouped_required or fragmented_chain,
             )
     if tool_name == "replace_in_file":
         old = args.get("old")
@@ -1072,7 +2004,7 @@ def _edit_policy_feedback(
         except (TypeError, ValueError):
             expected_replacements = 1
         large_replace = old_chars > 400 or new_chars > 400 or expected_replacements > 1
-        if not (in_repair or multi_file_task or large_replace):
+        if not (in_repair or grouped_required or large_replace):
             return None
         return _edit_policy_result(
             tool_name,
@@ -1084,12 +2016,16 @@ def _edit_policy_feedback(
             context={
                 "repair_context": in_repair,
                 "multi_file_task": multi_file_task,
+                "grouped_patch_required": grouped_required,
+                "projected_changed_files": projected_changed,
+                "impacted_files": impacted_files,
                 "large_replace": large_replace,
                 "old_chars": old_chars,
                 "new_chars": new_chars,
                 "expected_replacements": expected_replacements,
                 "target": affected[0] if affected else _short_value(args.get("path")),
             },
+            grouped_patch_required=grouped_required,
         )
     return None
 
@@ -1164,11 +2100,13 @@ def _edit_policy_result(
     *,
     reason: str,
     context: dict[str, Any],
+    grouped_patch_required: bool = False,
 ) -> dict[str, Any]:
     return {
         "ok": False,
         "tool": tool_name,
         "edit_policy_feedback": True,
+        "grouped_patch_required": grouped_patch_required,
         "recommended_tool": "apply_patch",
         "affected_files": affected_files,
         "error": reason,
@@ -2125,7 +3063,13 @@ def _has_recent_repo_context(
             last_edit_index = index
     if last_context_index > last_edit_index:
         return True
-    return last_edit_index < 0 and bool(reasoning_state and reasoning_state.inspected_files)
+    return last_edit_index < 0 and bool(
+        reasoning_state
+        and (
+            reasoning_state.inspected_files
+            or _context_tools_used([], reasoning_state)
+        )
+    )
 
 
 def _inspected_files_from_trace(

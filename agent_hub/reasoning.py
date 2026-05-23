@@ -19,6 +19,10 @@ class ExecutionNode:
     status: str = "pending"
     dependencies: list[str] = field(default_factory=list)
     affected_files: list[str] = field(default_factory=list)
+    related_files: list[str] = field(default_factory=list)
+    impacted_files: list[str] = field(default_factory=list)
+    repository_dependencies: list[str] = field(default_factory=list)
+    inspection_requirements: list[str] = field(default_factory=list)
     validation_targets: list[str] = field(default_factory=list)
     estimated_risk: str = "low"
     repair_strategy: str | None = None
@@ -38,6 +42,10 @@ class ExecutionNode:
             status=_execution_status(value.get("status")),
             dependencies=_string_list(value.get("dependencies")),
             affected_files=_string_list(value.get("affected_files")),
+            related_files=_string_list(value.get("related_files")),
+            impacted_files=_string_list(value.get("impacted_files")),
+            repository_dependencies=_string_list(value.get("repository_dependencies")),
+            inspection_requirements=_string_list(value.get("inspection_requirements")),
             validation_targets=_string_list(value.get("validation_targets")),
             estimated_risk=_risk_value(value.get("estimated_risk")),
             repair_strategy=str(value.get("repair_strategy"))[:500]
@@ -53,6 +61,10 @@ class ExecutionNode:
             "status": self.status,
             "dependencies": self.dependencies,
             "affected_files": self.affected_files,
+            "related_files": self.related_files,
+            "impacted_files": self.impacted_files,
+            "repository_dependencies": self.repository_dependencies,
+            "inspection_requirements": self.inspection_requirements,
             "validation_targets": self.validation_targets,
             "estimated_risk": self.estimated_risk,
             "repair_strategy": self.repair_strategy,
@@ -65,6 +77,10 @@ class ExecutionNode:
         self.status = _execution_status(self.status)
         self.dependencies = _cap(_dedupe(self.dependencies), 20)
         self.affected_files = _cap(_dedupe(_clean_paths(self.affected_files)), MAX_LIST_ITEMS)
+        self.related_files = _cap(_dedupe(_clean_paths(self.related_files)), MAX_LIST_ITEMS)
+        self.impacted_files = _cap(_dedupe(_clean_paths(self.impacted_files)), MAX_LIST_ITEMS)
+        self.repository_dependencies = _cap(_dedupe(_clean_paths(self.repository_dependencies)), MAX_LIST_ITEMS)
+        self.inspection_requirements = _cap(_dedupe(_clean_paths(self.inspection_requirements)), MAX_LIST_ITEMS)
         self.validation_targets = _cap(_dedupe(_clean_paths(self.validation_targets)), MAX_LIST_ITEMS)
         self.estimated_risk = _risk_value(self.estimated_risk)
         if self.repair_strategy:
@@ -159,6 +175,14 @@ class ExecutionPlan:
             current.status = _higher_progress_status(current.status, node.status)
             current.dependencies = _dedupe([*current.dependencies, *node.dependencies])
             current.affected_files = _dedupe([*current.affected_files, *node.affected_files])
+            current.related_files = _dedupe([*current.related_files, *node.related_files])
+            current.impacted_files = _dedupe([*current.impacted_files, *node.impacted_files])
+            current.repository_dependencies = _dedupe(
+                [*current.repository_dependencies, *node.repository_dependencies]
+            )
+            current.inspection_requirements = _dedupe(
+                [*current.inspection_requirements, *node.inspection_requirements]
+            )
             current.validation_targets = _dedupe([*current.validation_targets, *node.validation_targets])
             current.estimated_risk = _higher_risk(current.estimated_risk, node.estimated_risk)
             current.retry_count = max(current.retry_count, node.retry_count)
@@ -262,6 +286,41 @@ class ExecutionPlan:
             MAX_LIST_ITEMS,
         )
 
+    def record_related_for_active(self, files: list[str]) -> None:
+        node = self.active()
+        if node is None:
+            return
+        node.related_files = _cap(
+            _dedupe([*node.related_files, *_clean_paths(files)]),
+            MAX_LIST_ITEMS,
+        )
+        node.inspection_requirements = _cap(
+            _dedupe([*node.inspection_requirements, *_clean_paths(files)]),
+            MAX_LIST_ITEMS,
+        )
+
+    def record_impacted_for_active(self, files: list[str]) -> None:
+        node = self.active()
+        if node is None:
+            return
+        node.impacted_files = _cap(
+            _dedupe([*node.impacted_files, *_clean_paths(files)]),
+            MAX_LIST_ITEMS,
+        )
+
+    def record_repository_dependencies_for_active(self, files: list[str]) -> None:
+        node = self.active()
+        if node is None:
+            return
+        node.repository_dependencies = _cap(
+            _dedupe([*node.repository_dependencies, *_clean_paths(files)]),
+            MAX_LIST_ITEMS,
+        )
+        node.inspection_requirements = _cap(
+            _dedupe([*node.inspection_requirements, *_clean_paths(files)]),
+            MAX_LIST_ITEMS,
+        )
+
     def record_validation_targets_for_active(self, targets: list[str]) -> None:
         node = self.active()
         if node is None:
@@ -270,15 +329,29 @@ class ExecutionPlan:
             _dedupe([*node.validation_targets, *_clean_paths(targets)]),
             MAX_LIST_ITEMS,
         )
+        node.inspection_requirements = _cap(
+            _dedupe([*node.inspection_requirements, *_clean_paths(targets)]),
+            MAX_LIST_ITEMS,
+        )
 
 
 @dataclass(slots=True)
 class WorkspaceReasoningState:
     task_id: str
     objectives: list[str] = field(default_factory=list)
+    context_score: int = 0
     inspected_files: list[str] = field(default_factory=list)
     active_files: list[str] = field(default_factory=list)
     related_files: dict[str, list[str]] = field(default_factory=dict)
+    dependency_edges: list[dict[str, Any]] = field(default_factory=list)
+    inspected_symbols: dict[str, list[str]] = field(default_factory=dict)
+    related_tests: dict[str, list[str]] = field(default_factory=dict)
+    related_configs: dict[str, list[str]] = field(default_factory=dict)
+    related_docs: dict[str, list[str]] = field(default_factory=dict)
+    impacted_files: dict[str, list[str]] = field(default_factory=dict)
+    grouped_patch_required: bool = False
+    context_bar_blocks: list[dict[str, Any]] = field(default_factory=list)
+    repository_inspection_complete: bool = False
     planned_edits: list[dict[str, Any]] = field(default_factory=list)
     planned_validations: list[str] = field(default_factory=list)
     validation_history: list[dict[str, Any]] = field(default_factory=list)
@@ -307,12 +380,22 @@ class WorkspaceReasoningState:
     def from_dict(cls, value: Any, *, task_id: str = "") -> "WorkspaceReasoningState":
         if not isinstance(value, dict):
             return cls(task_id=task_id or "default")
-        return cls(
+        state = cls(
             task_id=str(value.get("task_id") or task_id or "default"),
             objectives=_string_list(value.get("objectives")),
+            context_score=_safe_int(value.get("context_score"), 0),
             inspected_files=_string_list(value.get("inspected_files")),
             active_files=_string_list(value.get("active_files")),
             related_files=_dict_of_string_lists(value.get("related_files")),
+            dependency_edges=_edge_list(value.get("dependency_edges")),
+            inspected_symbols=_dict_of_string_lists(value.get("inspected_symbols")),
+            related_tests=_dict_of_string_lists(value.get("related_tests")),
+            related_configs=_dict_of_string_lists(value.get("related_configs")),
+            related_docs=_dict_of_string_lists(value.get("related_docs")),
+            impacted_files=_dict_of_string_lists(value.get("impacted_files")),
+            grouped_patch_required=bool(value.get("grouped_patch_required", False)),
+            context_bar_blocks=_dict_list(value.get("context_bar_blocks")),
+            repository_inspection_complete=bool(value.get("repository_inspection_complete", False)),
             planned_edits=_dict_list(value.get("planned_edits")),
             planned_validations=_string_list(value.get("planned_validations")),
             validation_history=_dict_list(value.get("validation_history")),
@@ -323,15 +406,27 @@ class WorkspaceReasoningState:
             else {},
             dependency_map=_dict_of_string_lists(value.get("dependency_map")),
             execution_plan=ExecutionPlan.from_dict(value.get("execution_plan")),
-        ).compact()
+        )
+        state._refresh_context_state()
+        return state.compact()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "objectives": self.objectives,
+            "context_score": self.context_score,
             "inspected_files": self.inspected_files,
             "active_files": self.active_files,
             "related_files": self.related_files,
+            "dependency_edges": self.dependency_edges,
+            "inspected_symbols": self.inspected_symbols,
+            "related_tests": self.related_tests,
+            "related_configs": self.related_configs,
+            "related_docs": self.related_docs,
+            "impacted_files": self.impacted_files,
+            "grouped_patch_required": self.grouped_patch_required,
+            "context_bar_blocks": self.context_bar_blocks,
+            "repository_inspection_complete": self.repository_inspection_complete,
             "planned_edits": self.planned_edits,
             "planned_validations": self.planned_validations,
             "validation_history": self.validation_history,
@@ -344,14 +439,22 @@ class WorkspaceReasoningState:
 
     def compact(self) -> "WorkspaceReasoningState":
         self.objectives = _cap(_dedupe(self.objectives), MAX_LIST_ITEMS)
+        self.context_score = max(0, min(int(self.context_score or 0), 1000))
         self.inspected_files = _cap(_dedupe(self.inspected_files), MAX_LIST_ITEMS)
         self.active_files = _cap(_dedupe(self.active_files), MAX_LIST_ITEMS)
+        self.context_bar_blocks = _cap(self.context_bar_blocks, MAX_HISTORY_ITEMS)
         self.planned_validations = _cap(_dedupe(self.planned_validations), MAX_LIST_ITEMS)
         self.planned_edits = _cap(self.planned_edits, MAX_HISTORY_ITEMS)
         self.validation_history = _cap(self.validation_history, MAX_HISTORY_ITEMS)
         self.repair_history = _cap(self.repair_history, MAX_HISTORY_ITEMS)
         self.approval_history = _cap(self.approval_history, MAX_HISTORY_ITEMS)
         self.related_files = _compact_dict_lists(self.related_files)
+        self.dependency_edges = _compact_edges(self.dependency_edges)
+        self.inspected_symbols = _compact_dict_lists(self.inspected_symbols)
+        self.related_tests = _compact_dict_lists(self.related_tests)
+        self.related_configs = _compact_dict_lists(self.related_configs)
+        self.related_docs = _compact_dict_lists(self.related_docs)
+        self.impacted_files = _compact_dict_lists(self.impacted_files)
         self.dependency_map = _compact_dict_lists(self.dependency_map)
         self.repository_summary = _compact_dict(self.repository_summary)
         self.execution_plan.compact()
@@ -361,8 +464,32 @@ class WorkspaceReasoningState:
         self.add_objectives(other.objectives)
         self.add_active_files(other.active_files)
         self.add_inspected_files(other.inspected_files)
+        self.context_bar_blocks = _cap(
+            [*self.context_bar_blocks, *other.context_bar_blocks],
+            MAX_HISTORY_ITEMS,
+        )
+        self.grouped_patch_required = self.grouped_patch_required or other.grouped_patch_required
+        self.repository_inspection_complete = (
+            self.repository_inspection_complete or other.repository_inspection_complete
+        )
         for key, files in other.related_files.items():
             self.add_related_files(key, files)
+        for edge in other.dependency_edges:
+            self.add_related_file(
+                str(edge.get("source") or ""),
+                str(edge.get("target") or ""),
+                str(edge.get("relation") or "execution_plan"),
+            )
+        for key, symbols in other.inspected_symbols.items():
+            self.inspected_symbols[key] = _cap(
+                _dedupe([*self.inspected_symbols.get(key, []), *symbols]),
+                MAX_LIST_ITEMS,
+            )
+        for key, files in other.impacted_files.items():
+            self.impacted_files[key] = _cap(
+                _dedupe([*self.impacted_files.get(key, []), *files]),
+                MAX_LIST_ITEMS,
+            )
         for key, deps in other.dependency_map.items():
             self.dependency_map[key] = _cap(_dedupe([*self.dependency_map.get(key, []), *deps]), MAX_LIST_ITEMS)
         self.planned_edits = _cap([*self.planned_edits, *other.planned_edits], MAX_HISTORY_ITEMS)
@@ -381,6 +508,7 @@ class WorkspaceReasoningState:
         )
         self.repository_summary = _compact_dict({**self.repository_summary, **other.repository_summary})
         self.execution_plan.merge_from(other.execution_plan)
+        self._refresh_context_state()
         self.compact()
 
     def add_objectives(self, objectives: list[str]) -> None:
@@ -404,14 +532,136 @@ class WorkspaceReasoningState:
         )
         self.related_files = _compact_dict_lists(self.related_files)
 
+    def add_related_file(self, source: str, target: str, relation: str) -> None:
+        clean_source = _clean_path(source)
+        clean_target = _clean_path(target)
+        clean_relation = _relation_value(relation)
+        if not clean_source or not clean_target or clean_source == clean_target:
+            return
+        self.add_related_files(clean_source, [clean_target])
+        edge = {"source": clean_source, "target": clean_target, "relation": clean_relation}
+        existing = {_edge_key(item) for item in self.dependency_edges}
+        if _edge_key(edge) not in existing:
+            self.dependency_edges = _cap([*self.dependency_edges, edge], MAX_LIST_ITEMS * 4)
+        if clean_relation == "imports":
+            self.dependency_map[clean_source] = _cap(
+                _dedupe([*self.dependency_map.get(clean_source, []), clean_target]),
+                MAX_LIST_ITEMS,
+            )
+        if clean_relation == "tests":
+            self.related_tests[clean_source] = _cap(
+                _dedupe([*self.related_tests.get(clean_source, []), clean_target]),
+                MAX_LIST_ITEMS,
+            )
+        elif clean_relation == "configs":
+            self.related_configs[clean_source] = _cap(
+                _dedupe([*self.related_configs.get(clean_source, []), clean_target]),
+                MAX_LIST_ITEMS,
+            )
+        elif clean_relation == "docs":
+            self.related_docs[clean_source] = _cap(
+                _dedupe([*self.related_docs.get(clean_source, []), clean_target]),
+                MAX_LIST_ITEMS,
+            )
+        if clean_relation in {"imports", "tests", "configs", "docs", "validation", "patch_group"}:
+            self.impacted_files[clean_source] = _cap(
+                _dedupe([*self.impacted_files.get(clean_source, []), clean_target]),
+                MAX_LIST_ITEMS,
+            )
+
+    def related_files_for(self, path: str) -> list[str]:
+        clean = _clean_path(path)
+        related = list(self.related_files.get(clean, []))
+        for edge in self.dependency_edges:
+            source = str(edge.get("source") or "")
+            target = str(edge.get("target") or "")
+            if source == clean:
+                related.append(target)
+            elif target == clean:
+                related.append(source)
+        related.extend(self.related_tests.get(clean, []))
+        related.extend(self.related_configs.get(clean, []))
+        related.extend(self.related_docs.get(clean, []))
+        return _cap(_dedupe(_clean_paths(related)), MAX_LIST_ITEMS)
+
+    def impacted_files_for(self, path: str) -> list[str]:
+        clean = _clean_path(path)
+        impacted = list(self.impacted_files.get(clean, []))
+        impacted.extend(self.related_files_for(clean))
+        for source, deps in self.dependency_map.items():
+            if source == clean:
+                impacted.extend(deps)
+            elif clean in deps:
+                impacted.append(source)
+        return _cap(_dedupe(_clean_paths(impacted)), MAX_LIST_ITEMS)
+
+    def infer_related_files(self, paths: list[str] | None = None) -> None:
+        candidates = [
+            path
+            for path in _dedupe(
+            _clean_paths(
+                paths
+                or [
+                    *self.inspected_files,
+                    *self.active_files,
+                    *self.repository_summary_files(),
+                    *[path for files in self.related_files.values() for path in files],
+                ]
+            )
+            )
+            if not _is_internal_state_path(path)
+        ]
+        configs = [path for path in candidates if _is_config_context_file(path)]
+        docs = [path for path in candidates if _is_doc_context_file(path)]
+        tests = [path for path in candidates if _is_test_context_file(path)]
+        impls = [path for path in candidates if path not in configs and path not in docs and not _is_test_context_file(path)]
+        for impl in impls:
+            stem = _module_stem(impl)
+            for test in tests:
+                if _module_stem(test).removeprefix("test_").removesuffix("_test") == stem:
+                    self.add_related_file(impl, test, "tests")
+                    self.add_related_file(test, impl, "tests")
+            for config in configs:
+                self.add_related_file(impl, config, "configs")
+            for doc in docs:
+                doc_lower = doc.lower()
+                if stem and (stem in doc_lower or _path_name(impl).lower() in doc_lower or doc_lower.endswith("readme.md")):
+                    self.add_related_file(impl, doc, "docs")
+
+    def repository_summary_files(self) -> list[str]:
+        files: list[str] = []
+        for key in (
+            "key_files",
+            "validation_targets",
+            "searched_files",
+            "read_files",
+            "known_files",
+        ):
+            files.extend(_string_list(self.repository_summary.get(key)))
+        return _dedupe(_clean_paths(files))
+
     def record_repo_map(self, payload: dict[str, Any]) -> None:
         focus = str(payload.get("focus") or "workspace")
         related = _string_list(payload.get("related_files"))
         tests = _string_list(payload.get("test_files"))
+        key_files = _string_list(payload.get("key_files"))
+        validation_targets = _string_list(payload.get("validation_targets"))
         active = _string_list(payload.get("active_files"))
+        mentioned = _string_list(payload.get("mentioned_files"))
+        self._record_context_tool("repo_map")
         self.add_active_files(active)
-        self.add_inspected_files([*related[:20], *tests[:20], *_string_list(payload.get("key_files"))[:20]])
+        self.add_inspected_files([*related[:20], *tests[:20], *key_files[:20]])
         self.add_related_files(focus, [*related, *tests])
+        known = _dedupe([*related, *tests, *key_files, *validation_targets, *active, *mentioned])
+        for path in related:
+            self.add_related_file(focus, path, "execution_plan")
+        for path in tests:
+            self.add_related_file(focus, path, "tests")
+        for path in key_files:
+            relation = "docs" if _is_doc_context_file(path) else "configs"
+            self.add_related_file(focus, path, relation)
+        for path in validation_targets:
+            self.add_related_file(focus, path, "validation")
         dependency_map = payload.get("dependency_map")
         if isinstance(dependency_map, dict):
             for path, deps in _dict_of_string_lists(dependency_map).items():
@@ -419,42 +669,106 @@ class WorkspaceReasoningState:
                     _dedupe([*self.dependency_map.get(path, []), *deps]),
                     MAX_LIST_ITEMS,
                 )
+                for dep in deps:
+                    self.add_related_file(path, dep, "imports")
         reverse_map = payload.get("reverse_dependency_map")
         if isinstance(reverse_map, dict):
-            self.repository_summary["reverse_dependency_map"] = _dict_of_string_lists(reverse_map)
+            clean_reverse = _dict_of_string_lists(reverse_map)
+            self.repository_summary["reverse_dependency_map"] = clean_reverse
+            for path, dependents in clean_reverse.items():
+                for dependent in dependents:
+                    self.add_related_file(path, dependent, "imports")
         symbol_index = payload.get("symbol_index")
         if isinstance(symbol_index, dict):
             self.repository_summary["symbol_index"] = _compact_dict(symbol_index)
+            for path, symbols in _dict_of_string_lists(symbol_index).items():
+                self.inspected_symbols[path] = _cap(
+                    _dedupe([*self.inspected_symbols.get(path, []), *symbols]),
+                    MAX_LIST_ITEMS,
+                )
         self.repository_summary = _compact_dict(
             {
                 **self.repository_summary,
                 "last_focus": focus,
-                "key_files": _string_list(payload.get("key_files"))[:40],
+                "repo_map_used": True,
+                "key_files": key_files[:40],
                 "search_hints": _string_list(payload.get("search_hints"))[:20],
-                "validation_targets": _string_list(payload.get("validation_targets"))[:20],
+                "validation_targets": validation_targets[:20],
+                "known_files": _cap(
+                    _dedupe([*_string_list(self.repository_summary.get("known_files")), *known]),
+                    MAX_LIST_ITEMS,
+                ),
             }
         )
         self.execution_plan.record_files_for_active([*related, *tests])
-        self.execution_plan.record_validation_targets_for_active(_string_list(payload.get("validation_targets")))
+        self.execution_plan.record_related_for_active([*related, *tests, *key_files])
+        self.execution_plan.record_impacted_for_active([*related, *tests, *key_files, *validation_targets])
+        self.execution_plan.record_repository_dependencies_for_active(
+            [path for deps in self.dependency_map.values() for path in deps]
+        )
+        self.execution_plan.record_validation_targets_for_active(validation_targets)
+        self.infer_related_files([*known, focus])
+        self._refresh_context_state()
         self.compact()
 
     def record_tool_result(self, tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
         payload = result.get("result") if isinstance(result.get("result"), dict) else {}
         if tool_name == "read_file" and isinstance(payload.get("path"), str):
+            self._record_context_tool("read_file")
+            self._record_read_file(payload["path"])
+            if isinstance(payload.get("content"), str):
+                symbols = _symbols_from_content(payload["path"], payload["content"])
+                if symbols:
+                    self.inspected_symbols[payload["path"]] = _cap(
+                        _dedupe([*self.inspected_symbols.get(payload["path"], []), *symbols]),
+                        MAX_LIST_ITEMS,
+                    )
             self.execution_plan.activate_kind("inspect")
             self.add_inspected_files([payload["path"]])
+            self.infer_related_files([payload["path"], *self.repository_summary_files()])
             if result.get("ok") is not False:
                 self.execution_plan.mark_active_completed()
         elif tool_name == "list_files" and isinstance(payload.get("files"), list):
+            self._record_context_tool("list_files")
             self.execution_plan.activate_kind("inspect")
             paths = [str(item.get("path")) for item in payload["files"] if isinstance(item, dict)]
             self.add_inspected_files(paths[:20])
             if result.get("ok") is not False:
                 self.execution_plan.mark_active_completed()
         elif tool_name == "search_files" and isinstance(payload.get("matches"), list):
+            self._record_context_tool("search_files")
             self.execution_plan.activate_kind("inspect")
             paths = [str(item.get("path")) for item in payload["matches"] if isinstance(item, dict)]
             self.add_inspected_files(paths[:30])
+            self.add_related_files(str(args.get("query") or "search"), paths[:30])
+            query = str(args.get("query") or "search")
+            for path in paths[:30]:
+                self.add_related_file(query, path, "execution_plan")
+            self.repository_summary = _compact_dict(
+                {
+                    **self.repository_summary,
+                    "search_files_used": True,
+                    "searched_files": _cap(
+                        _dedupe(
+                            [
+                                *_string_list(self.repository_summary.get("searched_files")),
+                                *paths[:30],
+                            ]
+                        ),
+                        MAX_LIST_ITEMS,
+                    ),
+                    "known_files": _cap(
+                        _dedupe(
+                            [
+                                *_string_list(self.repository_summary.get("known_files")),
+                                *paths[:30],
+                            ]
+                        ),
+                        MAX_LIST_ITEMS,
+                    ),
+                }
+            )
+            self.infer_related_files(paths[:30])
             if result.get("ok") is not False:
                 self.execution_plan.mark_active_completed()
         elif tool_name == "repo_map":
@@ -468,7 +782,22 @@ class WorkspaceReasoningState:
                 self.execution_plan.activate_kind("edit")
             changed = _changed_files(tool_name, result) or _string_list(result.get("affected_files"))
             self.add_related_files("recent_edits", changed)
+            for source in changed:
+                self.impacted_files[source] = _cap(
+                    _dedupe([*self.impacted_files.get(source, []), *self.impacted_files_for(source)]),
+                    MAX_LIST_ITEMS,
+                )
+            for index, source in enumerate(changed):
+                for target in changed[index + 1 :]:
+                    self.add_related_file(source, target, "patch_group")
+                    self.add_related_file(target, source, "patch_group")
+            relation = "reviewer_feedback" if result.get("reviewer_rejected_unread_edit") else "repair" if result.get("repair") else "patch_group"
+            if result.get("edit_policy_feedback"):
+                for source in changed:
+                    for target in self.related_files_for(source):
+                        self.add_related_file(source, target, relation)
             self.execution_plan.record_files_for_active(changed)
+            self.execution_plan.record_impacted_for_active([path for source in changed for path in self.impacted_files_for(source)])
             summary = _edit_summary(payload, args)
             result_summary = result.get("summary")
             if isinstance(result_summary, str) and result_summary.strip():
@@ -495,13 +824,37 @@ class WorkspaceReasoningState:
                 self.execution_plan.mark_active_completed()
             else:
                 self.execution_plan.mark_active_completed()
+        if result.get("context_change_bar_feedback"):
+            self.record_context_bar_block(result)
+        if result.get("grouped_patch_required"):
+            self.grouped_patch_required = True
         validation = result.get("validation")
         if isinstance(validation, dict):
             self.record_validation(validation)
         repair = result.get("repair")
         if isinstance(repair, dict):
             self.record_repair(repair)
+        self._refresh_context_state()
         self.compact()
+
+    def record_context_bar_block(self, result: dict[str, Any]) -> None:
+        policy = result.get("policy") if isinstance(result.get("policy"), dict) else {}
+        self.context_bar_blocks = _cap(
+            [
+                *self.context_bar_blocks,
+                {
+                    "tool": result.get("tool"),
+                    "affected_files": _string_list(result.get("affected_files")),
+                    "recommended_tool": result.get("recommended_tool"),
+                    "score": policy.get("score"),
+                    "threshold": policy.get("threshold"),
+                    "missing_context": _string_list(policy.get("missing_context")),
+                },
+            ],
+            MAX_HISTORY_ITEMS,
+        )
+        if result.get("grouped_patch_required"):
+            self.grouped_patch_required = True
 
     def record_validation(self, validation: dict[str, Any]) -> None:
         commands = [
@@ -514,8 +867,13 @@ class WorkspaceReasoningState:
             MAX_LIST_ITEMS,
         )
         self.execution_plan.activate_kind("validate")
-        self.execution_plan.record_files_for_active(_string_list(validation.get("changed_files")))
-        self.execution_plan.record_validation_targets_for_active(_string_list(validation.get("validation_targets")))
+        changed_files = _string_list(validation.get("changed_files"))
+        validation_targets = _string_list(validation.get("validation_targets"))
+        self.execution_plan.record_files_for_active(changed_files)
+        self.execution_plan.record_validation_targets_for_active(validation_targets)
+        for source in changed_files:
+            for target in validation_targets:
+                self.add_related_file(source, target, "validation")
         self.validation_history = _cap(
             [
                 *self.validation_history,
@@ -523,8 +881,8 @@ class WorkspaceReasoningState:
                     "ok": validation.get("ok"),
                     "mode": validation.get("mode"),
                     "execution_node": validation.get("execution_node"),
-                    "changed_files": _string_list(validation.get("changed_files")),
-                    "validation_targets": _string_list(validation.get("validation_targets")),
+                    "changed_files": changed_files,
+                    "validation_targets": validation_targets,
                     "failed_categories": _string_list(validation.get("failed_categories")),
                     "checks": _compact_checks(validation.get("checks")),
                 },
@@ -545,12 +903,39 @@ class WorkspaceReasoningState:
             dependencies=[dependency] if dependency else [],
             strategy=str(repair.get("strategy") or "Apply the smallest safe repair."),
         )
+        active = self.execution_plan.active()
+        if active is not None:
+            active.related_files = _cap(_dedupe([*active.related_files, *self.repository_summary_files()]), MAX_LIST_ITEMS)
+            active.impacted_files = _cap(_dedupe([*active.impacted_files, *self.repository_summary_files()]), MAX_LIST_ITEMS)
 
     def record_approval(self, approval: dict[str, Any]) -> None:
         self.approval_history = _cap([*self.approval_history, dict(approval)], MAX_HISTORY_ITEMS)
         self.execution_plan.activate_kind("edit")
         self.execution_plan.record_files_for_active(_string_list(approval.get("affected_files")))
         self.execution_plan.mark_active_blocked(reason="Waiting for approval.")
+
+    def _record_context_tool(self, tool_name: str) -> None:
+        tools = _string_list(self.repository_summary.get("context_tools"))
+        self.repository_summary = _compact_dict(
+            {
+                **self.repository_summary,
+                "context_tools": _cap(_dedupe([*tools, tool_name]), MAX_LIST_ITEMS),
+            }
+        )
+
+    def _record_read_file(self, path: str) -> None:
+        reads = _string_list(self.repository_summary.get("read_files"))
+        self.repository_summary = _compact_dict(
+            {
+                **self.repository_summary,
+                "read_files": _cap(_dedupe([*reads, path]), MAX_LIST_ITEMS),
+            }
+        )
+
+    def _refresh_context_state(self) -> None:
+        self.context_score = _state_context_score(self)
+        tools = _string_list(self.repository_summary.get("context_tools"))
+        self.repository_inspection_complete = bool(tools) and self.context_score >= 3
 
 
 def reasoning_state_message(state: WorkspaceReasoningState) -> str:
@@ -623,6 +1008,46 @@ def _edit_status(result: dict[str, Any]) -> str:
     return "applied"
 
 
+def _state_context_score(state: WorkspaceReasoningState) -> int:
+    summary = state.repository_summary
+    tools = set(_string_list(summary.get("context_tools")))
+    read_files = _dedupe(_string_list(summary.get("read_files")))
+    score = 0
+    if "repo_map" in tools:
+        score += 4
+    if "search_files" in tools:
+        score += 2
+    score += len(read_files)
+
+    related = set(_string_list(summary.get("key_files")))
+    related.update(_string_list(summary.get("validation_targets")))
+    for files in state.related_files.values():
+        related.update(_string_list(files))
+    if any(_is_support_context_file(path) and (not related or path in related) for path in read_files):
+        score += 2
+    return score
+
+
+def _is_support_context_file(path: str) -> bool:
+    lowered = path.replace("\\", "/").lower()
+    name = lowered.rsplit("/", 1)[-1]
+    if "/test" in lowered or name.startswith("test_") or name.endswith("_test.py"):
+        return True
+    if name in {
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "requirements.txt",
+        "tox.ini",
+        "tsconfig.json",
+        "agent-hub.config.json",
+        "readme.md",
+    }:
+        return True
+    return lowered.endswith((".md", ".rst", ".txt", ".json", ".toml", ".yaml", ".yml", ".ini", ".cfg"))
+
+
 def _compact_checks(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -649,10 +1074,32 @@ def _string_list(value: Any) -> list[str]:
     return [str(item)[:300] for item in value if isinstance(item, str) and item.strip()]
 
 
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _dict_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [_compact_dict(item) for item in value if isinstance(item, dict)][:MAX_HISTORY_ITEMS]
+
+
+def _edge_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    edges: list[dict[str, Any]] = []
+    for item in value[: MAX_LIST_ITEMS * 4]:
+        if not isinstance(item, dict):
+            continue
+        source = _clean_path(str(item.get("source") or ""))
+        target = _clean_path(str(item.get("target") or ""))
+        relation = _relation_value(item.get("relation"))
+        if source and target and source != target:
+            edges.append({"source": source, "target": target, "relation": relation})
+    return _compact_edges(edges)
 
 
 def _dict_of_string_lists(value: Any) -> dict[str, list[str]]:
@@ -660,7 +1107,7 @@ def _dict_of_string_lists(value: Any) -> dict[str, list[str]]:
         return {}
     result: dict[str, list[str]] = {}
     for key, items in list(value.items())[:MAX_DICT_KEYS]:
-        result[str(key)[:160]] = _string_list(items)[:MAX_LIST_ITEMS]
+        result[_clean_path(str(key)[:160])] = _string_list(items)[:MAX_LIST_ITEMS]
     return result
 
 
@@ -683,14 +1130,115 @@ def _compact_dict(value: dict[str, Any]) -> dict[str, Any]:
 
 def _compact_dict_lists(value: dict[str, list[str]]) -> dict[str, list[str]]:
     return {
-        key: _cap(_dedupe(items), MAX_LIST_ITEMS)
+        _clean_path(key): _cap(_dedupe(_clean_paths(items)), MAX_LIST_ITEMS)
         for key, items in list(value.items())[-MAX_DICT_KEYS:]
-        if items
+        if key and items
     }
 
 
 def _clean_paths(paths: list[str]) -> list[str]:
-    return [path.replace("\\", "/") for path in paths if path and path != "."]
+    return [_clean_path(path) for path in paths if _clean_path(path)]
+
+
+def _clean_path(path: str) -> str:
+    value = str(path or "").replace("\\", "/").strip()
+    while value.startswith("./"):
+        value = value[2:]
+    return "" if value in {"", "."} else value[:300]
+
+
+def _compact_edges(edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str]] = set()
+    compact: list[dict[str, Any]] = []
+    for edge in edges[-MAX_LIST_ITEMS * 4 :]:
+        source = _clean_path(str(edge.get("source") or ""))
+        target = _clean_path(str(edge.get("target") or ""))
+        relation = _relation_value(edge.get("relation"))
+        key = (source, target, relation)
+        if not source or not target or source == target or key in seen:
+            continue
+        seen.add(key)
+        compact.append({"source": source, "target": target, "relation": relation})
+    return compact[-MAX_LIST_ITEMS * 4 :]
+
+
+def _edge_key(edge: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        _clean_path(str(edge.get("source") or "")),
+        _clean_path(str(edge.get("target") or "")),
+        _relation_value(edge.get("relation")),
+    )
+
+
+def _relation_value(value: Any) -> str:
+    relation = str(value or "execution_plan").strip().lower()
+    if relation in {
+        "imports",
+        "tests",
+        "configs",
+        "docs",
+        "validation",
+        "execution_plan",
+        "repair",
+        "patch_group",
+        "reviewer_feedback",
+    }:
+        return relation
+    return "execution_plan"
+
+
+def _module_stem(path: str) -> str:
+    name = _path_name(path)
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    return stem.lower().removeprefix("test_").removesuffix("_test")
+
+
+def _path_name(path: str) -> str:
+    return _clean_path(path).rsplit("/", 1)[-1]
+
+
+def _is_test_context_file(path: str) -> bool:
+    lowered = _clean_path(path).lower()
+    name = lowered.rsplit("/", 1)[-1]
+    return "/test" in lowered or name.startswith("test_") or name.endswith("_test.py")
+
+
+def _is_config_context_file(path: str) -> bool:
+    lowered = _clean_path(path).lower()
+    name = lowered.rsplit("/", 1)[-1]
+    return name in {
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "requirements.txt",
+        "tox.ini",
+        "tsconfig.json",
+        "agent-hub.config.json",
+    } or lowered.endswith((".json", ".toml", ".yaml", ".yml", ".ini", ".cfg"))
+
+
+def _is_doc_context_file(path: str) -> bool:
+    lowered = _clean_path(path).lower()
+    name = lowered.rsplit("/", 1)[-1]
+    return name == "readme.md" or lowered.endswith((".md", ".rst"))
+
+
+def _is_internal_state_path(path: str) -> bool:
+    lowered = _clean_path(path).lower()
+    return lowered.startswith("state/") or "/.agent-hub/" in lowered or lowered.startswith(".agent-hub/")
+
+
+def _symbols_from_content(path: str, content: str) -> list[str]:
+    lowered = path.lower()
+    symbols: list[str] = []
+    if lowered.endswith(".py"):
+        for pattern in (r"(?m)^\s*def\s+([A-Za-z_]\w*)\s*\(", r"(?m)^\s*class\s+([A-Za-z_]\w*)\b"):
+            symbols.extend(re.findall(pattern, content))
+    elif lowered.endswith((".js", ".ts", ".tsx", ".jsx")):
+        symbols.extend(re.findall(r"(?m)^\s*(?:export\s+)?function\s+([A-Za-z_]\w*)\s*\(", content))
+        symbols.extend(re.findall(r"(?m)^\s*(?:export\s+)?class\s+([A-Za-z_]\w*)\b", content))
+    return _cap(_dedupe(symbols), MAX_LIST_ITEMS)
 
 
 def _dedupe(values: list[str]) -> list[str]:

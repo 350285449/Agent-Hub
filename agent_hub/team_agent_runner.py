@@ -222,6 +222,7 @@ class TeamAgentRunner:
         reasoning_state: WorkspaceReasoningState,
     ) -> HubResponse:
         prompt = _researcher_prompt(request, toolbox.root, plan)
+        _emit_context_inherited(event_sink, "researcher", reasoning_state)
         return AgentRunner(self.config, self.router).run(
             self._role_agent_request(
                 request,
@@ -246,6 +247,7 @@ class TeamAgentRunner:
         reasoning_state: WorkspaceReasoningState,
     ) -> HubResponse:
         prompt = _coder_prompt(request, plan, research)
+        _emit_context_inherited(event_sink, "coder", reasoning_state)
         return AgentRunner(self.config, self.router).run(
             self._role_agent_request(
                 request,
@@ -280,6 +282,7 @@ class TeamAgentRunner:
         reasoning_state: WorkspaceReasoningState,
     ) -> HubResponse:
         prompt = _fixer_prompt(request, plan, review)
+        _emit_context_inherited(event_sink, "fixer", reasoning_state)
         return AgentRunner(self.config, self.router).run(
             self._role_agent_request(
                 request,
@@ -316,6 +319,8 @@ class TeamAgentRunner:
             role=role,
             agent=agent_name,
         )
+        if reasoning_state is not None and role != "planner":
+            _emit_context_inherited(event_sink, role, reasoning_state)
         response = self.router.route(
             replace(
                 request,
@@ -501,6 +506,7 @@ def _planner_prompt(request: HubRequest, root: Path) -> str:
             "You are the planner in an Agent Hub coding team.",
             f"Workspace root: {root}",
             "Break the task into concise execution objectives with dependencies, likely files, risk, and validation.",
+            "Recommend concrete repository inspection targets, related files, impacted files, dependencies, and validation targets before coder edits begin.",
             "Prefer minimal scoped edits, mention likely files, and include verification.",
             "Avoid destructive rewrites and avoid duplicate workspace copies unless the user named them.",
             "",
@@ -516,7 +522,8 @@ def _researcher_prompt(request: HubRequest, root: Path, plan: str) -> str:
             "You are the researcher in an Agent Hub coding team.",
             f"Workspace root: {root}",
             "Use only read/search/list tools, and run safe inspection commands if useful.",
-            "Gather concise repository context needed by the coder. Update dependency, symbol, and test relationships mentally. Do not edit files.",
+            "Expand the repository graph before the coder runs: use repo_map or search_files, then read target files and related tests/config/docs/dependencies. Do not edit files.",
+            "Identify imports, related tests, configs, docs, validation targets, and dependency impact. Preserve inspected files, repository graph, and context score in the shared reasoning state.",
             "",
             "Task:",
             request_text(request),
@@ -533,8 +540,8 @@ def _coder_prompt(request: HubRequest, plan: str, research: str) -> str:
             "You are the coder in an Agent Hub coding team.",
             "Confirm the workspace root and target path before editing.",
             "Inspect files before editing, keep changes scoped, and verify when possible.",
-            "Obey the context change bar: refresh context with repo_map, search_files, or read_file before edits when the task spans files/modules/tests/config/docs or the changed-file threshold is reached.",
-            "Prefer one grouped apply_patch for related edits across implementation, tests, configs, and docs.",
+            "Obey the context change bar using inherited repository graph, inspected files, related files, impacted files, and context score.",
+            "Use one grouped apply_patch for related edits across implementation, tests, configs, docs, and dependency-aware fixes.",
             "Advance the active execution node; use write_file only for new/generated files and replace_in_file only for tiny isolated edits after the relevant context is inspected.",
             "",
             "Task:",
@@ -554,6 +561,8 @@ def _review_context(request: HubRequest, plan: str, research: str, coder: HubRes
         [
             "You are the reviewer in an Agent Hub coding team.",
             "Review the coder's result for correctness, scope, style, safety, and missing tests.",
+            "Explicitly verify repository consistency, related file coverage, validation coverage, dependency impact, and grouped patch correctness.",
+            "Reject edits against unread files, unread dependencies, implementation-only edits when related tests exist, and isolated edits for multi-file tasks.",
             "Return either 'No blocking issues' or a concise list of required fixes.",
             "",
             "Task:",
@@ -579,7 +588,7 @@ def _fixer_prompt(request: HubRequest, plan: str, review: str) -> str:
         [
             "You are the fixer in an Agent Hub coding team.",
             "Apply only the review fixes that are necessary for the user's task.",
-            "Repair the active failed execution node with the smallest grouped apply_patch that preserves prior successful work.",
+            "Repair the active failed execution node with the smallest grouped apply_patch that preserves prior successful work, repository graph continuity, and validation coverage.",
             "",
             "Task:",
             request_text(request),
@@ -729,3 +738,52 @@ def _emit(event_sink: AgentEventSink | None, event_type: str, **data: Any) -> No
         event_sink({"type": event_type, **data})
     except Exception:
         return
+
+
+def _emit_context_inherited(
+    event_sink: AgentEventSink | None,
+    role: str,
+    reasoning_state: WorkspaceReasoningState,
+) -> None:
+    graph_nodes = _repository_graph_nodes(reasoning_state)
+    _emit(
+        event_sink,
+        "repository_context_inherited",
+        message=f"{role.capitalize()} inherited repository context.",
+        role=role,
+        context_score=reasoning_state.context_score,
+        inspected_files=reasoning_state.inspected_files[-20:],
+        related_files_count=sum(len(files) for files in reasoning_state.related_files.values()),
+        graph_node_count=len(graph_nodes),
+        graph_edge_count=len(reasoning_state.dependency_edges),
+        impacted_files=[path for files in reasoning_state.impacted_files.values() for path in files][:30],
+    )
+
+
+def _repository_graph_nodes(reasoning_state: WorkspaceReasoningState) -> list[str]:
+    nodes: list[str] = []
+    nodes.extend(reasoning_state.inspected_files)
+    nodes.extend(reasoning_state.repository_summary_files())
+    for edge in reasoning_state.dependency_edges:
+        nodes.append(str(edge.get("source") or ""))
+        nodes.append(str(edge.get("target") or ""))
+    for mapping in (
+        reasoning_state.related_files,
+        reasoning_state.related_tests,
+        reasoning_state.related_configs,
+        reasoning_state.related_docs,
+        reasoning_state.impacted_files,
+        reasoning_state.dependency_map,
+    ):
+        for source, targets in mapping.items():
+            nodes.append(source)
+            nodes.extend(targets)
+    seen: set[str] = set()
+    clean: list[str] = []
+    for path in nodes:
+        value = str(path or "").replace("\\", "/").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        clean.append(value)
+    return clean[:200]

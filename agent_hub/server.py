@@ -51,6 +51,12 @@ BACKEND_FEATURES = {
     "validation_repair_loops": True,
     "validation_rollback": True,
     "context_change_bar": True,
+    "strict_repository_context": True,
+    "grouped_patch_enforcement": True,
+    "repository_context_scoring": True,
+    "repository_graph_propagation": True,
+    "semantic_related_file_detection": True,
+    "anti_hallucination_edit_blocking": True,
 }
 
 
@@ -88,10 +94,28 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "allow_shell_tools": self.server.config.allow_shell_tools,
                     "shell_command_policy": self.server.config.shell_command_policy,
                     "prefer_multi_file_patches": self.server.config.prefer_multi_file_patches,
+                    "grouped_patch_enforcement": {
+                        "enabled": self.server.config.prefer_multi_file_patches,
+                    },
                     "context_change_bar": {
                         "enabled": self.server.config.context_change_bar_enabled,
                         "mode": self.server.config.context_change_bar_mode,
                         "threshold": self.server.config.context_change_bar_threshold,
+                    },
+                    "repository_context_scoring": {
+                        "enabled": self.server.config.context_change_bar_enabled,
+                        "light_minimum": 3,
+                        "strict_minimum": 6,
+                        "changed_file_threshold": self.server.config.context_change_bar_threshold,
+                    },
+                    "repository_graph": {
+                        "enabled": True,
+                        "node_count": 0,
+                        "related_file_detection_enabled": True,
+                        "strict_anti_hallucination_enforcement_enabled": (
+                            self.server.config.context_change_bar_enabled
+                            and self.server.config.context_change_bar_mode == "strict"
+                        ),
                     },
                     "workspace_dir": str(self.server.config.workspace_dir),
                     "initialization": self.server.config.initialization_report,

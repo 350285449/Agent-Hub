@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import json
+import threading
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.request import urlopen
 
 from agent_hub.config import AgentConfig, HubConfig, RouteRule
 from agent_hub.models import HubRequest
 from agent_hub.router import AgentRouter
-from agent_hub.server import BACKEND_FEATURES, BACKEND_VERSION, _apply_model_routing, _model_rows
+from agent_hub.server import (
+    BACKEND_FEATURES,
+    BACKEND_VERSION,
+    AgentHubHTTPServer,
+    _apply_model_routing,
+    _model_rows,
+)
 
 
 class ServerCompatibilityTests(unittest.TestCase):
@@ -15,6 +24,38 @@ class ServerCompatibilityTests(unittest.TestCase):
         self.assertNotEqual(BACKEND_VERSION, "0.3.2")
         self.assertTrue(BACKEND_FEATURES["workspace_checkpoints"])
         self.assertTrue(BACKEND_FEATURES["validation_repair_loops"])
+        self.assertTrue(BACKEND_FEATURES["strict_repository_context"])
+        self.assertTrue(BACKEND_FEATURES["grouped_patch_enforcement"])
+        self.assertTrue(BACKEND_FEATURES["repository_context_scoring"])
+
+    def test_health_includes_context_enforcement_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                context_change_bar_mode="strict",
+                context_change_bar_threshold=5,
+                prefer_multi_file_patches=True,
+                default_route=["echo"],
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with urlopen(f"http://127.0.0.1:{server.server_address[1]}/health", timeout=5) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(data["context_change_bar"]["mode"], "strict")
+            self.assertEqual(data["context_change_bar"]["threshold"], 5)
+            self.assertTrue(data["grouped_patch_enforcement"]["enabled"])
+            self.assertEqual(data["repository_context_scoring"]["strict_minimum"], 6)
+            self.assertTrue(data["features"]["repository_context_scoring"])
 
     def test_model_rows_include_router_aliases_and_agent_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
