@@ -36,6 +36,75 @@ TOOL_ACTIONS = {
 EDIT_TOOLS = {"write_file", "replace_in_file", "apply_patch"}
 CONTEXT_TOOLS = {"list_files", "read_file", "search_files", "repo_map"}
 BROAD_CONTEXT_TOOLS = {"list_files", "search_files", "repo_map"}
+REPOSITORY_ROOT_FILE_NAMES = {
+    ".dockerignore",
+    ".editorconfig",
+    ".env",
+    ".gitattributes",
+    ".gitignore",
+    ".npmrc",
+    "dockerfile",
+    "license",
+    "makefile",
+    "readme",
+}
+REPOSITORY_FILE_EXTENSIONS = {
+    ".astro",
+    ".bat",
+    ".c",
+    ".cfg",
+    ".cjs",
+    ".conf",
+    ".cpp",
+    ".cs",
+    ".css",
+    ".cts",
+    ".csv",
+    ".env",
+    ".fs",
+    ".fsx",
+    ".go",
+    ".gradle",
+    ".graphql",
+    ".h",
+    ".hpp",
+    ".html",
+    ".ini",
+    ".ipynb",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".kt",
+    ".less",
+    ".lock",
+    ".md",
+    ".mjs",
+    ".mts",
+    ".php",
+    ".properties",
+    ".proto",
+    ".ps1",
+    ".py",
+    ".rb",
+    ".rs",
+    ".rst",
+    ".sass",
+    ".scss",
+    ".sh",
+    ".sln",
+    ".sql",
+    ".svelte",
+    ".swift",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".vue",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
 
 REQUIRED_TOOL_ARGS = {
     "read_file": ("path",),
@@ -142,6 +211,7 @@ class AgentRunner:
                     agent=response.agent,
                     provider=response.provider,
                     model=response.model,
+                    failover=[event.to_dict() for event in response.failover],
                 )
                 final = self._with_agent_metadata(
                     response,
@@ -168,6 +238,7 @@ class AgentRunner:
                 model=response.model,
                 action=command.get("action"),
                 tool=command.get("tool"),
+                failover=[event.to_dict() for event in response.failover],
             )
             if command["action"] == "tool":
                 consecutive_invalid_responses = 0
@@ -1085,7 +1156,17 @@ def _is_repository_file_path(path: str, *, known_files: set[str]) -> bool:
     if clean in known_files:
         return True
     name = clean.rsplit("/", 1)[-1]
-    return "/" in clean or "." in name
+    if _has_repository_file_extension(name):
+        return True
+    return "/" not in clean and name.lower() in REPOSITORY_ROOT_FILE_NAMES
+
+
+def _has_repository_file_extension(name: str) -> bool:
+    lowered = name.lower()
+    if "." not in lowered.strip("."):
+        return False
+    suffixes = Path(lowered).suffixes
+    return any(suffix in REPOSITORY_FILE_EXTENSIONS for suffix in suffixes)
 
 
 def _is_internal_runtime_policy_path(path: str) -> bool:

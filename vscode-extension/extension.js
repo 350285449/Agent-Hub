@@ -13,7 +13,7 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let lastActiveTextEditor = null;
-const EXTENSION_VERSION = "0.6.5";
+const EXTENSION_VERSION = "0.6.7";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
@@ -1254,14 +1254,16 @@ async function sendChatTurn(panel, message) {
       requestId,
       text: reply || "(empty response)",
       tools: agentToolSteps(response),
-      sources: sourceLines(response)
+      sources: sourceLines(response),
+      response
     });
   } catch (error) {
     output.appendLine(`Agent Hub chat failed: ${error.message}`);
     panel.webview.postMessage({
       type: "chatError",
       requestId,
-      text: formatAgentHubError(error)
+      text: formatAgentHubError(error),
+      failover: Array.isArray(error.failover) ? error.failover : []
     });
   }
 }
@@ -1422,6 +1424,88 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     .settings-wrap {
       position: relative;
       flex: 0 0 auto;
+    }
+
+    .models-wrap {
+      position: relative;
+      flex: 0 1 auto;
+      min-width: 0;
+    }
+
+    #modelsToggle {
+      max-width: min(280px, 42vw);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .models-menu {
+      position: absolute;
+      z-index: 19;
+      top: calc(100% + 8px);
+      right: 0;
+      width: min(440px, calc(100vw - 28px));
+      max-height: calc(100vh - 88px);
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    }
+
+    .models-menu[hidden] {
+      display: none;
+    }
+
+    .models-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .models-title {
+      font-weight: 600;
+    }
+
+    .active-model {
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .models-list {
+      display: grid;
+      gap: 6px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .model-row {
+      display: grid;
+      gap: 2px;
+      padding: 7px 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .model-row:first-child {
+      border-top: 0;
+    }
+
+    .model-main {
+      color: var(--vscode-foreground);
+      overflow-wrap: anywhere;
+    }
+
+    .model-meta {
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
     }
 
     .settings-menu {
@@ -1723,6 +1807,22 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       </div>
       <div class="header-actions">
         <div class="status" id="status">Checking Agent Hub...</div>
+        <div class="models-wrap">
+          <button class="secondary" id="modelsToggle" type="button" aria-expanded="false" aria-controls="modelsMenu">Models</button>
+          <section class="models-menu" id="modelsMenu" hidden>
+            <div class="models-head">
+              <div class="models-title">Session Models</div>
+              <button class="secondary" id="modelsClose" type="button">Close</button>
+            </div>
+            <div class="active-model" id="activeModel">No model in this session yet</div>
+            <ul class="models-list" id="sessionModelsList">
+              <li class="model-row">
+                <div class="model-main">No models yet</div>
+                <div class="model-meta">Send a request to see routing live.</div>
+              </li>
+            </ul>
+          </section>
+        </div>
         <div class="settings-wrap">
           <button class="secondary" id="settingsToggle" type="button" aria-expanded="false" aria-controls="settingsMenu">Settings</button>
           <section class="settings-menu" id="settingsMenu" hidden>
@@ -1900,6 +2000,11 @@ ${apiKeyFieldsHtml()}
     const prompt = document.getElementById("prompt");
     const send = document.getElementById("send");
     const status = document.getElementById("status");
+    const modelsToggle = document.getElementById("modelsToggle");
+    const modelsMenu = document.getElementById("modelsMenu");
+    const modelsClose = document.getElementById("modelsClose");
+    const activeModel = document.getElementById("activeModel");
+    const sessionModelsList = document.getElementById("sessionModelsList");
     const settingsToggle = document.getElementById("settingsToggle");
     const settingsMenu = document.getElementById("settingsMenu");
     const settingsClose = document.getElementById("settingsClose");
@@ -1943,7 +2048,9 @@ ${apiKeyFieldsHtml()}
     const keyStates = Object.fromEntries(apiKeyIds.map((id) => [id, document.getElementById("key-" + id + "-state")]));
     const keyMessage = document.getElementById("keyMessage");
     const pending = new Map();
+    const sessionModels = new Map();
     let sessionId = "vscode-chat-" + Date.now().toString(36);
+    let activeModelKey = "";
     let workingTimer = null;
     let workingStarted = 0;
 
@@ -1961,10 +2068,20 @@ ${apiKeyFieldsHtml()}
       settingsMenu.hidden = !value;
       settingsToggle.setAttribute("aria-expanded", value ? "true" : "false");
       if (value) {
+        setModelsMenuOpen(false);
         const firstField = settingsMenu.querySelector("select, input, button");
         if (firstField) {
           firstField.focus();
         }
+      }
+    }
+
+    function setModelsMenuOpen(value) {
+      modelsMenu.hidden = !value;
+      modelsToggle.setAttribute("aria-expanded", value ? "true" : "false");
+      if (value) {
+        setSettingsMenuOpen(false);
+        modelsClose.focus();
       }
     }
 
@@ -2144,6 +2261,226 @@ ${apiKeyFieldsHtml()}
       return details;
     }
 
+    function resetSessionModels() {
+      sessionModels.clear();
+      activeModelKey = "";
+      renderSessionModels();
+    }
+
+    function sessionModelKey(row) {
+      return [
+        row.role || "agent",
+        row.agent || "",
+        row.provider || "",
+        row.model || ""
+      ].join("|");
+    }
+
+    function providerModelText(row) {
+      const provider = row.provider || "provider pending";
+      const model = row.model || "model pending";
+      return provider + " / " + model;
+    }
+
+    function shortModelText(row) {
+      if (!row || (!row.provider && !row.model && !row.agent)) {
+        return "Models";
+      }
+      const model = row.model || row.agent || "routing";
+      const provider = row.provider ? row.provider + " / " : "";
+      return "Models: " + provider + model;
+    }
+
+    function cleanSessionModelRow(row) {
+      const source = row || {};
+      return {
+        role: String(source.role || "agent"),
+        agent: String(source.agent || ""),
+        provider: String(source.provider || ""),
+        model: String(source.model || ""),
+        status: String(source.status || "active"),
+        detail: String(source.detail || "")
+      };
+    }
+
+    function recordSessionModel(row, options = {}) {
+      const clean = cleanSessionModelRow(row);
+      if (!clean.agent && !clean.provider && !clean.model) {
+        return;
+      }
+      if ((clean.provider || clean.model) && clean.agent) {
+        sessionModels.delete([
+          clean.role || "agent",
+          clean.agent,
+          "",
+          ""
+        ].join("|"));
+      }
+      const key = sessionModelKey(clean);
+      const previous = sessionModels.get(key) || {};
+      const next = Object.assign({}, previous, clean);
+      sessionModels.set(key, next);
+      if (options.active || next.status === "active" || next.status === "routing") {
+        activeModelKey = key;
+      }
+      renderSessionModels();
+    }
+
+    function recordFailovers(failovers, fallbackRole) {
+      if (!Array.isArray(failovers)) {
+        return;
+      }
+      for (const event of failovers) {
+        if (!event || typeof event !== "object") {
+          continue;
+        }
+        recordSessionModel({
+          role: fallbackRole || "failover",
+          agent: event.agent,
+          provider: event.provider,
+          model: event.model,
+          status: "failover",
+          detail: event.reason || "failover"
+        });
+      }
+    }
+
+    function updateSessionModelsFromEvent(eventName, data) {
+      const payload = data && typeof data === "object" ? data : {};
+      const type = payload.type || eventName || "";
+      if (type === "model_response") {
+        recordSessionModel({
+          role: "agent",
+          agent: payload.agent,
+          provider: payload.provider,
+          model: payload.model,
+          status: "active",
+          detail: payload.step ? "Step " + payload.step : "workspace agent"
+        }, { active: true });
+      } else if (type === "team_role_started") {
+        recordSessionModel({
+          role: payload.role,
+          agent: payload.agent,
+          status: "routing",
+          detail: "routing"
+        }, { active: true });
+      } else if (type === "team_role_finished") {
+        recordSessionModel({
+          role: payload.role,
+          agent: payload.agent,
+          provider: payload.provider,
+          model: payload.model,
+          status: "active",
+          detail: "team role complete"
+        }, { active: true });
+      } else if (type === "route_finished") {
+        recordSessionModel({
+          role: "route",
+          agent: payload.agent,
+          provider: payload.provider,
+          model: payload.model,
+          status: "active",
+          detail: "direct route"
+        }, { active: true });
+      } else if (type === "agent_stopped") {
+        recordSessionModel({
+          role: "agent",
+          agent: payload.agent,
+          provider: payload.provider,
+          model: payload.model,
+          status: "stopped",
+          detail: "stopped"
+        }, { active: true });
+      }
+      recordFailovers(payload.failover, payload.role);
+    }
+
+    function updateSessionModelsFromResponse(response) {
+      const payload = response && typeof response === "object" ? response : {};
+      if (payload.agent && typeof payload.agent === "object") {
+        recordSessionModel({
+          role: "final",
+          agent: payload.agent.name,
+          provider: payload.agent.provider,
+          model: payload.agent.model,
+          status: "active",
+          detail: "final response"
+        }, { active: true });
+      } else if (payload.model && sessionModels.size === 0) {
+        recordSessionModel({
+          role: "final",
+          model: payload.model,
+          status: "active",
+          detail: "final response"
+        }, { active: true });
+      }
+      recordFailovers(payload.failover);
+      const metadata = payload.agent_hub;
+      if (metadata && Array.isArray(metadata.steps)) {
+        for (const step of metadata.steps) {
+          if (!step || typeof step !== "object") {
+            continue;
+          }
+          recordSessionModel({
+            role: "agent",
+            agent: step.agent,
+            provider: step.provider,
+            model: step.model,
+            status: "used",
+            detail: step.tool ? "tool: " + step.tool : "step"
+          });
+        }
+      }
+    }
+
+    function renderSessionModels() {
+      const rows = Array.from(sessionModels.values());
+      const active = activeModelKey ? sessionModels.get(activeModelKey) : rows[rows.length - 1];
+      activeModel.textContent = active
+        ? "Active: " + providerModelText(active) + " (" + (active.role || "agent") + ")"
+        : "No model in this session yet";
+      modelsToggle.textContent = shortModelText(active);
+      sessionModelsList.textContent = "";
+      if (!rows.length) {
+        const item = document.createElement("li");
+        item.className = "model-row";
+        const main = document.createElement("div");
+        main.className = "model-main";
+        main.textContent = "No models yet";
+        const meta = document.createElement("div");
+        meta.className = "model-meta";
+        meta.textContent = "Send a request to see routing live.";
+        item.append(main, meta);
+        sessionModelsList.append(item);
+        return;
+      }
+      for (const row of rows.slice().reverse()) {
+        const item = document.createElement("li");
+        item.className = "model-row";
+        const main = document.createElement("div");
+        main.className = "model-main";
+        main.textContent = providerModelText(row);
+        const meta = document.createElement("div");
+        meta.className = "model-meta";
+        const pieces = [];
+        if (row.role) {
+          pieces.push("role: " + row.role);
+        }
+        if (row.agent) {
+          pieces.push("agent: " + row.agent);
+        }
+        if (row.status) {
+          pieces.push(row.status);
+        }
+        if (row.detail) {
+          pieces.push(row.detail);
+        }
+        meta.textContent = pieces.join(" - ");
+        item.append(main, meta);
+        sessionModelsList.append(item);
+      }
+    }
+
     function setApiKeyStatus(keys, messageText, clearInputs) {
       if (clearInputs) {
         for (const input of Object.values(keyInputs)) {
@@ -2171,21 +2508,42 @@ ${apiKeyFieldsHtml()}
       settingsToggle.focus();
     });
 
+    modelsToggle.addEventListener("click", () => {
+      setModelsMenuOpen(modelsMenu.hidden);
+    });
+
+    modelsClose.addEventListener("click", () => {
+      setModelsMenuOpen(false);
+      modelsToggle.focus();
+    });
+
     document.addEventListener("click", (event) => {
       if (
-        settingsMenu.hidden ||
-        settingsMenu.contains(event.target) ||
-        settingsToggle.contains(event.target)
+        !settingsMenu.hidden &&
+        !settingsMenu.contains(event.target) &&
+        !settingsToggle.contains(event.target)
       ) {
-        return;
+        setSettingsMenuOpen(false);
       }
-      setSettingsMenuOpen(false);
+      if (
+        !modelsMenu.hidden &&
+        !modelsMenu.contains(event.target) &&
+        !modelsToggle.contains(event.target)
+      ) {
+        setModelsMenuOpen(false);
+      }
     });
 
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !settingsMenu.hidden) {
-        setSettingsMenuOpen(false);
-        settingsToggle.focus();
+      if (event.key === "Escape") {
+        if (!settingsMenu.hidden) {
+          setSettingsMenuOpen(false);
+          settingsToggle.focus();
+        }
+        if (!modelsMenu.hidden) {
+          setModelsMenuOpen(false);
+          modelsToggle.focus();
+        }
       }
     });
 
@@ -2269,6 +2627,7 @@ ${apiKeyFieldsHtml()}
     document.getElementById("clear").addEventListener("click", () => {
       transcript.textContent = "";
       sessionId = "vscode-chat-" + Date.now().toString(36);
+      resetSessionModels();
       status.textContent = "Started a new chat";
       prompt.focus();
     });
@@ -2295,6 +2654,7 @@ ${apiKeyFieldsHtml()}
         return;
       }
       if (message.type === "chatProgress") {
+        updateSessionModelsFromEvent(message.event, message.data);
         appendActivity(pending.get(message.requestId), message.text);
         if (message.text) {
           status.textContent = message.text;
@@ -2315,6 +2675,7 @@ ${apiKeyFieldsHtml()}
       if (message.type === "chatResponse") {
         const turn = pending.get(message.requestId);
         pending.delete(message.requestId);
+        updateSessionModelsFromResponse(message.response);
         finishLiveMessage(turn, message.text, {
           tools: message.tools || [],
           sources: message.sources || []
@@ -2327,6 +2688,7 @@ ${apiKeyFieldsHtml()}
       if (message.type === "chatError") {
         const turn = pending.get(message.requestId);
         pending.delete(message.requestId);
+        recordFailovers(message.failover);
         finishLiveMessage(turn, message.text, { error: true });
         setBusy(false);
         status.textContent = "Request failed";
@@ -2342,6 +2704,7 @@ ${apiKeyFieldsHtml()}
     });
 
     applyChatSettings(initialSettings);
+    renderSessionModels();
     vscode.postMessage({ type: "ready" });
     prompt.focus();
   </script>
@@ -4701,6 +5064,9 @@ function requestEventStream(method, pathname, body, callbacks = {}) {
                 const error = new Error(event.data && event.data.message ? event.data.message : "Agent Hub stream failed");
                 if (event.data && Array.isArray(event.data.failover)) {
                   error.failover = event.data.failover;
+                }
+                if (typeof handlers.onEvent === "function") {
+                  handlers.onEvent(event);
                 }
                 finishReject(error);
                 if (responseRef && typeof responseRef.destroy === "function") {

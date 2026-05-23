@@ -340,6 +340,7 @@ class TeamAgentRunner:
             agent=response.agent,
             provider=response.provider,
             model=response.model,
+            failover=[event.to_dict() for event in response.failover],
         )
         return response
 

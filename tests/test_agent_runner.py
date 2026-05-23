@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from agent_hub.agent_tools import AgentToolbox, create_workspace_checkpoint, restore_workspace_checkpoint
-from agent_hub.agent_runner import AgentRunner
+from agent_hub.agent_runner import AgentRunner, _is_repository_file_path
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.router import AgentRouter
@@ -15,6 +15,20 @@ from agent_hub.providers import ProviderError
 
 
 class AgentRunnerTests(unittest.TestCase):
+    def test_repository_file_path_rejects_symbol_like_graph_nodes(self) -> None:
+        self.assertFalse(_is_repository_file_path("VALUE", known_files=set()))
+        self.assertFalse(_is_repository_file_path("Class.method", known_files=set()))
+        self.assertFalse(_is_repository_file_path("package/module", known_files=set()))
+        self.assertFalse(_is_repository_file_path("state/provider_health.json", known_files=set()))
+        self.assertTrue(_is_repository_file_path("app.py", known_files=set()))
+        self.assertTrue(_is_repository_file_path("agent_hub/app.py", known_files=set()))
+        self.assertTrue(_is_repository_file_path("README", known_files=set()))
+        self.assertTrue(_is_repository_file_path("LICENSE", known_files=set()))
+        self.assertTrue(_is_repository_file_path("Dockerfile", known_files=set()))
+        self.assertFalse(_is_repository_file_path("docs/README", known_files=set()))
+        self.assertTrue(_is_repository_file_path("docs/README", known_files={"docs/README"}))
+        self.assertTrue(_is_repository_file_path("tools/BUILD", known_files={"tools/BUILD"}))
+
     def test_agent_loop_executes_tool_and_returns_final_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

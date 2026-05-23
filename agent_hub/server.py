@@ -338,6 +338,17 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             else:
                 send_event("route_started", {"type": "route_started", "message": "Routing request."})
                 response = self.server.router.route(request)
+                send_event(
+                    "route_finished",
+                    {
+                        "type": "route_finished",
+                        "message": f"Response received from {response.agent}.",
+                        "agent": response.agent,
+                        "provider": response.provider,
+                        "model": response.model,
+                        "failover": [event.to_dict() for event in response.failover],
+                    },
+                )
             send_event(
                 "final",
                 {
