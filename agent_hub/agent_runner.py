@@ -34,6 +34,8 @@ TOOL_ACTIONS = {
     "run_command",
 }
 EDIT_TOOLS = {"write_file", "replace_in_file", "apply_patch"}
+CONTEXT_TOOLS = {"list_files", "read_file", "search_files", "repo_map"}
+BROAD_CONTEXT_TOOLS = {"list_files", "search_files", "repo_map"}
 
 REQUIRED_TOOL_ARGS = {
     "read_file": ("path",),
@@ -186,6 +188,7 @@ class AgentRunner:
                     request,
                     trace,
                     messages,
+                    reasoning_state,
                 ) or toolbox.run(tool_name, args)
                 if result.get("edit_policy_feedback"):
                     reasoning_state.record_tool_result(tool_name, args, result)
@@ -862,6 +865,12 @@ def _agent_step_raw(
             "reasoning_state": reasoning_state.to_dict(),
             "execution_plan": reasoning_state.execution_plan.to_dict(),
             "active_execution_node": _active_execution_metadata(reasoning_state),
+            "context_change_bar": _context_change_bar_state(
+                request,
+                toolbox.config,
+                trace,
+                reasoning_state,
+            ),
         }
     )
     raw["agent_hub_runtime"] = runtime
@@ -912,6 +921,95 @@ def _last_checkpoint(trace: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
+def _context_change_bar_state(
+    request: HubRequest,
+    config: HubConfig,
+    trace: list[dict[str, Any]],
+    reasoning_state: WorkspaceReasoningState | None,
+) -> dict[str, Any]:
+    context_steps = _repo_context_steps(trace)
+    broad_steps = [step for step in context_steps if step["tool"] in BROAD_CONTEXT_TOOLS]
+    inspected_files = _inspected_files_from_trace(trace, reasoning_state)
+    changed_files = _changed_files_from_trace(trace)
+    return {
+        "enabled": _context_change_bar_enabled(request, config),
+        "mode": _request_context_change_bar_mode(request, config),
+        "threshold": _request_context_change_bar_threshold(request, config),
+        "inspected_files": inspected_files,
+        "changed_files": changed_files,
+        "repo_context_tools": [step["tool"] for step in context_steps],
+        "broad_context_tools": [step["tool"] for step in broad_steps],
+        "recent_context": _has_recent_repo_context(trace, reasoning_state),
+        "last_context_tool": context_steps[-1]["tool"] if context_steps else "",
+    }
+
+
+def _context_change_bar_feedback(
+    toolbox: AgentToolbox,
+    tool_name: str,
+    args: dict[str, Any],
+    request: HubRequest,
+    trace: list[dict[str, Any]],
+    reasoning_state: WorkspaceReasoningState,
+) -> dict[str, Any] | None:
+    if tool_name not in EDIT_TOOLS or not _context_change_bar_enabled(request, toolbox.config):
+        return None
+
+    mode = _request_context_change_bar_mode(request, toolbox.config)
+    threshold = _request_context_change_bar_threshold(request, toolbox.config)
+    state = _context_change_bar_state(request, toolbox.config, trace, reasoning_state)
+    affected = _policy_affected_files(toolbox, tool_name, args)
+    inspected = [str(path) for path in state.get("inspected_files", []) if isinstance(path, str)]
+    changed = [str(path) for path in state.get("changed_files", []) if isinstance(path, str)]
+    projected_changed = _dedupe_strings([*changed, *affected])
+    has_context = bool(state.get("repo_context_tools")) or bool(inspected)
+    has_broad_context = bool(state.get("broad_context_tools"))
+    task_needs_context = _task_mentions_multi_file_work(request)
+    exceeds_threshold = len(projected_changed) > threshold
+    missing: list[str] = []
+
+    if not has_context and (mode == "strict" or task_needs_context or exceeds_threshold):
+        missing.append(
+            "no repository inspection has run yet: missing repo_map, list_files, search_files, or read_file context"
+        )
+    if task_needs_context and not has_broad_context:
+        missing.append(
+            "task mentions multiple files/modules/tests/config/docs but related repository context is missing"
+        )
+    if exceeds_threshold and not bool(state.get("recent_context")):
+        missing.append(
+            f"changed files would exceed threshold {threshold} without a fresh repo context pass"
+        )
+
+    if not missing:
+        return None
+
+    return {
+        "ok": False,
+        "tool": tool_name,
+        "edit_policy_feedback": True,
+        "context_change_bar_feedback": True,
+        "recommended_tool": "repo_map",
+        "affected_files": affected,
+        "error": "Context change bar blocked the edit: " + "; ".join(missing),
+        "message": "Context change bar blocked this edit until repository context is gathered.",
+        "policy": {
+            "name": "context_change_bar",
+            "mode": mode,
+            "threshold": threshold,
+            "missing_context": missing,
+            "inspected_files": inspected,
+            "changed_files": changed,
+            "projected_changed_files": projected_changed,
+            "instructions": [
+                "Run repo_map for the target module or file to find related implementation, tests, config, and docs.",
+                "Use search_files for usages/imports and read_file for files you plan to edit.",
+                "Then use apply_patch for grouped implementation, tests, docs, and config changes.",
+            ],
+        },
+    }
+
+
 def _edit_policy_feedback(
     toolbox: AgentToolbox,
     tool_name: str,
@@ -919,7 +1017,18 @@ def _edit_policy_feedback(
     request: HubRequest,
     trace: list[dict[str, Any]],
     messages: list[dict[str, Any]],
+    reasoning_state: WorkspaceReasoningState,
 ) -> dict[str, Any] | None:
+    context_feedback = _context_change_bar_feedback(
+        toolbox,
+        tool_name,
+        args,
+        request,
+        trace,
+        reasoning_state,
+    )
+    if context_feedback is not None:
+        return context_feedback
     if tool_name == "apply_patch":
         return _apply_patch_rewrite_policy_feedback(toolbox, args, request)
     if tool_name not in {"write_file", "replace_in_file"}:
@@ -1083,6 +1192,11 @@ def _edit_policy_result(
 
 
 def _policy_affected_files(toolbox: AgentToolbox, tool_name: str, args: dict[str, Any]) -> list[str]:
+    if tool_name == "apply_patch":
+        try:
+            return [str(path) for path in toolbox._get_affected_files(tool_name, args) if str(path)]
+        except Exception:
+            return _patch_path_hints(args)
     value = args.get("path")
     if not isinstance(value, str) or not value.strip():
         return []
@@ -1114,33 +1228,56 @@ def _repair_context_active(trace: list[dict[str, Any]], messages: list[dict[str,
 
 
 def _task_mentions_multi_file_work(request: HubRequest) -> bool:
-    text = " ".join(
-        str(value or "")
-        for value in [
-            request.task,
-            request.context,
-            *[
-                message.get("content")
-                for message in request.messages
-                if isinstance(message.get("content"), str)
-            ],
-        ]
-    ).lower()
+    text = _task_policy_text(request).lower()
     return any(
         phrase in text
         for phrase in (
             "multiple files",
             "multi-file",
             "several files",
+            "many files",
+            "multiple modules",
+            "module and",
+            "modules",
             "implementation and tests",
+            "implementation plus tests",
             "tests and docs",
+            "tests and config",
             "update tests",
             "add tests",
+            "test suite",
+            "config",
+            "configuration",
+            "docs",
+            "documentation",
+            "readme",
+            "examples",
             "refactor",
             "repository-wide",
             "repo-wide",
         )
     )
+
+
+def _task_policy_text(request: HubRequest) -> str:
+    parts = [str(value or "") for value in (request.task, request.context) if value]
+    for message in request.messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(_message_task_section(content))
+    return " ".join(part for part in parts if part)
+
+
+def _message_task_section(content: str) -> str:
+    match = re.search(r"(?im)^Task:\s*$", content)
+    if not match:
+        return content
+    rest = content[match.end() :]
+    end = re.search(
+        r"(?im)^(Selected plan|Research context|Review context|Coder result|Task result):\s*$",
+        rest,
+    )
+    return rest[: end.start()].strip() if end else rest.strip()
 
 
 def _workspace_edit_event(
@@ -1625,6 +1762,36 @@ def _request_validation_commands(request: HubRequest, config: HubConfig) -> list
     return []
 
 
+def _request_context_change_bar_mode(request: HubRequest, config: HubConfig) -> str:
+    value = str(
+        _request_option(request, "context_change_bar_mode", config.context_change_bar_mode)
+        or "light"
+    ).strip().lower()
+    if value in {"off", "light", "strict"}:
+        return value
+    return "light"
+
+
+def _request_context_change_bar_threshold(request: HubRequest, config: HubConfig) -> int:
+    value = _request_option(
+        request,
+        "context_change_bar_threshold",
+        config.context_change_bar_threshold,
+    )
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = config.context_change_bar_threshold
+    return max(0, min(number, 50))
+
+
+def _context_change_bar_enabled(request: HubRequest, config: HubConfig) -> bool:
+    return (
+        _request_bool(request, "context_change_bar_enabled", config.context_change_bar_enabled)
+        and _request_context_change_bar_mode(request, config) != "off"
+    )
+
+
 def _restore_after_failed_validation(
     request: HubRequest,
     config: HubConfig,
@@ -1931,6 +2098,93 @@ def _short_value(value: Any, maximum: int = 120) -> str:
     if len(text) <= maximum:
         return text
     return f"{text[: maximum - 1]}..."
+
+
+def _repo_context_steps(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    for index, step in enumerate(trace):
+        tool = str(step.get("tool") or "")
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        if tool in CONTEXT_TOOLS and result.get("ok") is not False:
+            steps.append({"index": index, "step": step.get("step"), "tool": tool})
+    return steps
+
+
+def _has_recent_repo_context(
+    trace: list[dict[str, Any]],
+    reasoning_state: WorkspaceReasoningState | None,
+) -> bool:
+    last_edit_index = -1
+    last_context_index = -1
+    for index, step in enumerate(trace):
+        tool = str(step.get("tool") or "")
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        if tool in CONTEXT_TOOLS and result.get("ok") is not False:
+            last_context_index = index
+        if tool in EDIT_TOOLS and _changed_files_from_result(tool, result):
+            last_edit_index = index
+    if last_context_index > last_edit_index:
+        return True
+    return last_edit_index < 0 and bool(reasoning_state and reasoning_state.inspected_files)
+
+
+def _inspected_files_from_trace(
+    trace: list[dict[str, Any]],
+    reasoning_state: WorkspaceReasoningState | None,
+) -> list[str]:
+    files: list[str] = []
+    if reasoning_state is not None:
+        files.extend(reasoning_state.inspected_files)
+    for step in trace:
+        tool = str(step.get("tool") or "")
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        payload = result.get("result") if isinstance(result.get("result"), dict) else {}
+        if tool == "read_file" and isinstance(payload.get("path"), str):
+            files.append(payload["path"])
+        elif tool == "list_files" and isinstance(payload.get("files"), list):
+            files.extend(str(item.get("path")) for item in payload["files"] if isinstance(item, dict))
+        elif tool == "search_files" and isinstance(payload.get("matches"), list):
+            files.extend(str(item.get("path")) for item in payload["matches"] if isinstance(item, dict))
+        elif tool == "repo_map":
+            for key in ("active_files", "mentioned_files", "key_files", "related_files", "test_files"):
+                values = payload.get(key)
+                if isinstance(values, list):
+                    files.extend(str(value) for value in values if isinstance(value, str))
+    return _dedupe_strings([path for path in files if path])[:80]
+
+
+def _changed_files_from_trace(trace: list[dict[str, Any]]) -> list[str]:
+    changed: list[str] = []
+    for step in trace:
+        tool = str(step.get("tool") or "")
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        changed.extend(_changed_files_from_result(tool, result))
+    return _dedupe_strings(changed)[:80]
+
+
+def _patch_path_hints(args: dict[str, Any]) -> list[str]:
+    changes = args.get("changes")
+    if isinstance(changes, list):
+        return [
+            str(item.get("path"))
+            for item in changes
+            if isinstance(item, dict) and isinstance(item.get("path"), str) and item.get("path")
+        ]
+    patch = args.get("patch")
+    if isinstance(patch, str):
+        paths: list[str] = []
+        for line in patch.splitlines():
+            if not line.startswith("+++ "):
+                continue
+            value = line[4:].strip().split("\t", 1)[0].split(" ", 1)[0]
+            if value in {"/dev/null", "dev/null"}:
+                continue
+            if value.startswith("b/"):
+                value = value[2:]
+            if value:
+                paths.append(value)
+        return _dedupe_strings(paths)
+    return []
 
 
 def _command_from_response(response: HubResponse) -> dict[str, Any]:

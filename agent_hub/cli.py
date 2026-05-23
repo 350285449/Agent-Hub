@@ -462,6 +462,30 @@ def _add_agent_runtime_flags(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Finish immediately after the first successful file edit.",
     )
+    patch_group = parser.add_mutually_exclusive_group()
+    patch_group.add_argument(
+        "--prefer-multi-file-patches",
+        dest="prefer_multi_file_patches",
+        action="store_true",
+        default=None,
+        help="Prefer grouped apply_patch edits for implementation, tests, docs, and config.",
+    )
+    patch_group.add_argument(
+        "--no-prefer-multi-file-patches",
+        dest="prefer_multi_file_patches",
+        action="store_false",
+        help="Allow single-file edit tools when otherwise permitted.",
+    )
+    parser.add_argument(
+        "--context-change-bar",
+        choices=["off", "light", "strict"],
+        help="Control how aggressively the agent refreshes repository context before edits.",
+    )
+    parser.add_argument(
+        "--context-change-threshold",
+        type=int,
+        help="Changed-file count that triggers a context refresh before more edits.",
+    )
     parser.add_argument(
         "--validation-mode",
         choices=["off", "basic", "strict"],
@@ -483,6 +507,16 @@ def _add_agent_runtime_flags(parser: argparse.ArgumentParser) -> None:
 def _apply_agent_runtime_flags(payload: dict[str, Any], args: argparse.Namespace) -> None:
     if getattr(args, "fast_write_finalize", False):
         payload["fast_write_finalize"] = True
+    prefer_multi_file_patches = getattr(args, "prefer_multi_file_patches", None)
+    if prefer_multi_file_patches is not None:
+        payload["prefer_multi_file_patches"] = bool(prefer_multi_file_patches)
+    context_change_bar = getattr(args, "context_change_bar", None)
+    if context_change_bar:
+        payload["context_change_bar_mode"] = context_change_bar
+        payload["context_change_bar_enabled"] = context_change_bar != "off"
+    threshold = getattr(args, "context_change_threshold", None)
+    if threshold is not None:
+        payload["context_change_bar_threshold"] = max(0, int(threshold))
     if getattr(args, "validation_mode", None):
         payload["validation_mode"] = args.validation_mode
     if getattr(args, "no_auto_validate", False):

@@ -111,6 +111,9 @@ class HubConfig:
     auto_validate_after_edits: bool = True
     validation_repair_attempts: int = 3
     prefer_multi_file_patches: bool = True
+    context_change_bar_enabled: bool = True
+    context_change_bar_threshold: int = 3
+    context_change_bar_mode: str = "light"
     rollback_on_validation_failure: bool = True
     workspace_checkpoint_retention: int = 5
 
@@ -592,6 +595,16 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         auto_validate_after_edits=_bool_with_default(raw.get("auto_validate_after_edits"), True),
         validation_repair_attempts=int(raw.get("validation_repair_attempts", 3)),
         prefer_multi_file_patches=_bool_with_default(raw.get("prefer_multi_file_patches"), True),
+        context_change_bar_enabled=_bool_with_default(
+            raw.get("context_change_bar_enabled"),
+            True,
+        ),
+        context_change_bar_threshold=_normalize_context_change_bar_threshold(
+            raw.get("context_change_bar_threshold", 3)
+        ),
+        context_change_bar_mode=_normalize_context_change_bar_mode(
+            raw.get("context_change_bar_mode", "light")
+        ),
         rollback_on_validation_failure=_bool_with_default(
             raw.get("rollback_on_validation_failure"),
             True,
@@ -674,6 +687,9 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "auto_validate_after_edits": config.auto_validate_after_edits,
         "validation_repair_attempts": config.validation_repair_attempts,
         "prefer_multi_file_patches": config.prefer_multi_file_patches,
+        "context_change_bar_enabled": config.context_change_bar_enabled,
+        "context_change_bar_threshold": config.context_change_bar_threshold,
+        "context_change_bar_mode": config.context_change_bar_mode,
         "rollback_on_validation_failure": config.rollback_on_validation_failure,
         "workspace_checkpoint_retention": config.workspace_checkpoint_retention,
         "include_raw_responses": config.include_raw_responses,
@@ -842,6 +858,21 @@ def _normalize_validation_mode(value: Any) -> str:
     if text == "strict":
         return "strict"
     return "basic"
+
+
+def _normalize_context_change_bar_mode(value: Any) -> str:
+    text = str(value or "light").strip().lower()
+    if text in {"off", "light", "strict"}:
+        return text
+    return "light"
+
+
+def _normalize_context_change_bar_threshold(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 3
+    return max(0, min(number, 50))
 
 
 def _expand_env_string(value: Any) -> Any:

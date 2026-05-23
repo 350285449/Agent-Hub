@@ -348,10 +348,46 @@ class AgentToolbox:
                 self.config.prefer_multi_file_patches,
             )
         )
+        context_bar_mode = str(
+            _request_option(
+                self.request,
+                "context_change_bar_mode",
+                self.config.context_change_bar_mode,
+            )
+            or "light"
+        ).strip().lower()
+        if context_bar_mode not in {"off", "light", "strict"}:
+            context_bar_mode = "light"
+        context_bar_enabled = (
+            _truthy(
+                _request_option(
+                    self.request,
+                    "context_change_bar_enabled",
+                    self.config.context_change_bar_enabled,
+                )
+            )
+            and context_bar_mode != "off"
+        )
+        try:
+            context_bar_threshold = int(
+                _request_option(
+                    self.request,
+                    "context_change_bar_threshold",
+                    self.config.context_change_bar_threshold,
+                )
+            )
+        except (TypeError, ValueError):
+            context_bar_threshold = 3
+        context_bar_threshold = max(0, min(context_bar_threshold, 50))
         patch_mode = (
             "PATCH-FIRST MODE is enabled: inspect broadly, batch related edits, and use apply_patch for multi-file work and all validation repairs."
             if prefer_patches
             else "Patch batching is available: use apply_patch when it keeps the change safer or clearer."
+        )
+        context_bar = (
+            f"CONTEXT CHANGE BAR is enabled ({context_bar_mode}, threshold {context_bar_threshold} changed files): refresh repository context with repo_map, search_files, or read_file before edits when context is stale or the task spans files/modules/tests/config/docs."
+            if context_bar_enabled
+            else "CONTEXT CHANGE BAR is off for this run."
         )
         repository_snapshot = self._repository_snapshot()
 
@@ -361,6 +397,7 @@ class AgentToolbox:
                 "Work like a professional code reviewer and implementer: inspect thoroughly, plan multi-file changes, and validate thoroughly.",
                 "Use tools for file inspection, file creation, and coordinated edits. Do not invent file contents you have not inspected.",
                 patch_mode,
+                context_bar,
                 "",
                 "REPOSITORY-AWARE PLANNING:",
                 "- Start non-trivial coding tasks with repo_map or list/search/read calls before editing.",

@@ -7,6 +7,7 @@ from agent_hub.config import (
     AgentConfig,
     cloud_agent_names,
     config_from_dict,
+    config_to_dict,
     default_agent_names,
     free_local_agent_names,
     free_local_config,
@@ -50,6 +51,10 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.auto_validate_after_edits)
         self.assertTrue(config.rollback_on_validation_failure)
         self.assertEqual(config.workspace_checkpoint_retention, 5)
+        self.assertTrue(config.prefer_multi_file_patches)
+        self.assertTrue(config.context_change_bar_enabled)
+        self.assertEqual(config.context_change_bar_threshold, 3)
+        self.assertEqual(config.context_change_bar_mode, "light")
         self.assertTrue(is_free_agent(config.agents["local-research"]))
         self.assertTrue(is_free_agent(config.agents["codex"]))
         self.assertTrue(is_free_agent(config.agents["claude"]))
@@ -78,6 +83,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.agents["ollama-qwen-coder"].timeout_seconds, 300.0)
         self.assertTrue(is_free_agent(config.agents["custom-local"]))
         self.assertTrue(is_free_agent(config.agents["ollama-qwen-coder"]))
+
+    def test_context_change_bar_settings_round_trip(self) -> None:
+        config = config_from_dict(
+            {
+                "context_change_bar_enabled": False,
+                "context_change_bar_threshold": 7,
+                "context_change_bar_mode": "strict",
+                "prefer_multi_file_patches": False,
+                "agents": [],
+            }
+        )
+
+        self.assertFalse(config.context_change_bar_enabled)
+        self.assertEqual(config.context_change_bar_threshold, 7)
+        self.assertEqual(config.context_change_bar_mode, "strict")
+        self.assertFalse(config.prefer_multi_file_patches)
+
+        data = config_to_dict(config)
+        self.assertFalse(data["context_change_bar_enabled"])
+        self.assertEqual(data["context_change_bar_threshold"], 7)
+        self.assertEqual(data["context_change_bar_mode"], "strict")
+        self.assertFalse(data["prefer_multi_file_patches"])
 
     def test_cloud_agents_can_be_configured_from_environment(self) -> None:
         with patch.dict(

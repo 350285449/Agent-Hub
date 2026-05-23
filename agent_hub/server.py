@@ -50,6 +50,7 @@ BACKEND_FEATURES = {
     "workspace_checkpoints": True,
     "validation_repair_loops": True,
     "validation_rollback": True,
+    "context_change_bar": True,
 }
 
 
@@ -86,6 +87,12 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "free_only": self.server.config.free_only,
                     "allow_shell_tools": self.server.config.allow_shell_tools,
                     "shell_command_policy": self.server.config.shell_command_policy,
+                    "prefer_multi_file_patches": self.server.config.prefer_multi_file_patches,
+                    "context_change_bar": {
+                        "enabled": self.server.config.context_change_bar_enabled,
+                        "mode": self.server.config.context_change_bar_mode,
+                        "threshold": self.server.config.context_change_bar_threshold,
+                    },
                     "workspace_dir": str(self.server.config.workspace_dir),
                     "initialization": self.server.config.initialization_report,
                     "provider_health": self.server.router.health_snapshot(),
@@ -435,6 +442,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       <dt>Workspace</dt><dd><code>{config.workspace_dir}</code></dd>
       <dt>Shell tools</dt><dd>{str(config.allow_shell_tools).lower()}</dd>
       <dt>Free only</dt><dd>{str(config.free_only).lower()}</dd>
+      <dt>Patch preference</dt><dd>{str(config.prefer_multi_file_patches).lower()}</dd>
+      <dt>Context bar</dt><dd>{config.context_change_bar_mode} / threshold {config.context_change_bar_threshold} / enabled {str(config.context_change_bar_enabled).lower()}</dd>
       <dt>Agents</dt><dd>{agents}</dd>
     </dl>
     <p>

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_hub.cli import main
+from agent_hub.models import HubResponse
 
 
 class CliTests(unittest.TestCase):
@@ -255,6 +256,140 @@ class CliTests(unittest.TestCase):
             output = buffer.getvalue()
             self.assertIn("Agent-Hub Codex Chat", output)
             self.assertIn("codex>", output)
+
+    def test_agent_runtime_flags_populate_agent_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+            captured: list[dict] = []
+
+            def fake_run(self, request, event_sink=None, shell_permission_callback=None):
+                captured.append(request.raw)
+                return HubResponse(
+                    request_id="test",
+                    session_id=request.session_id,
+                    agent="local",
+                    provider="echo",
+                    model="echo",
+                    text="ok",
+                )
+
+            with patch("agent_hub.cli.AgentRunner.run", fake_run), redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "agent",
+                        "--prefer-multi-file-patches",
+                        "--context-change-bar",
+                        "strict",
+                        "--context-change-threshold",
+                        "6",
+                        "update",
+                        "tests",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(captured[0]["prefer_multi_file_patches"])
+            self.assertTrue(captured[0]["context_change_bar_enabled"])
+            self.assertEqual(captured[0]["context_change_bar_mode"], "strict")
+            self.assertEqual(captured[0]["context_change_bar_threshold"], 6)
+
+    def test_agent_runtime_flags_populate_group_agent_and_chat_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+            group_payloads: list[dict] = []
+            chat_payloads: list[dict] = []
+
+            def fake_group_run(self, request, event_sink=None, shell_permission_callback=None):
+                group_payloads.append(request.raw)
+                return HubResponse(
+                    request_id="group",
+                    session_id=request.session_id,
+                    agent="local",
+                    provider="echo",
+                    model="echo",
+                    text="group ok",
+                )
+
+            def fake_agent_run(self, request, event_sink=None, shell_permission_callback=None):
+                chat_payloads.append(request.raw)
+                return HubResponse(
+                    request_id="chat",
+                    session_id=request.session_id,
+                    agent="local",
+                    provider="echo",
+                    model="echo",
+                    text="chat ok",
+                )
+
+            with patch("agent_hub.cli.TeamAgentRunner.run", fake_group_run), redirect_stdout(io.StringIO()):
+                group_code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "group-agent",
+                        "--no-prefer-multi-file-patches",
+                        "--context-change-bar",
+                        "off",
+                        "--context-change-threshold",
+                        "2",
+                        "update",
+                    ]
+                )
+
+            with (
+                patch("builtins.input", side_effect=["hello", "/exit"]),
+                patch("agent_hub.cli.AgentRunner.run", fake_agent_run),
+                redirect_stdout(io.StringIO()),
+            ):
+                chat_code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "chat",
+                        "--prefer-multi-file-patches",
+                        "--context-change-bar",
+                        "light",
+                        "--context-change-threshold",
+                        "4",
+                    ]
+                )
+
+            self.assertEqual(group_code, 0)
+            self.assertFalse(group_payloads[0]["prefer_multi_file_patches"])
+            self.assertFalse(group_payloads[0]["context_change_bar_enabled"])
+            self.assertEqual(group_payloads[0]["context_change_bar_mode"], "off")
+            self.assertEqual(group_payloads[0]["context_change_bar_threshold"], 2)
+            self.assertEqual(chat_code, 0)
+            self.assertTrue(chat_payloads[0]["prefer_multi_file_patches"])
+            self.assertTrue(chat_payloads[0]["context_change_bar_enabled"])
+            self.assertEqual(chat_payloads[0]["context_change_bar_mode"], "light")
+            self.assertEqual(chat_payloads[0]["context_change_bar_threshold"], 4)
+
+
+def _write_minimal_config(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "state_dir": str(path.parent / "state"),
+                "auto_detect_local_models": False,
+                "default_route": ["echo"],
+                "routes": [{"name": "cloud-agent", "agents": ["echo"]}],
+                "agents": [
+                    {
+                        "name": "echo",
+                        "provider": "echo",
+                        "model": "local-echo",
+                        "free": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":
