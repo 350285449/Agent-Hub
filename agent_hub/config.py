@@ -97,6 +97,8 @@ class HubConfig:
     agent_max_steps: int = 8
     agent_context_budget_tokens: int = 32_000
     agent_context_compaction_enabled: bool = True
+    context_mode: str = "balanced"
+    cline_compatibility_mode: bool = True
     allow_shell_tools: bool = True
     shell_command_policy: str = "allow"
     free_only: bool = True
@@ -107,6 +109,7 @@ class HubConfig:
     quota_cooldown_seconds: float = 1800.0
     rate_limit_cooldown_seconds: float = 300.0
     approval_mode: str = "auto"
+    debug_echo_enabled: bool = False
     fast_write_finalize: bool = False
     validation_mode: str = "basic"
     validation_commands: list[str] = field(default_factory=list)
@@ -439,12 +442,15 @@ def free_local_config() -> HubConfig:
         agent_max_steps=8,
         agent_context_budget_tokens=32_000,
         agent_context_compaction_enabled=True,
+        context_mode="balanced",
+        cline_compatibility_mode=True,
         allow_shell_tools=True,
         shell_command_policy="ask",
         free_only=True,
         auto_enable_available_providers=True,
         auto_detect_local_models=True,
         approval_mode="ask",
+        debug_echo_enabled=False,
         fast_write_finalize=False,
         validation_mode="basic",
         validation_commands=[],
@@ -579,6 +585,8 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             raw.get("agent_context_compaction_enabled"),
             True,
         ),
+        context_mode=_normalize_context_mode(raw.get("context_mode", "balanced")),
+        cline_compatibility_mode=_bool_with_default(raw.get("cline_compatibility_mode"), True),
         allow_shell_tools=_bool_with_default(raw.get("allow_shell_tools"), True),
         shell_command_policy=_normalize_shell_command_policy(
             raw.get("shell_command_policy", raw.get("shell_tools_policy", "ask"))
@@ -596,6 +604,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         quota_cooldown_seconds=float(raw.get("quota_cooldown_seconds", 1800.0)),
         rate_limit_cooldown_seconds=float(raw.get("rate_limit_cooldown_seconds", 300.0)),
         approval_mode=_normalize_approval_mode(raw.get("approval_mode", "ask")),
+        debug_echo_enabled=_bool_with_default(raw.get("debug_echo_enabled"), False),
         fast_write_finalize=_bool_with_default(raw.get("fast_write_finalize"), False),
         validation_mode=_normalize_validation_mode(raw.get("validation_mode", "basic")),
         validation_commands=[
@@ -684,6 +693,8 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "agent_max_steps": config.agent_max_steps,
         "agent_context_budget_tokens": config.agent_context_budget_tokens,
         "agent_context_compaction_enabled": config.agent_context_compaction_enabled,
+        "context_mode": config.context_mode,
+        "cline_compatibility_mode": config.cline_compatibility_mode,
         "allow_shell_tools": config.allow_shell_tools,
         "shell_command_policy": config.shell_command_policy,
         "free_only": config.free_only,
@@ -694,6 +705,7 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "quota_cooldown_seconds": config.quota_cooldown_seconds,
         "rate_limit_cooldown_seconds": config.rate_limit_cooldown_seconds,
         "approval_mode": config.approval_mode,
+        "debug_echo_enabled": config.debug_echo_enabled,
         "fast_write_finalize": config.fast_write_finalize,
         "validation_mode": config.validation_mode,
         "validation_commands": config.validation_commands,
@@ -857,6 +869,8 @@ def _normalize_approval_mode(value: Any) -> str:
     text = str(value or "ask").strip().lower()
     if text in {"auto", "allow", "always", "trusted"}:
         return "auto"
+    if text in {"safe", "safe-mode", "safe_mode"}:
+        return "safe"
     if text in {"ask", "confirm", "prompt"}:
         return "ask"
     if text in {"readonly", "read-only", "read_only"}:
@@ -898,6 +912,13 @@ def _normalize_agent_context_budget(value: Any) -> int:
     except (TypeError, ValueError):
         number = 32_000
     return max(1_000, min(number, 1_000_000))
+
+
+def _normalize_context_mode(value: Any) -> str:
+    text = str(value or "balanced").strip().lower()
+    if text in {"minimal", "balanced", "deep"}:
+        return text
+    return "balanced"
 
 
 def _expand_env_string(value: Any) -> Any:

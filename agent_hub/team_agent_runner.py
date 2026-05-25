@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ from .reasoning import WorkspaceReasoningState
 from .router import AgentRouter, RouterError
 
 
-TEAM_ROLES = ("planner", "researcher", "coder", "reviewer", "fixer", "finalizer")
+TEAM_ROLES = ("planner", "researcher", "coder", "reviewer", "validator", "repair", "fixer", "finalizer")
 READ_ONLY_TOOLS = ["list_files", "read_file", "search_files", "repo_map", "run_command"]
 EDIT_TOOLS = [
     "list_files",
@@ -100,6 +101,19 @@ class TeamAgentRunner:
         _merge_response_reasoning(reasoning_state, coder)
         phases.append(_phase_from_agent_response("coder", coder))
 
+        validator: HubResponse | None = None
+        if self._has_role("validator", request) or _request_bool(request, "enable_validator_agent", default=False):
+            validator = self._role_call(
+                request,
+                role="validator",
+                prompt=_validator_prompt(request, selected_plan, researcher.text, coder),
+                event_sink=event_sink,
+                reasoning_state=reasoning_state,
+            )
+            failover.extend(validator.failover)
+            _merge_response_reasoning(reasoning_state, validator)
+            phases.append({"role": "validator", "agent": validator.agent, "text": validator.text})
+
         review_context = _review_context(request, selected_plan, researcher.text, coder)
         reviewer = self._role_call(
             request,
@@ -113,11 +127,19 @@ class TeamAgentRunner:
         phases.append({"role": "reviewer", "agent": reviewer.agent, "text": reviewer.text})
 
         fixer: HubResponse | None = None
-        if _review_requests_fixes(reviewer.text):
+        repair_text = "\n".join(
+            text
+            for text in [
+                reviewer.text,
+                validator.text if validator and _review_requests_fixes(validator.text) else "",
+            ]
+            if text
+        )
+        if _review_requests_fixes(repair_text):
             fixer = self._run_fixer(
                 request,
                 selected_plan,
-                reviewer.text,
+                repair_text,
                 event_sink,
                 shell_permission_callback,
                 reasoning_state,
@@ -132,6 +154,7 @@ class TeamAgentRunner:
             research=researcher.text,
             coder=coder,
             reviewer=reviewer,
+            validator=validator,
             fixer=fixer,
         )
         finalizer = self._role_call(
@@ -155,6 +178,7 @@ class TeamAgentRunner:
             "finalizer_agent": finalizer.agent,
             "reasoning_state": reasoning_state.to_dict(),
             "execution_plan": reasoning_state.execution_plan.to_dict(),
+            "confidence": _team_confidence(phases, finalizer),
         }
         response = HubResponse(
             request_id=finalizer.request_id,
@@ -190,27 +214,61 @@ class TeamAgentRunner:
         if not agents:
             agents = self._role_agents("finalizer", request)[:1]
         plans: list[dict[str, Any]] = []
-        for index, agent in enumerate(agents, start=1):
-            _emit(
-                event_sink,
-                "team_role_started",
-                message=f"Planner candidate {index}: asking {agent.name} for a plan.",
-                role="planner",
-                agent=agent.name,
-            )
-            response = self._role_call(
-                request,
-                role="planner",
-                prompt=_planner_prompt(request, toolbox.root),
-                preferred_agent=agent.name,
-                event_sink=event_sink,
-                reasoning_state=reasoning_state,
-            )
-            score = score_plan(response.text, request, toolbox.root)
-            plans.append({"response": response, "text": response.text, "score": score})
+        if len(agents) == 1:
+            plans.append(self._planner_candidate(
+                request, toolbox, agents[0], 1, event_sink, reasoning_state
+            ))
+        else:
+            with ThreadPoolExecutor(max_workers=min(len(agents), count)) as executor:
+                futures = {
+                    executor.submit(
+                        self._planner_candidate,
+                        request,
+                        toolbox,
+                        agent,
+                        index,
+                        event_sink,
+                        reasoning_state,
+                    ): agent
+                    for index, agent in enumerate(agents, start=1)
+                }
+                for future in as_completed(futures):
+                    plans.append(future.result())
         if not plans:
             raise RouterError("No planner agent could produce a plan")
         return sorted(plans, key=lambda item: item["score"], reverse=True)
+
+    def _planner_candidate(
+        self,
+        request: HubRequest,
+        toolbox: AgentToolbox,
+        agent: AgentConfig,
+        index: int,
+        event_sink: AgentEventSink | None,
+        reasoning_state: WorkspaceReasoningState,
+    ) -> dict[str, Any]:
+        _emit(
+            event_sink,
+            "team_role_started",
+            message=f"Planner candidate {index}: asking {agent.name} for a plan.",
+            role="planner",
+            agent=agent.name,
+        )
+        response = self._role_call(
+            request,
+            role="planner",
+            prompt=_planner_prompt(request, toolbox.root),
+            preferred_agent=agent.name,
+            event_sink=event_sink,
+            reasoning_state=reasoning_state,
+        )
+        score = score_plan(response.text, request, toolbox.root)
+        return {
+            "response": response,
+            "text": _compact_phase_text(response.text),
+            "score": score,
+            "confidence": _score_to_confidence(score),
+        }
 
     def _run_researcher(
         self,
@@ -282,11 +340,12 @@ class TeamAgentRunner:
         reasoning_state: WorkspaceReasoningState,
     ) -> HubResponse:
         prompt = _fixer_prompt(request, plan, review)
-        _emit_context_inherited(event_sink, "fixer", reasoning_state)
+        role = "repair" if self._has_role("repair", request) else "fixer"
+        _emit_context_inherited(event_sink, role, reasoning_state)
         return AgentRunner(self.config, self.router).run(
             self._role_agent_request(
                 request,
-                role="fixer",
+                role=role,
                 prompt=prompt,
                 allowed_tools=EDIT_TOOLS,
                 max_steps=_request_int(request, "fixer_max_steps", default=6, minimum=1, maximum=30),
@@ -394,6 +453,15 @@ class TeamAgentRunner:
             key=lambda agent: (-_role_score(agent, role), route_names.index(agent.name)),
         )
 
+    def _has_role(self, role: str, request: HubRequest) -> bool:
+        configured = self.config.group_roles.get(role)
+        if configured and configured in self.config.agents and self.config.agents[configured].enabled:
+            return True
+        raw = request.raw or {}
+        group = raw.get("group_agent")
+        enabled_roles = group.get("enabled_roles") if isinstance(group, dict) else None
+        return isinstance(enabled_roles, list) and role in enabled_roles
+
 
 def score_plan(plan: str, request: HubRequest, root: Path) -> float:
     """Heuristic scoring for plan voting when no judge model is configured."""
@@ -447,8 +515,12 @@ def _role_score(agent: AgentConfig, role: str) -> float:
         return base + coding * 20 + reasoning * 5 + tools * 10
     if role in {"planner", "reviewer"}:
         return base + reasoning * 20 + coding * 5 + context * 5
+    if role == "validator":
+        return base + reasoning * 16 + coding * 8 + tools * 6 + context * 3
     if role == "researcher":
         return base + context * 12 + reasoning * 8 + speed * 4 + tools * 8
+    if role == "repair":
+        return base + coding * 18 + reasoning * 8 + tools * 10
     return base + reasoning * 8 + speed * 8 + coding * 4
 
 
@@ -570,13 +642,13 @@ def _review_context(request: HubRequest, plan: str, research: str, coder: HubRes
             request_text(request),
             "",
             "Selected plan:",
-            plan,
+            _compact_phase_text(plan),
             "",
             "Research context:",
-            research,
+            _compact_phase_text(research),
             "",
             "Coder result:",
-            coder.text,
+            _compact_phase_text(coder.text),
             "",
             "Coder trace:",
             _trace_summary(coder),
@@ -595,10 +667,35 @@ def _fixer_prompt(request: HubRequest, plan: str, review: str) -> str:
             request_text(request),
             "",
             "Selected plan:",
-            plan,
+            _compact_phase_text(plan),
             "",
             "Review feedback:",
-            review,
+            _compact_phase_text(review),
+        ]
+    )
+
+
+def _validator_prompt(request: HubRequest, plan: str, research: str, coder: HubResponse) -> str:
+    return "\n".join(
+        [
+            "You are the validator in an Agent Hub coding team.",
+            "Validate the coder's result against the task, changed files, and known test targets. Do not edit files.",
+            "Return 'Validation passed' or a concise list of failures and exact repair guidance.",
+            "",
+            "Task:",
+            request_text(request),
+            "",
+            "Plan:",
+            _compact_phase_text(plan),
+            "",
+            "Research memory:",
+            _compact_phase_text(research),
+            "",
+            "Coder result:",
+            _compact_phase_text(coder.text),
+            "",
+            "Tool trace:",
+            _trace_summary(coder),
         ]
     )
 
@@ -610,6 +707,7 @@ def _finalizer_prompt(
     research: str,
     coder: HubResponse,
     reviewer: HubResponse,
+    validator: HubResponse | None,
     fixer: HubResponse | None,
 ) -> str:
     return "\n".join(
@@ -621,19 +719,22 @@ def _finalizer_prompt(
             request_text(request),
             "",
             "Plan:",
-            plan,
+            _compact_phase_text(plan),
             "",
             "Research:",
-            research,
+            _compact_phase_text(research),
             "",
             "Coder result:",
-            coder.text,
+            _compact_phase_text(coder.text),
             "",
             "Reviewer result:",
-            reviewer.text,
+            _compact_phase_text(reviewer.text),
+            "",
+            "Validator result:",
+            _compact_phase_text(validator.text) if validator else "No validator pass was configured.",
             "",
             "Fixer result:",
-            fixer.text if fixer else "No fixer pass was needed.",
+            _compact_phase_text(fixer.text) if fixer else "No repair pass was needed.",
             "",
             "Tool traces:",
             _trace_summary(fixer or coder),
@@ -663,10 +764,37 @@ def _phase_from_agent_response(role: str, response: HubResponse) -> dict[str, An
     return {
         "role": role,
         "agent": response.agent,
-        "text": response.text,
+        "text": _compact_phase_text(response.text),
         "trace": response.raw.get("agent_hub", {}).get("steps", [])
         if isinstance(response.raw.get("agent_hub"), dict)
         else [],
+    }
+
+
+def _compact_phase_text(text: str, *, maximum: int = 2400) -> str:
+    clean = re.sub(r"\n{3,}", "\n\n", str(text or "")).strip()
+    if len(clean) <= maximum:
+        return clean
+    head = clean[: int(maximum * 0.65)].rstrip()
+    tail = clean[-int(maximum * 0.25) :].lstrip()
+    return f"{head}\n\n[compact: omitted {len(clean) - len(head) - len(tail)} chars]\n\n{tail}"
+
+
+def _score_to_confidence(score: float) -> float:
+    return round(max(0.0, min(1.0, 0.45 + (score / 20.0))), 3)
+
+
+def _team_confidence(phases: list[dict[str, Any]], finalizer: HubResponse) -> dict[str, Any]:
+    blocking_text = " ".join(str(phase.get("text") or "") for phase in phases).lower()
+    penalties = sum(
+        1
+        for marker in ("blocking", "must fix", "failed", "regression")
+        if marker in blocking_text
+    )
+    score = max(0.1, min(0.98, 0.82 - penalties * 0.12 + (0.04 if finalizer.text else 0.0)))
+    return {
+        "score": round(score, 3),
+        "basis": "phase summaries, review/validation language, and finalizer completion",
     }
 
 

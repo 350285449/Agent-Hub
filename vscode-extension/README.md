@@ -49,9 +49,19 @@ sh ./install.sh --with-extension
 - `Agent Hub: Research Web`
 - `Agent Hub: Explain Selection`
 - `Agent Hub: Explain Current File`
+- `Agent Hub: Copy Cline Config`
+- `Agent Hub: Test Cline Connection`
+- `Agent Hub: Copy Claude Code Config`
+- `Agent Hub: Test Anthropic Endpoint`
 
 When `agentHub.autoStart` is enabled, the extension starts the local server for
 you before sending a request.
+
+The sidebar includes first-run checks for the Python backend, Python version,
+config file, providers/API keys, Ollama, LM Studio, and server status. It also
+shows context diagnostics from `/debug/context`, including incoming tokens,
+preserved tokens, compacted tokens, protected tokens, TODO/task progress, and
+active files.
 
 Workspace-agent turns can modify files while the live run is in progress. Agent
 Hub exposes file tools to compatible models, applies `write_file` and
@@ -133,8 +143,8 @@ Claude Code / Anthropic-compatible clients:
 
 ```text
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-ANTHROPIC_AUTH_TOKEN=local-agent-hub-token
-Model: agent-hub-coding
+ANTHROPIC_AUTH_TOKEN=agent-hub-local
+ANTHROPIC_MODEL=agent-hub-coding
 ```
 
 Cline / RooCode / OpenCode:
@@ -142,9 +152,20 @@ Cline / RooCode / OpenCode:
 ```text
 Provider: OpenAI Compatible
 Base URL: http://127.0.0.1:8787/v1
-API Key: local-agent-hub-token
+API Key: agent-hub-local
 Model: agent-hub-coding
 ```
+
+`clineCompatibilityMode` is enabled by default. It preserves structured
+content arrays, `task_progress`, TODO state, tool chains, active files, and MCP
+state during request normalization and token compaction.
+
+More docs:
+
+- [Cline setup](https://github.com/350285449/Agent-Hub/blob/main/docs/CLINE.md)
+- [Claude Code setup](https://github.com/350285449/Agent-Hub/blob/main/docs/CLAUDE_CODE.md)
+- [Permissions](https://github.com/350285449/Agent-Hub/blob/main/docs/PERMISSIONS.md)
+- [Troubleshooting](https://github.com/350285449/Agent-Hub/blob/main/docs/TROUBLESHOOTING.md)
 
 ## Development
 

@@ -6,11 +6,18 @@ from typing import Any
 
 from .config import AgentConfig, _is_local_or_private_url, normalize_provider
 from .models import HubRequest
+from .security import (
+    RISK_ORDER,
+    classify_tool_action,
+    cloud_transparency_report,
+)
+from .token_budget import estimate_messages_tokens
 
 
-APPROVAL_MODES = {"ask", "auto", "readonly", "shell-ask", "deny"}
+APPROVAL_MODES = {"ask", "auto", "safe", "readonly", "shell-ask", "deny"}
 SENSITIVE_CATEGORIES = {
     "config_edit",
+    "external_download",
     "external_provider",
     "file_delete",
     "file_write",
@@ -18,7 +25,9 @@ SENSITIVE_CATEGORIES = {
     "network_request",
     "package_install",
     "process_control",
+    "secret_edit",
     "shell_command",
+    "workspace_upload",
     "workspace_cloud",
 }
 
@@ -88,10 +97,21 @@ class PermissionManager:
         self.callback = callback
 
     def check(self, request: PermissionRequest) -> PermissionDecision:
-        if request.category not in SENSITIVE_CATEGORIES:
-            return PermissionDecision(True, mode=self.mode, request=request)
+        security = request.details.get("security") if isinstance(request.details, dict) else None
+        blocked = bool(isinstance(security, dict) and security.get("blocked"))
+        explicit_approval_required = bool(
+            isinstance(security, dict) and security.get("explicit_approval_required")
+        )
+        if blocked:
+            return PermissionDecision(
+                False,
+                denied=True,
+                reason=str(security.get("reason") or "Action blocked by Agent Hub security policy."),
+                mode=self.mode,
+                request=request,
+            )
 
-        if self.mode == "auto":
+        if request.category not in SENSITIVE_CATEGORIES:
             return PermissionDecision(True, mode=self.mode, request=request)
 
         if self.mode == "readonly":
@@ -112,10 +132,59 @@ class PermissionManager:
                 request=request,
             )
 
-        if self.mode == "shell-ask" and request.category != "shell_command":
-            return PermissionDecision(True, mode=self.mode, request=request)
+        if self.mode == "safe" and _risk_at_least(request.risk_level, "critical"):
+            return PermissionDecision(
+                False,
+                denied=True,
+                reason="Action blocked by safe mode because risk is critical.",
+                mode=self.mode,
+                request=request,
+            )
 
         if self.approval_granted:
+            return PermissionDecision(True, mode=self.mode, request=request)
+
+        if self.mode == "auto":
+            if explicit_approval_required:
+                return PermissionDecision(
+                    False,
+                    requires_approval=True,
+                    reason="Explicit approval is required for this high-risk action.",
+                    mode=self.mode,
+                    request=request,
+                )
+            return PermissionDecision(True, mode=self.mode, request=request)
+
+        if self.mode == "safe":
+            if _risk_at_least(request.risk_level, "medium") or explicit_approval_required:
+                if self.callback is not None:
+                    try:
+                        allowed = bool(self.callback(request.to_dict()))
+                    except Exception as exc:
+                        return PermissionDecision(
+                            False,
+                            denied=True,
+                            reason=f"Permission prompt failed: {exc}",
+                            mode=self.mode,
+                            request=request,
+                        )
+                    return PermissionDecision(
+                        allowed,
+                        denied=not allowed,
+                        reason="" if allowed else "User denied permission.",
+                        mode=self.mode,
+                        request=request,
+                    )
+                return PermissionDecision(
+                    False,
+                    requires_approval=True,
+                    reason="Safe mode requires approval for this action.",
+                    mode=self.mode,
+                    request=request,
+                )
+            return PermissionDecision(True, mode=self.mode, request=request)
+
+        if self.mode == "shell-ask" and request.category != "shell_command":
             return PermissionDecision(True, mode=self.mode, request=request)
 
         if self.callback is not None:
@@ -150,6 +219,8 @@ def normalize_approval_mode(value: Any) -> str:
     text = str(value or "ask").strip().lower()
     if text in {"auto", "allow", "always", "trusted"}:
         return "auto"
+    if text in {"safe", "safe-mode", "safe_mode"}:
+        return "safe"
     if text in {"ask", "confirm", "prompt"}:
         return "ask"
     if text in {"readonly", "read-only", "read_only"}:
@@ -188,31 +259,38 @@ def approval_mode_from_request(request: HubRequest, default: str) -> str:
 
 
 def tool_permission_request(tool_name: str, args: dict[str, Any]) -> PermissionRequest:
+    security = classify_tool_action(tool_name, args).to_dict()
     if tool_name == "run_command":
         command = str(args.get("command") or "")
-        category = "package_install" if _looks_like_package_install(command) else "shell_command"
-        risk = "high" if _looks_like_dangerous_command(command) or category == "package_install" else "medium"
+        category = str(security.get("category") or "shell_command")
+        risk = str(security.get("risk_level") or "medium")
         return PermissionRequest(
             action="run_shell_command",
             category=category,
             description=f"Run shell command: {command[:160]}",
             resource=command,
             risk_level=risk,
-            details={"command": command, "cwd": args.get("cwd") or ".", "timeout_seconds": args.get("timeout_seconds")},
+            details={
+                "command": command,
+                "cwd": args.get("cwd") or ".",
+                "timeout_seconds": args.get("timeout_seconds"),
+                "security": security,
+            },
         )
     if tool_name in {"write_file", "replace_in_file", "apply_patch"}:
-        category = "file_write"
+        category = str(security.get("category") or "file_write")
         details = {"tool": tool_name, "args": args}
         resource = str(args.get("path") or "")
         if tool_name == "apply_patch":
             resource = "multiple files"
             details = {"tool": tool_name, "summary": args.get("summary"), "commands": args.get("commands")}
+        details["security"] = security
         return PermissionRequest(
             action=tool_name,
             category=category,
             description=f"Modify workspace files with {tool_name}.",
             resource=resource,
-            risk_level="medium",
+            risk_level=str(security.get("risk_level") or "medium"),
             details=details,
         )
     return PermissionRequest(
@@ -232,9 +310,32 @@ def provider_permission_request(agent: AgentConfig, request: HubRequest) -> Perm
         for message in request.messages[:3]
         if isinstance(message, dict)
     )
+    token_estimate = estimate_messages_tokens(request.messages)
+    transparency = cloud_transparency_report(
+        provider=agent.provider,
+        model=agent.model,
+        messages=request.messages,
+        context=request.context,
+        token_estimate=token_estimate,
+    )
     category = "workspace_cloud"
     if not request_text_has_workspace_context(request):
         category = "external_provider"
+    risk_level = "high" if agent.resolved_api_key or not agent.free else "medium"
+    explicit_approval_required = bool(transparency["has_secret_findings"])
+    security = {
+        "category": category,
+        "risk_level": "critical" if explicit_approval_required else risk_level,
+        "reason": (
+            "Request content appears to include secrets."
+            if explicit_approval_required
+            else "External provider call can transmit prompt or workspace context."
+        ),
+        "blocked": False,
+        "explicit_approval_required": explicit_approval_required,
+        "findings": transparency["secret_findings"],
+        "metadata": {"token_estimate": token_estimate},
+    }
     return PermissionRequest(
         action="call_external_provider",
         category=category,
@@ -243,7 +344,7 @@ def provider_permission_request(agent: AgentConfig, request: HubRequest) -> Perm
             f"using model {agent.model}."
         ),
         resource=f"{agent.provider}/{agent.model}",
-        risk_level="high" if agent.resolved_api_key or not agent.free else "medium",
+        risk_level=str(security["risk_level"]),
         details={
             "agent": agent.name,
             "provider": agent.provider,
@@ -252,6 +353,8 @@ def provider_permission_request(agent: AgentConfig, request: HubRequest) -> Perm
             "may_cost_money": bool(agent.resolved_api_key or not agent.free),
             "sends_workspace_content": bool(text_preview),
             "preview": text_preview[:1000],
+            "cloud_transparency": transparency,
+            "security": security,
         },
     )
 
@@ -342,3 +445,7 @@ def _looks_like_dangerous_command(command: str) -> bool:
             " >> ",
         )
     )
+
+
+def _risk_at_least(value: str, threshold: str) -> bool:
+    return RISK_ORDER.get(str(value or "low").lower(), 0) >= RISK_ORDER.get(threshold, 0)

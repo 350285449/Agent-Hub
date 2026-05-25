@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import threading
 import time
 import uuid
@@ -22,6 +23,7 @@ from .config import (
     load_config,
     normalize_provider,
 )
+from .context import request_context_diagnostics
 from .inbox import InboxProcessor
 from .payloads import request_from_payload
 from .provider_presets import (
@@ -34,6 +36,7 @@ from .provider_presets import (
 from .router import AgentRouter, RouterError
 from .server import serve
 from .team_agent_runner import TeamAgentRunner
+from .version import backend_version
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -59,6 +62,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     doctor_parser = subparsers.add_parser("doctor", help="Explain config and provider readiness.")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     doctor_parser.add_argument("--providers", action="store_true", help="Include known provider metadata.")
+
+    inspect_parser = subparsers.add_parser(
+        "inspect-request",
+        help="Normalize a request payload and show context-preservation diagnostics.",
+    )
+    inspect_parser.add_argument("path", nargs="?", help="JSON file to inspect. Reads stdin when omitted.")
+    inspect_parser.add_argument(
+        "--api-shape",
+        choices=["native", "openai-chat", "openai-responses", "anthropic-messages"],
+        default="openai-chat",
+        help="Compatibility shape used to normalize the payload.",
+    )
+    inspect_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     health_parser = subparsers.add_parser("health", help="Show live provider health and best route candidates.")
     health_parser.add_argument("--route", default="cloud-agent", help="Route to summarize.")
@@ -247,7 +263,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     route_parser.add_argument("path")
     route_parser.add_argument(
         "--api-shape",
-        choices=["native", "openai-chat", "anthropic-messages"],
+        choices=["native", "openai-chat", "openai-responses", "anthropic-messages"],
         default="native",
     )
     route_parser.add_argument(
@@ -346,6 +362,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             _print_local_models(report)
         return 0
+    if command == "inspect-request":
+        return _inspect_request(
+            args.path,
+            api_shape=args.api_shape,
+            as_json=args.json,
+        )
     if command == "recommend":
         return _recommend(
             config,
@@ -886,6 +908,8 @@ def _move_agent_to_front(data: dict[str, Any], route_name: str, agent_name: str)
 
 def _print_route_error(error: RouterError) -> None:
     print(f"Agent-Hub route failed: {error}")
+    if getattr(error, "suggested_fix", None):
+        print(f"Suggested fix: {error.suggested_fix}")
     if error.failover:
         print("Failover:")
         for event in error.failover:
@@ -1033,6 +1057,60 @@ def _agent_status(agent: Any, *, free: bool, allowed: bool, normalized: str) -> 
     return "ready"
 
 
+def _inspect_request(path: str | None, *, api_shape: str, as_json: bool) -> int:
+    try:
+        if path:
+            payload_text = Path(path).read_text(encoding="utf-8")
+        else:
+            payload_text = sys.stdin.read()
+        payload = json.loads(payload_text)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read request JSON: {exc}")
+        return 1
+    if not isinstance(payload, dict):
+        print("Request JSON must be an object.")
+        return 1
+    request = request_from_payload(payload, api_shape=api_shape)
+    diagnostics = request_context_diagnostics(request)
+    report = {
+        "api_shape": api_shape,
+        "session_id": request.session_id,
+        "route": request.route,
+        "preferred_agent": request.preferred_agent,
+        "message_count": len(request.messages),
+        "metadata_keys": sorted(request.metadata),
+        "diagnostics": diagnostics,
+    }
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(f"API shape: {api_shape}")
+        print(f"Session: {request.session_id}")
+        print(f"Route: {request.route or '(auto)'}")
+        print(f"Messages: {len(request.messages)}")
+        print("Context diagnostics:")
+        for key in (
+            "incoming_token_count",
+            "compacted_token_count",
+            "protected_token_count",
+            "dropped_messages",
+            "dropped_token_count",
+            "preserved_tool_calls",
+            "preserved_tool_results",
+            "preserved_todo_count",
+            "active_files_detected",
+            "task_progress_present",
+            "structured_content_messages",
+            "cline_compatibility_mode",
+            "suspiciously_empty",
+        ):
+            print(f"- {key}: {diagnostics.get(key)}")
+        if diagnostics.get("suspiciously_empty"):
+            print()
+            print("Warning: context looks empty. Check that the client is sending messages, task_progress, and active file metadata.")
+    return 0
+
+
 def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
     rows = _agent_rows(config)
     router = AgentRouter(config)
@@ -1082,7 +1160,9 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
         pairs = ", ".join(f"{name}={model}" for name, model in selected_models.items())
         warnings.append(f"Selected detected local model ID(s): {pairs}.")
     if not usable:
-        warnings.append("No enabled ready agents are currently available.")
+        warnings.append(
+            "No usable model is available. Enable a provider, set a missing API key, or start Ollama/LM Studio."
+        )
     for row in rows:
         if row["enabled"] and row["status"].startswith("missing"):
             warnings.append(f"{row['name']}: {row['status']}.")
@@ -1091,26 +1171,136 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
                 f"{row['name']}: config looks usable; first request will confirm {row['base_url']} is running."
             )
 
+    local_servers = _local_endpoint_status()
+    likely_problems = _doctor_likely_problems(config, rows, local_servers)
+    fixes = _doctor_exact_fixes(config, rows, likely_problems)
     return {
         "config": config_path,
+        "config_path": str(Path(config_path).resolve()),
+        "backend_version": backend_version(),
+        "python_version": sys.version.split()[0],
+        "python_executable": sys.executable,
         "host": config.host,
         "port": config.port,
+        "cline_endpoint": f"http://{config.host}:{config.port}/v1",
+        "claude_endpoint": f"http://{config.host}:{config.port}/v1/messages",
         "free_only": config.free_only,
         "shell_command_policy": config.shell_command_policy,
+        "approval_mode": config.approval_mode,
+        "safe_mode": config.approval_mode == "safe",
+        "readonly_mode": config.approval_mode == "readonly",
+        "token_optimization_mode": config.context_mode,
+        "cline_compatibility_mode": config.cline_compatibility_mode,
         "default_route": config.default_route,
         "initialization": init_report,
         "agents": rows,
+        "enabled_providers": [row["name"] for row in rows if row["enabled"]],
+        "missing_api_keys": _missing_api_key_rows(rows),
+        "local_servers": local_servers,
         "provider_health": provider_health,
         "recommendations": recommendations,
+        "context_diagnostics": {
+            "mode": config.context_mode,
+            "budget_tokens": config.agent_context_budget_tokens,
+            "compaction_enabled": config.agent_context_compaction_enabled,
+            "cline_compatibility_mode": config.cline_compatibility_mode,
+        },
+        "likely_problems": likely_problems,
+        "exact_fixes": fixes,
         "warnings": warnings,
     }
 
 
+def _missing_api_key_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    missing: list[dict[str, Any]] = []
+    for row in rows:
+        status = str(row.get("status") or "")
+        if not status.startswith("missing"):
+            continue
+        missing.append(
+            {
+                "agent": row.get("name"),
+                "provider": row.get("provider"),
+                "api_key_env": row.get("api_key_env"),
+            }
+        )
+    return missing
+
+
+def _local_endpoint_status() -> list[dict[str, Any]]:
+    endpoints = [
+        ("Ollama", "http://127.0.0.1:11434/api/tags"),
+        ("LM Studio", "http://127.0.0.1:1234/v1/models"),
+    ]
+    rows: list[dict[str, Any]] = []
+    for name, url in endpoints:
+        ok = False
+        detail = ""
+        try:
+            with urllib.request.urlopen(url, timeout=0.6) as response:
+                ok = 200 <= int(response.status) < 300
+                detail = f"HTTP {response.status}"
+        except Exception as exc:
+            detail = str(exc)
+        rows.append({"name": name, "url": url, "running": ok, "detail": detail})
+    return rows
+
+
+def _doctor_likely_problems(
+    config: Any,
+    rows: list[dict[str, Any]],
+    local_servers: list[dict[str, Any]],
+) -> list[str]:
+    problems: list[str] = []
+    if not any(row.get("enabled") and row.get("allowed") and row.get("status") in {"ready", "configured"} for row in rows):
+        problems.append("no_usable_model")
+    if _missing_api_key_rows(rows):
+        problems.append("missing_api_key")
+    if not any(row.get("running") for row in local_servers):
+        problems.append("no_local_server_detected")
+    if config.approval_mode in {"auto", "deny"}:
+        problems.append("approval_mode_review_recommended")
+    if not config.cline_compatibility_mode:
+        problems.append("cline_compatibility_disabled")
+    return problems
+
+
+def _doctor_exact_fixes(
+    config: Any,
+    rows: list[dict[str, Any]],
+    problems: list[str],
+) -> list[str]:
+    fixes: list[str] = []
+    if "no_usable_model" in problems:
+        fixes.append("Enable a provider in the Agent Hub sidebar, set its API key, or start Ollama/LM Studio before sending a request.")
+    missing = _missing_api_key_rows(rows)
+    for row in missing:
+        env_name = row.get("api_key_env") or "the provider API key"
+        fixes.append(f"Set {env_name} for {row.get('agent')} or disable that provider.")
+    if "no_local_server_detected" in problems:
+        fixes.append("Start Ollama on http://127.0.0.1:11434 or LM Studio on http://127.0.0.1:1234 for local fallback.")
+    if "approval_mode_review_recommended" in problems:
+        fixes.append("Use approval_mode=ask or safe for publishable setups; readonly is best for demos.")
+    if "cline_compatibility_disabled" in problems:
+        fixes.append("Set cline_compatibility_mode=true in agent-hub.config.json.")
+    fixes.append(f"Cline: base URL http://{config.host}:{config.port}/v1, model agent-hub-coding, API key any non-empty placeholder.")
+    fixes.append(f"Claude Code: Anthropic base URL http://{config.host}:{config.port}, model agent-hub-coding.")
+    return fixes
+
+
 def _print_doctor(report: dict[str, Any]) -> None:
     print(f"Config: {report['config']}")
+    print(f"Resolved config: {report['config_path']}")
+    print(f"Backend version: {report['backend_version']}")
+    print(f"Python: {report['python_version']} ({report['python_executable']})")
     print(f"Server: http://{report['host']}:{report['port']}")
+    print(f"Cline endpoint: {report['cline_endpoint']}")
+    print(f"Claude endpoint: {report['claude_endpoint']}")
     print(f"free_only: {report['free_only']}")
     print(f"shell_command_policy: {report['shell_command_policy']}")
+    print(f"approval_mode: {report['approval_mode']} (safe={report['safe_mode']}, readonly={report['readonly_mode']})")
+    print(f"token_optimization_mode: {report['token_optimization_mode']}")
+    print(f"cline_compatibility_mode: {report['cline_compatibility_mode']}")
     print(f"default_route: {', '.join(report['default_route'])}")
     print()
     _print_table(report["agents"], ["name", "provider", "model", "enabled", "free", "allowed", "tokens", "status"])
@@ -1135,6 +1325,21 @@ def _print_doctor(report: dict[str, Any]) -> None:
         print("Notes:")
         for warning in report["warnings"]:
             print(f"- {warning}")
+    local_servers = report.get("local_servers")
+    if isinstance(local_servers, list) and local_servers:
+        print()
+        print("Local model servers:")
+        _print_table(local_servers, ["name", "running", "url", "detail"])
+    if report.get("likely_problems"):
+        print()
+        print("Likely problems:")
+        for problem in report["likely_problems"]:
+            print(f"- {problem}")
+    if report.get("exact_fixes"):
+        print()
+        print("Exact fixes:")
+        for fix in report["exact_fixes"]:
+            print(f"- {fix}")
     provider_types = report.get("provider_types")
     if isinstance(provider_types, list) and provider_types:
         print()

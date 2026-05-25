@@ -32,12 +32,17 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(commands["agentHub.restartServer"], "Agent Hub: Restart Server")
         self.assertEqual(commands["agentHub.openSettings"], "Agent Hub: Open Settings")
         self.assertEqual(commands["agentHub.checkHealth"], "Agent Hub: Check Health")
+        self.assertEqual(commands["agentHub.copyClineConfig"], "Agent Hub: Copy Cline Config")
+        self.assertEqual(commands["agentHub.testClineConnection"], "Agent Hub: Test Cline Connection")
+        self.assertEqual(commands["agentHub.copyClaudeCodeConfig"], "Agent Hub: Copy Claude Code Config")
+        self.assertEqual(commands["agentHub.testAnthropicEndpoint"], "Agent Hub: Test Anthropic Endpoint")
 
     def test_approval_mode_setting_is_ask_by_default(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
         approval = package["contributes"]["configuration"]["properties"]["agentHub.approvalMode"]
 
         self.assertEqual(approval["default"], "ask")
+        self.assertIn("safe", approval["enum"])
         self.assertIn("readonly", approval["enum"])
         self.assertIn("deny", approval["enum"])
 
@@ -54,6 +59,40 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('data-primary-action="start-server"', source[start_index : start_index + 220])
         self.assertLess(start_index, stop_index)
         self.assertLess(start_index, restart_index)
+
+    def test_sidebar_sections_match_platform_dashboard(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        headings = [
+            "<h2>Server</h2>",
+            "<h2>Permissions</h2>",
+            "<h2>Models / Providers</h2>",
+            "<h2>Limits</h2>",
+            "<h2>Token Usage</h2>",
+            "<h2>Activity</h2>",
+            "<h2>Logs</h2>",
+            "<h2>Settings</h2>",
+        ]
+        positions = [source.index(heading) for heading in headings]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("createStatusBarItem", source)
+        self.assertIn('id="routingChain"', source)
+        self.assertIn('id="onboardingList"', source)
+        self.assertIn('id="contextDiagnostics"', source)
+
+    def test_cline_compatibility_setting_is_enabled_by_default(self) -> None:
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        setting = package["contributes"]["configuration"]["properties"]["agentHub.clineCompatibilityMode"]
+
+        self.assertTrue(setting["default"])
+
+    def test_setup_helpers_are_registered_in_extension_source(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertIn("function clineConfigText", source)
+        self.assertIn("agent-hub-coding", source)
+        self.assertIn("function claudeCodeConfigText", source)
+        self.assertIn("/debug/request", source)
 
 
 if __name__ == "__main__":

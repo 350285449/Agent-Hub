@@ -13,10 +13,11 @@ let output;
 let chatPanel = null;
 let extensionContext = null;
 let sidebarProvider = null;
+let statusBarItem = null;
 let lastActiveTextEditor = null;
 let serverLifecycleState = "Stopped";
 let lastServerMessage = "";
-const EXTENSION_VERSION = "0.7.1";
+const EXTENSION_VERSION = "0.7.4";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const SIDEBAR_VIEW_ID = "agentHub.sidebar";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
@@ -269,10 +270,12 @@ const REQUIRED_BACKEND_FEATURES = [
   "fast_write_finalize",
   "agent_context_compaction",
   "context_usage_bar",
+  "cline_compatibility_mode",
+  "context_debug_endpoints",
   "team_agent_mode",
   "provider_presets"
 ];
-const APPROVAL_MODES = new Set(["ask", "auto", "readonly", "shell-ask", "deny"]);
+const APPROVAL_MODES = new Set(["ask", "auto", "safe", "readonly", "shell-ask", "deny"]);
 const SENSITIVE_PERMISSION_CATEGORIES = new Set([
   "cloud_provider",
   "config_edit",
@@ -340,6 +343,12 @@ function activate(context) {
   extensionContext = context;
   output = vscode.window.createOutputChannel("Agent Hub");
   context.subscriptions.push(output);
+  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusBarItem.command = "agentHub.status";
+  statusBarItem.text = "$(hubot) Agent Hub";
+  statusBarItem.tooltip = "Agent Hub status";
+  statusBarItem.show();
+  context.subscriptions.push(statusBarItem);
   lastActiveTextEditor = vscode.window.activeTextEditor || null;
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor((editor) => {
@@ -370,6 +379,12 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.research", researchWeb),
     vscode.commands.registerCommand("agentHub.explainSelection", explainSelection),
     vscode.commands.registerCommand("agentHub.explainFile", explainFile),
+    vscode.commands.registerCommand("agentHub.copyClineConfig", copyClineConfig),
+    vscode.commands.registerCommand("agentHub.testClineConnection", testClineConnection),
+    vscode.commands.registerCommand("agentHub.showClineSetup", showClineSetup),
+    vscode.commands.registerCommand("agentHub.copyClaudeCodeConfig", copyClaudeCodeConfig),
+    vscode.commands.registerCommand("agentHub.testAnthropicEndpoint", testAnthropicEndpoint),
+    vscode.commands.registerCommand("agentHub.showClaudeCodeSetup", showClaudeCodeSetup),
     vscode.commands.registerCommand("agentHub.openOutput", () => output.show())
   );
 }
@@ -426,6 +441,32 @@ class AgentHubSidebarProvider {
       await openAgentHubSettings();
       return;
     }
+    if (message.type === "copyClineConfig") {
+      await copyClineConfig();
+      return;
+    }
+    if (message.type === "testClineConnection") {
+      await testClineConnection();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "showClineSetup") {
+      await showClineSetup();
+      return;
+    }
+    if (message.type === "copyClaudeCodeConfig") {
+      await copyClaudeCodeConfig();
+      return;
+    }
+    if (message.type === "testAnthropicEndpoint") {
+      await testAnthropicEndpoint();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "showClaudeCodeSetup") {
+      await showClaudeCodeSetup();
+      return;
+    }
     if (message.type === "checkHealth") {
       await checkHealth();
       await this.refresh();
@@ -441,6 +482,7 @@ class AgentHubSidebarProvider {
       return;
     }
     const dashboard = await sidebarDashboardState();
+    updateStatusBar(dashboard);
     this.view.webview.postMessage({ type: "dashboard", dashboard });
   }
 }
@@ -455,6 +497,27 @@ function refreshSidebar() {
   if (sidebarProvider) {
     sidebarProvider.refresh();
   }
+  updateStatusBar({
+    status: serverLifecycleState,
+    statusText: lastServerMessage,
+  });
+}
+
+function updateStatusBar(dashboard = {}) {
+  if (!statusBarItem) {
+    return;
+  }
+  const status = dashboard.status || serverLifecycleState || "Stopped";
+  const active = dashboard.activeModel;
+  const provider = active && (active.provider || active.provider_name || active.agent);
+  const model = active && active.model;
+  const remaining = dashboard.tokenUsage && dashboard.tokenUsage.remainingText
+    ? ` ${dashboard.tokenUsage.remainingText}`
+    : "";
+  statusBarItem.text = status === "Running"
+    ? `$(hubot) Agent Hub: ${provider || "provider"}${model ? `/${model}` : ""}${remaining}`
+    : `$(circle-slash) Agent Hub: ${status}`;
+  statusBarItem.tooltip = dashboard.statusText || "Agent Hub";
 }
 
 async function sidebarDashboardState() {
@@ -471,16 +534,55 @@ async function sidebarDashboardState() {
     providers: [],
     limits: [],
     failedModels: [],
+    permissions: {
+      approvalMode: config.approvalMode,
+      safeMode: config.approvalMode === "safe",
+      recent: []
+    },
+    tokenUsage: {
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      remainingText: ""
+    },
+    onboarding: await sidebarOnboardingState(config, null),
+    contextDiagnostics: {},
+    activity: [],
+    routingChain: [],
     logs: lastServerMessage || "",
   };
 
   try {
     const health = await requestJson("GET", "/health");
     let limits = null;
+    let usage = null;
+    let permissions = null;
+    let metrics = null;
+    let debugContext = null;
     try {
       limits = await requestJson("GET", "/limits");
     } catch (_error) {
       limits = null;
+    }
+    try {
+      usage = await requestJson("GET", "/usage");
+    } catch (_error) {
+      usage = null;
+    }
+    try {
+      permissions = await requestJson("GET", "/permissions");
+    } catch (_error) {
+      permissions = null;
+    }
+    try {
+      metrics = await requestJson("GET", "/metrics");
+    } catch (_error) {
+      metrics = null;
+    }
+    try {
+      debugContext = await requestJson("GET", "/debug/context");
+    } catch (_error) {
+      debugContext = null;
     }
     dashboard.status = "Running";
     dashboard.statusText = `Running at ${config.serverUrl}`;
@@ -489,6 +591,12 @@ async function sidebarDashboardState() {
     dashboard.providers = sidebarProviderRows(health, limits);
     dashboard.limits = sidebarLimitRows(health, limits);
     dashboard.failedModels = sidebarFailedModels(health, limits);
+    dashboard.permissions = sidebarPermissionState(health, permissions, config);
+    dashboard.tokenUsage = sidebarTokenUsage(usage, dashboard.limits);
+    dashboard.contextDiagnostics = sidebarContextDiagnostics(debugContext);
+    dashboard.onboarding = await sidebarOnboardingState(config, health);
+    dashboard.activity = sidebarActivityRows(usage, metrics, dashboard.failedModels);
+    dashboard.routingChain = sidebarRoutingChain(health, limits);
     dashboard.logs = "Open the Agent Hub output for live server logs.";
     return dashboard;
   } catch (error) {
@@ -569,6 +677,178 @@ function sidebarFailedModels(health, limits) {
     }
   }
   return rows.slice(0, 8);
+}
+
+function sidebarPermissionState(health, permissions, config) {
+  const policy = health && health.permission_policy && typeof health.permission_policy === "object"
+    ? health.permission_policy
+    : {};
+  return {
+    approvalMode: permissions && permissions.approval_mode ? permissions.approval_mode : config.approvalMode,
+    safeMode: !!(permissions && permissions.safe_mode) || !!policy.safe_mode,
+    readonlyMode: !!policy.readonly_mode,
+    secretDetection: policy.secret_detection !== false,
+    dangerousCommandBlocking: policy.dangerous_command_blocking !== false,
+    recent: permissions && Array.isArray(permissions.recent) ? permissions.recent.slice(-5) : [],
+    counts: permissions && permissions.counts ? permissions.counts : {}
+  };
+}
+
+function sidebarTokenUsage(usage, limits) {
+  const inputTokens = Number(usage && usage.input_tokens || 0);
+  const outputTokens = Number(usage && usage.output_tokens || 0);
+  const totalTokens = Number(usage && usage.total_tokens || inputTokens + outputTokens);
+  const tokenRows = Array.isArray(limits) ? limits : [];
+  const remaining = tokenRows
+    .map((row) => Number(row && row.tokens_remaining))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  const minRemaining = remaining.length ? Math.min(...remaining) : null;
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    remainingTokens: minRemaining,
+    remainingText: minRemaining === null ? "" : `${minRemaining} tok left`
+  };
+}
+
+function sidebarActivityRows(usage, metrics, failedModels) {
+  const rows = [];
+  const tools = usage && Array.isArray(usage.recent_tool_executions) ? usage.recent_tool_executions : [];
+  for (const item of tools.slice(-4).reverse()) {
+    rows.push({
+      main: `${item.tool || "tool"} ${item.ok === false ? "failed" : "ok"}`,
+      meta: item.error || (Array.isArray(item.paths) && item.paths.length ? item.paths.join(", ") : "workspace tool")
+    });
+  }
+  const routing = metrics && Array.isArray(metrics.routing_decisions) ? metrics.routing_decisions : [];
+  for (const item of routing.slice(-3).reverse()) {
+    rows.push({
+      main: item.agent ? `Routed to ${item.agent}` : item.type || "routing",
+      meta: item.message || item.model || item.route || ""
+    });
+  }
+  for (const item of (failedModels || []).slice(0, 2)) {
+    rows.push({
+      main: `Fallback: ${item.agent || item.model || "provider"}`,
+      meta: item.reason || "provider unavailable"
+    });
+  }
+  return rows.slice(0, 8);
+}
+
+function sidebarRoutingChain(health, limits) {
+  const recommendations = limits && Array.isArray(limits.recommendations)
+    ? limits.recommendations
+    : health && Array.isArray(health.recommendations)
+      ? health.recommendations
+      : [];
+  return recommendations.slice(0, 5).map((row) => ({
+    agent: row.agent,
+    provider: row.provider,
+    model: row.model,
+    available: row.available,
+    reason: row.unavailable_reason || row.why || ""
+  }));
+}
+
+async function sidebarOnboardingState(config, health) {
+  const workspace = workspaceRoot();
+  const configPath = workspace ? resolveConfigPath(config.configPath, workspace) : "";
+  const backendRoot = backendSourceRoot(workspace);
+  const keys = await apiKeyStatusRows().catch(() => []);
+  const savedKeys = keys.filter((row) => row.saved).length;
+  const localStatus = await sidebarLocalServerStatus();
+  const python = await detectPythonForOnboarding(config, workspace);
+  const providers = health && Array.isArray(health.agents) ? health.agents.length : 0;
+  return [
+    {
+      label: "Backend",
+      ok: !!backendRoot,
+      detail: backendRoot ? `found at ${backendRoot}` : "backend package not found"
+    },
+    {
+      label: "Python",
+      ok: python.ok,
+      detail: python.detail
+    },
+    {
+      label: "Config",
+      ok: !!(configPath && fs.existsSync(configPath)),
+      detail: configPath || "open a workspace folder"
+    },
+    {
+      label: "Providers",
+      ok: providers > 0 || savedKeys > 0 || localStatus.some((row) => row.ok),
+      detail: providers > 0 ? `${providers} enabled` : savedKeys > 0 ? `${savedKeys} saved key(s)` : "add a key or start a local model"
+    },
+    {
+      label: "Local models",
+      ok: localStatus.some((row) => row.ok),
+      detail: localStatus.map((row) => `${row.name}: ${row.ok ? "running" : "offline"}`).join(" / ")
+    },
+    {
+      label: "Start Server",
+      ok: health && health.running === true,
+      detail: health && health.running ? `running at ${config.serverUrl}` : "click Start Server"
+    }
+  ];
+}
+
+async function sidebarLocalServerStatus() {
+  const rows = [
+    { name: "Ollama", check: () => detectOllamaModels() },
+    { name: "LM Studio", check: () => detectLmStudioModels() }
+  ];
+  const result = [];
+  for (const row of rows) {
+    try {
+      const models = await row.check();
+      result.push({ name: row.name, ok: Array.isArray(models) && models.length > 0 });
+    } catch (_error) {
+      result.push({ name: row.name, ok: false });
+    }
+  }
+  return result;
+}
+
+async function detectPythonForOnboarding(config, workspace) {
+  const candidates = pythonCandidates(config.pythonPath, workspace).slice(0, 5);
+  for (const candidate of candidates) {
+    try {
+      const { stdout, stderr } = await execFile(candidate.command, [...candidate.args, "--version"], {
+        cwd: workspace || undefined,
+        timeout: 2000
+      });
+      const text = String(stdout || stderr || "").trim();
+      const match = text.match(/Python\s+(\d+)\.(\d+)/i);
+      const ok = !!(match && (Number(match[1]) > 3 || (Number(match[1]) === 3 && Number(match[2]) >= 11)));
+      if (ok) {
+        return { ok: true, detail: `${candidate.label}: ${text}` };
+      }
+    } catch (_error) {
+      // Try the next configured launcher.
+    }
+  }
+  return { ok: false, detail: "Python 3.11+ not detected" };
+}
+
+function sidebarContextDiagnostics(debugContext) {
+  const summary = debugContext && debugContext.summary && typeof debugContext.summary === "object"
+    ? debugContext.summary
+    : {};
+  return {
+    incoming: Number(summary.incoming_context_size || summary.incoming_token_count || 0),
+    preserved: Number(summary.preserved_context_size || summary.compacted_token_count || 0),
+    compacted: Number(summary.compacted_amount || 0),
+    protected: Number(summary.protected_token_count || 0),
+    preservedToolCalls: Number(summary.preserved_tool_calls || 0),
+    preservedTodos: Number(summary.preserved_todo_count || 0),
+    activeFiles: Array.isArray(summary.active_files_detected) ? summary.active_files_detected : [],
+    taskProgressPresent: !!summary.task_progress_present,
+    suspiciouslyEmpty: !!summary.suspiciously_empty,
+    warning: summary.warning || ""
+  };
 }
 
 function sidebarHtml(webview, logoPath) {
@@ -753,6 +1033,7 @@ function sidebarHtml(webview, logoPath) {
         <span class="status" id="serverStatus">Stopped</span>
       </div>
       <div class="detail" id="serverDetail">Checking Agent Hub...</div>
+      <ul class="list" id="onboardingList"></ul>
       <div class="actions">
         <button class="primary" id="startServer" type="button" data-primary-action="start-server">Start Server</button>
         <button id="stopServer" type="button">Stop Server</button>
@@ -762,9 +1043,17 @@ function sidebarHtml(webview, logoPath) {
     </section>
     <section>
       <div class="section-head">
+        <h2>Permissions</h2>
+      </div>
+      <div class="detail" id="permissionDetail">Approval: ask</div>
+      <ul class="list" id="permissionList"></ul>
+    </section>
+    <section>
+      <div class="section-head">
         <h2>Models / Providers</h2>
       </div>
       <div class="detail" id="activeModel">No active model yet</div>
+      <ul class="list" id="routingChain"></ul>
       <ul class="list" id="providerList"></ul>
     </section>
     <section>
@@ -772,6 +1061,19 @@ function sidebarHtml(webview, logoPath) {
         <h2>Limits</h2>
       </div>
       <ul class="list" id="limitList"></ul>
+    </section>
+    <section>
+      <div class="section-head">
+        <h2>Token Usage</h2>
+      </div>
+      <div class="detail" id="tokenUsage">No token usage yet</div>
+      <div class="detail" id="contextDiagnostics"></div>
+    </section>
+    <section>
+      <div class="section-head">
+        <h2>Activity</h2>
+      </div>
+      <ul class="list" id="activityList"></ul>
     </section>
     <section>
       <div class="section-head">
@@ -789,6 +1091,12 @@ function sidebarHtml(webview, logoPath) {
       <div class="detail" id="settingsDetail"></div>
       <div class="actions">
         <button id="openSettings" type="button">Open Settings</button>
+        <button id="copyClineConfig" type="button">Copy Cline Config</button>
+        <button id="testClineConnection" type="button">Test Cline Connection</button>
+        <button id="showClineSetup" type="button">Show Cline Setup</button>
+        <button id="copyClaudeCodeConfig" type="button">Copy Claude Code Config</button>
+        <button id="testAnthropicEndpoint" type="button">Test Anthropic Endpoint</button>
+        <button id="showClaudeCodeSetup" type="button">Show Claude Code Setup</button>
       </div>
     </section>
   </div>
@@ -796,9 +1104,16 @@ function sidebarHtml(webview, logoPath) {
     const vscode = acquireVsCodeApi();
     const serverStatus = document.getElementById("serverStatus");
     const serverDetail = document.getElementById("serverDetail");
+    const onboardingList = document.getElementById("onboardingList");
     const activeModel = document.getElementById("activeModel");
+    const routingChain = document.getElementById("routingChain");
     const providerList = document.getElementById("providerList");
+    const permissionDetail = document.getElementById("permissionDetail");
+    const permissionList = document.getElementById("permissionList");
     const limitList = document.getElementById("limitList");
+    const tokenUsage = document.getElementById("tokenUsage");
+    const contextDiagnostics = document.getElementById("contextDiagnostics");
+    const activityList = document.getElementById("activityList");
     const logDetail = document.getElementById("logDetail");
     const settingsDetail = document.getElementById("settingsDetail");
 
@@ -816,9 +1131,15 @@ function sidebarHtml(webview, logoPath) {
       serverStatus.textContent = status;
       serverStatus.dataset.state = status;
       setText(serverDetail, dashboard.statusText || dashboard.serverUrl || "");
+      renderOnboarding(dashboard.onboarding || []);
       setText(activeModel, activeModelText(dashboard.activeModel));
+      renderRoutingChain(dashboard.routingChain || []);
       renderProviderRows(dashboard.providers || []);
+      renderPermissions(dashboard.permissions || {});
       renderLimitRows(dashboard.limits || []);
+      setText(tokenUsage, tokenUsageText(dashboard.tokenUsage || {}));
+      setText(contextDiagnostics, contextDiagnosticsText(dashboard.contextDiagnostics || {}));
+      renderActivityRows(dashboard.activity || []);
       setText(logDetail, dashboard.logs || "Open the output channel for live logs.");
       setText(settingsDetail, "Mode: " + (dashboard.agentProviderMode || "cloud") + " / " + (dashboard.agentMode || "agent") + ". Approval: " + (dashboard.approvalMode || "ask") + ". Auto-start: " + (dashboard.autoStart ? "on" : "off") + ".");
     }
@@ -830,6 +1151,32 @@ function sidebarHtml(webview, logoPath) {
       const provider = row.provider ? row.provider + " / " : "";
       const agent = row.agent ? " (" + row.agent + ")" : "";
       return "Active: " + provider + (row.model || "model pending") + agent;
+    }
+
+    function renderRoutingChain(rows) {
+      routingChain.textContent = "";
+      if (!rows.length) {
+        return;
+      }
+      for (const row of rows.slice(0, 4)) {
+        routingChain.append(rowElement(
+          [row.provider || row.agent || "provider", row.model || ""].filter(Boolean).join(" / "),
+          [row.available ? "active candidate" : "fallback candidate", row.reason || ""].filter(Boolean).join(" - ")
+        ));
+      }
+    }
+
+    function renderOnboarding(rows) {
+      onboardingList.textContent = "";
+      if (!rows.length) {
+        return;
+      }
+      for (const row of rows) {
+        onboardingList.append(rowElement(
+          (row.ok ? "[ok] " : "[ ] ") + (row.label || "Setup"),
+          row.detail || ""
+        ));
+      }
     }
 
     function renderProviderRows(rows) {
@@ -861,6 +1208,77 @@ function sidebarHtml(webview, logoPath) {
           [row.provider || row.agent || "provider", row.model || ""].filter(Boolean).join(" / "),
           limitText(row)
         ));
+      }
+    }
+
+    function renderPermissions(state) {
+      const flags = [];
+      flags.push("Approval: " + (state.approvalMode || "ask"));
+      if (state.safeMode) {
+        flags.push("safe mode");
+      }
+      if (state.readonlyMode) {
+        flags.push("readonly");
+      }
+      if (state.secretDetection) {
+        flags.push("secret detection");
+      }
+      if (state.dangerousCommandBlocking) {
+        flags.push("command blocking");
+      }
+      setText(permissionDetail, flags.join(" - "));
+      permissionList.textContent = "";
+      const recent = Array.isArray(state.recent) ? state.recent.slice(-4).reverse() : [];
+      if (!recent.length) {
+        permissionList.append(emptyRow("No permission events yet"));
+        return;
+      }
+      for (const item of recent) {
+        permissionList.append(rowElement(
+          item.tool || item.provider || item.type || "permission",
+          [item.category || "", item.risk_level || "", item.allowed ? "allowed" : item.requires_approval ? "approval required" : item.denied ? "denied" : ""].filter(Boolean).join(" - ")
+        ));
+      }
+    }
+
+    function tokenUsageText(row) {
+      const total = Number(row.totalTokens || 0);
+      const input = Number(row.inputTokens || 0);
+      const output = Number(row.outputTokens || 0);
+      const remaining = row.remainingTokens === null || row.remainingTokens === undefined
+        ? ""
+        : " - remaining " + row.remainingTokens;
+      if (!total && !input && !output) {
+        return "No token usage yet";
+      }
+      return "Used " + total + " tokens (in " + input + ", out " + output + ")" + remaining;
+    }
+
+    function contextDiagnosticsText(row) {
+      const incoming = Number(row.incoming || 0);
+      const preserved = Number(row.preserved || 0);
+      const compacted = Number(row.compacted || 0);
+      const protectedTokens = Number(row.protected || 0);
+      const files = Array.isArray(row.activeFiles) ? row.activeFiles.length : 0;
+      const warnings = [];
+      if (row.suspiciouslyEmpty) {
+        warnings.push("context looks empty");
+      }
+      if (!row.taskProgressPresent && incoming > 0) {
+        warnings.push("task_progress missing");
+      }
+      const base = "Context: incoming " + incoming + ", preserved " + preserved + ", compacted " + compacted + ", protected " + protectedTokens + ", files " + files + ", todos " + Number(row.preservedTodos || 0) + ".";
+      return warnings.length ? base + " Warning: " + warnings.join(", ") + "." : base;
+    }
+
+    function renderActivityRows(rows) {
+      activityList.textContent = "";
+      if (!rows.length) {
+        activityList.append(emptyRow("No recent activity"));
+        return;
+      }
+      for (const row of rows.slice(0, 6)) {
+        activityList.append(rowElement(row.main, row.meta));
       }
     }
 
@@ -935,6 +1353,12 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("checkHealth").addEventListener("click", () => post("checkHealth"));
     document.getElementById("openOutput").addEventListener("click", () => post("openOutput"));
     document.getElementById("openSettings").addEventListener("click", () => post("openSettings"));
+    document.getElementById("copyClineConfig").addEventListener("click", () => post("copyClineConfig"));
+    document.getElementById("testClineConnection").addEventListener("click", () => post("testClineConnection"));
+    document.getElementById("showClineSetup").addEventListener("click", () => post("showClineSetup"));
+    document.getElementById("copyClaudeCodeConfig").addEventListener("click", () => post("copyClaudeCodeConfig"));
+    document.getElementById("testAnthropicEndpoint").addEventListener("click", () => post("testAnthropicEndpoint"));
+    document.getElementById("showClaudeCodeSetup").addEventListener("click", () => post("showClaudeCodeSetup"));
 
     window.addEventListener("message", (event) => {
       const message = event.data;
@@ -1032,6 +1456,8 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
     body.coder_max_steps = config.agentMaxSteps;
     body.agent_context_budget_tokens = config.agentContextBudgetTokens;
     body.agent_context_compaction_enabled = config.agentContextCompactionEnabled;
+    body.context_mode = config.contextMode;
+    body.cline_compatibility_mode = config.clineCompatibilityMode;
     body.group_agent = {
       plan_candidates: config.groupPlanCandidates
     };
@@ -1927,6 +2353,8 @@ async function sendChatTurn(panel, message) {
     coder_max_steps: config.agentMaxSteps,
     agent_context_budget_tokens: config.agentContextBudgetTokens,
     agent_context_compaction_enabled: config.agentContextCompactionEnabled,
+    context_mode: config.contextMode,
+    cline_compatibility_mode: config.clineCompatibilityMode,
     group_agent: {
       plan_candidates: config.groupPlanCandidates
     },
@@ -4202,8 +4630,7 @@ function applyCloudRouteMode(data, mode) {
   setRouteAgents(data.routes, "coding", ["code", "bug", "fix", "refactor", "test", "repo"], routeAgents);
   setRouteAgents(data.routes, "research", ["research", "search", "latest", "sources", "web", "news"], [
     "local-research",
-    ...routeAgents.filter((name) => name !== "echo"),
-    "echo"
+    ...routeAgents.filter((name) => name !== "echo")
   ]);
   data.default_route = routeAgents;
 }
@@ -4224,8 +4651,8 @@ function cloudRouteAgentsForConfig(data, mode) {
   const ollamaCloudAgents = ollamaCloudAgentNames(data);
   const hostedAgents = hostedCloudAgentNames(data);
   const ordered = normalizeCloudRouteMode(mode) === "api-key"
-    ? [...hostedAgents, ...ollamaCloudAgents, "echo"]
-    : [...ollamaCloudAgents, ...hostedAgents, "echo"];
+    ? [...hostedAgents, ...ollamaCloudAgents]
+    : [...ollamaCloudAgents, ...hostedAgents];
   return uniqueAgentNames(ordered);
 }
 
@@ -4330,8 +4757,8 @@ function localConfigForLocalModels(sources, options = {}) {
   const cloudRouteMode = normalizeCloudRouteMode(options.cloudRouteMode || "ollama-cloud");
   const cloudRouteAgents = uniqueAgentNames(
     cloudRouteMode === "api-key"
-      ? [...cloudAgents, ...ollamaCloudAgents, "echo"]
-      : [...ollamaCloudAgents, ...cloudAgents, "echo"]
+      ? [...cloudAgents, ...ollamaCloudAgents]
+      : [...ollamaCloudAgents, ...cloudAgents]
   );
   const hybridAgents = cloudRouteAgents;
   return {
@@ -4343,11 +4770,17 @@ function localConfigForLocalModels(sources, options = {}) {
     archive_dir: ".agent-hub/archive",
     workspace_dir: ".",
     agent_max_steps: 8,
+    agent_context_budget_tokens: 32000,
+    agent_context_compaction_enabled: true,
+    context_mode: "balanced",
+    cline_compatibility_mode: true,
     allow_shell_tools: true,
+    approval_mode: "ask",
     free_only: options.cloudSettings?.freeOnly !== false,
     enable_load_balancing: options.cloudSettings?.enableLoadBalancing !== false,
     include_raw_responses: false,
     expose_routing_details: options.cloudSettings?.exposeRoutingDetails === true,
+    debug_echo_enabled: false,
     cloud_control_selection: {
       route_mode: cloudRouteMode,
       api_key_models_enabled: !!options.cloudSettings?.apiKeyModelsEnabled,
@@ -4378,7 +4811,7 @@ function localConfigForLocalModels(sources, options = {}) {
       {
         name: "research",
         keywords: ["research", "search", "latest", "sources", "web", "news"],
-        agents: ["local-research", ...cloudRouteAgents.filter((name) => name !== "echo"), "echo"]
+        agents: ["local-research", ...cloudRouteAgents.filter((name) => name !== "echo")]
       }
     ],
     agents: [
@@ -4393,15 +4826,7 @@ function localConfigForLocalModels(sources, options = {}) {
       },
       ...ollamaCloudSources.map((source) => ollamaCloudModelAgentConfig(source)),
       ...cloudSources.map((source) => cloudModelAgentConfig(source)),
-      ...localSources.map((source) => localModelAgentConfig(source)),
-      {
-        name: "echo",
-        provider: "echo",
-        model: "local-echo",
-        free: true,
-        context_window: 1000000,
-        cooldown_seconds: 1
-      }
+      ...localSources.map((source) => localModelAgentConfig(source))
     ]
   };
 }
@@ -5134,6 +5559,163 @@ async function showStatus() {
   }
 }
 
+async function copyClineConfig() {
+  const text = clineConfigText(settings());
+  await vscode.env.clipboard.writeText(text);
+  vscode.window.showInformationMessage("Agent Hub Cline config copied. Use model agent-hub-coding.");
+}
+
+async function showClineSetup() {
+  output.show(true);
+  output.appendLine("");
+  output.appendLine("Agent Hub Cline setup");
+  output.appendLine(clineConfigText(settings()));
+  output.appendLine("");
+  output.appendLine("Use the OpenAI-compatible provider in Cline. Base URL must include /v1.");
+}
+
+async function testClineConnection() {
+  if (!(await ensureServerReady())) {
+    vscode.window.showWarningMessage("Agent Hub backend is not running. Click Start Server first.");
+    return;
+  }
+  const payload = {
+    api_shape: "openai-chat",
+    model: "agent-hub-coding",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Cline connectivity probe." },
+          { type: "tool_result", tool_use_id: "probe", content: [{ type: "text", text: "tool result preserved" }] }
+        ],
+        task_progress: [{ title: "probe", status: "in_progress" }],
+        active_files: activeEditorFileList()
+      }
+    ],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "agent_hub_probe",
+          parameters: { type: "object", properties: {} }
+        }
+      }
+    ],
+    agent_hub: { cline_compatibility_mode: true }
+  };
+  try {
+    const response = await requestJson("POST", "/debug/request", payload);
+    const diagnostics = response.diagnostics || {};
+    const ok = diagnostics.structured_content_messages > 0 && diagnostics.preserved_tool_results > 0;
+    const message = ok
+      ? "Cline request normalization OK: structured content, tool results, and task state are preserved."
+      : "Cline request reached Agent Hub, but context diagnostics look incomplete. Open logs for details.";
+    output.appendLine(JSON.stringify(response, null, 2));
+    vscode.window.showInformationMessage(message);
+  } catch (error) {
+    vscode.window.showErrorMessage(`Cline connection test failed: ${formatAgentHubError(error)}`);
+  }
+}
+
+async function copyClaudeCodeConfig() {
+  const text = claudeCodeConfigText(settings());
+  await vscode.env.clipboard.writeText(text);
+  vscode.window.showInformationMessage("Agent Hub Claude Code config copied.");
+}
+
+async function showClaudeCodeSetup() {
+  output.show(true);
+  output.appendLine("");
+  output.appendLine("Agent Hub Claude Code setup");
+  output.appendLine(claudeCodeConfigText(settings()));
+  output.appendLine("");
+  output.appendLine("Agent Hub exposes Anthropic Messages at /v1/messages and keeps tool_use/tool_result blocks structured.");
+}
+
+async function testAnthropicEndpoint() {
+  if (!(await ensureServerReady())) {
+    vscode.window.showWarningMessage("Agent Hub backend is not running. Click Start Server first.");
+    return;
+  }
+  const payload = {
+    api_shape: "anthropic-messages",
+    model: "agent-hub-coding",
+    max_tokens: 16,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Claude Code endpoint probe." },
+          { type: "tool_result", tool_use_id: "toolu_probe", content: "tool result preserved" }
+        ],
+        task_progress: [{ title: "probe", status: "in_progress" }],
+        active_files: activeEditorFileList()
+      }
+    ],
+    tools: [
+      {
+        name: "agent_hub_probe",
+        input_schema: { type: "object", properties: {} }
+      }
+    ],
+    agent_hub: { cline_compatibility_mode: true }
+  };
+  try {
+    const response = await requestJson("POST", "/debug/request", payload);
+    const diagnostics = response.diagnostics || {};
+    const ok = diagnostics.structured_content_messages > 0 && diagnostics.preserved_tool_results > 0;
+    const message = ok
+      ? "Anthropic request normalization OK: /v1/messages shape, tool results, and task state are preserved."
+      : "Anthropic request reached Agent Hub, but context diagnostics look incomplete. Open logs for details.";
+    output.appendLine(JSON.stringify(response, null, 2));
+    vscode.window.showInformationMessage(message);
+  } catch (error) {
+    vscode.window.showErrorMessage(`Anthropic endpoint test failed: ${formatAgentHubError(error)}`);
+  }
+}
+
+function clineConfigText(config) {
+  const baseUrl = `${config.serverUrl.replace(/\/+$/, "")}/v1`;
+  return JSON.stringify({
+    apiProvider: "openai-compatible",
+    openAiBaseUrl: baseUrl,
+    openAiApiKey: "agent-hub-local",
+    openAiModelId: "agent-hub-coding",
+    model: "agent-hub-coding",
+    agentHub: {
+      cline_compatibility_mode: true
+    }
+  }, null, 2);
+}
+
+function claudeCodeConfigText(config) {
+  const baseUrl = config.serverUrl.replace(/\/+$/, "");
+  return [
+    "# Agent Hub Claude Code",
+    `ANTHROPIC_BASE_URL=${baseUrl}`,
+    "ANTHROPIC_AUTH_TOKEN=agent-hub-local",
+    "ANTHROPIC_MODEL=agent-hub-coding"
+  ].join("\n");
+}
+
+function activeEditorFileList() {
+  const files = [];
+  const editor = currentTextEditor();
+  if (editor && editor.document && editor.document.uri) {
+    files.push(vscode.workspace.asRelativePath(editor.document.uri, false));
+  }
+  for (const tabGroup of vscode.window.tabGroups.all) {
+    for (const tab of tabGroup.tabs) {
+      const uri = tab.input && tab.input.uri;
+      if (uri && uri.scheme === "file") {
+        files.push(vscode.workspace.asRelativePath(uri, false));
+      }
+    }
+  }
+  return Array.from(new Set(files)).slice(0, 20);
+}
+
 async function askAgent() {
   const task = await vscode.window.showInputBox({
     title: "Ask Agent Hub",
@@ -5179,6 +5761,8 @@ async function runCodingAgent() {
       agent_max_steps: config.agentMaxSteps,
       agent_context_budget_tokens: config.agentContextBudgetTokens,
       agent_context_compaction_enabled: config.agentContextCompactionEnabled,
+      context_mode: config.contextMode,
+      cline_compatibility_mode: config.clineCompatibilityMode,
       workspace_dir: workspace || "."
     }
   });
@@ -5264,6 +5848,8 @@ async function sendAgentRequest({ task, context, route, agentMode = true, extra 
     provider_approval_granted: true,
     agent_context_budget_tokens: config.agentContextBudgetTokens,
     agent_context_compaction_enabled: config.agentContextCompactionEnabled,
+    context_mode: config.contextMode,
+    cline_compatibility_mode: config.clineCompatibilityMode,
     group_agent: {
       plan_candidates: config.groupPlanCandidates
     },
@@ -5315,6 +5901,31 @@ function formatAgentHubError(error) {
       "Agent Hub tried an API-key model on the cloud control route, but the configured API key is missing.",
       "",
       "Open Settings in Agent Hub chat, save the provider key, and restart Agent Hub. You can also set Cloud route to Ollama cloud models first."
+    );
+  } else if (raw.includes("No usable model") || raw.includes("No enabled agents")) {
+    lines.push(
+      "No usable model is available for this request.",
+      "",
+      "Enable a provider in Agent Hub settings, add an API key, or start a local Ollama/LM Studio model.",
+      "For Cline, use base URL " + settings().serverUrl.replace(/\/+$/, "") + "/v1 and model agent-hub-coding."
+    );
+  } else if (raw.includes("Echo is disabled")) {
+    lines.push(
+      "Echo is disabled by default.",
+      "",
+      "Configure a real provider or set debug_echo_enabled=true only for diagnostics."
+    );
+  } else if (raw.includes("Approval required") || raw.includes("permission")) {
+    lines.push(
+      "Agent Hub needs explicit approval before continuing.",
+      "",
+      "Review the permission prompt, switch approval mode in settings, or use a local provider for private workspace content."
+    );
+  } else if (raw.includes("context looks empty") || raw.includes("suspiciously empty")) {
+    lines.push(
+      "The client request reached Agent Hub, but the context looks empty.",
+      "",
+      "Run Agent Hub: Test Cline Connection and check /debug/context for dropped messages, task_progress, and active file metadata."
     );
   } else {
     lines.push(`Agent Hub request failed: ${raw}`);
@@ -5652,6 +6263,8 @@ function settings() {
     agentMaxSteps: config.get("agentMaxSteps", 20),
     agentContextBudgetTokens: config.get("agentContextBudgetTokens", 32000),
     agentContextCompactionEnabled: config.get("agentContextCompactionEnabled", true),
+    contextMode: normalizeContextMode(config.get("contextMode", "balanced")),
+    clineCompatibilityMode: config.get("clineCompatibilityMode", true),
     allowShellTools: config.get("allowShellTools", true),
     maxTokens: config.get("maxTokens", 1200),
     autoStart: config.get("autoStart", true)
@@ -5666,6 +6279,11 @@ function normalizeAgentProviderMode(value) {
 function normalizeAgentMode(value) {
   const mode = typeof value === "string" ? value.toLowerCase() : "";
   return ["agent", "group-agent"].includes(mode) ? mode : "agent";
+}
+
+function normalizeContextMode(value) {
+  const mode = typeof value === "string" ? value.toLowerCase() : "";
+  return ["minimal", "balanced", "deep"].includes(mode) ? mode : "balanced";
 }
 
 function codingAgentRoute(config, providerMode = config.agentProviderMode) {
@@ -5696,6 +6314,11 @@ async function approveModelRequest({ providerMode, contextText, source }) {
     return true;
   }
   const sendsWorkspace = typeof contextText === "string" && contextText.trim().length > 0;
+  const tokenEstimate = estimateTokens(contextText || "");
+  const files = workspaceContextFiles(contextText || "");
+  const secretWarning = looksLikeSecret(contextText || "")
+    ? "Possible secret-like text was detected; review carefully before sending."
+    : "No obvious secret patterns detected.";
   return requestPermission({
     category: sendsWorkspace ? "workspace_cloud" : "cloud_provider",
     description: "Agent Hub wants to send this request to a cloud-capable model route.",
@@ -5703,12 +6326,35 @@ async function approveModelRequest({ providerMode, contextText, source }) {
     risk: sendsWorkspace ? "high" : "medium",
     detail: [
       `Source: ${source || "Agent Hub"}.`,
+      `Provider/model: selected by ${mode} route.`,
+      `Estimated input: ${tokenEstimate} tokens.`,
+      files.length ? `Files/snippets: ${files.slice(0, 6).join(", ")}.` : "Files/snippets: none detected.",
       sendsWorkspace
         ? "Workspace/file context may be included in the model request."
         : "The request may use an external provider depending on routing.",
+      secretWarning,
       "Provider API usage may consume quota or credits."
     ].join(" ")
   });
+}
+
+function estimateTokens(text) {
+  return Math.max(1, Math.ceil(String(text || "").length / 4));
+}
+
+function workspaceContextFiles(text) {
+  const files = [];
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:Current file|File|Reference):\s*(.+?)\s*$/i);
+    if (match && match[1] && !files.includes(match[1].trim())) {
+      files.push(match[1].trim());
+    }
+  }
+  return files;
+}
+
+function looksLikeSecret(text) {
+  return /(api[_-]?key|token|secret|password)\s*[:=]\s*['"]?[^'"\s]{8,}|-----BEGIN .*PRIVATE KEY-----|sk-[A-Za-z0-9_-]{20,}/i.test(String(text || ""));
 }
 
 function permissionActionFromApprovalEvent(event) {
@@ -6126,6 +6772,10 @@ function requestJson(method, pathname, body) {
               ? parsed.error.message
               : text || `HTTP ${response.statusCode}`;
             const error = new Error(message);
+            if (parsed.error && parsed.error.suggested_fix) {
+              error.suggestedFix = parsed.error.suggested_fix;
+              error.message += ` Suggested fix: ${parsed.error.suggested_fix}`;
+            }
             if (Array.isArray(parsed.failover)) {
               error.failover = parsed.failover;
             }

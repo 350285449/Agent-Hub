@@ -20,6 +20,7 @@ class InboxTests(unittest.TestCase):
                 inbox_dir=root / "inbox",
                 outbox_dir=root / "outbox",
                 archive_dir=root / "archive",
+                debug_echo_enabled=True,
                 default_route=["echo"],
                 agents={
                     "echo": AgentConfig(

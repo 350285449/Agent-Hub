@@ -4,6 +4,16 @@
 
 No changes yet.
 
+## 0.7.4
+
+- Adds first-run sidebar checks for backend packaging, Python, config, providers, API keys, Ollama, LM Studio, and Start Server readiness.
+- Adds Cline and Claude Code setup helpers, copy commands, and compatibility tests.
+- Preserves structured context blocks, `task_progress`, TODO state, active files, recent tool chains, and provider-neutral metadata during normalization and compaction.
+- Adds `/debug/request`, `/debug/context`, and `agent-hub inspect-request` diagnostics for empty-context investigations.
+- Improves actionable error messages for missing models, missing API keys, echo gating, permissions, backend startup, and context loss.
+- Updates docs for setup, permissions, privacy/security, token optimization, troubleshooting, and architecture.
+- Packages the 0.7.4 backend and extension metadata.
+
 ## 0.7.1
 
 - Adds Claude Code, Cline, RooCode, OpenCode, and Cursor-style local gateway compatibility.

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .agent_runner import AgentRunner
-from .config import HubConfig
+from .config import HubConfig, normalize_provider
+from .context import request_context_diagnostics
 from .models import HubRequest
+from .observability import metrics_snapshot, permission_snapshot, record_event, usage_snapshot
 from .payloads import (
     anthropic_message_response,
     anthropic_stream_events,
@@ -16,7 +19,7 @@ from .payloads import (
     openai_stream_events,
     request_from_payload,
 )
-from .router import AgentRouter, RouterError
+from .router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
 from .team_agent_runner import TeamAgentRunner
 from .version import backend_version, build_metadata, config_runtime_hash
 
@@ -66,6 +69,17 @@ BACKEND_FEATURES = {
     "response_limit_headers": True,
     "central_permission_manager": True,
     "provider_permission_gate": True,
+    "debug_echo_gate": True,
+    "cline_tool_model_gate": True,
+    "central_token_budget_manager": True,
+    "tool_security_classifier": True,
+    "secret_detection": True,
+    "structured_observability": True,
+    "capability_graph": True,
+    "safe_mode": True,
+    "cline_compatibility_mode": True,
+    "protected_context_categories": True,
+    "context_debug_endpoints": True,
 }
 
 
@@ -76,6 +90,7 @@ class AgentHubHTTPServer(ThreadingHTTPServer):
         self.router = AgentRouter(config)
         self.agent_runner = AgentRunner(config, self.router)
         self.team_agent_runner = TeamAgentRunner(config, self.router)
+        self.debug_requests: list[dict[str, Any]] = []
 
 
 class AgentHubHandler(BaseHTTPRequestHandler):
@@ -106,11 +121,16 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "allow_shell_tools": self.server.config.allow_shell_tools,
                     "shell_command_policy": self.server.config.shell_command_policy,
                     "approval_mode": self.server.config.approval_mode,
+                    "debug_echo_enabled": self.server.config.debug_echo_enabled,
                     "permission_policy": {
                         "approval_mode": self.server.config.approval_mode,
+                        "safe_mode": self.server.config.approval_mode == "safe",
+                        "readonly_mode": self.server.config.approval_mode == "readonly",
                         "shell_command_policy": self.server.config.shell_command_policy,
                         "external_provider_approval": True,
-                        "file_write_approval": self.server.config.approval_mode in {"ask", "readonly", "deny"},
+                        "file_write_approval": self.server.config.approval_mode in {"ask", "safe", "readonly", "deny"},
+                        "dangerous_command_blocking": True,
+                        "secret_detection": True,
                     },
                     "prefer_multi_file_patches": self.server.config.prefer_multi_file_patches,
                     "grouped_patch_enforcement": {
@@ -124,7 +144,24 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "agent_context_compaction": {
                         "enabled": self.server.config.agent_context_compaction_enabled,
                         "budget_tokens": self.server.config.agent_context_budget_tokens,
+                        "mode": self.server.config.context_mode,
                     },
+                    "token_budget": {
+                        "mode": self.server.config.context_mode,
+                        "budget_tokens": self.server.config.agent_context_budget_tokens,
+                        "adaptive_modes": ["minimal", "balanced", "deep"],
+                        "cline_compatibility_mode": self.server.config.cline_compatibility_mode,
+                        "protected_categories": [
+                            "recent_tool_calls",
+                            "task_progress",
+                            "todos",
+                            "active_editor",
+                            "workspace_state",
+                            "mcp_state",
+                            "latest_reasoning",
+                        ],
+                    },
+                    "context_diagnostics": _debug_context_summary(self.server),
                     "repository_context_scoring": {
                         "enabled": self.server.config.context_change_bar_enabled,
                         "light_minimum": 3,
@@ -143,6 +180,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "workspace_dir": str(self.server.config.workspace_dir),
                     "initialization": self.server.config.initialization_report,
                     "provider_health": self.server.router.health_snapshot(),
+                    "capability_graph": self.server.router.capability_graph(),
                     "active_providers": _active_provider_names(
                         self.server.config,
                         self.server.router,
@@ -169,6 +207,48 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return
         if path == "/limits":
             self._send_json(_limits_body(self.server.config, self.server.router))
+            return
+        if path == "/usage":
+            self._send_json(
+                usage_snapshot(
+                    self.server.config.state_dir,
+                    self.server.router.health_snapshot(include_history=True),
+                )
+            )
+            return
+        if path == "/permissions":
+            self._send_json(
+                permission_snapshot(
+                    self.server.config.state_dir,
+                    approval_mode=self.server.config.approval_mode,
+                    safe_mode=self.server.config.approval_mode == "safe",
+                )
+            )
+            return
+        if path == "/metrics":
+            self._send_json(
+                metrics_snapshot(
+                    self.server.config.state_dir,
+                    self.server.router.health_snapshot(include_history=True),
+                )
+            )
+            return
+        if path == "/debug/request":
+            self._send_json(
+                {
+                    "object": "agent_hub.debug.request",
+                    "recent": list(reversed(self.server.debug_requests[-20:])),
+                }
+            )
+            return
+        if path == "/debug/context":
+            self._send_json(
+                {
+                    "object": "agent_hub.debug.context",
+                    "summary": _debug_context_summary(self.server),
+                    "recent": list(reversed(self.server.debug_requests[-20:])),
+                }
+            )
             return
         if path in {"/models", "/v1/models", "/api/v1/models"}:
             self._send_json(
@@ -205,6 +285,37 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return
 
         path = _request_path(self.path)
+        if path == "/debug/request":
+            api_shape = _debug_api_shape(payload)
+            debug_payload = _payload_with_header_metadata(payload, self.headers)
+            request = request_from_payload(debug_payload, api_shape=api_shape)
+            diagnostics = request_context_diagnostics(request)
+            _record_debug_request(
+                self.server,
+                {
+                    "path": path,
+                    "api_shape": api_shape,
+                    "response_shape": "debug",
+                    "session_id": request.session_id,
+                    "route": request.route,
+                    "preferred_agent": request.preferred_agent,
+                    "message_count": len(request.messages),
+                    "diagnostics": diagnostics,
+                },
+            )
+            self._send_json(
+                {
+                    "object": "agent_hub.debug.request",
+                    "api_shape": api_shape,
+                    "session_id": request.session_id,
+                    "route": request.route,
+                    "preferred_agent": request.preferred_agent,
+                    "message_count": len(request.messages),
+                    "metadata": request.metadata,
+                    "diagnostics": diagnostics,
+                }
+            )
+            return
         if path in {"/agent", "/v1/agent"}:
             self._handle_payload(
                 payload,
@@ -285,7 +396,34 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     ) -> None:
         payload = _payload_with_header_metadata(payload, self.headers)
         request = request_from_payload(payload, api_shape=api_shape)
+        record_event(
+            self.server.config.state_dir,
+            "requests",
+            {
+                "type": "http_request",
+                "path": _request_path(self.path),
+                "api_shape": api_shape,
+                "response_shape": response_shape,
+                "session_id": request.session_id,
+                "route": request.route,
+                "stream": request.stream,
+            },
+        )
         _apply_model_routing(self.server.config, request)
+        diagnostics = request_context_diagnostics(request)
+        _record_debug_request(
+            self.server,
+            {
+                "path": _request_path(self.path),
+                "api_shape": api_shape,
+                "response_shape": response_shape,
+                "session_id": request.session_id,
+                "route": request.route,
+                "preferred_agent": request.preferred_agent,
+                "message_count": len(request.messages),
+                "diagnostics": diagnostics,
+            },
+        )
         if response_shape == "native" and request.stream:
             self._send_native_stream(
                 request,
@@ -305,21 +443,49 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 event.error_type in {"permission_required", "permission_denied"}
                 for event in exc.failover
             )
+            route_error_type = getattr(exc, "error_type", None)
+            error_type = (
+                "agent_hub_permission_required"
+                if permission_required
+                else route_error_type or "agent_hub_route_error"
+            )
             error_body: dict[str, Any] = {
                 "error": {
                     "message": str(exc),
-                    "type": "agent_hub_permission_required" if permission_required else "agent_hub_route_error",
+                    "type": error_type,
                 },
             }
+            suggested_fix = getattr(exc, "suggested_fix", None)
+            if suggested_fix:
+                error_body["error"]["suggested_fix"] = suggested_fix
             if permission_required:
+                permission_event = next(
+                    (
+                        event
+                        for event in reversed(exc.failover)
+                        if event.error_type in {"permission_required", "permission_denied"}
+                    ),
+                    None,
+                )
                 error_body["agent_hub"] = {
                     "permission_required": True,
                     "approval_mode": self.server.config.approval_mode,
                     "message": str(exc),
                 }
+                if permission_event and permission_event.metadata.get("permission"):
+                    error_body["agent_hub"]["permission"] = permission_event.metadata["permission"]
+            elif route_error_type == NO_TOOL_CAPABLE_MODEL:
+                error_body["agent_hub"] = {
+                    "error_type": NO_TOOL_CAPABLE_MODEL,
+                    "message": str(exc),
+                    "suggested_fix": suggested_fix,
+                }
             if self.server.config.expose_routing_details or permission_required:
                 error_body["failover"] = [event.to_dict() for event in exc.failover]
-            self._send_json(error_body, status=403 if permission_required else 503)
+            status = getattr(exc, "status_code", None)
+            if status is None:
+                status = 403 if permission_required else 503
+            self._send_json(error_body, status=status)
             return
 
         if request.stream and response_shape == "openai-chat":
@@ -491,6 +657,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             "Access-Control-Expose-Headers",
             (
                 "X-Agent-Hub-Agent, X-Agent-Hub-Provider, X-Agent-Hub-Model, "
+                "X-AgentHub-Provider, X-AgentHub-Model, X-AgentHub-Fallback, "
+                "X-AgentHub-Tokens-Saved, X-AgentHub-Requests-Remaining, "
+                "X-AgentHub-Permission-Status, X-AgentHub-Safe-Mode, "
+                "X-AgentHub-Context-Warning, "
                 "X-Agent-Hub-Active-Model, X-Agent-Hub-Requests-Remaining, "
                 "X-Agent-Hub-Tokens-Remaining, X-Agent-Hub-Credits-Remaining, "
                 "X-Agent-Hub-Quota-Remaining, X-Agent-Hub-Reset-At, "
@@ -634,7 +804,14 @@ class AgentHubHandler(BaseHTTPRequestHandler):
 
 def serve(config: HubConfig) -> None:
     config.ensure_dirs()
-    server = AgentHubHTTPServer((config.host, config.port), config)
+    try:
+        server = AgentHubHTTPServer((config.host, config.port), config)
+    except OSError as exc:
+        raise SystemExit(
+            f"Agent Hub could not bind http://{config.host}:{config.port}. "
+            "Another process may already be using the port. Stop the old server, "
+            "change the agentHub.serverUrl/port setting, or run agent-hub serve --port <free-port>."
+        ) from exc
     build = build_metadata()
     print(
         "Agent Hub "
@@ -650,6 +827,66 @@ def serve(config: HubConfig) -> None:
         print("\nStopping Agent Hub")
     finally:
         server.server_close()
+
+
+def _record_debug_request(server: AgentHubHTTPServer, entry: dict[str, Any]) -> None:
+    entry = {"time": time.time(), **entry}
+    server.debug_requests.append(entry)
+    if len(server.debug_requests) > 100:
+        del server.debug_requests[:-100]
+
+
+def _debug_context_summary(server: AgentHubHTTPServer) -> dict[str, Any]:
+    recent = server.debug_requests[-20:]
+    if not recent:
+        return {
+            "request_count": 0,
+            "incoming_token_count": 0,
+            "compacted_token_count": 0,
+            "protected_token_count": 0,
+            "warning": "",
+        }
+    latest = recent[-1].get("diagnostics") if isinstance(recent[-1], dict) else {}
+    diagnostics = latest if isinstance(latest, dict) else {}
+    suspicious = [
+        item
+        for item in recent
+        if isinstance(item.get("diagnostics"), dict)
+        and item["diagnostics"].get("suspiciously_empty")
+    ]
+    return {
+        "request_count": len(recent),
+        "incoming_context_size": diagnostics.get("incoming_token_count", 0),
+        "preserved_context_size": diagnostics.get("compacted_token_count", 0),
+        "compacted_amount": diagnostics.get("dropped_token_count", 0),
+        "incoming_token_count": diagnostics.get("incoming_token_count", 0),
+        "compacted_token_count": diagnostics.get("compacted_token_count", 0),
+        "protected_token_count": diagnostics.get("protected_token_count", 0),
+        "preserved_tool_calls": diagnostics.get("preserved_tool_calls", 0),
+        "preserved_tool_results": diagnostics.get("preserved_tool_results", 0),
+        "preserved_todo_count": diagnostics.get("preserved_todo_count", 0),
+        "active_files_detected": diagnostics.get("active_files_detected", []),
+        "task_progress_present": diagnostics.get("task_progress_present", False),
+        "suspiciously_empty": diagnostics.get("suspiciously_empty", False),
+        "warning": (
+            "Incoming context looks suspiciously empty; check Cline/Claude Code setup and active workspace state."
+            if suspicious
+            else ""
+        ),
+    }
+
+
+def _debug_api_shape(payload: dict[str, Any]) -> str:
+    shape = payload.get("api_shape") or payload.get("response_shape")
+    if isinstance(shape, str) and shape in {"native", "openai-chat", "openai-responses", "anthropic-messages"}:
+        return shape
+    if "messages" in payload and ("anthropic_version" in payload or "system" in payload and "model" in payload):
+        return "anthropic-messages"
+    if "input" in payload:
+        return "openai-responses"
+    if "messages" in payload:
+        return "openai-chat"
+    return "native"
 
 
 ROUTE_MODEL_ALIASES = {
@@ -670,6 +907,15 @@ def _response_headers(response: Any, router: AgentRouter) -> dict[str, str]:
         for event in response.failover
         if event and event.model
     ]
+    fallback_chain = ",".join(fallback_models)
+    token_metadata = _response_token_metadata(response)
+    permission_status = _response_permission_status(response)
+    safe_mode = "on" if router.config.approval_mode == "safe" else "off"
+    context_warning = (
+        "suspiciously_empty"
+        if token_metadata.get("suspiciously_empty")
+        else ""
+    )
     values = {
         "X-Agent-Hub-Agent": response.agent,
         "X-Agent-Hub-Provider": response.provider,
@@ -681,7 +927,15 @@ def _response_headers(response: Any, router: AgentRouter) -> dict[str, str]:
         "X-Agent-Hub-Quota-Remaining": health.get("quota_remaining"),
         "X-Agent-Hub-Reset-At": health.get("rate_limit_reset_at"),
         "X-Agent-Hub-Cooldown-Until": health.get("cooldown_until"),
-        "X-Agent-Hub-Fallback-Models": ",".join(fallback_models),
+        "X-Agent-Hub-Fallback-Models": fallback_chain,
+        "X-AgentHub-Provider": response.provider,
+        "X-AgentHub-Model": response.model,
+        "X-AgentHub-Fallback": fallback_chain,
+        "X-AgentHub-Tokens-Saved": token_metadata.get("estimated_tokens_saved"),
+        "X-AgentHub-Requests-Remaining": health.get("requests_remaining"),
+        "X-AgentHub-Permission-Status": permission_status,
+        "X-AgentHub-Safe-Mode": safe_mode,
+        "X-AgentHub-Context-Warning": context_warning,
     }
     return {
         name: _safe_header_value(value)
@@ -695,6 +949,34 @@ def _safe_header_value(value: Any) -> str:
         return ""
     text = str(value).replace("\r", " ").replace("\n", " ").strip()
     return text[:1000]
+
+
+def _response_token_metadata(response: Any) -> dict[str, Any]:
+    raw = response.raw if isinstance(getattr(response, "raw", None), dict) else {}
+    metadata = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    context_usage = metadata.get("context_usage") if isinstance(metadata, dict) else None
+    if isinstance(context_usage, dict):
+        return context_usage
+    token_budget = metadata.get("token_budget") if isinstance(metadata, dict) else None
+    return token_budget if isinstance(token_budget, dict) else {}
+
+
+def _response_permission_status(response: Any) -> str:
+    if any(event.error_type == "permission_denied" for event in getattr(response, "failover", [])):
+        return "denied"
+    if any(event.error_type == "permission_required" for event in getattr(response, "failover", [])):
+        return "required"
+    raw = response.raw if isinstance(getattr(response, "raw", None), dict) else {}
+    metadata = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    steps = metadata.get("steps") if isinstance(metadata, dict) else []
+    if isinstance(steps, list):
+        for step in steps:
+            result = step.get("result") if isinstance(step, dict) and isinstance(step.get("result"), dict) else {}
+            if result.get("approval_required"):
+                return "required"
+            if result.get("permission_denied"):
+                return "denied"
+    return "allowed"
 
 
 def _limits_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
@@ -847,7 +1129,8 @@ def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:
                 "route": route_name,
                 "recommended_agent": recommendation[0]["agent"] if recommendation else None,
                 "recommended_model": recommendation[0]["model"] if recommendation else None,
-                "available": bool(recommendation),
+                "available": bool(recommendation)
+                and _route_has_visible_agent(config, route_name),
                 "recommended_health": (
                     health.get(recommendation[0]["agent"], {}) if recommendation else {}
                 ),
@@ -867,17 +1150,14 @@ def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:
                 "agent_hub": {
                     "type": "route",
                     "route": route.name,
-                    "available": any(
-                        name in config.agents and config.agents[name].enabled
-                        for name in route.agents
-                    ),
+                    "available": _route_has_visible_agent(config, route.name),
                 },
             }
         )
         seen.add(route.name)
 
     for agent in config.agents.values():
-        if not agent.enabled:
+        if not _agent_visible_in_models(config, agent):
             continue
         for model_id in (f"agent:{agent.name}", agent.name, agent.model):
             if model_id in seen:
@@ -903,6 +1183,25 @@ def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:
             )
             seen.add(model_id)
     return rows
+
+
+def _route_has_visible_agent(config: HubConfig, route_name: str) -> bool:
+    route = next((item for item in config.routes if item.name == route_name), None)
+    if route is None:
+        return False
+    return any(
+        _agent_visible_in_models(config, config.agents[name])
+        for name in route.agents
+        if name in config.agents
+    )
+
+
+def _agent_visible_in_models(config: HubConfig, agent: Any) -> bool:
+    if not getattr(agent, "enabled", False):
+        return False
+    if normalize_provider(getattr(agent, "provider", "")) == "echo":
+        return bool(config.debug_echo_enabled)
+    return True
 
 
 def _apply_model_routing(config: HubConfig, request: HubRequest) -> None:

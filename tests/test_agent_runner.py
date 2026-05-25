@@ -866,6 +866,7 @@ class AgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                debug_echo_enabled=True,
                 default_route=["local", "echo"],
                 agents={
                     "local": AgentConfig(

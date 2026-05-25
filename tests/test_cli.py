@@ -233,6 +233,7 @@ class CliTests(unittest.TestCase):
                 json.dumps(
                     {
                         "state_dir": str(Path(tmp) / "state"),
+                        "debug_echo_enabled": True,
                         "default_route": ["echo"],
                         "routes": [{"name": "local-agent", "agents": ["echo"]}],
                         "agents": [
@@ -256,6 +257,49 @@ class CliTests(unittest.TestCase):
             output = buffer.getvalue()
             self.assertIn("Agent-Hub Codex Chat", output)
             self.assertIn("codex>", output)
+
+    def test_inspect_request_reports_context_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "request.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "model": "agent-hub-coding",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "hello"},
+                                    {"type": "tool_result", "tool_use_id": "x", "content": "ok"},
+                                ],
+                                "task_progress": [{"title": "todo"}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = Path(tmp) / "agent-hub.config.json"
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--config",
+                        str(config),
+                        "inspect-request",
+                        str(path),
+                        "--api-shape",
+                        "openai-chat",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            data = json.loads(buffer.getvalue())
+            self.assertEqual(data["diagnostics"]["structured_content_messages"], 1)
+            self.assertEqual(data["diagnostics"]["preserved_tool_results"], 1)
+            self.assertTrue(data["diagnostics"]["cline_compatibility_mode"])
 
     def test_agent_runtime_flags_populate_agent_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

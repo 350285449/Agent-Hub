@@ -5,6 +5,11 @@ import time
 import uuid
 from typing import Any
 
+from .context import (
+    compatibility_mode_enabled,
+    content_to_text as structured_content_to_text,
+    enrich_metadata_with_context,
+)
 from .models import HubRequest, HubResponse, Message
 
 
@@ -25,27 +30,7 @@ ROUTE_MODEL_ALIASES = {
 
 
 def content_to_text(content: Any) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                if isinstance(item.get("text"), str):
-                    parts.append(item["text"])
-                elif isinstance(item.get("content"), str):
-                    parts.append(item["content"])
-        return "\n".join(part for part in parts if part)
-    if isinstance(content, dict):
-        if isinstance(content.get("text"), str):
-            return content["text"]
-        if isinstance(content.get("content"), str):
-            return content["content"]
-    return str(content)
+    return structured_content_to_text(content)
 
 
 def request_text(request: HubRequest) -> str:
@@ -85,12 +70,12 @@ def request_from_native(payload: dict[str, Any]) -> HubRequest:
         use_session_history=bool(payload.get("use_session_history", True)),
         api_shape="native",
         raw=payload,
-        metadata=dict(payload.get("metadata", {})),
+        metadata=enrich_metadata_with_context(payload, _dict_value(payload.get("metadata"))),
     )
 
 
 def request_from_openai_chat(payload: dict[str, Any]) -> HubRequest:
-    metadata = _dict_value(payload.get("metadata"))
+    metadata = enrich_metadata_with_context(payload, _dict_value(payload.get("metadata")))
     hub_options = _dict_value(payload.get("agent_hub"))
     model_route, model_agent = _routing_from_model(payload.get("model"))
     return HubRequest(
@@ -109,10 +94,13 @@ def request_from_openai_chat(payload: dict[str, Any]) -> HubRequest:
 
 
 def request_from_openai_responses(payload: dict[str, Any]) -> HubRequest:
-    metadata = _dict_value(payload.get("metadata"))
+    metadata = enrich_metadata_with_context(payload, _dict_value(payload.get("metadata")))
     hub_options = _dict_value(payload.get("agent_hub"))
     model_route, model_agent = _routing_from_model(payload.get("model"))
-    messages = _responses_input_messages(payload.get("input"))
+    messages = _responses_input_messages(
+        payload.get("input"),
+        preserve_structured=compatibility_mode_enabled(payload),
+    )
     instructions = payload.get("instructions")
     if isinstance(instructions, str) and instructions.strip():
         messages = [{"role": "system", "content": instructions}, *messages]
@@ -132,7 +120,7 @@ def request_from_openai_responses(payload: dict[str, Any]) -> HubRequest:
 
 
 def request_from_anthropic_messages(payload: dict[str, Any]) -> HubRequest:
-    metadata = _dict_value(payload.get("metadata"))
+    metadata = enrich_metadata_with_context(payload, _dict_value(payload.get("metadata")))
     hub_options = _dict_value(payload.get("agent_hub"))
     model_route, model_agent = _routing_from_model(payload.get("model"))
     messages = _message_list(payload.get("messages"))
@@ -457,6 +445,9 @@ def _hub_metadata(response: HubResponse) -> dict[str, Any]:
             "failed_models",
             "fallback_models",
             "session_models",
+            "context_usage",
+            "token_budget",
+            "confidence",
         ):
             if key in raw_metadata:
                 data[key] = raw_metadata[key]
@@ -724,7 +715,7 @@ def _messages_from_task(task: Any, context: Any) -> list[Message]:
     return [{"role": "user", "content": "\n\n".join(parts)}] if parts else []
 
 
-def _responses_input_messages(value: Any) -> list[Message]:
+def _responses_input_messages(value: Any, *, preserve_structured: bool = False) -> list[Message]:
     if isinstance(value, str):
         return [{"role": "user", "content": value}]
     if isinstance(value, list):
@@ -732,15 +723,36 @@ def _responses_input_messages(value: Any) -> list[Message]:
         for item in value:
             if isinstance(item, dict) and item.get("type") == "message":
                 role = item.get("role", "user")
-                messages.append({"role": role, "content": _responses_content_text(item.get("content"))})
+                messages.append(
+                    {
+                        "role": role,
+                        "content": _responses_content_value(
+                            item.get("content"),
+                            preserve_structured=preserve_structured,
+                        ),
+                    }
+                )
             elif isinstance(item, dict) and "role" in item:
                 message = dict(item)
-                message["content"] = _responses_content_text(item.get("content"))
+                message["content"] = _responses_content_value(
+                    item.get("content"),
+                    preserve_structured=preserve_structured,
+                )
                 messages.append(message)
+            elif isinstance(item, dict) and item.get("type") in {"function_call", "tool_use"}:
+                messages.append({"role": "assistant", "content": [dict(item)] if preserve_structured else content_to_text(item)})
+            elif isinstance(item, dict) and item.get("type") in {"function_call_output", "tool_result"}:
+                messages.append({"role": "tool", "content": [dict(item)] if preserve_structured else content_to_text(item)})
             elif isinstance(item, str):
                 messages.append({"role": "user", "content": item})
         return messages
     return []
+
+
+def _responses_content_value(value: Any, *, preserve_structured: bool) -> Any:
+    if preserve_structured and isinstance(value, list):
+        return [dict(item) if isinstance(item, dict) else item for item in value]
+    return _responses_content_text(value)
 
 
 def _responses_content_text(value: Any) -> str:

@@ -63,6 +63,8 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(data["context_change_bar"]["threshold"], 5)
             self.assertTrue(data["agent_context_compaction"]["enabled"])
             self.assertEqual(data["agent_context_compaction"]["budget_tokens"], 16000)
+            self.assertTrue(data["token_budget"]["cline_compatibility_mode"])
+            self.assertIn("context_diagnostics", data)
             self.assertTrue(data["grouped_patch_enforcement"]["enabled"])
             self.assertEqual(data["repository_context_scoring"]["strict_minimum"], 6)
             self.assertTrue(data["features"]["repository_context_scoring"])
@@ -279,6 +281,141 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("agent-hub-local", ids)
             self.assertIn("agent:tooly", ids)
 
+    def test_models_endpoint_does_not_expose_echo_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                default_route=["echo"],
+                routes=[RouteRule(name="coding", agents=["echo"])],
+                agents={
+                    "echo": AgentConfig(
+                        name="echo",
+                        provider="echo",
+                        model="local-echo",
+                    )
+                },
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                data = _get_json(f"http://127.0.0.1:{server.server_address[1]}/v1/models")
+            finally:
+                _stop(server, thread)
+
+            ids = {item["id"] for item in data["data"]}
+            self.assertNotIn("echo", ids)
+            self.assertNotIn("local-echo", ids)
+            self.assertNotIn("agent:echo", ids)
+
+    def test_cline_tool_request_with_only_echo_returns_tool_model_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                default_route=["echo"],
+                routes=[RouteRule(name="coding", agents=["echo"])],
+                agents={
+                    "echo": AgentConfig(
+                        name="echo",
+                        provider="echo",
+                        model="local-echo",
+                    )
+                },
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with self.assertRaises(HTTPError) as error:
+                    _post_json(
+                        f"{base}/v1/chat/completions",
+                        {
+                            "model": "agent-hub-coding",
+                            "messages": [{"role": "user", "content": "<task>Read README</task>"}],
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "parameters": {"type": "object"},
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                body = json.loads(error.exception.read().decode("utf-8"))
+                error.exception.close()
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(error.exception.code, 400)
+            self.assertEqual(body["error"]["type"], "no_tool_capable_model")
+            self.assertIn("No tool-capable model", body["error"]["message"])
+            self.assertIn("suggested_fix", body["error"])
+
+    def test_non_tool_echo_requires_debug_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                default_route=["echo"],
+                agents={
+                    "echo": AgentConfig(
+                        name="echo",
+                        provider="echo",
+                        model="local-echo",
+                    )
+                },
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with self.assertRaises(HTTPError) as error:
+                    _post_json(
+                        f"{base}/v1/chat/completions",
+                        {
+                            "model": "agent:echo",
+                            "messages": [{"role": "user", "content": "hello"}],
+                        },
+                    )
+                body = json.loads(error.exception.read().decode("utf-8"))
+                error.exception.close()
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(error.exception.code, 400)
+            self.assertEqual(body["error"]["type"], "configuration_error")
+            self.assertIn("Echo is disabled", body["error"]["message"])
+
+    def test_debug_echo_non_tool_request_still_works(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                debug_echo_enabled=True,
+                default_route=["echo"],
+                agents={
+                    "echo": AgentConfig(
+                        name="echo",
+                        provider="echo",
+                        model="local-echo",
+                    )
+                },
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                data = _post_json(
+                    f"{base}/v1/chat/completions",
+                    {
+                        "model": "agent:echo",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(data["choices"][0]["message"]["content"], "[echo] hello")
+
     def test_health_limits_and_models_expose_quota_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _compat_config(Path(tmp))
@@ -338,6 +475,53 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(headers.get("X-Agent-Hub-Requests-Remaining"), "7")
             self.assertEqual(headers.get("X-Agent-Hub-Tokens-Remaining"), "12345")
             self.assertEqual(headers.get("X-Agent-Hub-Credits-Remaining"), "2.5")
+            self.assertEqual(headers.get("X-AgentHub-Provider"), "openai-compatible")
+            self.assertEqual(headers.get("X-AgentHub-Model"), "tool-model")
+            self.assertEqual(headers.get("X-AgentHub-Requests-Remaining"), "7")
+            self.assertEqual(headers.get("X-AgentHub-Permission-Status"), "allowed")
+
+    def test_usage_permissions_and_metrics_endpoints_are_exposed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            server.router.provider_factory = _QuotaProvider
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                _post_json(
+                    f"{base}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+                usage = _get_json(f"{base}/usage")
+                permissions = _get_json(f"{base}/permissions")
+                metrics = _get_json(f"{base}/metrics")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(usage["object"], "agent_hub.usage")
+            self.assertGreaterEqual(usage["input_tokens"], 3)
+            self.assertEqual(permissions["object"], "agent_hub.permissions")
+            self.assertEqual(metrics["object"], "agent_hub.metrics")
+            self.assertIn("routing_decisions", metrics)
+
+    def test_health_exposes_capability_graph_and_token_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            config.context_mode = "minimal"
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                health = _get_json(f"http://127.0.0.1:{server.server_address[1]}/health")
+            finally:
+                _stop(server, thread)
+
+            self.assertTrue(health["features"]["central_token_budget_manager"])
+            self.assertTrue(health["features"]["tool_security_classifier"])
+            self.assertEqual(health["token_budget"]["mode"], "minimal")
+            self.assertEqual(health["capability_graph"]["object"], "agent_hub.capability_graph")
 
     def test_detailed_routing_includes_limit_metadata_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -402,6 +586,81 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 403)
             self.assertEqual(body["error"]["type"], "agent_hub_permission_required")
             self.assertTrue(body["agent_hub"]["permission_required"])
+
+    def test_debug_request_preserves_cline_structured_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                debug = _post_json(
+                    f"{base}/debug/request",
+                    {
+                        "api_shape": "openai-chat",
+                        "model": "agent-hub-coding",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "hello"},
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "x",
+                                        "content": [{"type": "text", "text": "tool output"}],
+                                    },
+                                ],
+                                "task_progress": [{"title": "todo", "status": "in_progress"}],
+                                "active_files": ["tests/test_cli.py"],
+                            }
+                        ],
+                        "agent_hub": {"cline_compatibility_mode": True},
+                    },
+                )
+                context = _get_json(f"{base}/debug/context")
+            finally:
+                _stop(server, thread)
+
+            diagnostics = debug["diagnostics"]
+            self.assertTrue(diagnostics["cline_compatibility_mode"])
+            self.assertEqual(diagnostics["structured_content_messages"], 1)
+            self.assertEqual(diagnostics["preserved_tool_results"], 1)
+            self.assertEqual(diagnostics["preserved_todo_count"], 1)
+            self.assertEqual(diagnostics["active_files_detected"], ["tests/test_cli.py"])
+            self.assertEqual(context["summary"]["preserved_tool_results"], 1)
+
+    def test_openai_responses_debug_request_keeps_content_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                debug = _post_json(
+                    f"{base}/debug/request",
+                    {
+                        "api_shape": "openai-responses",
+                        "model": "agent-hub-coding",
+                        "input": [
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": [
+                                    {"type": "input_text", "text": "hello"},
+                                    {"type": "tool_result", "tool_use_id": "x", "content": "ok"},
+                                ],
+                            }
+                        ],
+                        "task_progress": [{"title": "keep me"}],
+                    },
+                )
+            finally:
+                _stop(server, thread)
+
+            diagnostics = debug["diagnostics"]
+            self.assertEqual(diagnostics["structured_content_messages"], 1)
+            self.assertEqual(diagnostics["preserved_tool_results"], 1)
+            self.assertTrue(debug["metadata"]["cline_compatibility_mode"])
 
 
 def _compat_config(path: Path) -> HubConfig:

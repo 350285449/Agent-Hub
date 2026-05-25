@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from .config import HubConfig
 from .models import HubRequest
+from .observability import record_event
 from .permissions import (
     PermissionDecision,
     PermissionManager,
@@ -455,12 +456,14 @@ class AgentToolbox:
         args = args or {}
         checkpoint: dict[str, Any] | None = None
         rollback_result: dict[str, Any] | None = None
+        decision: PermissionDecision | None = None
         try:
             allowed = self.allowed_tool_names
             if allowed is not None and name not in allowed:
                 raise ToolError(f"Tool {name!r} is not available for this agent stage")
             
             decision = self._permission_decision(name, args)
+            self._record_permission_event(name, args, decision)
             if decision.requires_approval:
                 return self._request_approval(name, args, decision)
             if not decision.allowed:
@@ -502,6 +505,7 @@ class AgentToolbox:
                 response["checkpoint"] = checkpoint
             if decision.sensitive and self._approval_granted():
                 response["approval_granted"] = True
+            self._record_tool_event(name, args, response)
             return response
         except Exception as exc:
             response = {"ok": False, "tool": name, "error": str(exc)}
@@ -509,6 +513,8 @@ class AgentToolbox:
                 response["checkpoint"] = checkpoint
             if rollback_result is not None:
                 response["rollback"] = rollback_result
+            if decision is not None:
+                self._record_tool_event(name, args, response)
             return response
 
     def _permission_decision(self, name: str, args: dict[str, Any]) -> PermissionDecision:
@@ -529,6 +535,52 @@ class AgentToolbox:
 
     def _approval_granted(self) -> bool:
         return approval_granted_from_request(self.request)
+
+    def _record_permission_event(
+        self,
+        name: str,
+        args: dict[str, Any],
+        decision: PermissionDecision,
+    ) -> None:
+        try:
+            record_event(
+                self.config.state_dir,
+                "permissions",
+                {
+                    "type": "tool_permission",
+                    "session_id": self.request.session_id,
+                    "tool": name,
+                    "allowed": decision.allowed,
+                    "requires_approval": decision.requires_approval,
+                    "denied": decision.denied,
+                    "reason": decision.reason,
+                    "mode": decision.mode,
+                    "category": decision.request.category if decision.request else "",
+                    "risk_level": decision.request.risk_level if decision.request else "",
+                    "resource": decision.request.resource if decision.request else "",
+                },
+            )
+        except Exception:
+            return
+
+    def _record_tool_event(self, name: str, args: dict[str, Any], response: dict[str, Any]) -> None:
+        try:
+            record_event(
+                self.config.state_dir,
+                "tools",
+                {
+                    "type": "tool_execution",
+                    "session_id": self.request.session_id,
+                    "tool": name,
+                    "ok": response.get("ok") is not False,
+                    "approval_required": bool(response.get("approval_required")),
+                    "permission_denied": bool(response.get("permission_denied")),
+                    "error": response.get("error", ""),
+                    "paths": self._get_affected_files(name, args),
+                },
+            )
+        except Exception:
+            return
 
     def _is_mutating_tool(self, name: str) -> bool:
         return name in ("write_file", "replace_in_file", "apply_patch")
@@ -1259,6 +1311,8 @@ class AgentToolbox:
 
     def _check_shell_permission(self, *, command: str, cwd: Path, timeout_seconds: int) -> None:
         if self.shell_command_policy != "ask":
+            return
+        if self._approval_granted() or self._get_approval_mode() in {"ask", "safe", "shell-ask"}:
             return
         if self.shell_permission_callback is None:
             raise ToolError(

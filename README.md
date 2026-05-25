@@ -5,6 +5,12 @@ requests. It accepts JSON, chooses a configured agent/model, can run a small
 tool-using agent loop, and fails over to the next agent when a provider is out
 of quota, rate limited, overloaded, or cannot handle the context size.
 
+It can also act as a transparent OpenAI endpoint, Anthropic endpoint, Cline
+backend, Claude Code backend, OpenRouter-style endpoint, VS Code workspace
+agent, and universal provider router. Risky shell, install, file-write,
+delete, config, provider, upload, and process actions go through centralized
+permission policy.
+
 It uses the `cloud-agent` route by default for the model calls that plan and
 assign workspace actions. Fresh configs put Ollama cloud model IDs first on that
 route, so no heavy local model is run unless you explicitly choose Local control.
@@ -25,6 +31,7 @@ proprietary vendor models.
 - Free-only routing and context-window preflight checks before provider calls
 - JSON file inbox: `.agent-hub/inbox/*.json`
 - Session logs: `.agent-hub/state/sessions/*.json`
+- Context diagnostics: `GET /debug/context` and `POST /debug/request`
 
 ## Quick Start
 
@@ -73,6 +80,9 @@ Then open a second terminal for an interactive Codex-style chat:
 ```
 
 Or use the VS Code extension command `Agent Hub: Open Chat`.
+On first run, the VS Code sidebar checks backend availability, Python version,
+config file, provider/API-key state, local Ollama/LM Studio availability, and
+then guides you to the primary `Start Server` action.
 Cloud control starts with Ollama cloud model IDs in fresh VS Code configs. Those
 models run through Ollama Cloud, not on your local CPU/GPU. To put hosted API-key
 models first, open the chat `Settings` menu, set `Cloud route` to `API-key
@@ -168,6 +178,70 @@ Open the chat `Settings` menu to switch Cloud route priority to API-key models,
 change hosted model IDs, or choose Local for direct local-only control.
 `hybrid` follows the same Cloud route priority and then falls through remaining
 providers.
+
+## Cline And Claude Code
+
+Cline:
+
+```json
+{
+  "apiProvider": "openai-compatible",
+  "openAiBaseUrl": "http://127.0.0.1:8787/v1",
+  "openAiApiKey": "agent-hub-local",
+  "openAiModelId": "agent-hub-coding",
+  "model": "agent-hub-coding"
+}
+```
+
+Claude Code:
+
+```text
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+ANTHROPIC_AUTH_TOKEN=agent-hub-local
+ANTHROPIC_MODEL=agent-hub-coding
+```
+
+The VS Code commands `Agent Hub: Copy Cline Config`,
+`Agent Hub: Test Cline Connection`, `Agent Hub: Copy Claude Code Config`, and
+`Agent Hub: Test Anthropic Endpoint` provide setup and compatibility checks.
+
+## Context Preservation
+
+`cline_compatibility_mode` is enabled by default. Agent Hub preserves structured
+content arrays, `task_progress`, TODO state, tool calls/results, MCP/tool state,
+workspace metadata, active/open file metadata, and recent reasoning/action
+chains. Token compaction protects those categories and compacts older,
+lower-signal content first.
+
+Inspect context with:
+
+```powershell
+agent-hub inspect-request .\request.json --api-shape openai-chat
+curl http://127.0.0.1:8787/debug/context
+```
+
+## Operations
+
+Run:
+
+```powershell
+agent-hub doctor
+```
+
+The doctor report includes config path, backend version, Python runtime,
+enabled providers, missing API keys, local model servers, Cline/Claude
+endpoints, approval mode, safe mode, token optimization mode, context
+diagnostics, likely problems, and exact fixes.
+
+Further docs:
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Permissions](docs/PERMISSIONS.md)
+- [Cline setup](docs/CLINE.md)
+- [Claude Code setup](docs/CLAUDE_CODE.md)
+- [Token optimization](docs/TOKEN_OPTIMIZATION.md)
+- [Privacy and security](docs/PRIVACY_SECURITY.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 Health check:
 

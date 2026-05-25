@@ -261,6 +261,163 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(response.agent, "tooly")
             self.assertEqual(calls, ["tooly"])
 
+    def test_cline_tool_request_does_not_route_to_echo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                routes=[RouteRule(name="coding", agents=["plain", "echo"])],
+                agents={
+                    "plain": AgentConfig(
+                        name="plain",
+                        provider="openai-compatible",
+                        model="plain-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                    "echo": AgentConfig(
+                        name="echo",
+                        provider="echo",
+                        model="local-echo",
+                    ),
+                },
+            )
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+
+            with self.assertRaises(RouterError) as error:
+                router.route(
+                    HubRequest(
+                        session_id="cline",
+                        api_shape="openai-chat",
+                        route="coding",
+                        messages=[{"role": "user", "content": "Read README"}],
+                        raw={
+                            "model": "agent-hub-coding",
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "function": {"name": "read_file", "parameters": {"type": "object"}},
+                                }
+                            ],
+                        },
+                    )
+                )
+
+            self.assertEqual(calls, [])
+            self.assertEqual(error.exception.error_type, "no_tool_capable_model")
+            self.assertIn("No tool-capable model", str(error.exception))
+
+    def test_tool_request_with_only_echo_returns_no_tool_capable_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp),
+                routes=[RouteRule(name="coding", agents=["echo"])],
+                agents={
+                    "echo": AgentConfig(
+                        name="echo",
+                        provider="echo",
+                        model="local-echo",
+                    )
+                },
+            )
+            router = AgentRouter(config, provider_factory=lambda agent: _FakeProvider(agent, []))
+
+            with self.assertRaises(RouterError) as error:
+                router.route(
+                    HubRequest(
+                        session_id="cline",
+                        api_shape="openai-chat",
+                        route="coding",
+                        messages=[{"role": "user", "content": "Read README"}],
+                        raw={
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "function": {"name": "read_file", "parameters": {"type": "object"}},
+                                }
+                            ],
+                        },
+                    )
+                )
+
+            self.assertEqual(error.exception.error_type, "no_tool_capable_model")
+            self.assertIn("Echo is a diagnostic provider", str(error.exception))
+
+    def test_no_tool_capable_model_error_names_missing_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp),
+                routes=[RouteRule(name="coding", agents=["codex", "echo"])],
+                agents={
+                    "codex": AgentConfig(
+                        name="codex",
+                        provider="openai",
+                        model="gpt-test",
+                        api_key_env="OPENAI_API_KEY",
+                        free=True,
+                        supports_tools=True,
+                    ),
+                    "echo": AgentConfig(
+                        name="echo",
+                        provider="echo",
+                        model="local-echo",
+                    ),
+                },
+            )
+            router = AgentRouter(config, provider_factory=lambda agent: _FakeProvider(agent, []))
+
+            with self.assertRaises(RouterError) as error:
+                router.route(
+                    HubRequest(
+                        session_id="cline",
+                        api_shape="openai-chat",
+                        route="coding",
+                        messages=[{"role": "user", "content": "Read README"}],
+                        raw={
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "function": {"name": "read_file", "parameters": {"type": "object"}},
+                                }
+                            ],
+                        },
+                    )
+                )
+
+            self.assertEqual(error.exception.error_type, "no_tool_capable_model")
+            self.assertIn("OPENAI_API_KEY", str(error.exception))
+            self.assertIn("OPENAI_API_KEY", error.exception.suggested_fix or "")
+
+    def test_debug_echo_non_tool_request_works_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp),
+                debug_echo_enabled=True,
+                default_route=["echo"],
+                agents={
+                    "echo": AgentConfig(
+                        name="echo",
+                        provider="echo",
+                        model="local-echo",
+                    )
+                },
+            )
+            router = AgentRouter(config, provider_factory=lambda agent: _FakeProvider(agent, []))
+
+            response = router.route(
+                HubRequest(
+                    session_id="debug",
+                    api_shape="openai-chat",
+                    messages=[{"role": "user", "content": "hello"}],
+                    raw={"model": "agent:echo"},
+                )
+            )
+
+            self.assertEqual(response.agent, "echo")
+            self.assertEqual(response.text, "done")
+
     def test_preferred_agent_can_fall_back_to_route_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             calls: list[str] = []
@@ -321,7 +478,7 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(recommendations[0]["agent"], "coder")
             self.assertTrue(recommendations[0]["supports_tools"])
 
-    def test_recommendation_keeps_echo_as_last_resort(self) -> None:
+    def test_recommendation_hides_echo_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp),
@@ -355,6 +512,32 @@ class RouterTests(unittest.TestCase):
             )
 
             self.assertEqual(recommendations[0]["agent"], "cloud")
+            self.assertNotIn("echo", {row["agent"] for row in recommendations})
+
+    def test_recommendation_allows_echo_in_debug_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp),
+                debug_echo_enabled=True,
+                default_route=["echo"],
+                agents={
+                    "echo": AgentConfig(
+                        name="echo",
+                        provider="echo",
+                        model="local-echo",
+                        free=True,
+                    )
+                },
+            )
+
+            recommendations = AgentRouter(config).recommend(
+                HubRequest(
+                    session_id="abc",
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+            )
+
+            self.assertEqual(recommendations[0]["agent"], "echo")
 
     def test_session_history_is_replayed_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

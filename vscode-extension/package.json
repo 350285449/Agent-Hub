@@ -1,17 +1,30 @@
 {
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub Workspace",
-  "description": "Run cloud or local coding agents through Agent Hub from VS Code.",
-  "version": "0.7.1",
+  "description": "Universal AI router, Cline/Claude Code gateway, and permissioned workspace-agent platform for VS Code.",
+  "version": "0.7.4",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/350285449/Agent-Hub.git"
+  },
+  "bugs": {
+    "url": "https://github.com/350285449/Agent-Hub/issues"
+  },
+  "homepage": "https://github.com/350285449/Agent-Hub#readme",
   "keywords": [
     "ai",
     "agent",
     "local-ai",
     "ollama",
-    "coding-agent"
+    "coding-agent",
+    "cline",
+    "claude-code",
+    "openai-compatible",
+    "anthropic",
+    "llm-router"
   ],
   "extensionKind": [
     "workspace"
@@ -38,6 +51,12 @@
     "onCommand:agentHub.research",
     "onCommand:agentHub.explainSelection",
     "onCommand:agentHub.explainFile",
+    "onCommand:agentHub.copyClineConfig",
+    "onCommand:agentHub.testClineConnection",
+    "onCommand:agentHub.showClineSetup",
+    "onCommand:agentHub.copyClaudeCodeConfig",
+    "onCommand:agentHub.testAnthropicEndpoint",
+    "onCommand:agentHub.showClaudeCodeSetup",
     "onCommand:agentHub.openOutput"
   ],
   "main": "./extension.js",
@@ -126,6 +145,30 @@
         "title": "Agent Hub: Explain Current File"
       },
       {
+        "command": "agentHub.copyClineConfig",
+        "title": "Agent Hub: Copy Cline Config"
+      },
+      {
+        "command": "agentHub.testClineConnection",
+        "title": "Agent Hub: Test Cline Connection"
+      },
+      {
+        "command": "agentHub.showClineSetup",
+        "title": "Agent Hub: Show Cline Setup"
+      },
+      {
+        "command": "agentHub.copyClaudeCodeConfig",
+        "title": "Agent Hub: Copy Claude Code Config"
+      },
+      {
+        "command": "agentHub.testAnthropicEndpoint",
+        "title": "Agent Hub: Test Anthropic Endpoint"
+      },
+      {
+        "command": "agentHub.showClaudeCodeSetup",
+        "title": "Agent Hub: Show Claude Code Setup"
+      },
+      {
         "command": "agentHub.openOutput",
         "title": "Agent Hub: Open Output"
       }
@@ -203,12 +246,28 @@
           "enum": [
             "ask",
             "auto",
+            "safe",
             "readonly",
             "shell-ask",
             "deny"
           ],
           "default": "ask",
           "description": "Permission mode for privileged Agent Hub actions. Ask prompts before commands, file/config changes, process control, model downloads, and cloud provider use."
+        },
+        "agentHub.contextMode": {
+          "type": "string",
+          "enum": [
+            "minimal",
+            "balanced",
+            "deep"
+          ],
+          "default": "balanced",
+          "description": "Adaptive context mode for Agent Hub token budgeting."
+        },
+        "agentHub.clineCompatibilityMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Preserve Cline/Claude Code structured content, task_progress, TODO state, tool chains, and active editor metadata during normalization and compaction."
         },
         "agentHub.groupPlanCandidates": {
           "type": "number",

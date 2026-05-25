@@ -20,9 +20,16 @@ from .agent_tools import (
     tool_result_message,
 )
 from .config import HubConfig
+from .context import (
+    context_state_messages,
+    is_protected_context_message,
+    message_signature,
+    request_context_diagnostics,
+)
 from .models import FailoverEvent, HubRequest, HubResponse
 from .reasoning import WorkspaceReasoningState
 from .router import AgentRouter
+from .token_budget import TokenBudget, TokenBudgetManager, estimate_messages_tokens
 
 
 TOOL_ACTIONS = {
@@ -428,6 +435,7 @@ class AgentRunner:
                 reasoning_state,
                 previous_input_tokens=previous_input_tokens,
             )
+            self._latest_context_usage = context_usage
             previous_input_tokens = context_usage["input_tokens"]
             _emit(
                 event_sink,
@@ -1008,8 +1016,11 @@ class AgentRunner:
         session_data: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         request_with_history = self._with_session_history(request, session_data=session_data)
+        context_state = request.metadata.get("context_state") if isinstance(request.metadata, dict) else None
+        protected_context = context_state_messages(context_state if isinstance(context_state, dict) else {})
         return [
             {"role": "system", "content": f"{toolbox.instructions()}\n\n{_compact_reasoning_state_prompt(reasoning_state)}"},
+            *protected_context,
             *request_with_history.messages,
         ]
 
@@ -1056,6 +1067,8 @@ class AgentRunner:
             "repair_history": _repair_history_from_trace(trace),
             "reasoning_state": reasoning_state.to_dict() if reasoning_state else None,
             "execution_plan": reasoning_state.execution_plan.to_dict() if reasoning_state else None,
+            "context_usage": getattr(self, "_latest_context_usage", {}),
+            "token_budget": getattr(self, "_latest_context_usage", {}).get("token_budget", {}),
             "stopped": stopped,
         }
         if response:
@@ -2292,8 +2305,10 @@ def _prepare_agent_messages_for_step(
     pre_compacted_tool_results_count: int = 0,
     pre_estimated_tokens_saved: int = 0,
 ) -> dict[str, Any]:
-    budget_tokens = _agent_context_input_budget(request, router, messages)
+    budget_info = _agent_context_input_budget_info(request, router, messages)
+    budget_tokens = budget_info.effective_budget
     before_tokens = _estimated_message_tokens(messages)
+    before_messages = deepcopy(messages)
     compaction_enabled = _agent_context_compaction_enabled(request, router.config)
     compacted_messages_count = pre_compacted_count
     compacted_tool_results_count = pre_compacted_tool_results_count
@@ -2303,10 +2318,16 @@ def _prepare_agent_messages_for_step(
             messages,
             repair_active=_repair_context_active(trace, messages),
             budget_tokens=budget_tokens,
+            context_mode=budget_info.mode,
         )
         compacted_messages_count += history_compacted_count
         compacted_tool_results_count += history_compacted_count
     input_tokens = _estimated_message_tokens(messages)
+    diagnostics = request_context_diagnostics(
+        request,
+        messages=before_messages,
+        compacted_messages=messages,
+    )
     estimated_tokens_saved = pre_estimated_tokens_saved + max(0, before_tokens - input_tokens)
     tokens_added = 0 if previous_input_tokens is None else input_tokens - previous_input_tokens
     percent_used = (
@@ -2328,6 +2349,8 @@ def _prepare_agent_messages_for_step(
     return {
         "input_tokens": input_tokens,
         "budget_tokens": budget_tokens,
+        "context_mode": budget_info.mode,
+        "token_budget": budget_info.to_dict(),
         "percent_used": percent_used,
         "tokens_added_since_last_step": tokens_added,
         "compaction_enabled": compaction_enabled,
@@ -2342,6 +2365,19 @@ def _prepare_agent_messages_for_step(
         "budget_exceeded_after_compaction": hard_budget_exceeded,
         "hard_budget_exceeded": hard_budget_exceeded,
         "input_tokens_before_compaction": before_tokens,
+        "incoming_token_count": diagnostics["incoming_token_count"],
+        "compacted_token_count": diagnostics["compacted_token_count"],
+        "protected_token_count": diagnostics["protected_token_count"],
+        "dropped_messages": diagnostics["dropped_messages"],
+        "dropped_token_count": diagnostics["dropped_token_count"],
+        "preserved_tool_calls": diagnostics["preserved_tool_calls"],
+        "preserved_tool_results": diagnostics["preserved_tool_results"],
+        "preserved_todo_count": diagnostics["preserved_todo_count"],
+        "active_files_detected": diagnostics["active_files_detected"],
+        "task_progress_present": diagnostics["task_progress_present"],
+        "structured_content_messages": diagnostics["structured_content_messages"],
+        "cline_compatibility_mode": diagnostics["cline_compatibility_mode"],
+        "suspiciously_empty": diagnostics["suspiciously_empty"],
     }
 
 
@@ -2350,11 +2386,17 @@ def _agent_context_input_budget(
     router: AgentRouter,
     messages: list[dict[str, Any]],
 ) -> int | None:
+    return _agent_context_input_budget_info(request, router, messages).effective_budget
+
+
+def _agent_context_input_budget_info(
+    request: HubRequest,
+    router: AgentRouter,
+    messages: list[dict[str, Any]],
+):
     override = _request_positive_int_option(request, "agent_context_budget_tokens")
     if override is None:
         override = _request_positive_int_option(request, "context_budget_tokens")
-    if override is not None:
-        return override
     configured = getattr(router.config, "agent_context_budget_tokens", None)
     try:
         configured_budget = int(configured) if configured is not None else 0
@@ -2372,11 +2414,22 @@ def _agent_context_input_budget(
         output_tokens = _agent_output_budget(request, agent)
         budgets.append(max(1, int(agent.context_window) - output_tokens))
     model_budget = min(budgets) if budgets else None
-    if configured_budget > 0 and model_budget is not None:
-        return min(configured_budget, model_budget)
-    if configured_budget > 0:
-        return configured_budget
-    return model_budget
+    manager = TokenBudgetManager.from_request(
+        request,
+        getattr(router.config, "context_mode", "balanced"),
+    )
+    if override is not None:
+        effective = min(override, model_budget) if model_budget is not None else override
+        return TokenBudget(
+            mode=manager.mode,
+            configured_budget=override,
+            provider_budget=model_budget,
+            effective_budget=effective,
+        )
+    return manager.effective_input_budget(
+        configured_budget=configured_budget if configured_budget > 0 else None,
+        provider_budget=model_budget,
+    )
 
 
 def _agent_context_compaction_enabled(request: HubRequest, config: HubConfig) -> bool:
@@ -2400,9 +2453,10 @@ def _compact_agent_message_history(
     *,
     repair_active: bool,
     budget_tokens: int | None,
+    context_mode: str = "balanced",
 ) -> int:
     compacted = 0
-    keep_full = FULL_REPAIR_TOOL_RESULT_HISTORY if repair_active else FULL_TOOL_RESULT_HISTORY
+    keep_full = TokenBudgetManager(context_mode).full_tool_history(repair_active=repair_active)
     tool_messages = _tool_result_messages(messages)
     for item in tool_messages[:-keep_full]:
         if _compact_tool_message(messages, item, reason="old_tool_result"):
@@ -2413,9 +2467,10 @@ def _compact_agent_message_history(
         return compacted
     budget = max(1, budget_tokens - CONTEXT_BUDGET_MARGIN_TOKENS)
     while _estimated_message_tokens(messages) > budget:
-        if not _compact_largest_tool_message(messages):
+        if not _compact_largest_tool_message(messages, protect_recent=keep_full):
             if not _compact_system_message(messages):
-                break
+                if not _compact_largest_tool_message(messages, protect_recent=0):
+                    break
         compacted += 1
     compacted += _remove_old_assistant_tool_messages(messages, keep_full=keep_full)
     return compacted
@@ -2526,11 +2581,19 @@ def _compact_tool_message(messages: list[dict[str, Any]], item: dict[str, Any], 
     return True
 
 
-def _compact_largest_tool_message(messages: list[dict[str, Any]]) -> bool:
+def _compact_largest_tool_message(messages: list[dict[str, Any]], *, protect_recent: int = 0) -> bool:
+    tool_messages = _tool_result_messages(messages)
+    protected_indexes = {
+        int(item["index"])
+        for item in tool_messages[-protect_recent:]
+        if isinstance(item.get("index"), int)
+    } if protect_recent > 0 else set()
     candidates = [
         item
-        for item in _tool_result_messages(messages)
-        if isinstance(item.get("result"), dict) and not item["result"].get("compacted")
+        for item in tool_messages
+        if isinstance(item.get("result"), dict)
+        and not item["result"].get("compacted")
+        and item.get("index") not in protected_indexes
     ]
     if not candidates:
         return False
@@ -2831,12 +2894,7 @@ def _compact_policy_result(policy: dict[str, Any]) -> dict[str, Any]:
 
 
 def _estimated_message_tokens(messages: list[dict[str, Any]]) -> int:
-    total = 0
-    for message in messages:
-        role = str(message.get("role", "user"))
-        content = str(message.get("content", ""))
-        total += max(1, (len(role) + len(content) + 3) // 4) + 4
-    return max(1, total)
+    return estimate_messages_tokens(messages)
 
 
 def _largest_context_sources(messages: list[dict[str, Any]], *, limit: int = 5) -> list[dict[str, Any]]:
@@ -5005,17 +5063,27 @@ def _compact_session_history_messages(
     history: list[dict[str, Any]],
     current_messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    cleaned: list[dict[str, str]] = []
-    for message in history:
+    cleaned: list[dict[str, Any]] = []
+    for index, message in enumerate(history):
         if not isinstance(message, dict):
             continue
         role = str(message.get("role") or "")
         content = message.get("content")
-        if role not in {"user", "assistant", "system"} or not isinstance(content, str):
+        if role not in {"user", "assistant", "system", "tool"}:
             continue
-        if _session_history_content_is_tool_noise(content):
+        recent = index >= max(0, len(history) - 8)
+        protected = is_protected_context_message(message, recent=recent)
+        if isinstance(content, str) and _session_history_content_is_tool_noise(content) and not protected:
             continue
-        cleaned.append({"role": role, "content": _short_value(content, maximum=1200)})
+        if isinstance(content, str):
+            maximum = 4000 if protected else 1200
+            cleaned.append({"role": role, "content": _short_value(content, maximum=maximum)})
+            continue
+        if protected:
+            cleaned.append(dict(message))
+            continue
+        text = _short_value(json.dumps(content, ensure_ascii=False), maximum=1200)
+        cleaned.append({"role": role, "content": text})
     if not cleaned:
         return []
 
@@ -5029,28 +5097,34 @@ def _compact_session_history_messages(
         compact.append(
             {
                 "role": "user",
-                "content": "Prior session request (compact): " + last_user["content"],
+                "content": "Prior session request (compact): " + _short_value(
+                    last_user.get("content"),
+                    maximum=1200,
+                ),
             }
         )
     if last_assistant:
         compact.append(
             {
                 "role": "assistant",
-                "content": "Prior session answer (compact): " + last_assistant["content"],
+                "content": "Prior session answer (compact): " + _short_value(
+                    last_assistant.get("content"),
+                    maximum=1200,
+                ),
             }
         )
     for message in cleaned[-MAX_COMPACT_SESSION_MESSAGES:]:
         if message not in compact:
             compact.append(message)
     current_texts = {
-        str(message.get("content") or "")
+        message_signature(message)
         for message in current_messages
         if isinstance(message, dict)
     }
     return [
         message
         for message in compact[-MAX_COMPACT_SESSION_MESSAGES:]
-        if message["content"] not in current_texts
+        if message_signature(message) not in current_texts
     ]
 
 

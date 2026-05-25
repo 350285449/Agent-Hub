@@ -52,6 +52,7 @@ class FailoverEvent:
     retryable: bool = True
     error_type: str | None = None
     unavailable_until: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -66,6 +67,8 @@ class FailoverEvent:
             data["error_type"] = self.error_type
         if self.unavailable_until is not None:
             data["unavailable_until"] = self.unavailable_until
+        if self.metadata:
+            data["metadata"] = self.metadata
         return data
 
 

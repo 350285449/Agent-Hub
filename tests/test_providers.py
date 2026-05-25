@@ -231,6 +231,38 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(payload["tools"][0]["function"]["name"], "read_file")
         self.assertEqual(payload["tool_choice"], "auto")
 
+    def test_openai_provider_carries_protected_client_metadata_to_model(self) -> None:
+        agent = AgentConfig(
+            name="ollama",
+            provider="openai-compatible",
+            model="tool-test",
+            base_url="http://127.0.0.1:11434",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Read the active file"}],
+                    "task_progress": [{"title": "inspect"}],
+                    "active_files": ["tests/test_providers.py"],
+                }
+            ],
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.return_value = {
+                "choices": [{"message": {"content": "Done"}, "finish_reason": "stop"}],
+                "usage": {},
+            }
+            OpenAIChatProvider(agent).complete(request)
+
+        content = post_json.call_args.kwargs["payload"]["messages"][0]["content"]
+        self.assertIn("Read the active file", content)
+        self.assertIn("Protected client context", content)
+        self.assertIn("task_progress", content)
+        self.assertIn("tests/test_providers.py", content)
+
     def test_openai_provider_preserves_legacy_functions(self) -> None:
         agent = AgentConfig(
             name="ollama",
@@ -388,6 +420,38 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(payload["tool_choice"]["type"], "tool")
         self.assertEqual(payload["messages"][0]["content"][0]["type"], "tool_use")
         self.assertEqual(payload["messages"][1]["content"][0]["type"], "tool_result")
+
+    def test_anthropic_provider_carries_protected_client_metadata_to_model(self) -> None:
+        agent = AgentConfig(
+            name="claude",
+            provider="anthropic",
+            model="claude-test",
+            api_key="key",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Read the active file"}],
+                    "task_progress": [{"title": "inspect"}],
+                    "active_files": ["tests/test_providers.py"],
+                }
+            ],
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.return_value = {
+                "content": [{"type": "text", "text": "Done"}],
+                "usage": {},
+                "stop_reason": "end_turn",
+            }
+            AnthropicMessagesProvider(agent).complete(request)
+
+        content = post_json.call_args.kwargs["payload"]["messages"][0]["content"]
+        self.assertEqual(content[0]["text"], "Read the active file")
+        self.assertIn("Protected client context", content[1]["text"])
+        self.assertIn("task_progress", content[1]["text"])
 
     def test_gemini_provider_translates_agent_hub_tools(self) -> None:
         agent = AgentConfig(

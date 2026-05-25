@@ -10,6 +10,7 @@ from typing import Any
 
 from .config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from .models import FailoverEvent, HubRequest, HubResponse, ProviderResult
+from .observability import record_event
 from .payloads import content_to_text, request_text
 from .permissions import (
     PermissionManager,
@@ -19,6 +20,7 @@ from .permissions import (
 )
 from .providers import Provider, ProviderError, create_provider
 from .session_store import SessionStore
+from .token_budget import TokenBudgetManager, estimate_messages_tokens
 
 
 ProviderFactory = Callable[[AgentConfig], Provider]
@@ -26,6 +28,10 @@ HEALTH_STATE_VERSION = 1
 HEALTH_STATE_FILE = "provider_health.json"
 HEALTH_STALE_SECONDS = 7 * 24 * 60 * 60
 MAX_FAILOVER_HISTORY = 50
+TRANSPARENT_API_SHAPES = {"openai-chat", "openai-responses", "anthropic-messages"}
+NO_TOOL_CAPABLE_MODEL = "no_tool_capable_model"
+ECHO_DISABLED = "echo_disabled"
+CONFIGURATION_ERROR = "configuration_error"
 
 
 @dataclass(slots=True)
@@ -115,9 +121,20 @@ class ProviderHealth:
 
 
 class RouterError(Exception):
-    def __init__(self, message: str, failover: list[FailoverEvent] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        failover: list[FailoverEvent] | None = None,
+        *,
+        error_type: str | None = None,
+        suggested_fix: str | None = None,
+        status_code: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.failover = failover or []
+        self.error_type = error_type
+        self.suggested_fix = suggested_fix
+        self.status_code = status_code
 
 
 class AgentRouter:
@@ -143,8 +160,19 @@ class AgentRouter:
         request_id = f"hub-{uuid.uuid4().hex}"
         failover: list[FailoverEvent] = []
         candidates = self._candidate_agents(effective_request)
+        self._record_route_event(
+            "request_started",
+            request_id=request_id,
+            request=effective_request,
+            candidates=[agent.name for agent in candidates],
+        )
         if not candidates:
-            raise RouterError("No enabled agents are configured")
+            raise RouterError(
+                _no_model_available_message(),
+                error_type=CONFIGURATION_ERROR,
+                suggested_fix=_no_model_available_fix(),
+                status_code=400,
+            )
 
         tried_any = False
         for agent in candidates:
@@ -162,6 +190,7 @@ class AgentRouter:
 
             skip_reason = self._preflight_skip_reason(agent, effective_request)
             if skip_reason:
+                error_type = self._preflight_error_type(agent, effective_request, skip_reason)
                 failover.append(
                     FailoverEvent(
                         agent=agent.name,
@@ -169,6 +198,7 @@ class AgentRouter:
                         model=agent.model,
                         reason=skip_reason,
                         retryable=False,
+                        error_type=error_type,
                     )
                 )
                 continue
@@ -184,7 +214,17 @@ class AgentRouter:
                         reason=reason,
                         retryable=False,
                         error_type="permission_required" if permission.requires_approval else "permission_denied",
+                        metadata={"permission": permission.request.to_dict() if permission.request else None},
                     )
+                )
+                self._record_route_event(
+                    "provider_permission_blocked",
+                    request_id=request_id,
+                    request=effective_request,
+                    agent=agent.name,
+                    provider=agent.provider,
+                    model=agent.model,
+                    decision=permission.to_dict(),
                 )
                 continue
 
@@ -227,6 +267,16 @@ class AgentRouter:
                 )
                 if effective_request.record_session:
                     self.session_store.record_turn(effective_request, response)
+                self._record_route_event(
+                    "routing_decision",
+                    request_id=request_id,
+                    request=effective_request,
+                    agent=agent.name,
+                    provider=agent.provider,
+                    model=response.model,
+                    latency_seconds=round(latency, 4),
+                    failover=[event.to_dict() for event in failover],
+                )
                 return response
             except ProviderError as exc:
                 cooldown_seconds = self._cooldown_seconds(agent, exc)
@@ -254,23 +304,84 @@ class AgentRouter:
                 if exc.retryable:
                     self._cooldowns[agent.name] = unavailable_until or time.time()
                     continue
+                self._record_route_event(
+                    "routing_failure",
+                    request_id=request_id,
+                    request=effective_request,
+                    agent=agent.name,
+                    provider=agent.provider,
+                    model=agent.model,
+                    error_type=exc.error_type,
+                    message=str(exc),
+                    failover=[event.to_dict() for event in failover],
+                )
                 raise RouterError(str(exc), failover=failover) from exc
 
         if not tried_any:
             reason = _no_fallback_reason(failover)
-            raise RouterError(reason, failover=failover)
+            error_type = _route_error_type(failover)
+            self._record_route_event(
+                "routing_failure",
+                request_id=request_id,
+                request=effective_request,
+                message=reason,
+                error_type=error_type,
+                failover=[event.to_dict() for event in failover],
+            )
+            raise RouterError(
+                reason,
+                failover=failover,
+                error_type=error_type,
+                suggested_fix=_suggested_fix(error_type, failover),
+                status_code=_route_status_code(error_type),
+            )
 
         reason = _no_fallback_reason(failover)
-        raise RouterError(reason, failover=failover)
+        error_type = _route_error_type(failover)
+        self._record_route_event(
+            "routing_failure",
+            request_id=request_id,
+            request=effective_request,
+            message=reason,
+            error_type=error_type,
+            failover=[event.to_dict() for event in failover],
+        )
+        raise RouterError(
+            reason,
+            failover=failover,
+            error_type=error_type,
+            suggested_fix=_suggested_fix(error_type, failover),
+            status_code=_route_status_code(error_type),
+        )
 
     def _provider_permission_decision(self, agent: AgentConfig, request: HubRequest):
         permission_request = provider_permission_request(agent, request)
         if permission_request is None:
             return None
-        return PermissionManager(
+        decision = PermissionManager(
             approval_mode_from_request(request, self.config.approval_mode),
             approval_granted=provider_approval_granted_from_request(request),
         ).check(permission_request)
+        record_event(
+            self.config.state_dir,
+            "permissions",
+            {
+                "type": "provider_permission",
+                "session_id": request.session_id,
+                "agent": agent.name,
+                "provider": agent.provider,
+                "model": agent.model,
+                "allowed": decision.allowed,
+                "requires_approval": decision.requires_approval,
+                "denied": decision.denied,
+                "reason": decision.reason,
+                "mode": decision.mode,
+                "category": permission_request.category,
+                "risk_level": permission_request.risk_level,
+                "resource": permission_request.resource,
+            },
+        )
+        return decision
 
     def _with_session_history(self, request: HubRequest) -> HubRequest:
         if not request.use_session_history:
@@ -413,6 +524,8 @@ class AgentRouter:
                 available = False
             if agent and _requires_missing_api_key(agent):
                 available = False
+            if agent and _is_echo_agent(agent) and not self.config.debug_echo_enabled:
+                available = False
             row: dict[str, Any] = {
                 "agent": name,
                 "provider": agent.provider if agent else "",
@@ -462,6 +575,53 @@ class AgentRouter:
             snapshot[name] = row
         return snapshot
 
+    def capability_graph(self) -> dict[str, Any]:
+        """Expose provider/model capabilities for transparent routing decisions."""
+
+        health = self.health_snapshot(include_history=False)
+        nodes: list[dict[str, Any]] = []
+        edges: list[dict[str, Any]] = []
+        for route in self.config.routes:
+            for index, agent_name in enumerate(route.agents):
+                agent = self.config.agents.get(agent_name)
+                if not agent:
+                    continue
+                edges.append(
+                    {
+                        "route": route.name,
+                        "agent": agent.name,
+                        "order": index,
+                        "available": bool(health.get(agent.name, {}).get("available")),
+                    }
+                )
+        for agent in self.config.agents.values():
+            row = health.get(agent.name, {})
+            nodes.append(
+                {
+                    "agent": agent.name,
+                    "provider": agent.provider,
+                    "provider_type": agent.provider_type or normalize_provider(agent.provider),
+                    "model": agent.model,
+                    "enabled": agent.enabled,
+                    "available": bool(row.get("available")),
+                    "capabilities": {
+                        "tools": bool(agent.supports_tools or agent.supports_function_calling),
+                        "json": bool(agent.supports_json),
+                        "streaming": bool(agent.supports_streaming),
+                        "vision": bool(agent.supports_vision),
+                        "context_window": agent.context_window,
+                    },
+                    "benchmark_memory": {
+                        "reliability_score": row.get("reliability_score"),
+                        "average_latency_ms": row.get("average_latency_ms"),
+                        "streaming_tokens_per_second": row.get("streaming_tokens_per_second"),
+                        "success_count": row.get("success_count"),
+                        "failure_count": row.get("failure_count"),
+                    },
+                }
+            )
+        return {"object": "agent_hub.capability_graph", "nodes": nodes, "edges": edges}
+
     def recommend(
         self,
         request: HubRequest,
@@ -481,9 +641,12 @@ class AgentRouter:
             for name in route_names
             if name in self.config.agents
         ]
+        if not self.config.debug_echo_enabled:
+            candidates = [agent for agent in candidates if not _is_echo_agent(agent)]
         if request.preferred_agent and request.preferred_agent in self.config.agents:
             preferred = self.config.agents[request.preferred_agent]
-            candidates = [preferred, *[agent for agent in candidates if agent.name != preferred.name]]
+            if self.config.debug_echo_enabled or not _is_echo_agent(preferred):
+                candidates = [preferred, *[agent for agent in candidates if agent.name != preferred.name]]
 
         rows: list[dict[str, Any]] = []
         for index, agent in enumerate(candidates):
@@ -547,6 +710,23 @@ class AgentRouter:
         return rows[: max(1, limit)]
 
     def _preflight_skip_reason(self, agent: AgentConfig, request: HubRequest) -> str | None:
+        if _requires_tool_capable_model(request) and not _agent_supports_tools(agent):
+            if _is_echo_agent(agent):
+                return (
+                    "Echo is a diagnostic provider and cannot satisfy Cline, Claude Code, "
+                    "or OpenAI-compatible tool calls."
+                )
+            return (
+                "This request includes tools, but the configured agent does not advertise "
+                "tool/function-call support."
+            )
+
+        if _is_echo_agent(agent) and not self.config.debug_echo_enabled:
+            return (
+                "Echo is disabled by default because it only repeats the task and is not a real model. "
+                "Configure a real provider or set debug_echo_enabled=true for diagnostics."
+            )
+
         if self.config.free_only and not is_free_agent(agent):
             return (
                 "Agent provider is disabled because free_only is enabled; "
@@ -576,6 +756,25 @@ class AgentRouter:
             )
         return None
 
+    def _preflight_error_type(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        reason: str,
+    ) -> str | None:
+        if _requires_tool_capable_model(request):
+            if (
+                not _agent_supports_tools(agent)
+                or _requires_missing_api_key(agent)
+                or "free_only" in reason
+            ):
+                return NO_TOOL_CAPABLE_MODEL
+        if _is_echo_agent(agent) and not self.config.debug_echo_enabled:
+            return ECHO_DISABLED
+        if "missing API key" in reason:
+            return CONFIGURATION_ERROR
+        return None
+
     def _balanced_agents(self, agents: list[AgentConfig], request: HubRequest | None = None) -> list[AgentConfig]:
         if not self.config.enable_load_balancing or len(agents) <= 1:
             return agents
@@ -591,7 +790,7 @@ class AgentRouter:
         score = float(agent.priority or 0.0)
         has_tools = _request_has_tools(request) if request is not None else False
         if normalize_provider(agent.provider) == "echo":
-            score -= 50.0
+            score -= 5000.0
         if request is not None:
             text = request_text(request).lower()
             if has_tools and (agent.supports_tools or agent.supports_function_calling):
@@ -625,9 +824,32 @@ class AgentRouter:
                 score -= min(12.0, health.tool_call_failure_count * 2.0)
             if request is not None and request.stream and agent.supports_streaming and health.streaming_tokens_per_second:
                 score += min(4.0, health.streaming_tokens_per_second / 25.0)
+            if health.tokens_in > 0:
+                token_efficiency = health.tokens_out / max(1, health.tokens_in)
+                score += min(3.0, token_efficiency)
         if self._is_on_cooldown(agent.name):
             score -= 100.0
+        if not self.config.free_only and not is_free_agent(agent):
+            score -= 2.5
         return score
+
+    def _record_route_event(self, event_type: str, *, request_id: str, request: HubRequest, **data: Any) -> None:
+        try:
+            record_event(
+                self.config.state_dir,
+                "routing",
+                {
+                    "type": event_type,
+                    "request_id": request_id,
+                    "session_id": request.session_id,
+                    "route": request.route,
+                    "preferred_agent": request.preferred_agent,
+                    "api_shape": request.api_shape,
+                    **data,
+                },
+            )
+        except Exception:
+            return
 
     def _record_success(
         self,
@@ -954,12 +1176,7 @@ def _is_prefix(prefix: list[dict], messages: list[dict]) -> bool:
 
 
 def estimate_input_tokens(request: HubRequest) -> int:
-    total = 0
-    for message in request.messages:
-        role = str(message.get("role", "user"))
-        content = content_to_text(message.get("content"))
-        total += max(1, (len(role) + len(content) + 3) // 4) + 4
-    return max(1, total)
+    return estimate_messages_tokens(request.messages)
 
 
 def expected_output_tokens(request: HubRequest, agent: AgentConfig) -> int:
@@ -1019,9 +1236,28 @@ def _is_local_or_private_agent(agent: AgentConfig) -> bool:
     return _is_local_or_private_url(agent.base_url)
 
 
+def _is_echo_agent(agent: AgentConfig) -> bool:
+    return normalize_provider(agent.provider) == "echo"
+
+
+def _agent_supports_tools(agent: AgentConfig) -> bool:
+    return bool(agent.supports_tools or agent.supports_function_calling)
+
+
+def _requires_tool_capable_model(request: HubRequest) -> bool:
+    return request.api_shape in TRANSPARENT_API_SHAPES and _request_has_tools(request)
+
+
 def _no_fallback_reason(failover: list[FailoverEvent]) -> str:
     if not failover:
-        return "No agent produced a response"
+        return _no_model_available_message()
+    no_tool_events = [
+        event
+        for event in failover
+        if event.error_type == NO_TOOL_CAPABLE_MODEL
+    ]
+    if no_tool_events and len(no_tool_events) == len(failover):
+        return _no_tool_capable_message(no_tool_events)
     permission_events = [
         event
         for event in failover
@@ -1035,6 +1271,17 @@ def _no_fallback_reason(failover: list[FailoverEvent]) -> str:
             "Approval required before Agent Hub can use an external provider "
             f"or send workspace content. Provider: {latest.agent}. {latest.reason}"
         )
+    echo_events = [
+        event
+        for event in failover
+        if event.error_type == ECHO_DISABLED
+    ]
+    if echo_events and len(echo_events) == len(failover):
+        return (
+            "Echo is disabled by default and no real provider is available for this route. "
+            "Configure an OpenAI-compatible, Anthropic, Gemini, or local provider, or set "
+            "debug_echo_enabled=true only for diagnostics."
+        )
     quota_events = [
         event
         for event in failover
@@ -1046,7 +1293,119 @@ def _no_fallback_reason(failover: list[FailoverEvent]) -> str:
             "No fallback model is currently available; providers are rate-limited "
             f"or out of free-tier quota. Last failure from {latest.agent}: {latest.reason}"
         )
+    real_failures = [event for event in failover if event.error_type != ECHO_DISABLED]
+    if echo_events and real_failures:
+        latest = real_failures[-1]
+        return (
+            "No real fallback model is available; echo is disabled by default. "
+            f"Last real provider failure from {latest.agent}: {latest.reason}"
+        )
     return failover[-1].reason
+
+
+def _route_error_type(failover: list[FailoverEvent]) -> str | None:
+    if not failover:
+        return None
+    no_tool_events = [event for event in failover if event.error_type == NO_TOOL_CAPABLE_MODEL]
+    if no_tool_events and len(no_tool_events) == len(failover):
+        return NO_TOOL_CAPABLE_MODEL
+    echo_events = [event for event in failover if event.error_type == ECHO_DISABLED]
+    if echo_events and len(echo_events) == len(failover):
+        return CONFIGURATION_ERROR
+    permission_events = [
+        event
+        for event in failover
+        if event.error_type in {"permission_required", "permission_denied"}
+    ]
+    if permission_events and len(permission_events) == len(failover):
+        return permission_events[-1].error_type
+    return None
+
+
+def _route_status_code(error_type: str | None) -> int | None:
+    if error_type in {NO_TOOL_CAPABLE_MODEL, CONFIGURATION_ERROR}:
+        return 400
+    return None
+
+
+def _suggested_fix(error_type: str | None, failover: list[FailoverEvent]) -> str | None:
+    if error_type == NO_TOOL_CAPABLE_MODEL:
+        return _no_tool_capable_fix(failover)
+    if error_type == CONFIGURATION_ERROR:
+        return _no_model_available_fix()
+    missing_keys = _missing_key_names(failover)
+    if missing_keys:
+        return (
+            f"Set {', '.join(missing_keys)} or disable that provider. "
+            "For Cline, use model agent-hub-coding against the Agent Hub OpenAI endpoint."
+        )
+    return None
+
+
+def _no_model_available_message() -> str:
+    return (
+        "No usable model is available for this request. Enable a provider in Agent Hub "
+        "settings, add an API key, or start a local Ollama/LM Studio model. For Cline, "
+        "use model agent-hub-coding."
+    )
+
+
+def _no_model_available_fix() -> str:
+    return (
+        "Open the Agent Hub sidebar, add an API key or start Ollama/LM Studio, then click "
+        "Start Server. Cline base URL: http://127.0.0.1:8787/v1, model: agent-hub-coding. "
+        "Claude Code endpoint: http://127.0.0.1:8787/v1/messages."
+    )
+
+
+def _no_tool_capable_message(events: list[FailoverEvent]) -> str:
+    checked = _checked_model_summary(events)
+    fix = _no_tool_capable_fix(events)
+    if checked:
+        return (
+            "No tool-capable model is available for this Cline/OpenAI-compatible request. "
+            f"Checked: {checked}. Suggested fix: {fix}"
+        )
+    return (
+        "No tool-capable model is available for this Cline/OpenAI-compatible request. "
+        f"Suggested fix: {fix}"
+    )
+
+
+def _no_tool_capable_fix(events: list[FailoverEvent]) -> str:
+    missing_keys = _missing_key_names(events)
+    if missing_keys:
+        keys = ", ".join(missing_keys)
+        return (
+            f"Set {keys}, enable that provider, or configure a local OpenAI-compatible "
+            "coding model with supports_tools=true on the selected route."
+        )
+    return (
+        "Configure an enabled non-echo provider on the selected route with "
+        "supports_tools=true or supports_function_calling=true, such as OpenAI, "
+        "Anthropic, Gemini, or a local OpenAI-compatible server that supports tools."
+    )
+
+
+def _checked_model_summary(events: list[FailoverEvent]) -> str:
+    parts: list[str] = []
+    for event in events[:6]:
+        parts.append(f"{event.agent} ({event.provider}/{event.model}: {event.reason})")
+    if len(events) > 6:
+        parts.append(f"{len(events) - 6} more")
+    return "; ".join(parts)
+
+
+def _missing_key_names(events: list[FailoverEvent]) -> list[str]:
+    names: list[str] = []
+    marker = "missing API key env "
+    for event in events:
+        if marker not in event.reason:
+            continue
+        key = event.reason.split(marker, 1)[1].strip().split()[0].strip(".,;:")
+        if key and key not in names:
+            names.append(key)
+    return names
 
 
 def _looks_like_coding_task(text: str) -> bool:

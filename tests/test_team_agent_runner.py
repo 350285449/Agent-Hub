@@ -130,6 +130,64 @@ class TeamAgentRunnerTests(unittest.TestCase):
             self.assertGreater(score_plan(scoped, request, root), score_plan(risky, request, root))
             self.assertEqual(select_best_plan([risky, scoped], request, root), scoped)
 
+    def test_group_agent_runs_optional_validator_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["planner", "researcher", "coder", "validator", "reviewer", "finalizer"],
+                group_roles={
+                    "planner": "planner",
+                    "researcher": "researcher",
+                    "coder": "coder",
+                    "validator": "validator",
+                    "reviewer": "reviewer",
+                    "finalizer": "finalizer",
+                },
+                agents={
+                    name: AgentConfig(
+                        name=name,
+                        provider="openai-compatible",
+                        model=f"{name}-test",
+                        base_url="http://127.0.0.1:9999",
+                        supports_tools=True,
+                    )
+                    for name in ["planner", "researcher", "coder", "validator", "reviewer", "finalizer"]
+                },
+            )
+            calls: list[str] = []
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    if self.agent.name == "planner":
+                        return ProviderResult(text="Inspect, edit, validate.", model=self.agent.model)
+                    if self.agent.name == "researcher":
+                        return ProviderResult(text='{"action":"final","answer":"Context ready."}', model=self.agent.model)
+                    if self.agent.name == "coder":
+                        return ProviderResult(text='{"action":"final","answer":"Changed files."}', model=self.agent.model)
+                    if self.agent.name == "validator":
+                        return ProviderResult(text="Validation passed.", model=self.agent.model)
+                    if self.agent.name == "reviewer":
+                        return ProviderResult(text="No blocking issues.", model=self.agent.model)
+                    return ProviderResult(text="Done.", model=self.agent.model)
+
+            response = TeamAgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(
+                    session_id="team-validator",
+                    messages=[{"role": "user", "content": "Do work"}],
+                )
+            )
+
+            self.assertEqual(response.text, "Done.")
+            self.assertIn("validator", calls)
+            self.assertIn("confidence", response.raw["agent_hub"])
+            self.assertIn("validator", [phase["role"] for phase in response.raw["agent_hub"]["phases"]])
+
 
 if __name__ == "__main__":
     unittest.main()

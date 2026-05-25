@@ -408,14 +408,21 @@ class AnthropicMessagesProvider:
         for message in request.messages:
             role = message.get("role", "user")
             content = message.get("content", "")
+            extra_context = _message_extra_context_text(message)
             if role in {"system", "developer"}:
-                text = content_to_text(content)
+                text = _append_extra_context(content_to_text(content), extra_context)
                 if text:
                     system_parts.append(text)
             elif role == "assistant":
-                messages.append({"role": "assistant", "content": _anthropic_assistant_content(message)})
+                assistant_content = _anthropic_assistant_content(message)
+                if extra_context:
+                    assistant_content = _anthropic_append_text_block(assistant_content, extra_context)
+                messages.append({"role": "assistant", "content": assistant_content})
             elif role == "user":
-                messages.append({"role": "user", "content": _anthropic_user_content(content)})
+                user_content = _anthropic_user_content(content)
+                if extra_context:
+                    user_content = _anthropic_append_text_block(user_content, extra_context)
+                messages.append({"role": "user", "content": user_content})
             elif role == "tool":
                 messages.append(
                     {
@@ -509,7 +516,10 @@ class GeminiProvider:
         contents: list[dict[str, Any]] = []
         for message in request.messages:
             role = message.get("role", "user")
-            text = content_to_text(message.get("content"))
+            text = _append_extra_context(
+                content_to_text(message.get("content")),
+                _message_extra_context_text(message),
+            )
             if role in {"system", "developer"}:
                 if text:
                     system_parts.append(text)
@@ -602,14 +612,65 @@ def _tool_spec_from_function(function: Any) -> dict[str, Any] | None:
     return None
 
 
+MESSAGE_CONTEXT_KEYS = (
+    "task_progress",
+    "todo",
+    "todos",
+    "todo_list",
+    "active_file",
+    "active_files",
+    "open_files",
+    "open_tabs",
+    "workspace_metadata",
+    "workspace_state",
+    "mcp_state",
+    "tool_state",
+)
+
+
+def _message_extra_context_text(message: dict[str, Any]) -> str:
+    extras = {
+        key: message[key]
+        for key in MESSAGE_CONTEXT_KEYS
+        if key in message and message[key] not in (None, "", [], {})
+    }
+    if not extras:
+        return ""
+    return "Protected client context:\n" + json.dumps(
+        extras,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _append_extra_context(text: Any, extra_context: str) -> str:
+    base = content_to_text(text)
+    if not extra_context:
+        return base
+    return "\n\n".join(part for part in (base, extra_context) if part)
+
+
+def _anthropic_append_text_block(content: Any, text: str) -> Any:
+    if not text:
+        return content
+    block = {"type": "text", "text": text}
+    if isinstance(content, list):
+        return [*content, block]
+    existing = content_to_text(content)
+    return [block] if not existing else [{"type": "text", "text": existing}, block]
+
+
 def _openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for message in messages:
         role = str(message.get("role", "user"))
         content = message.get("content", "")
+        extra_context = _message_extra_context_text(message)
         if role == "assistant":
             tool_calls = _openai_tool_calls_from_message(message)
             text = content_to_text(content)
+            text = _append_extra_context(text, extra_context)
             item: dict[str, Any] = {
                 "role": "assistant",
                 "content": None if tool_calls and not text else text,
@@ -637,13 +698,19 @@ def _openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if role == "user":
             text, tool_results = _openai_user_parts_from_anthropic(content)
+            if not text and not tool_results:
+                text = content_to_text(content)
+            text = _append_extra_context(text, extra_context)
             for result in tool_results:
                 normalized.append(result)
             if text:
                 normalized.append({"role": "user", "content": text})
             if text or tool_results:
                 continue
-        normalized.append({"role": role, "content": content})
+        if extra_context:
+            normalized.append({"role": role, "content": _append_extra_context(content_to_text(content), extra_context)})
+        else:
+            normalized.append({"role": role, "content": content})
     return normalized
 
 
