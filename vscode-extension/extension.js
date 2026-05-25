@@ -272,6 +272,69 @@ const REQUIRED_BACKEND_FEATURES = [
   "team_agent_mode",
   "provider_presets"
 ];
+const APPROVAL_MODES = new Set(["ask", "auto", "readonly", "shell-ask", "deny"]);
+const SENSITIVE_PERMISSION_CATEGORIES = new Set([
+  "cloud_provider",
+  "config_edit",
+  "file_write",
+  "model_download",
+  "process_control",
+  "secret_edit",
+  "shell_command",
+  "workspace_cloud"
+]);
+
+class PermissionManager {
+  constructor(config = settings()) {
+    this.mode = normalizeApprovalMode(config.approvalMode || "ask");
+  }
+
+  async request(action) {
+    const category = action && action.category ? action.category : "unknown";
+    if (!SENSITIVE_PERMISSION_CATEGORIES.has(category)) {
+      return true;
+    }
+    if (this.mode === "auto") {
+      return true;
+    }
+    if (this.mode === "readonly" || this.mode === "deny") {
+      vscode.window.showWarningMessage(permissionDeniedText(action, this.mode));
+      return false;
+    }
+    if (this.mode === "shell-ask" && category !== "shell_command") {
+      return true;
+    }
+
+    const allow = "Allow Once";
+    const choice = await vscode.window.showWarningMessage(
+      permissionPromptText(action),
+      { modal: true },
+      allow,
+      "Deny"
+    );
+    return choice === allow;
+  }
+}
+
+function normalizeApprovalMode(value) {
+  const mode = typeof value === "string" ? value.toLowerCase() : "";
+  return APPROVAL_MODES.has(mode) ? mode : "ask";
+}
+
+async function requestPermission(action) {
+  return new PermissionManager(settings()).request(action);
+}
+
+function permissionPromptText(action) {
+  const risk = action.risk ? ` Risk: ${action.risk}.` : "";
+  const resource = action.resource ? `\n\nTarget: ${action.resource}` : "";
+  const detail = action.detail ? `\n\n${action.detail}` : "";
+  return `${action.description || "Agent Hub needs permission to continue."}${risk}${resource}${detail}`;
+}
+
+function permissionDeniedText(action, mode) {
+  return `${action.description || "Agent Hub action"} was blocked by approval mode '${mode}'.`;
+}
 
 function activate(context) {
   extensionContext = context;
@@ -402,6 +465,7 @@ async function sidebarDashboardState() {
     serverUrl: config.serverUrl,
     agentProviderMode: config.agentProviderMode,
     agentMode: config.agentMode,
+    approvalMode: config.approvalMode,
     autoStart: config.autoStart,
     activeModel: null,
     providers: [],
@@ -756,7 +820,7 @@ function sidebarHtml(webview, logoPath) {
       renderProviderRows(dashboard.providers || []);
       renderLimitRows(dashboard.limits || []);
       setText(logDetail, dashboard.logs || "Open the output channel for live logs.");
-      setText(settingsDetail, "Mode: " + (dashboard.agentProviderMode || "cloud") + " / " + (dashboard.agentMode || "agent") + ". Auto-start: " + (dashboard.autoStart ? "on" : "off") + ".");
+      setText(settingsDetail, "Mode: " + (dashboard.agentProviderMode || "cloud") + " / " + (dashboard.agentMode || "agent") + ". Approval: " + (dashboard.approvalMode || "ask") + ". Auto-start: " + (dashboard.autoStart ? "on" : "off") + ".");
     }
 
     function activeModelText(row) {
@@ -927,6 +991,14 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
   const route = command === "research" ? config.researchRoute : codingAgentRoute(config);
   const context = participantContext(command, request);
   const task = participantTask(command, prompt, chatContext);
+  if (!(await approveModelRequest({
+    providerMode: config.agentProviderMode,
+    contextText: context,
+    source: "VS Code chat participant"
+  }))) {
+    stream.markdown("Agent Hub request cancelled because permission was not granted.");
+    return { metadata: { command, ok: false, permission_denied: true } };
+  }
 
   stream.progress("Checking Agent Hub server...");
   if (!(await ensureServerReady())) {
@@ -945,6 +1017,8 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
     context,
     use_session_history: true,
     max_tokens: config.maxTokens,
+    approval_mode: config.approvalMode,
+    provider_approval_granted: true,
     metadata: {
       source: "vscode-chat-participant",
       command,
@@ -1223,6 +1297,15 @@ async function handleChatMessage(panel, message) {
 }
 
 async function saveApiKeysFromWebview(panel, keys) {
+  if (!(await requestPermission({
+    category: "secret_edit",
+    description: "Agent Hub wants to save provider API keys in VS Code Secret Storage.",
+    resource: "VS Code Secret Storage",
+    risk: "high"
+  }))) {
+    await postApiKeyStatus(panel, "Saving API keys was cancelled.");
+    return;
+  }
   if (!extensionContext || !extensionContext.secrets) {
     await postApiKeyStatus(panel, "VS Code secret storage is unavailable.");
     return;
@@ -1254,6 +1337,15 @@ async function saveApiKeysFromWebview(panel, keys) {
 }
 
 async function clearApiKeysFromWebview(panel) {
+  if (!(await requestPermission({
+    category: "secret_edit",
+    description: "Agent Hub wants to clear saved provider API keys from VS Code Secret Storage.",
+    resource: "VS Code Secret Storage",
+    risk: "medium"
+  }))) {
+    await postApiKeyStatus(panel, "Clearing API keys was cancelled.");
+    return;
+  }
   if (!extensionContext || !extensionContext.secrets) {
     await postApiKeyStatus(panel, "VS Code secret storage is unavailable.");
     return;
@@ -1298,6 +1390,7 @@ function chatSettingsPayload(config) {
     codingAgentRoute: config.codingAgentRoute,
     agentProviderMode: config.agentProviderMode,
     agentMode: config.agentMode,
+    approvalMode: config.approvalMode,
     groupPlanCandidates: config.groupPlanCandidates,
     agentMaxSteps: config.agentMaxSteps,
     allowShellTools: config.allowShellTools,
@@ -1310,6 +1403,16 @@ function chatSettingsPayload(config) {
 async function saveChatSettingsFromWebview(panel, rawSettings) {
   try {
     const next = normalizeChatSettingsInput(rawSettings);
+    if (!(await requestPermission({
+      category: "config_edit",
+      description: "Agent Hub wants to modify VS Code and Agent Hub configuration.",
+      resource: next.workspaceSettings.configPath,
+      risk: "medium",
+      detail: "This may change provider routing, approval mode, model selections, and server settings."
+    }))) {
+      postChatSettings(panel, "Saving settings was cancelled.");
+      return;
+    }
     const target = workspaceRoot()
       ? vscode.ConfigurationTarget.Workspace
       : vscode.ConfigurationTarget.Global;
@@ -1348,6 +1451,7 @@ function normalizeChatSettingsInput(value) {
       codingAgentRoute: cleanSettingString(input.codingAgentRoute, current.codingAgentRoute),
       agentProviderMode: normalizeAgentProviderMode(input.agentProviderMode || current.agentProviderMode),
       agentMode: normalizeAgentMode(input.agentMode || current.agentMode),
+      approvalMode: normalizeApprovalMode(input.approvalMode || current.approvalMode),
       groupPlanCandidates: cleanSettingInteger(input.groupPlanCandidates, current.groupPlanCandidates, 1, 5),
       agentMaxSteps: cleanSettingInteger(input.agentMaxSteps, current.agentMaxSteps, 1, 100),
       allowShellTools: !!input.allowShellTools,
@@ -1525,40 +1629,17 @@ async function apiKeyStatusRows() {
 }
 
 async function restartServerFromWebview(panel) {
-  if (serverProcess) {
-    panel.webview.postMessage({
-      type: "serverStatus",
-      online: false,
-      text: "Restarting Agent Hub..."
-    });
-    stopServerProcess();
-    if (!(await waitForServerOffline(3000))) {
-      await stopAgentHubServerOnConfiguredPort();
-      await waitForServerOffline(3000);
-    }
-    await startServer();
-    const online = await isServerOnline();
-    panel.webview.postMessage({
-      type: "serverStatus",
-      online,
-      text: online ? "Agent Hub restarted" : "Agent Hub did not respond after restart"
-    });
-    return;
-  }
-
-  if (await isServerOnline()) {
-    const text = "Agent Hub is running outside this VS Code window. Stop it, then start it here to use saved API keys.";
-    vscode.window.showWarningMessage(text);
-    panel.webview.postMessage({ type: "serverStatus", online: true, text });
-    return;
-  }
-
-  await startServer();
+  panel.webview.postMessage({
+    type: "serverStatus",
+    online: false,
+    text: "Restarting Agent Hub..."
+  });
+  await restartServer();
   const online = await isServerOnline();
   panel.webview.postMessage({
     type: "serverStatus",
     online,
-    text: online ? "Agent Hub started" : "Agent Hub did not respond after start"
+    text: online ? "Agent Hub restarted" : "Agent Hub did not respond after restart"
   });
 }
 
@@ -1649,6 +1730,20 @@ function ollamaInstallQuickPickItems() {
 }
 
 async function installOllamaModelChoice(panel, option) {
+  if (!(await requestPermission({
+    category: "model_download",
+    description: "Agent Hub wants to download an Ollama model.",
+    resource: `${option.model} (${option.size})`,
+    risk: "medium",
+    detail: "This runs 'ollama pull' and downloads model files to your machine."
+  }))) {
+    panel.webview.postMessage({
+      type: "modelPullStatus",
+      running: false,
+      text: "Model download cancelled."
+    });
+    return;
+  }
   panel.webview.postMessage({
     type: "modelPullStatus",
     running: true,
@@ -1689,6 +1784,19 @@ async function saveLocalModelChoice(panel, source, options = {}) {
   }
 
   try {
+    if (!(await requestPermission({
+      category: "config_edit",
+      description: "Agent Hub wants to update the local model selection in its config.",
+      resource: source.model,
+      risk: "medium"
+    }))) {
+      panel.webview.postMessage({
+        type: "modelPullStatus",
+        running: false,
+        text: "Local model selection was not saved."
+      });
+      return;
+    }
     const config = settings();
     const configPath = resolveConfigPath(config.configPath, workspace);
     const changed = applyLocalModelSelectionToConfig(configPath, source);
@@ -1792,6 +1900,18 @@ async function sendChatTurn(panel, message) {
   const context = message.includeSelection
     ? selectedEditorContext() || activeEditorReferenceContext()
     : activeEditorReferenceContext();
+  if (!(await approveModelRequest({
+    providerMode,
+    contextText: context,
+    source: "Agent Hub sidebar/chat"
+  }))) {
+    panel.webview.postMessage({
+      type: "chatError",
+      requestId,
+      text: "Request cancelled because permission was not granted."
+    });
+    return;
+  }
   const body = {
     session_id: message.sessionId || `vscode-chat-${Date.now()}`,
     mode: agentMode,
@@ -1800,6 +1920,8 @@ async function sendChatTurn(panel, message) {
     context,
     use_session_history: true,
     max_tokens: config.maxTokens,
+    approval_mode: config.approvalMode,
+    provider_approval_granted: true,
     allow_shell_tools: config.allowShellTools,
     agent_max_steps: config.agentMaxSteps,
     coder_max_steps: config.agentMaxSteps,
@@ -1819,8 +1941,12 @@ async function sendChatTurn(panel, message) {
   output.appendLine("");
   output.appendLine(`[Agent Hub Chat] ${text}`);
   try {
-    const response = await requestEventStream("POST", "/v1/agent", { ...body, stream: true }, {
+    let approvalEvent = null;
+    const streamHandlers = {
       onEvent: (event) => {
+        if (event && event.data && event.data.type === "approval_required") {
+          approvalEvent = event.data;
+        }
         const progress = progressTextFromEvent(event);
         if (!progress) {
           return;
@@ -1837,7 +1963,25 @@ async function sendChatTurn(panel, message) {
       onJsonFallback: () => {
         postChatProgress(panel, requestId, "Server returned a non-streaming response; restart Agent Hub to load the latest backend.");
       }
-    });
+    };
+    let response = await requestEventStream("POST", "/v1/agent", { ...body, stream: true }, streamHandlers);
+    if (approvalEvent && await requestPermission(permissionActionFromApprovalEvent(approvalEvent))) {
+      postChatProgress(panel, requestId, "Approval granted. Resuming Agent Hub...");
+      approvalEvent = null;
+      response = await requestEventStream(
+        "POST",
+        "/v1/agent",
+        {
+          ...body,
+          stream: true,
+          approval_granted: true,
+          agent_hub: {
+            approval_granted: true
+          }
+        },
+        streamHandlers
+      );
+    }
     const reply = responseText(response);
     output.appendLine(reply || "(empty response)");
     appendAgentTrace(response);
@@ -2440,6 +2584,16 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
                 </select>
               </label>
               <label class="settings-field">
+                <span>Approval mode</span>
+                <select id="settingApprovalMode">
+                  <option value="ask">Ask before privileged actions</option>
+                  <option value="readonly">Read-only</option>
+                  <option value="shell-ask">Ask for shell only</option>
+                  <option value="auto">Auto approve</option>
+                  <option value="deny">Deny privileged actions</option>
+                </select>
+              </label>
+              <label class="settings-field">
                 <span>Cloud route</span>
                 <select id="settingCloudRouteMode">
                   <option value="ollama-cloud">Ollama cloud models first</option>
@@ -2608,6 +2762,7 @@ ${apiKeyFieldsHtml()}
     const settingInputs = {
       cloudRouteMode: document.getElementById("settingCloudRouteMode"),
       agentMode: document.getElementById("settingAgentMode"),
+      approvalMode: document.getElementById("settingApprovalMode"),
       serverUrl: document.getElementById("settingServerUrl"),
       pythonPath: document.getElementById("settingPythonPath"),
       configPath: document.getElementById("settingConfigPath"),
@@ -2683,6 +2838,7 @@ ${apiKeyFieldsHtml()}
       controlMode.value = next.agentProviderMode || "cloud";
       settingInputs.cloudRouteMode.value = next.cloudRouteMode || "ollama-cloud";
       settingInputs.agentMode.value = next.agentMode || "agent";
+      settingInputs.approvalMode.value = next.approvalMode || "ask";
       settingInputs.serverUrl.value = next.serverUrl || "";
       settingInputs.pythonPath.value = next.pythonPath || "";
       settingInputs.configPath.value = next.configPath || "";
@@ -2726,6 +2882,7 @@ ${apiKeyFieldsHtml()}
         researchRoute: settingInputs.researchRoute.value,
         agentProviderMode: controlMode.value,
         agentMode: settingInputs.agentMode.value,
+        approvalMode: settingInputs.approvalMode.value,
         cloudRouteMode: settingInputs.cloudRouteMode.value,
         maxTokens: settingInputs.maxTokens.value,
         agentMaxSteps: settingInputs.agentMaxSteps.value,
@@ -3318,7 +3475,7 @@ function getNonce() {
   return text;
 }
 
-async function startServer() {
+async function startServer(options = {}) {
   const workspace = workspaceRoot();
   if (!workspace) {
     setServerLifecycleState("Error", "Open a workspace folder before starting Agent Hub.");
@@ -3327,6 +3484,16 @@ async function startServer() {
   }
 
   const config = settings();
+  if (!options.permissionAlreadyGranted && !(await requestPermission({
+    category: "process_control",
+    description: "Agent Hub wants to start the local backend server process.",
+    resource: config.serverUrl,
+    risk: "medium",
+    detail: "This launches Python from the selected workspace and may create or repair the Agent Hub config."
+  }))) {
+    setServerLifecycleState("Stopped", "Start Server was cancelled.");
+    return;
+  }
   const configChanged = await ensureLocalConfig(config, workspace);
 
   if (await isServerOnline()) {
@@ -4874,6 +5041,15 @@ function execFile(command, args, options = {}) {
 }
 
 async function stopServer() {
+  if (!(await requestPermission({
+    category: "process_control",
+    description: "Agent Hub wants to stop the backend server process.",
+    resource: settings().serverUrl,
+    risk: "medium"
+  }))) {
+    refreshSidebar();
+    return;
+  }
   if (stopServerProcess()) {
     setServerLifecycleState("Stopped", "Agent Hub server stopped.");
     vscode.window.showInformationMessage("Agent Hub server stopped.");
@@ -4914,6 +5090,15 @@ function stopServerProcess() {
 }
 
 async function restartServer() {
+  if (!(await requestPermission({
+    category: "process_control",
+    description: "Agent Hub wants to restart the backend server process.",
+    resource: settings().serverUrl,
+    risk: "medium"
+  }))) {
+    refreshSidebar();
+    return;
+  }
   setServerLifecycleState("Starting", "Restarting Agent Hub...");
   if (serverProcess) {
     stopServerProcess();
@@ -4922,7 +5107,7 @@ async function restartServer() {
     await stopAgentHubServerOnConfiguredPort();
     await waitForServerOffline(3000);
   }
-  await startServer();
+  await startServer({ permissionAlreadyGranted: true });
   refreshSidebar();
 }
 
@@ -5053,6 +5238,14 @@ async function explainFile() {
 
 async function sendAgentRequest({ task, context, route, agentMode = true, extra = {} }) {
   const config = settings();
+  if (!(await approveModelRequest({
+    providerMode: config.agentProviderMode,
+    contextText: context,
+    source: "VS Code command"
+  }))) {
+    vscode.window.showWarningMessage("Agent Hub request cancelled because permission was not granted.");
+    return;
+  }
   if (!(await ensureServerReady())) {
     vscode.window.showErrorMessage("Agent Hub is not running. Use 'Agent Hub: Start Server' or check the output.");
     return;
@@ -5067,6 +5260,8 @@ async function sendAgentRequest({ task, context, route, agentMode = true, extra 
     task,
     context,
     max_tokens: config.maxTokens,
+    approval_mode: config.approvalMode,
+    provider_approval_granted: true,
     agent_context_budget_tokens: config.agentContextBudgetTokens,
     agent_context_compaction_enabled: config.agentContextCompactionEnabled,
     group_agent: {
@@ -5214,6 +5409,15 @@ async function waitForRequiredBackend(timeoutMs) {
 }
 
 async function restartAgentHubServerForUpdate(health) {
+  if (!(await requestPermission({
+    category: "process_control",
+    description: "Agent Hub wants to restart the backend to load the bundled version.",
+    resource: settings().serverUrl,
+    risk: "medium",
+    detail: health && health.version ? `Running backend version: ${health.version}` : ""
+  }))) {
+    return;
+  }
   stopServerProcess();
   await delay(500);
   if (await isServerOnline()) {
@@ -5233,6 +5437,15 @@ async function stopAgentHubServerOnConfiguredPort() {
   const url = new URL(config.serverUrl);
   const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
   if (!Number.isInteger(port) || port <= 0) {
+    return;
+  }
+  if (!(await requestPermission({
+    category: "process_control",
+    description: "Agent Hub wants to stop a process listening on the configured server port.",
+    resource: `port ${port}`,
+    risk: "high",
+    detail: "This is used when another Agent Hub process is already bound to the port."
+  }))) {
     return;
   }
 
@@ -5434,6 +5647,7 @@ function settings() {
     codingAgentRoute: config.get("codingAgentRoute", "local-agent"),
     agentProviderMode: providerMode,
     agentMode: normalizeAgentMode(config.get("agentMode", "agent")),
+    approvalMode: normalizeApprovalMode(config.get("approvalMode", "ask")),
     groupPlanCandidates: config.get("groupPlanCandidates", 1),
     agentMaxSteps: config.get("agentMaxSteps", 20),
     agentContextBudgetTokens: config.get("agentContextBudgetTokens", 32000),
@@ -5474,6 +5688,43 @@ function controlAgentSummary(providerMode) {
     return "Control agent: cloud route with local fallback.";
   }
   return "Control agent: cloud route.";
+}
+
+async function approveModelRequest({ providerMode, contextText, source }) {
+  const mode = normalizeAgentProviderMode(providerMode || settings().agentProviderMode);
+  if (mode === "local") {
+    return true;
+  }
+  const sendsWorkspace = typeof contextText === "string" && contextText.trim().length > 0;
+  return requestPermission({
+    category: sendsWorkspace ? "workspace_cloud" : "cloud_provider",
+    description: "Agent Hub wants to send this request to a cloud-capable model route.",
+    resource: mode,
+    risk: sendsWorkspace ? "high" : "medium",
+    detail: [
+      `Source: ${source || "Agent Hub"}.`,
+      sendsWorkspace
+        ? "Workspace/file context may be included in the model request."
+        : "The request may use an external provider depending on routing.",
+      "Provider API usage may consume quota or credits."
+    ].join(" ")
+  });
+}
+
+function permissionActionFromApprovalEvent(event) {
+  const tool = event && event.tool ? String(event.tool) : "tool";
+  const files = Array.isArray(event && event.affected_files) ? event.affected_files : [];
+  const commands = Array.isArray(event && event.commands) ? event.commands : [];
+  const category = tool === "run_command" ? "shell_command" : "file_write";
+  return {
+    category,
+    description: event && event.summary
+      ? `Agent Hub asks permission: ${event.summary}`
+      : `Agent Hub asks permission to run ${tool}.`,
+    resource: files.length ? files.join(", ") : commands.join(", "),
+    risk: event && event.risk_level ? event.risk_level : "medium",
+    detail: event && event.impact ? event.impact : ""
+  };
 }
 
 function appendAgentTrace(response) {

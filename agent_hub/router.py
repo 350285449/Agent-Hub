@@ -11,6 +11,12 @@ from typing import Any
 from .config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from .models import FailoverEvent, HubRequest, HubResponse, ProviderResult
 from .payloads import content_to_text, request_text
+from .permissions import (
+    PermissionManager,
+    approval_mode_from_request,
+    provider_approval_granted_from_request,
+    provider_permission_request,
+)
 from .providers import Provider, ProviderError, create_provider
 from .session_store import SessionStore
 
@@ -167,6 +173,21 @@ class AgentRouter:
                 )
                 continue
 
+            permission = self._provider_permission_decision(agent, effective_request)
+            if permission is not None and not permission.allowed:
+                reason = permission.reason or "Permission required before using this provider."
+                failover.append(
+                    FailoverEvent(
+                        agent=agent.name,
+                        provider=agent.provider,
+                        model=agent.model,
+                        reason=reason,
+                        retryable=False,
+                        error_type="permission_required" if permission.requires_approval else "permission_denied",
+                    )
+                )
+                continue
+
             tried_any = True
             started = time.perf_counter()
             try:
@@ -241,6 +262,15 @@ class AgentRouter:
 
         reason = _no_fallback_reason(failover)
         raise RouterError(reason, failover=failover)
+
+    def _provider_permission_decision(self, agent: AgentConfig, request: HubRequest):
+        permission_request = provider_permission_request(agent, request)
+        if permission_request is None:
+            return None
+        return PermissionManager(
+            approval_mode_from_request(request, self.config.approval_mode),
+            approval_granted=provider_approval_granted_from_request(request),
+        ).check(permission_request)
 
     def _with_session_history(self, request: HubRequest) -> HubRequest:
         if not request.use_session_history:
@@ -992,6 +1022,19 @@ def _is_local_or_private_agent(agent: AgentConfig) -> bool:
 def _no_fallback_reason(failover: list[FailoverEvent]) -> str:
     if not failover:
         return "No agent produced a response"
+    permission_events = [
+        event
+        for event in failover
+        if event.error_type in {"permission_required", "permission_denied"}
+    ]
+    if permission_events and len(permission_events) == len(failover):
+        latest = permission_events[-1]
+        if latest.error_type == "permission_denied":
+            return f"Permission denied before using {latest.agent}: {latest.reason}"
+        return (
+            "Approval required before Agent Hub can use an external provider "
+            f"or send workspace content. Provider: {latest.agent}. {latest.reason}"
+        )
     quota_events = [
         event
         for event in failover

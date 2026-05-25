@@ -198,6 +198,18 @@
           "default": "agent",
           "description": "Workspace agent mode. Standard agent uses one routed model loop; group-agent coordinates planner, researcher, coder, reviewer, fixer, and finalizer roles."
         },
+        "agentHub.approvalMode": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "auto",
+            "readonly",
+            "shell-ask",
+            "deny"
+          ],
+          "default": "ask",
+          "description": "Permission mode for privileged Agent Hub actions. Ask prompts before commands, file/config changes, process control, model downloads, and cloud provider use."
+        },
         "agentHub.groupPlanCandidates": {
           "type": "number",
           "default": 1,

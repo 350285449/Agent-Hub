@@ -64,6 +64,8 @@ BACKEND_FEATURES = {
     "anti_hallucination_edit_blocking": True,
     "limits_endpoint": True,
     "response_limit_headers": True,
+    "central_permission_manager": True,
+    "provider_permission_gate": True,
 }
 
 
@@ -103,6 +105,13 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "free_only": self.server.config.free_only,
                     "allow_shell_tools": self.server.config.allow_shell_tools,
                     "shell_command_policy": self.server.config.shell_command_policy,
+                    "approval_mode": self.server.config.approval_mode,
+                    "permission_policy": {
+                        "approval_mode": self.server.config.approval_mode,
+                        "shell_command_policy": self.server.config.shell_command_policy,
+                        "external_provider_approval": True,
+                        "file_write_approval": self.server.config.approval_mode in {"ask", "readonly", "deny"},
+                    },
                     "prefer_multi_file_patches": self.server.config.prefer_multi_file_patches,
                     "grouped_patch_enforcement": {
                         "enabled": self.server.config.prefer_multi_file_patches,
@@ -292,15 +301,25 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             else:
                 response = self.server.router.route(request)
         except RouterError as exc:
+            permission_required = any(
+                event.error_type in {"permission_required", "permission_denied"}
+                for event in exc.failover
+            )
             error_body: dict[str, Any] = {
                 "error": {
                     "message": str(exc),
-                    "type": "agent_hub_route_error",
+                    "type": "agent_hub_permission_required" if permission_required else "agent_hub_route_error",
                 },
             }
-            if self.server.config.expose_routing_details:
+            if permission_required:
+                error_body["agent_hub"] = {
+                    "permission_required": True,
+                    "approval_mode": self.server.config.approval_mode,
+                    "message": str(exc),
+                }
+            if self.server.config.expose_routing_details or permission_required:
                 error_body["failover"] = [event.to_dict() for event in exc.failover]
-            self._send_json(error_body, status=503)
+            self._send_json(error_body, status=403 if permission_required else 503)
             return
 
         if request.stream and response_shape == "openai-chat":

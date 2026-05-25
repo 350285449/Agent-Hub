@@ -440,11 +440,11 @@ def free_local_config() -> HubConfig:
         agent_context_budget_tokens=32_000,
         agent_context_compaction_enabled=True,
         allow_shell_tools=True,
-        shell_command_policy="allow",
+        shell_command_policy="ask",
         free_only=True,
         auto_enable_available_providers=True,
         auto_detect_local_models=True,
-        approval_mode="auto",
+        approval_mode="ask",
         fast_write_finalize=False,
         validation_mode="basic",
         validation_commands=[],
@@ -581,7 +581,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         ),
         allow_shell_tools=_bool_with_default(raw.get("allow_shell_tools"), True),
         shell_command_policy=_normalize_shell_command_policy(
-            raw.get("shell_command_policy", raw.get("shell_tools_policy", "allow"))
+            raw.get("shell_command_policy", raw.get("shell_tools_policy", "ask"))
         ),
         free_only=_bool_with_default(raw.get("free_only"), True),
         enable_load_balancing=_bool_with_default(raw.get("enable_load_balancing"), True),
@@ -595,7 +595,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         ),
         quota_cooldown_seconds=float(raw.get("quota_cooldown_seconds", 1800.0)),
         rate_limit_cooldown_seconds=float(raw.get("rate_limit_cooldown_seconds", 300.0)),
-        approval_mode=_normalize_approval_mode(raw.get("approval_mode", "auto")),
+        approval_mode=_normalize_approval_mode(raw.get("approval_mode", "ask")),
         fast_write_finalize=_bool_with_default(raw.get("fast_write_finalize"), False),
         validation_mode=_normalize_validation_mode(raw.get("validation_mode", "basic")),
         validation_commands=[
@@ -854,14 +854,18 @@ def _normalize_shell_command_policy(value: Any) -> str:
 
 
 def _normalize_approval_mode(value: Any) -> str:
-    text = str(value or "auto").strip().lower()
+    text = str(value or "ask").strip().lower()
+    if text in {"auto", "allow", "always", "trusted"}:
+        return "auto"
     if text in {"ask", "confirm", "prompt"}:
         return "ask"
     if text in {"readonly", "read-only", "read_only"}:
         return "readonly"
     if text in {"shell-ask", "shell_ask", "shell"}:
         return "shell-ask"
-    return "auto"
+    if text in {"deny", "never"}:
+        return "deny"
+    return "ask"
 
 
 def _normalize_validation_mode(value: Any) -> str:

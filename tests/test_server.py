@@ -5,6 +5,7 @@ import threading
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from agent_hub.config import AgentConfig, HubConfig, RouteRule
@@ -364,6 +365,43 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(hub["limits"]["tokens_remaining"], 12345)
             self.assertIn("failed_models", hub)
             self.assertIn("fallback_models", hub)
+
+    def test_openai_compatible_proxy_blocks_external_provider_without_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                approval_mode="ask",
+                free_only=False,
+                default_route=["paid"],
+                agents={
+                    "paid": AgentConfig(
+                        name="paid",
+                        provider="openai",
+                        model="paid-model",
+                        api_key="secret",
+                    )
+                },
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with self.assertRaises(HTTPError) as error:
+                    _post_json(
+                        f"{base}/v1/chat/completions",
+                        {
+                            "model": "paid-model",
+                            "messages": [{"role": "user", "content": "Current file: app.py\nhello"}],
+                        },
+                    )
+                body = json.loads(error.exception.read().decode("utf-8"))
+                error.exception.close()
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(error.exception.code, 403)
+            self.assertEqual(body["error"]["type"], "agent_hub_permission_required")
+            self.assertTrue(body["agent_hub"]["permission_required"])
 
 
 def _compat_config(path: Path) -> HubConfig:

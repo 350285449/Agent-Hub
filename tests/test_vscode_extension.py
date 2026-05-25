@@ -33,10 +33,20 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(commands["agentHub.openSettings"], "Agent Hub: Open Settings")
         self.assertEqual(commands["agentHub.checkHealth"], "Agent Hub: Check Health")
 
+    def test_approval_mode_setting_is_ask_by_default(self) -> None:
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        approval = package["contributes"]["configuration"]["properties"]["agentHub.approvalMode"]
+
+        self.assertEqual(approval["default"], "ask")
+        self.assertIn("readonly", approval["enum"])
+        self.assertIn("deny", approval["enum"])
+
     def test_start_server_is_primary_sidebar_action(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
 
         self.assertIn("registerWebviewViewProvider(SIDEBAR_VIEW_ID", source)
+        self.assertIn("class PermissionManager", source)
+        self.assertIn("requestPermission", source)
         start_index = source.index('id="startServer"')
         stop_index = source.index('id="stopServer"', start_index)
         restart_index = source.index('id="restartServer"', start_index)

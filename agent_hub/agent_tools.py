@@ -16,6 +16,14 @@ from typing import Any, Callable
 
 from .config import HubConfig
 from .models import HubRequest
+from .permissions import (
+    PermissionDecision,
+    PermissionManager,
+    PermissionRequest,
+    approval_granted_from_request,
+    approval_mode_from_request,
+    tool_permission_request,
+)
 
 
 SKIPPED_DIRS = {".agent-hub", ".git", ".hg", ".svn", ".venv", "__pycache__", "node_modules"}
@@ -452,23 +460,17 @@ class AgentToolbox:
             if allowed is not None and name not in allowed:
                 raise ToolError(f"Tool {name!r} is not available for this agent stage")
             
-            # Check if approval is needed
-            approval_needed = self._is_approval_needed(name, args)
-            if approval_needed and not self._approval_granted():
-                approval_mode = self._get_approval_mode()
-                if approval_mode == "readonly":
-                    return {
-                        "ok": False,
-                        "tool": name,
-                        "error": f"Tool {name} is not allowed in readonly mode."
-                    }
-                elif approval_mode in ("ask", "shell-ask"):
-                    # For shell-ask mode, we only ask for shell commands (run_command)
-                    if approval_mode == "shell-ask" and name != "run_command":
-                        # File edits are allowed automatically in shell-ask mode
-                        pass
-                    else:
-                        return self._request_approval(name, args)
+            decision = self._permission_decision(name, args)
+            if decision.requires_approval:
+                return self._request_approval(name, args, decision)
+            if not decision.allowed:
+                return {
+                    "ok": False,
+                    "tool": name,
+                    "permission_denied": True,
+                    "permission": decision.to_dict(),
+                    "error": decision.reason or f"Permission denied for tool {name}.",
+                }
             
             if self._is_mutating_tool(name):
                 checkpoint = self._create_edit_checkpoint(name, args)
@@ -498,7 +500,7 @@ class AgentToolbox:
             response = {"ok": True, "tool": name, "result": result}
             if checkpoint is not None:
                 response["checkpoint"] = checkpoint
-            if approval_needed and self._approval_granted():
+            if decision.sensitive and self._approval_granted():
                 response["approval_granted"] = True
             return response
         except Exception as exc:
@@ -509,33 +511,24 @@ class AgentToolbox:
                 response["rollback"] = rollback_result
             return response
 
+    def _permission_decision(self, name: str, args: dict[str, Any]) -> PermissionDecision:
+        return PermissionManager(
+            self._get_approval_mode(),
+            approval_granted=self._approval_granted(),
+            callback=self.shell_permission_callback,
+        ).check(tool_permission_request(name, args))
+
     def _is_approval_needed(self, name: str, args: dict[str, Any]) -> bool:
-        """Determine if a tool requires approval based on current approval mode."""
-        approval_mode = self._get_approval_mode()
-        if approval_mode == "auto":
-            return False
-        if approval_mode == "readonly":
-            # In readonly mode, we still need to know if it's mutating to block it
-            return self._is_mutating_tool(name) or self._is_unsafe_shell_command(name, args)
-        if approval_mode == "ask":
-            return self._is_mutating_tool(name) or self._is_unsafe_shell_command(name, args)
-        if approval_mode == "shell-ask":
-            # In shell-ask mode, we need approval for all shell commands
-            return name == "run_command"
-        # Fallback
-        return False
+        """Determine if a tool requires approval based on the centralized manager."""
+
+        decision = self._permission_decision(name, args)
+        return decision.requires_approval
 
     def _get_approval_mode(self) -> str:
-        value = _request_option(self.request, "approval_mode", self.config.approval_mode)
-        if value not in ("auto", "ask", "readonly", "shell-ask"):
-            value = self.config.approval_mode
-        return value
+        return approval_mode_from_request(self.request, self.config.approval_mode)
 
     def _approval_granted(self) -> bool:
-        value = _request_option(self.request, "approval_granted", False)
-        if value is False:
-            value = _request_option(self.request, "approved", False)
-        return _truthy(value)
+        return approval_granted_from_request(self.request)
 
     def _is_mutating_tool(self, name: str) -> bool:
         return name in ("write_file", "replace_in_file", "apply_patch")
@@ -659,12 +652,25 @@ class AgentToolbox:
             return f"Will execute shell command: {cmd[:100]}{'...' if len(cmd) > 100 else ''}"
         return "Unknown risk"
 
-    def _request_approval(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    def _request_approval(
+        self,
+        name: str,
+        args: dict[str, Any],
+        decision: PermissionDecision | None = None,
+    ) -> dict[str, Any]:
         """Return an approval required result."""
         details = self._approval_details(name, args)
+        permission = decision.to_dict() if decision else PermissionDecision(
+            allowed=False,
+            requires_approval=True,
+            mode=self._get_approval_mode(),
+            request=tool_permission_request(name, args),
+        ).to_dict()
         return {
             "ok": False,
             "approval_required": True,
+            "permission_required": True,
+            "permission": permission,
             "tool": name,
             "args": args,
             "affected_files": details["affected_files"],
