@@ -62,6 +62,8 @@ BACKEND_FEATURES = {
     "repository_graph_propagation": True,
     "semantic_related_file_detection": True,
     "anti_hallucination_edit_blocking": True,
+    "limits_endpoint": True,
+    "response_limit_headers": True,
 }
 
 
@@ -86,6 +88,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "status": "ok",
+                    "running": True,
+                    "server_status": "running",
                     "version": BACKEND_VERSION,
                     "build": build_metadata(),
                     "runtime": {"config_hash": config_runtime_hash(self.server.config)},
@@ -130,6 +134,11 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "workspace_dir": str(self.server.config.workspace_dir),
                     "initialization": self.server.config.initialization_report,
                     "provider_health": self.server.router.health_snapshot(),
+                    "active_providers": _active_provider_names(
+                        self.server.config,
+                        self.server.router,
+                    ),
+                    "limits": _limits_body(self.server.config, self.server.router),
                     "recommendations": self.server.router.recommend(
                         HubRequest(
                             session_id="health",
@@ -142,10 +151,17 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                         include_unavailable=True,
                     ),
                     "models": _model_rows(self.server.config, self.server.router),
+                    "available_models": _available_model_ids(
+                        self.server.config,
+                        self.server.router,
+                    ),
                 }
             )
             return
-        if path in {"/v1/models", "/api/v1/models"}:
+        if path == "/limits":
+            self._send_json(_limits_body(self.server.config, self.server.router))
+            return
+        if path in {"/models", "/v1/models", "/api/v1/models"}:
             self._send_json(
                 {
                     "object": "list",
@@ -296,12 +312,14 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         if request.stream and response_shape == "openai-responses":
             self._send_openai_response_stream(response)
             return
+        response_headers = _response_headers(response, self.server.router)
         if response_shape == "openai-chat":
             self._send_json(
                 openai_chat_response(
                     response,
                     include_routing_details=self.server.config.expose_routing_details,
-                )
+                ),
+                headers=response_headers,
             )
             return
         if response_shape == "anthropic-messages":
@@ -309,7 +327,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 anthropic_message_response(
                     response,
                     include_routing_details=self.server.config.expose_routing_details,
-                )
+                ),
+                headers=response_headers,
             )
             return
         if response_shape == "openai-responses":
@@ -317,14 +336,16 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 openai_response_response(
                     response,
                     include_routing_details=self.server.config.expose_routing_details,
-                )
+                ),
+                headers=response_headers,
             )
             return
         self._send_json(
             response.to_native_dict(
                 include_raw=self.server.config.include_raw_responses,
                 include_routing_details=self.server.config.expose_routing_details,
-            )
+            ),
+            headers=response_headers,
         )
 
     def _send_native_stream(self, request: Any, agent_mode: bool) -> None:
@@ -419,12 +440,19 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             raise ValueError("Expected a JSON object")
         return payload
 
-    def _send_json(self, data: dict[str, Any], status: int = 200) -> None:
+    def _send_json(
+        self,
+        data: dict[str, Any],
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self._send_common_headers()
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -440,6 +468,16 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     def _send_common_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header(
+            "Access-Control-Expose-Headers",
+            (
+                "X-Agent-Hub-Agent, X-Agent-Hub-Provider, X-Agent-Hub-Model, "
+                "X-Agent-Hub-Active-Model, X-Agent-Hub-Requests-Remaining, "
+                "X-Agent-Hub-Tokens-Remaining, X-Agent-Hub-Credits-Remaining, "
+                "X-Agent-Hub-Quota-Remaining, X-Agent-Hub-Reset-At, "
+                "X-Agent-Hub-Cooldown-Until, X-Agent-Hub-Fallback-Models"
+            ),
+        )
 
     def _root_html(self) -> str:
         config = self.server.config
@@ -531,6 +569,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self._send_common_headers()
+        for name, value in _response_headers(response, self.server.router).items():
+            self.send_header(name, value)
         self.end_headers()
         for event in openai_stream_events(
             response,
@@ -545,6 +585,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self._send_common_headers()
+        for name, value in _response_headers(response, self.server.router).items():
+            self.send_header(name, value)
         self.end_headers()
         for name, event in anthropic_stream_events(
             response,
@@ -559,6 +601,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self._send_common_headers()
+        for name, value in _response_headers(response, self.server.router).items():
+            self.send_header(name, value)
         self.end_headers()
         for event in openai_response_stream_events(
             response,
@@ -598,6 +642,164 @@ ROUTE_MODEL_ALIASES = {
     "agent-hub-local": "local-agent",
     "agent-hub-research": "research",
 }
+
+
+def _response_headers(response: Any, router: AgentRouter) -> dict[str, str]:
+    health = router.health_snapshot().get(response.agent, {})
+    fallback_models = [
+        event.model
+        for event in response.failover
+        if event and event.model
+    ]
+    values = {
+        "X-Agent-Hub-Agent": response.agent,
+        "X-Agent-Hub-Provider": response.provider,
+        "X-Agent-Hub-Model": response.model,
+        "X-Agent-Hub-Active-Model": response.model,
+        "X-Agent-Hub-Requests-Remaining": health.get("requests_remaining"),
+        "X-Agent-Hub-Tokens-Remaining": health.get("tokens_remaining"),
+        "X-Agent-Hub-Credits-Remaining": health.get("credits_remaining"),
+        "X-Agent-Hub-Quota-Remaining": health.get("quota_remaining"),
+        "X-Agent-Hub-Reset-At": health.get("rate_limit_reset_at"),
+        "X-Agent-Hub-Cooldown-Until": health.get("cooldown_until"),
+        "X-Agent-Hub-Fallback-Models": ",".join(fallback_models),
+    }
+    return {
+        name: _safe_header_value(value)
+        for name, value in values.items()
+        if _safe_header_value(value)
+    }
+
+
+def _safe_header_value(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    return text[:1000]
+
+
+def _limits_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
+    health = router.health_snapshot(include_history=True)
+    recommendations = router.recommend(
+        HubRequest(
+            session_id="limits",
+            route="cloud-agent",
+            messages=[{"role": "user", "content": "select an agent model"}],
+            record_session=False,
+        ),
+        limit=8,
+        needs_tools=True,
+        include_unavailable=True,
+    )
+    active = next((row for row in recommendations if row.get("available")), None)
+    if active is None and recommendations:
+        active = recommendations[0]
+    providers = [
+        _provider_limit_row(name, agent, health.get(name, {}))
+        for name, agent in sorted(config.agents.items())
+        if agent.enabled
+    ]
+    failed_models: list[dict[str, Any]] = []
+    for row in providers:
+        if row.get("last_error_message"):
+            failed_models.append(
+                {
+                    "agent": row["agent"],
+                    "provider": row["provider"],
+                    "model": row["model"],
+                    "reason": row["last_error_message"],
+                    "cooldown_until": row["cooldown_until"],
+                }
+            )
+    return {
+        "object": "agent_hub.limits",
+        "status": "running",
+        "running": True,
+        "active_model": _active_model_row(active),
+        "active_providers": [
+            row["agent"]
+            for row in providers
+            if row.get("available")
+        ],
+        "providers": providers,
+        "limits": providers,
+        "provider_health": health,
+        "cooldowns": {
+            row["agent"]: row["cooldown_until"]
+            for row in providers
+            if row.get("cooldown_until")
+        },
+        "available_models": _available_model_ids(config, router),
+        "failed_models": failed_models,
+        "fallback_models": failed_models,
+        "recommendations": recommendations,
+    }
+
+
+def _provider_limit_row(
+    name: str,
+    agent: Any,
+    health: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "agent": name,
+        "provider": agent.provider,
+        "provider_name": agent.provider,
+        "provider_type": agent.provider_type,
+        "model": agent.model,
+        "available": bool(health.get("available")),
+        "degraded": bool(health.get("degraded")),
+        "quota_remaining": health.get("quota_remaining"),
+        "requests_remaining": health.get("requests_remaining"),
+        "tokens_remaining": health.get("tokens_remaining"),
+        "credits_remaining": health.get("credits_remaining"),
+        "rate_limit_reset_at": health.get("rate_limit_reset_at"),
+        "cooldown_until": health.get("cooldown_until"),
+        "unavailable_until": health.get("unavailable_until"),
+        "last_error_type": health.get("last_error_type"),
+        "last_error_message": health.get("last_error_message"),
+        "success_count": health.get("success_count", 0),
+        "failure_count": health.get("failure_count", 0),
+    }
+
+
+def _active_model_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "agent": row.get("agent"),
+        "provider": row.get("provider"),
+        "provider_name": row.get("provider"),
+        "provider_type": row.get("provider_type"),
+        "model": row.get("model"),
+        "available": row.get("available"),
+        "requests_remaining": row.get("requests_remaining"),
+        "tokens_remaining": row.get("tokens_remaining"),
+        "credits_remaining": row.get("credits_remaining"),
+        "rate_limit_reset_at": row.get("rate_limit_reset_at"),
+        "cooldown_until": row.get("cooldown_until"),
+    }
+
+
+def _active_provider_names(config: HubConfig, router: AgentRouter) -> list[str]:
+    health = router.health_snapshot()
+    return [
+        name
+        for name, agent in sorted(config.agents.items())
+        if agent.enabled and health.get(name, {}).get("available")
+    ]
+
+
+def _available_model_ids(config: HubConfig, router: AgentRouter) -> list[str]:
+    ids: list[str] = []
+    for row in _model_rows(config, router):
+        metadata = row.get("agent_hub") if isinstance(row, dict) else None
+        if isinstance(metadata, dict) and metadata.get("available") is False:
+            continue
+        model_id = row.get("id") if isinstance(row, dict) else None
+        if isinstance(model_id, str) and model_id not in ids:
+            ids.append(model_id)
+    return ids
 
 
 def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:

@@ -24,10 +24,14 @@
     "Other"
   ],
   "activationEvents": [
+    "onView:agentHub.sidebar",
     "onChatParticipant:agent-hub.agent-hub-vscode.agenthub",
     "onCommand:agentHub.chat",
     "onCommand:agentHub.startServer",
     "onCommand:agentHub.stopServer",
+    "onCommand:agentHub.restartServer",
+    "onCommand:agentHub.checkHealth",
+    "onCommand:agentHub.openSettings",
     "onCommand:agentHub.status",
     "onCommand:agentHub.ask",
     "onCommand:agentHub.codeAgent",
@@ -84,6 +88,18 @@
       {
         "command": "agentHub.stopServer",
         "title": "Agent Hub: Stop Server"
+      },
+      {
+        "command": "agentHub.restartServer",
+        "title": "Agent Hub: Restart Server"
+      },
+      {
+        "command": "agentHub.checkHealth",
+        "title": "Agent Hub: Check Health"
+      },
+      {
+        "command": "agentHub.openSettings",
+        "title": "Agent Hub: Open Settings"
       },
       {
         "command": "agentHub.status",
@@ -206,7 +222,42 @@
         }
       }
     },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentHub",
+          "title": "Agent Hub",
+          "icon": "assets/activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentHub": [
+        {
+          "id": "agentHub.sidebar",
+          "name": "Agent Hub",
+          "type": "webview"
+        }
+      ]
+    },
     "menus": {
+      "view/title": [
+        {
+          "command": "agentHub.startServer",
+          "when": "view == agentHub.sidebar",
+          "group": "navigation@1"
+        },
+        {
+          "command": "agentHub.checkHealth",
+          "when": "view == agentHub.sidebar",
+          "group": "navigation@2"
+        },
+        {
+          "command": "agentHub.openSettings",
+          "when": "view == agentHub.sidebar",
+          "group": "navigation@3"
+        }
+      ],
       "editor/context": [
         {
           "command": "agentHub.explainSelection",

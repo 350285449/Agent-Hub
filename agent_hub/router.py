@@ -296,7 +296,36 @@ class AgentRouter:
         if self.config.expose_routing_details and isinstance(raw, dict):
             raw = dict(raw)
             agent_metadata = dict(raw.get("agent_hub") or {})
-            agent_metadata["selected_health"] = self.health_snapshot().get(agent.name, {})
+            selected_health = self.health_snapshot().get(agent.name, {})
+            agent_metadata["selected_health"] = selected_health
+            agent_metadata["active_model"] = {
+                "agent": agent.name,
+                "provider": agent.provider,
+                "provider_name": agent.provider,
+                "provider_type": agent.provider_type or normalize_provider(agent.provider),
+                "model": result.model or agent.model,
+            }
+            agent_metadata["limits"] = _agent_limit_metadata(agent, selected_health)
+            agent_metadata["failed_models"] = [
+                {
+                    "agent": event.agent,
+                    "provider": event.provider,
+                    "model": event.model,
+                    "reason": event.reason,
+                    "retryable": event.retryable,
+                }
+                for event in failover
+            ]
+            agent_metadata["fallback_models"] = [
+                {
+                    "agent": event.agent,
+                    "provider": event.provider,
+                    "model": event.model,
+                    "reason": event.reason,
+                    "retryable": event.retryable,
+                }
+                for event in failover
+            ]
             raw["agent_hub"] = agent_metadata
         return HubResponse(
             request_id=request_id,
@@ -355,6 +384,14 @@ class AgentRouter:
             if agent and _requires_missing_api_key(agent):
                 available = False
             row: dict[str, Any] = {
+                "agent": name,
+                "provider": agent.provider if agent else "",
+                "provider_name": agent.provider if agent else "",
+                "provider_type": (
+                    agent.provider_type or normalize_provider(agent.provider)
+                    if agent else ""
+                ),
+                "model": agent.model if agent else "",
                 "available": available,
                 "degraded": health.is_degraded(now),
                 "quota_remaining": health.quota_remaining,
@@ -469,6 +506,8 @@ class AgentRouter:
                     "quota_remaining": health.quota_remaining if health else None,
                     "requests_remaining": health.requests_remaining if health else None,
                     "tokens_remaining": health.tokens_remaining if health else None,
+                    "credits_remaining": health.credits_remaining if health else None,
+                    "rate_limit_reset_at": health.rate_limit_reset_at if health else None,
                     "why": _recommendation_reason(agent, text=text, prefer=prefer, index=index),
                 }
             )
@@ -747,6 +786,22 @@ def _provider_health_to_state(health: ProviderHealth) -> dict[str, Any]:
     return {
         item.name: getattr(health, item.name)
         for item in fields(ProviderHealth)
+    }
+
+
+def _agent_limit_metadata(agent: AgentConfig, health: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider": agent.provider,
+        "provider_name": agent.provider,
+        "provider_type": agent.provider_type or normalize_provider(agent.provider),
+        "model": agent.model,
+        "requests_remaining": health.get("requests_remaining"),
+        "tokens_remaining": health.get("tokens_remaining"),
+        "credits_remaining": health.get("credits_remaining"),
+        "quota_remaining": health.get("quota_remaining"),
+        "rate_limit_reset_at": health.get("rate_limit_reset_at"),
+        "cooldown_until": health.get("cooldown_until"),
+        "unavailable_until": health.get("unavailable_until"),
     }
 
 

@@ -12,9 +12,13 @@ let modelPullProcess = null;
 let output;
 let chatPanel = null;
 let extensionContext = null;
+let sidebarProvider = null;
 let lastActiveTextEditor = null;
+let serverLifecycleState = "Stopped";
+let lastServerMessage = "";
 const EXTENSION_VERSION = "0.7.1";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
+const SIDEBAR_VIEW_ID = "agentHub.sidebar";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
 const DEFAULT_LM_STUDIO_MODEL = "local-model";
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
@@ -283,11 +287,20 @@ function activate(context) {
   );
 
   registerChatParticipant(context);
+  sidebarProvider = new AgentHubSidebarProvider(context);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(SIDEBAR_VIEW_ID, sidebarProvider, {
+      webviewOptions: { retainContextWhenHidden: true }
+    })
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("agentHub.chat", () => openChat(context)),
     vscode.commands.registerCommand("agentHub.startServer", startServer),
     vscode.commands.registerCommand("agentHub.stopServer", stopServer),
+    vscode.commands.registerCommand("agentHub.restartServer", restartServer),
+    vscode.commands.registerCommand("agentHub.checkHealth", checkHealth),
+    vscode.commands.registerCommand("agentHub.openSettings", openAgentHubSettings),
     vscode.commands.registerCommand("agentHub.status", showStatus),
     vscode.commands.registerCommand("agentHub.ask", askAgent),
     vscode.commands.registerCommand("agentHub.codeAgent", runCodingAgent),
@@ -296,6 +309,580 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.explainFile", explainFile),
     vscode.commands.registerCommand("agentHub.openOutput", () => output.show())
   );
+}
+
+class AgentHubSidebarProvider {
+  constructor(context) {
+    this.context = context;
+    this.view = null;
+  }
+
+  resolveWebviewView(webviewView) {
+    this.view = webviewView;
+    const assetsRoot = vscode.Uri.file(path.join(this.context.extensionPath, "assets"));
+    const logoUri = vscode.Uri.file(path.join(this.context.extensionPath, "assets", "agent-hub-icon.png"));
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [assetsRoot]
+    };
+    webviewView.webview.html = sidebarHtml(webviewView.webview, logoUri);
+    webviewView.webview.onDidReceiveMessage(
+      (message) => this.handleMessage(message),
+      undefined,
+      this.context.subscriptions
+    );
+    this.refresh();
+  }
+
+  async handleMessage(message) {
+    if (!message || typeof message !== "object") {
+      return;
+    }
+    if (message.type === "ready" || message.type === "refresh") {
+      await this.refresh();
+      return;
+    }
+    if (message.type === "startServer") {
+      setServerLifecycleState("Starting", "Starting Agent Hub...");
+      await this.refresh();
+      await startServer();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "stopServer") {
+      await stopServer();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "restartServer") {
+      await restartServer();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "openSettings") {
+      await openAgentHubSettings();
+      return;
+    }
+    if (message.type === "checkHealth") {
+      await checkHealth();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "openOutput") {
+      output.show(true);
+    }
+  }
+
+  async refresh() {
+    if (!this.view || !this.view.webview) {
+      return;
+    }
+    const dashboard = await sidebarDashboardState();
+    this.view.webview.postMessage({ type: "dashboard", dashboard });
+  }
+}
+
+function setServerLifecycleState(state, message = "") {
+  serverLifecycleState = state;
+  lastServerMessage = message;
+  refreshSidebar();
+}
+
+function refreshSidebar() {
+  if (sidebarProvider) {
+    sidebarProvider.refresh();
+  }
+}
+
+async function sidebarDashboardState() {
+  const config = settings();
+  const dashboard = {
+    status: serverLifecycleState,
+    statusText: lastServerMessage || "Agent Hub is not running.",
+    serverUrl: config.serverUrl,
+    agentProviderMode: config.agentProviderMode,
+    agentMode: config.agentMode,
+    autoStart: config.autoStart,
+    activeModel: null,
+    providers: [],
+    limits: [],
+    failedModels: [],
+    logs: lastServerMessage || "",
+  };
+
+  try {
+    const health = await requestJson("GET", "/health");
+    let limits = null;
+    try {
+      limits = await requestJson("GET", "/limits");
+    } catch (_error) {
+      limits = null;
+    }
+    dashboard.status = "Running";
+    dashboard.statusText = `Running at ${config.serverUrl}`;
+    dashboard.health = health;
+    dashboard.activeModel = sidebarActiveModel(health, limits);
+    dashboard.providers = sidebarProviderRows(health, limits);
+    dashboard.limits = sidebarLimitRows(health, limits);
+    dashboard.failedModels = sidebarFailedModels(health, limits);
+    dashboard.logs = "Open the Agent Hub output for live server logs.";
+    return dashboard;
+  } catch (error) {
+    if (serverLifecycleState === "Starting" || serverLifecycleState === "Error" || serverProcess) {
+      dashboard.status = serverLifecycleState === "Starting" ? "Starting" : "Error";
+      dashboard.statusText = lastServerMessage || `Waiting for Agent Hub at ${config.serverUrl}.`;
+      if (dashboard.status === "Error") {
+        dashboard.statusText = lastServerMessage || `Agent Hub is unhealthy: ${error.message}`;
+      }
+    } else {
+      dashboard.status = "Stopped";
+      dashboard.statusText = `Stopped. Server URL: ${config.serverUrl}`;
+    }
+    dashboard.error = error.message;
+    return dashboard;
+  }
+}
+
+function sidebarActiveModel(health, limits) {
+  if (limits && limits.active_model) {
+    return limits.active_model;
+  }
+  const recommendations = health && Array.isArray(health.recommendations) ? health.recommendations : [];
+  const active = recommendations.find((item) => item && item.available) || recommendations[0];
+  if (!active) {
+    return null;
+  }
+  return {
+    provider: active.provider,
+    model: active.model,
+    agent: active.agent,
+  };
+}
+
+function sidebarProviderRows(health, limits) {
+  if (limits && Array.isArray(limits.providers)) {
+    return limits.providers.slice(0, 12);
+  }
+  const providerHealth = health && health.provider_health && typeof health.provider_health === "object"
+    ? health.provider_health
+    : {};
+  return Object.entries(providerHealth).slice(0, 12).map(([agent, row]) => ({
+    agent,
+    provider: row.provider || "",
+    model: row.model || "",
+    available: !!row.available,
+    degraded: !!row.degraded,
+    requests_remaining: row.requests_remaining,
+    tokens_remaining: row.tokens_remaining,
+    credits_remaining: row.credits_remaining,
+    cooldown_until: row.cooldown_until,
+  }));
+}
+
+function sidebarLimitRows(health, limits) {
+  if (limits && Array.isArray(limits.limits)) {
+    return limits.limits.slice(0, 12);
+  }
+  return sidebarProviderRows(health, limits);
+}
+
+function sidebarFailedModels(health, limits) {
+  if (limits && Array.isArray(limits.failed_models)) {
+    return limits.failed_models.slice(0, 8);
+  }
+  const providerHealth = health && health.provider_health && typeof health.provider_health === "object"
+    ? health.provider_health
+    : {};
+  const rows = [];
+  for (const [agent, row] of Object.entries(providerHealth)) {
+    if (row && row.last_error_message) {
+      rows.push({
+        agent,
+        provider: row.provider || "",
+        model: row.model || "",
+        reason: row.last_error_message,
+      });
+    }
+  }
+  return rows.slice(0, 8);
+}
+
+function sidebarHtml(webview, logoPath) {
+  const nonce = getNonce();
+  const logoSrc = webview.asWebviewUri(logoPath);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource}; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Hub</title>
+  <style nonce="${nonce}">
+    :root {
+      color-scheme: light dark;
+      --border: var(--vscode-sideBarSectionHeader-border);
+      --muted: var(--vscode-descriptionForeground);
+      --button: var(--vscode-button-background);
+      --button-fg: var(--vscode-button-foreground);
+      --button-hover: var(--vscode-button-hoverBackground);
+      --secondary: var(--vscode-button-secondaryBackground);
+      --secondary-fg: var(--vscode-button-secondaryForeground);
+      --secondary-hover: var(--vscode-button-secondaryHoverBackground);
+      --error: var(--vscode-errorForeground);
+      --ok: var(--vscode-testing-iconPassed);
+      --warn: var(--vscode-testing-iconQueued);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--vscode-sideBar-foreground);
+      background: var(--vscode-sideBar-background);
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+    }
+
+    .shell {
+      min-width: 0;
+    }
+
+    header,
+    section {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+
+    img {
+      width: 24px;
+      height: 24px;
+      border-radius: 5px;
+      flex: 0 0 auto;
+    }
+
+    h1,
+    h2 {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    h1 {
+      font-size: 14px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      min-width: 72px;
+      justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 3px 7px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .status[data-state="Running"] {
+      color: var(--ok);
+    }
+
+    .status[data-state="Starting"] {
+      color: var(--warn);
+    }
+
+    .status[data-state="Error"] {
+      color: var(--error);
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 7px;
+      margin-top: 10px;
+    }
+
+    button {
+      width: 100%;
+      min-height: 28px;
+      border: 0;
+      border-radius: 5px;
+      padding: 5px 8px;
+      color: var(--secondary-fg);
+      background: var(--secondary);
+      font: inherit;
+      cursor: pointer;
+      text-align: center;
+    }
+
+    button:hover {
+      background: var(--secondary-hover);
+    }
+
+    button.primary {
+      grid-column: 1 / -1;
+      color: var(--button-fg);
+      background: var(--button);
+      font-weight: 600;
+    }
+
+    button.primary:hover {
+      background: var(--button-hover);
+    }
+
+    .detail,
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .list {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .row {
+      display: grid;
+      gap: 2px;
+    }
+
+    .main {
+      overflow-wrap: anywhere;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <img src="${logoSrc}" alt="">
+      <h1>Agent Hub</h1>
+    </header>
+    <section>
+      <div class="section-head">
+        <h2>Server</h2>
+        <span class="status" id="serverStatus">Stopped</span>
+      </div>
+      <div class="detail" id="serverDetail">Checking Agent Hub...</div>
+      <div class="actions">
+        <button class="primary" id="startServer" type="button" data-primary-action="start-server">Start Server</button>
+        <button id="stopServer" type="button">Stop Server</button>
+        <button id="restartServer" type="button">Restart Server</button>
+        <button id="checkHealth" type="button">Check Health</button>
+      </div>
+    </section>
+    <section>
+      <div class="section-head">
+        <h2>Models / Providers</h2>
+      </div>
+      <div class="detail" id="activeModel">No active model yet</div>
+      <ul class="list" id="providerList"></ul>
+    </section>
+    <section>
+      <div class="section-head">
+        <h2>Limits</h2>
+      </div>
+      <ul class="list" id="limitList"></ul>
+    </section>
+    <section>
+      <div class="section-head">
+        <h2>Logs</h2>
+      </div>
+      <div class="detail" id="logDetail">Open the output channel for live logs.</div>
+      <div class="actions">
+        <button id="openOutput" type="button">Open Logs</button>
+      </div>
+    </section>
+    <section>
+      <div class="section-head">
+        <h2>Settings</h2>
+      </div>
+      <div class="detail" id="settingsDetail"></div>
+      <div class="actions">
+        <button id="openSettings" type="button">Open Settings</button>
+      </div>
+    </section>
+  </div>
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    const serverStatus = document.getElementById("serverStatus");
+    const serverDetail = document.getElementById("serverDetail");
+    const activeModel = document.getElementById("activeModel");
+    const providerList = document.getElementById("providerList");
+    const limitList = document.getElementById("limitList");
+    const logDetail = document.getElementById("logDetail");
+    const settingsDetail = document.getElementById("settingsDetail");
+
+    function post(type) {
+      vscode.postMessage({ type });
+    }
+
+    function setText(element, value) {
+      element.textContent = value || "";
+    }
+
+    function renderDashboard(data) {
+      const dashboard = data || {};
+      const status = dashboard.status || "Stopped";
+      serverStatus.textContent = status;
+      serverStatus.dataset.state = status;
+      setText(serverDetail, dashboard.statusText || dashboard.serverUrl || "");
+      setText(activeModel, activeModelText(dashboard.activeModel));
+      renderProviderRows(dashboard.providers || []);
+      renderLimitRows(dashboard.limits || []);
+      setText(logDetail, dashboard.logs || "Open the output channel for live logs.");
+      setText(settingsDetail, "Mode: " + (dashboard.agentProviderMode || "cloud") + " / " + (dashboard.agentMode || "agent") + ". Auto-start: " + (dashboard.autoStart ? "on" : "off") + ".");
+    }
+
+    function activeModelText(row) {
+      if (!row || (!row.model && !row.provider && !row.agent)) {
+        return "No active model yet";
+      }
+      const provider = row.provider ? row.provider + " / " : "";
+      const agent = row.agent ? " (" + row.agent + ")" : "";
+      return "Active: " + provider + (row.model || "model pending") + agent;
+    }
+
+    function renderProviderRows(rows) {
+      providerList.textContent = "";
+      if (!rows.length) {
+        providerList.append(emptyRow("No provider health yet"));
+        return;
+      }
+      for (const row of rows.slice(0, 6)) {
+        providerList.append(rowElement(
+          [row.provider || row.agent || "provider", row.model || ""].filter(Boolean).join(" / "),
+          [
+            row.agent ? "agent " + row.agent : "",
+            row.available ? "available" : "unavailable",
+            row.degraded ? "degraded" : ""
+          ].filter(Boolean).join(" - ")
+        ));
+      }
+    }
+
+    function renderLimitRows(rows) {
+      limitList.textContent = "";
+      if (!rows.length) {
+        limitList.append(emptyRow("No remaining limits reported yet"));
+        return;
+      }
+      for (const row of rows.slice(0, 6)) {
+        limitList.append(rowElement(
+          [row.provider || row.agent || "provider", row.model || ""].filter(Boolean).join(" / "),
+          limitText(row)
+        ));
+      }
+    }
+
+    function limitText(row) {
+      const parts = [];
+      pushRemaining(parts, "requests", row.requests_remaining);
+      pushRemaining(parts, "tokens", row.tokens_remaining);
+      pushRemaining(parts, "credits", row.credits_remaining);
+      pushRemaining(parts, "quota", row.quota_remaining);
+      const reset = timeText(row.rate_limit_reset_at || row.reset_at);
+      const cooldown = timeText(row.cooldown_until);
+      if (reset) {
+        parts.push("reset " + reset);
+      }
+      if (cooldown) {
+        parts.push("cooldown " + cooldown);
+      }
+      if (row.unavailable_reason) {
+        parts.push(row.unavailable_reason);
+      }
+      return parts.length ? parts.join(" - ") : "No limit data reported";
+    }
+
+    function pushRemaining(parts, label, value) {
+      if (value === null || value === undefined || value === "") {
+        return;
+      }
+      parts.push(label + " " + value);
+    }
+
+    function timeText(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number <= 0) {
+        return "";
+      }
+      const seconds = Math.max(0, Math.round(number - Date.now() / 1000));
+      if (seconds <= 0) {
+        return "now";
+      }
+      if (seconds < 60) {
+        return "in " + seconds + "s";
+      }
+      if (seconds < 3600) {
+        return "in " + Math.round(seconds / 60) + "m";
+      }
+      return "in " + Math.round(seconds / 3600) + "h";
+    }
+
+    function rowElement(mainText, metaText) {
+      const item = document.createElement("li");
+      item.className = "row";
+      const main = document.createElement("div");
+      main.className = "main";
+      main.textContent = mainText || "Unknown";
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = metaText || "";
+      item.append(main, meta);
+      return item;
+    }
+
+    function emptyRow(text) {
+      const item = document.createElement("li");
+      item.className = "empty";
+      item.textContent = text;
+      return item;
+    }
+
+    document.getElementById("startServer").addEventListener("click", () => post("startServer"));
+    document.getElementById("stopServer").addEventListener("click", () => post("stopServer"));
+    document.getElementById("restartServer").addEventListener("click", () => post("restartServer"));
+    document.getElementById("checkHealth").addEventListener("click", () => post("checkHealth"));
+    document.getElementById("openOutput").addEventListener("click", () => post("openOutput"));
+    document.getElementById("openSettings").addEventListener("click", () => post("openSettings"));
+
+    window.addEventListener("message", (event) => {
+      const message = event.data;
+      if (message && message.type === "dashboard") {
+        renderDashboard(message.dashboard);
+      }
+    });
+
+    vscode.postMessage({ type: "ready" });
+  </script>
+</body>
+</html>`;
 }
 
 function registerChatParticipant(context) {
@@ -2734,6 +3321,7 @@ function getNonce() {
 async function startServer() {
   const workspace = workspaceRoot();
   if (!workspace) {
+    setServerLifecycleState("Error", "Open a workspace folder before starting Agent Hub.");
     vscode.window.showErrorMessage("Open a workspace folder before starting Agent Hub.");
     return;
   }
@@ -2742,6 +3330,7 @@ async function startServer() {
   const configChanged = await ensureLocalConfig(config, workspace);
 
   if (await isServerOnline()) {
+    setServerLifecycleState("Running", `Running at ${config.serverUrl}`);
     if (configChanged) {
       vscode.window.showWarningMessage("Agent Hub config was repaired. Restart Agent Hub to use the repaired config.");
     } else {
@@ -2750,12 +3339,14 @@ async function startServer() {
     return;
   }
   if (serverProcess) {
+    setServerLifecycleState("Starting", "Agent Hub is starting.");
     vscode.window.showInformationMessage("Agent Hub is starting.");
     return;
   }
 
   const launch = await serverLaunchEnvironment(workspace);
   if (!(await ensurePythonBackend(config, workspace, launch))) {
+    setServerLifecycleState("Error", "Python backend check failed. See Agent Hub output.");
     return;
   }
 
@@ -2777,6 +3368,7 @@ async function startServer() {
 
   const pythonArgs = [...launch.pythonArgs, ...args];
   output.appendLine(`Starting Agent Hub: ${launch.pythonLabel} ${args.join(" ")}`);
+  setServerLifecycleState("Starting", `Starting Agent Hub at ${config.serverUrl}...`);
   serverProcess = cp.spawn(launch.pythonCommand, pythonArgs, {
     cwd: workspace,
     shell: false,
@@ -2785,20 +3377,28 @@ async function startServer() {
 
   serverProcess.stdout.on("data", (data) => output.append(data.toString()));
   serverProcess.stderr.on("data", (data) => output.append(data.toString()));
-  serverProcess.on("exit", (code) => {
+  serverProcess.on("exit", (code, signal) => {
     output.appendLine(`Agent Hub server exited with code ${code}.`);
     serverProcess = null;
+    const stoppedByRequest = signal || code === 0 || code === null;
+    setServerLifecycleState(
+      stoppedByRequest ? "Stopped" : "Error",
+      stoppedByRequest ? "Agent Hub stopped." : `Agent Hub exited with code ${code}.`
+    );
   });
   serverProcess.on("error", (error) => {
     output.appendLine(`Failed to start Agent Hub: ${error.message}`);
     vscode.window.showErrorMessage(`Failed to start Agent Hub: ${error.message}`);
     serverProcess = null;
+    setServerLifecycleState("Error", `Failed to start Agent Hub: ${error.message}`);
   });
 
   const online = await waitForServer(7000);
   if (online) {
+    setServerLifecycleState("Running", `Running at ${config.serverUrl}`);
     vscode.window.showInformationMessage(`Agent Hub started at ${config.serverUrl}.`);
   } else {
+    setServerLifecycleState("Error", "Agent Hub did not respond yet. Check the Agent Hub output.");
     output.show();
     vscode.window.showWarningMessage("Agent Hub did not respond yet. Check the Agent Hub output.");
   }
@@ -4273,12 +4873,34 @@ function execFile(command, args, options = {}) {
   });
 }
 
-function stopServer() {
+async function stopServer() {
   if (stopServerProcess()) {
+    setServerLifecycleState("Stopped", "Agent Hub server stopped.");
     vscode.window.showInformationMessage("Agent Hub server stopped.");
-  } else {
-    vscode.window.showInformationMessage("Agent Hub server was not started by this VS Code window.");
+    await waitForServerOffline(3000);
+    refreshSidebar();
+    return;
   }
+
+  if (await isServerOnline()) {
+    await stopAgentHubServerOnConfiguredPort();
+    const offline = await waitForServerOffline(3000);
+    setServerLifecycleState(
+      offline ? "Stopped" : "Error",
+      offline
+        ? "Agent Hub server stopped."
+        : "Agent Hub is still running. Check the process using the configured port."
+    );
+    if (offline) {
+      vscode.window.showInformationMessage("Agent Hub server stopped.");
+    } else {
+      vscode.window.showWarningMessage("Agent Hub is still running. Check the process using the configured port.");
+    }
+    return;
+  }
+
+  setServerLifecycleState("Stopped", "Agent Hub server is stopped.");
+  vscode.window.showInformationMessage("Agent Hub server is stopped.");
 }
 
 function stopServerProcess() {
@@ -4291,14 +4913,38 @@ function stopServerProcess() {
   return true;
 }
 
+async function restartServer() {
+  setServerLifecycleState("Starting", "Restarting Agent Hub...");
+  if (serverProcess) {
+    stopServerProcess();
+    await waitForServerOffline(3000);
+  } else if (await isServerOnline()) {
+    await stopAgentHubServerOnConfiguredPort();
+    await waitForServerOffline(3000);
+  }
+  await startServer();
+  refreshSidebar();
+}
+
+async function openAgentHubSettings() {
+  await vscode.commands.executeCommand("workbench.action.openSettings", "Agent Hub");
+}
+
+async function checkHealth() {
+  await showStatus();
+  refreshSidebar();
+}
+
 async function showStatus() {
   try {
     const health = await requestJson("GET", "/health");
     const agents = Array.isArray(health.agents) ? health.agents.join(", ") : "unknown";
     const freeOnly = health.free_only === undefined ? "unknown" : String(health.free_only);
+    setServerLifecycleState("Running", `Running at ${settings().serverUrl}`);
     vscode.window.showInformationMessage(`Agent Hub online. Agents: ${agents}. free_only: ${freeOnly}.`);
     output.appendLine(JSON.stringify(health, null, 2));
   } catch (error) {
+    setServerLifecycleState(serverProcess ? "Error" : "Stopped", `Agent Hub is offline or unhealthy: ${error.message}`);
     vscode.window.showWarningMessage(`Agent Hub is offline or unhealthy: ${error.message}`);
   }
 }

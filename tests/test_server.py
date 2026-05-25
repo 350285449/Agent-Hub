@@ -278,6 +278,93 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("agent-hub-local", ids)
             self.assertIn("agent:tooly", ids)
 
+    def test_health_limits_and_models_expose_quota_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            server.router.provider_factory = _QuotaProvider
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                _post_json(
+                    f"{base}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+                health = _get_json(f"{base}/health")
+                limits = _get_json(f"{base}/limits")
+                models = _get_json(f"{base}/models")
+            finally:
+                _stop(server, thread)
+
+            self.assertTrue(health["running"])
+            self.assertEqual(health["server_status"], "running")
+            self.assertIn("limits", health)
+            self.assertEqual(health["provider_health"]["tooly"]["requests_remaining"], 7)
+            self.assertEqual(health["provider_health"]["tooly"]["tokens_remaining"], 12345)
+
+            tooly_limits = next(row for row in limits["limits"] if row["agent"] == "tooly")
+            self.assertEqual(tooly_limits["provider"], "openai-compatible")
+            self.assertEqual(tooly_limits["model"], "tool-model")
+            self.assertEqual(tooly_limits["credits_remaining"], 2.5)
+            self.assertIn("agent-hub-coding", limits["available_models"])
+            self.assertEqual(models["object"], "list")
+
+    def test_openai_compatible_response_includes_limit_headers_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            server.router.provider_factory = _QuotaProvider
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                data, headers = _post_json_with_headers(
+                    f"{base}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(data["choices"][0]["message"]["content"], "ok")
+            self.assertNotIn("agent_hub", data)
+            self.assertEqual(headers.get("X-Agent-Hub-Provider"), "openai-compatible")
+            self.assertEqual(headers.get("X-Agent-Hub-Model"), "tool-model")
+            self.assertEqual(headers.get("X-Agent-Hub-Requests-Remaining"), "7")
+            self.assertEqual(headers.get("X-Agent-Hub-Tokens-Remaining"), "12345")
+            self.assertEqual(headers.get("X-Agent-Hub-Credits-Remaining"), "2.5")
+
+    def test_detailed_routing_includes_limit_metadata_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            config.expose_routing_details = True
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            server.router.provider_factory = _QuotaProvider
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                data = _post_json(
+                    f"{base}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+            finally:
+                _stop(server, thread)
+
+            hub = data["agent_hub"]
+            self.assertEqual(hub["agent"], "tooly")
+            self.assertEqual(hub["active_model"]["model"], "tool-model")
+            self.assertEqual(hub["limits"]["requests_remaining"], 7)
+            self.assertEqual(hub["limits"]["tokens_remaining"], 12345)
+            self.assertIn("failed_models", hub)
+            self.assertIn("fallback_models", hub)
+
 
 def _compat_config(path: Path) -> HubConfig:
     return HubConfig(
@@ -302,6 +389,29 @@ def _compat_config(path: Path) -> HubConfig:
     )
 
 
+class _QuotaProvider:
+    def __init__(self, agent: AgentConfig) -> None:
+        self.agent = agent
+
+    def complete(self, request: HubRequest) -> ProviderResult:
+        return ProviderResult(
+            text="ok",
+            model=self.agent.model,
+            raw={
+                "agent_hub_provider": {
+                    "quota": {
+                        "requests_remaining": 7,
+                        "tokens_remaining": 12345,
+                        "credits_remaining": 2.5,
+                        "rate_limit_reset_at": 2_000_000_000,
+                    }
+                }
+            },
+            usage={"prompt_tokens": 3, "completion_tokens": 1},
+            finish_reason="stop",
+        )
+
+
 def _start(server: AgentHubHTTPServer) -> threading.Thread:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -318,7 +428,30 @@ def _post_json(url: str, payload: dict, headers: dict[str, str] | None = None) -
     return json.loads(_post_text(url, payload, headers=headers))
 
 
+def _post_json_with_headers(
+    url: str,
+    payload: dict,
+    headers: dict[str, str] | None = None,
+) -> tuple[dict, object]:
+    text, response_headers = _post_text_with_headers(url, payload, headers=headers)
+    return json.loads(text), response_headers
+
+
 def _post_text(url: str, payload: dict, headers: dict[str, str] | None = None) -> str:
+    text, _headers = _post_text_with_headers(url, payload, headers=headers)
+    return text
+
+
+def _get_json(url: str) -> dict:
+    with urlopen(url, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _post_text_with_headers(
+    url: str,
+    payload: dict,
+    headers: dict[str, str] | None = None,
+) -> tuple[str, object]:
     body = json.dumps(payload).encode("utf-8")
     request = Request(
         url,
@@ -330,7 +463,7 @@ def _post_text(url: str, payload: dict, headers: dict[str, str] | None = None) -
         },
     )
     with urlopen(request, timeout=5) as response:
-        return response.read().decode("utf-8")
+        return response.read().decode("utf-8"), response.headers
 
 
 if __name__ == "__main__":

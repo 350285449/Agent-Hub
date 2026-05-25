@@ -436,12 +436,35 @@ def openai_response_stream_events(
 
 
 def _hub_metadata(response: HubResponse) -> dict[str, Any]:
-    return {
+    data = {
         "session_id": response.session_id,
         "agent": response.agent,
         "provider": response.provider,
+        "model": response.model,
+        "active_model": {
+            "agent": response.agent,
+            "provider": response.provider,
+            "model": response.model,
+        },
         "failover": [event.to_dict() for event in response.failover],
     }
+    raw_metadata = response.raw.get("agent_hub") if isinstance(response.raw, dict) else None
+    if isinstance(raw_metadata, dict):
+        for key in (
+            "limits",
+            "selected_health",
+            "active_model",
+            "failed_models",
+            "fallback_models",
+            "session_models",
+        ):
+            if key in raw_metadata:
+                data[key] = raw_metadata[key]
+    if "failed_models" not in data:
+        data["failed_models"] = [event.to_dict() for event in response.failover]
+    if "fallback_models" not in data:
+        data["fallback_models"] = [event.to_dict() for event in response.failover]
+    return data
 
 
 def _routing_from_model(value: Any) -> tuple[str | None, str | None]:
