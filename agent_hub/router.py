@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import AgentConfig, HubConfig, is_free_agent, normalize_provider
+from .core.provider_manager import ProviderManager
 from .models import FailoverEvent, HubRequest, HubResponse, ProviderResult
 from .observability import record_event
 from .payloads import content_to_text, request_text
@@ -32,6 +33,43 @@ TRANSPARENT_API_SHAPES = {"openai-chat", "openai-responses", "anthropic-messages
 NO_TOOL_CAPABLE_MODEL = "no_tool_capable_model"
 ECHO_DISABLED = "echo_disabled"
 CONFIGURATION_ERROR = "configuration_error"
+ROUTING_MODES = {
+    "manual",
+    "fastest",
+    "cheapest",
+    "best_available",
+    "coding",
+    "long_context",
+    "local_private",
+}
+DEFAULT_ROUTING_MODE = "best_available"
+LONG_CONTEXT_TOKEN_THRESHOLD = 24_000
+
+
+@dataclass(slots=True)
+class RoutingDecision:
+    """Explainable router selection before provider execution and failover."""
+
+    selected_provider: str
+    selected_model: str
+    routing_mode: str
+    reason: str
+    fallback_chain: list[str] = field(default_factory=list)
+    selected_agent: str | None = None
+    task_type: str | None = None
+    estimated_input_tokens: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "selected_agent": self.selected_agent,
+            "selected_provider": self.selected_provider,
+            "selected_model": self.selected_model,
+            "routing_mode": self.routing_mode,
+            "task_type": self.task_type,
+            "reason": self.reason,
+            "fallback_chain": list(self.fallback_chain),
+            "estimated_input_tokens": self.estimated_input_tokens,
+        }
 
 
 @dataclass(slots=True)
@@ -145,7 +183,7 @@ class AgentRouter:
         session_store: SessionStore | None = None,
     ) -> None:
         self.config = config
-        self.provider_factory = provider_factory
+        self._provider_factory = provider_factory
         self.session_store = session_store or SessionStore(config.state_dir)
         self._health_path = config.state_dir / HEALTH_STATE_FILE
         self._health: dict[str, ProviderHealth] = self._load_provider_health()
@@ -154,16 +192,33 @@ class AgentRouter:
             for name, health in self._health.items()
             if health.cooldown_deadline() > time.time()
         }
+        self.provider_manager = ProviderManager(
+            config,
+            provider_factory=self._provider_factory,
+            health_snapshot=self.health_snapshot,
+        )
+
+    @property
+    def provider_factory(self) -> ProviderFactory:
+        return self._provider_factory
+
+    @provider_factory.setter
+    def provider_factory(self, value: ProviderFactory) -> None:
+        self._provider_factory = value
+        if hasattr(self, "provider_manager"):
+            self.provider_manager.provider_factory = value
 
     def route(self, request: HubRequest) -> HubResponse:
         effective_request = self._with_session_history(request)
         request_id = f"hub-{uuid.uuid4().hex}"
         failover: list[FailoverEvent] = []
-        candidates = self._candidate_agents(effective_request)
+        decision = self.decide(effective_request)
+        candidates = self._candidate_agents(effective_request, decision=decision)
         self._record_route_event(
             "request_started",
             request_id=request_id,
             request=effective_request,
+            routing_decision=decision.to_dict(),
             candidates=[agent.name for agent in candidates],
         )
         if not candidates:
@@ -231,7 +286,7 @@ class AgentRouter:
             tried_any = True
             started = time.perf_counter()
             try:
-                result = self.provider_factory(agent).complete(effective_request)
+                result = self.provider_manager.chat(agent, effective_request)
                 latency = time.perf_counter() - started
                 if _token_limit_finish_reason(result.finish_reason) and agent != candidates[-1]:
                     reason = (
@@ -264,6 +319,7 @@ class AgentRouter:
                     agent=agent,
                     result=result,
                     failover=failover,
+                    decision=decision,
                 )
                 if effective_request.record_session:
                     self.session_store.record_turn(effective_request, response)
@@ -276,6 +332,7 @@ class AgentRouter:
                     model=response.model,
                     latency_seconds=round(latency, 4),
                     failover=[event.to_dict() for event in failover],
+                    routing_decision=decision.to_dict(),
                 )
                 return response
             except ProviderError as exc:
@@ -395,11 +452,55 @@ class AgentRouter:
             return replace(request, messages=list(history))
         return replace(request, messages=[*history, *request.messages])
 
-    def _candidate_agents(self, request: HubRequest) -> list[AgentConfig]:
+    def decide(self, request: HubRequest) -> RoutingDecision:
+        """Choose a ranked fallback chain before execution."""
+
+        mode = self._routing_mode(request)
+        task_type = self._classify_task(request)
+        agents = self._candidate_agent_pool(request, mode=mode)
+        selected = agents[0] if agents else None
+        return RoutingDecision(
+            selected_agent=selected.name if selected else None,
+            selected_provider=selected.provider if selected else "",
+            selected_model=selected.model if selected else "",
+            routing_mode=mode,
+            task_type=task_type,
+            reason=self._routing_decision_reason(
+                mode=mode,
+                task_type=task_type,
+                selected=selected,
+                request=request,
+            ),
+            fallback_chain=[agent.name for agent in agents],
+            estimated_input_tokens=estimate_input_tokens(request),
+        )
+
+    def _candidate_agents(
+        self,
+        request: HubRequest,
+        *,
+        decision: RoutingDecision | None = None,
+    ) -> list[AgentConfig]:
+        if decision is None:
+            decision = self.decide(request)
+        return [
+            self.config.agents[name]
+            for name in decision.fallback_chain
+            if name in self.config.agents and self.config.agents[name].enabled
+        ]
+
+    def _candidate_agent_pool(self, request: HubRequest, *, mode: str) -> list[AgentConfig]:
         names: list[str] = []
         if request.preferred_agent:
             names.append(request.preferred_agent)
+        names.extend(self._manual_model_or_provider_agent_names(request))
         names.extend(self._route_names(request))
+        if mode == "local_private":
+            names.extend(
+                agent.name
+                for agent in self.config.agents.values()
+                if _is_local_or_private_agent(agent)
+            )
 
         seen: set[str] = set()
         agents: list[AgentConfig] = []
@@ -411,8 +512,8 @@ class AgentRouter:
             if agent and agent.enabled:
                 agents.append(agent)
         if request.preferred_agent and agents and agents[0].name == request.preferred_agent:
-            return [agents[0], *self._balanced_agents(agents[1:], request)]
-        return self._balanced_agents(agents, request)
+            return [agents[0], *self._rank_agents_for_mode(agents[1:], request, mode)]
+        return self._rank_agents_for_mode(agents, request, mode)
 
     def _route_names(self, request: HubRequest) -> list[str]:
         if request.route:
@@ -425,6 +526,177 @@ class AgentRouter:
                 return route.agents
         return self.config.default_route
 
+    def _manual_model_or_provider_agent_names(self, request: HubRequest) -> list[str]:
+        model = _request_option(request, "model")
+        provider = _request_option(request, "provider", "provider_type")
+        names: list[str] = []
+        if isinstance(model, str) and model.strip():
+            normalized_model = model.strip().lower()
+            for agent in self.config.agents.values():
+                if agent.model.lower() == normalized_model or agent.name.lower() == normalized_model:
+                    names.append(agent.name)
+        if isinstance(provider, str) and provider.strip():
+            normalized_provider = normalize_provider(provider.strip())
+            raw_provider = provider.strip().lower()
+            for agent in self.config.agents.values():
+                agent_provider = normalize_provider(agent.provider)
+                agent_type = (agent.provider_type or agent.provider).lower()
+                if agent_provider == normalized_provider or agent_type == raw_provider:
+                    names.append(agent.name)
+        return names
+
+    def _routing_mode(self, request: HubRequest) -> str:
+        explicit = _request_option(
+            request,
+            "routing_mode",
+            "route_mode",
+            "routingMode",
+            "routeMode",
+        )
+        if isinstance(explicit, str) and explicit.strip().lower() in ROUTING_MODES:
+            return explicit.strip().lower()
+        prefer = _request_option(request, "prefer", "preference")
+        if isinstance(prefer, str):
+            lowered = prefer.strip().lower()
+            if lowered == "speed":
+                return "fastest"
+            if lowered in ROUTING_MODES:
+                return lowered
+        if request.preferred_agent or self._manual_model_or_provider_agent_names(request):
+            return "manual"
+        if _privacy_requested(request):
+            return "local_private"
+        task_type = self._classify_task(request)
+        if task_type in {"coding", "long_context"}:
+            return task_type
+        return DEFAULT_ROUTING_MODE
+
+    def _classify_task(self, request: HubRequest) -> str:
+        if _privacy_requested(request):
+            return "local_private"
+        if estimate_input_tokens(request) >= LONG_CONTEXT_TOKEN_THRESHOLD:
+            return "long_context"
+        if _looks_like_coding_task(request_text(request).lower()):
+            return "coding"
+        return "general"
+
+    def _rank_agents_for_mode(
+        self,
+        agents: list[AgentConfig],
+        request: HubRequest,
+        mode: str,
+    ) -> list[AgentConfig]:
+        if mode == "manual":
+            return self._balanced_agents(agents, request)
+        if mode == "local_private":
+            private_agents = [agent for agent in agents if _is_local_or_private_agent(agent)]
+            return self._rank_by_key(
+                private_agents,
+                request,
+                key=lambda agent: (
+                    float(agent.coding_score or 0.0) * 8,
+                    float(agent.context_window or 0),
+                    self._routing_score(agent, request),
+                ),
+            )
+        if mode == "fastest":
+            return self._rank_by_key(
+                agents,
+                request,
+                key=lambda agent: (
+                    float(agent.speed_score or 0.0) * 12,
+                    self._streaming_speed_score(agent),
+                    -self._average_latency_score(agent),
+                    self._routing_score(agent, request),
+                ),
+            )
+        if mode == "cheapest":
+            return self._rank_by_key(
+                agents,
+                request,
+                key=lambda agent: (
+                    1.0 if is_free_agent(agent) else 0.0,
+                    1.0 if _is_local_or_private_agent(agent) else 0.0,
+                    self._routing_score(agent, request),
+                ),
+            )
+        if mode == "coding":
+            return self._rank_by_key(
+                agents,
+                request,
+                key=lambda agent: (
+                    float(agent.coding_score or 0.0) * 16,
+                    4.0 if _agent_supports_tools(agent) else 0.0,
+                    self._routing_score(agent, request),
+                ),
+            )
+        if mode == "long_context":
+            return self._rank_by_key(
+                agents,
+                request,
+                key=lambda agent: (
+                    float(agent.context_window or 0),
+                    self._routing_score(agent, request),
+                ),
+            )
+        return self._balanced_agents(agents, request)
+
+    def _rank_by_key(
+        self,
+        agents: list[AgentConfig],
+        request: HubRequest,
+        *,
+        key: Callable[[AgentConfig], tuple[Any, ...]],
+    ) -> list[AgentConfig]:
+        if not self.config.enable_load_balancing or len(agents) <= 1:
+            return agents
+        indexed = list(enumerate(agents))
+        return [
+            agent
+            for _, agent in sorted(
+                indexed,
+                key=lambda item: (*_negated_sort_tuple(key(item[1])), item[0]),
+            )
+        ]
+
+    def _streaming_speed_score(self, agent: AgentConfig) -> float:
+        health = self._health.get(agent.name)
+        if health and health.streaming_tokens_per_second:
+            return health.streaming_tokens_per_second
+        return 1.0 if agent.supports_streaming else 0.0
+
+    def _average_latency_score(self, agent: AgentConfig) -> float:
+        health = self._health.get(agent.name)
+        return health.average_latency_seconds if health else 0.0
+
+    def _routing_decision_reason(
+        self,
+        *,
+        mode: str,
+        task_type: str,
+        selected: AgentConfig | None,
+        request: HubRequest,
+    ) -> str:
+        if selected is None:
+            return "No enabled provider matched the requested route and routing mode."
+        if mode == "manual":
+            return "Manual model/provider preference was applied before fallback candidates."
+        if mode == "fastest":
+            return "Selected the highest-ranked low-latency candidate using speed score and observed latency."
+        if mode == "cheapest":
+            return "Selected the highest-ranked free or local/private candidate."
+        if mode == "coding":
+            return "Prompt was classified as coding-related and ranked by coding/tool capability."
+        if mode == "long_context":
+            return "Prompt was classified as long-context and ranked by context window."
+        if mode == "local_private":
+            return "Privacy/local mode was requested, so only local/private providers were considered."
+        if request.stream and selected.supports_streaming:
+            return "Selected best available streaming-capable route candidate."
+        if task_type != "general":
+            return f"Selected best available candidate for {task_type} task."
+        return "Selected best available route candidate using priority, health, and capability scores."
+
     def _response_from_result(
         self,
         request_id: str,
@@ -432,6 +704,7 @@ class AgentRouter:
         agent: AgentConfig,
         result: ProviderResult,
         failover: list[FailoverEvent],
+        decision: RoutingDecision | None = None,
     ) -> HubResponse:
         raw = result.raw
         if self.config.expose_routing_details and isinstance(raw, dict):
@@ -467,6 +740,8 @@ class AgentRouter:
                 }
                 for event in failover
             ]
+            if decision is not None:
+                agent_metadata["routing_decision"] = decision.to_dict()
             raw["agent_hub"] = agent_metadata
         return HubResponse(
             request_id=request_id,
@@ -1041,6 +1316,45 @@ def _provider_health_to_state(health: ProviderHealth) -> dict[str, Any]:
     }
 
 
+def _request_option(request: HubRequest, *keys: str) -> Any:
+    sources = []
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    hub_options = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    sources.extend([raw, hub_options, metadata])
+    for source in sources:
+        for key in keys:
+            if key in source and source[key] not in (None, ""):
+                return source[key]
+    return None
+
+
+def _privacy_requested(request: HubRequest) -> bool:
+    value = _request_option(
+        request,
+        "local_private",
+        "private",
+        "privacy",
+        "privacy_mode",
+        "local_only",
+    )
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "local", "private", "local_private"}
+    return False
+
+
+def _negated_sort_tuple(values: tuple[Any, ...]) -> tuple[float, ...]:
+    negated: list[float] = []
+    for value in values:
+        try:
+            negated.append(-float(value))
+        except (TypeError, ValueError):
+            negated.append(0.0)
+    return tuple(negated)
+
+
 def _agent_limit_metadata(agent: AgentConfig, health: dict[str, Any]) -> dict[str, Any]:
     return {
         "provider": agent.provider,
@@ -1233,6 +1547,12 @@ def _requires_missing_api_key(agent: AgentConfig) -> bool:
 def _is_local_or_private_agent(agent: AgentConfig) -> bool:
     from .config import _is_local_or_private_url
 
+    provider = normalize_provider(agent.provider)
+    provider_type = (agent.provider_type or agent.provider).lower()
+    if provider in {"echo", "local-research"}:
+        return True
+    if provider_type == "ollama-cloud":
+        return False
     return _is_local_or_private_url(agent.base_url)
 
 
@@ -1416,6 +1736,7 @@ def _looks_like_coding_task(text: str) -> bool:
             "code",
             "debug",
             "edit",
+            "error",
             "fix",
             "implement",
             "refactor",

@@ -7,6 +7,8 @@ from typing import Any
 
 OPENAI_COMPATIBLE_PROVIDER_TYPES = {
     "openai-compatible",
+    "ollama",
+    "ollama-local",
     "ollama-cloud",
     "groq",
     "openrouter",

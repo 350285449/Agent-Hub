@@ -13,14 +13,15 @@ from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 from typing import Any, Protocol
 
-from .config import AgentConfig, normalize_provider
-from .models import HubRequest, ProviderResult
-from .payloads import content_to_text
-from .provider_presets import (
+from ..config import AgentConfig, normalize_provider
+from ..models import HubRequest, ProviderResult
+from ..payloads import content_to_text
+from ..provider_presets import (
     chat_completions_path_for_agent,
     default_headers_for_agent,
     provider_kind_for_agent,
 )
+from .base import BaseProviderAdapter, ProviderAdapter
 
 
 FAILOVER_STATUSES = {401, 402, 403, 404, 408, 409, 429, 500, 502, 503}
@@ -124,14 +125,14 @@ class ProviderError(Exception):
         return self.message
 
 
-class Provider(Protocol):
+class Provider(ProviderAdapter, Protocol):
     agent: AgentConfig
 
     def complete(self, request: HubRequest) -> ProviderResult:
         ...
 
 
-class EchoProvider:
+class EchoProvider(BaseProviderAdapter):
     def __init__(self, agent: AgentConfig) -> None:
         self.agent = agent
 
@@ -154,7 +155,7 @@ class EchoProvider:
         )
 
 
-class OpenAIChatProvider:
+class OpenAIChatProvider(BaseProviderAdapter):
     def __init__(self, agent: AgentConfig) -> None:
         self.agent = agent
 
@@ -244,7 +245,7 @@ class OpenAIChatProvider:
         return payload
 
 
-class LocalResearchProvider:
+class LocalResearchProvider(BaseProviderAdapter):
     def __init__(self, agent: AgentConfig) -> None:
         self.agent = agent
 
@@ -342,7 +343,7 @@ class LocalResearchProvider:
         return _clean_text(text)
 
 
-class AnthropicMessagesProvider:
+class AnthropicMessagesProvider(BaseProviderAdapter):
     def __init__(self, agent: AgentConfig) -> None:
         self.agent = agent
 
@@ -455,7 +456,7 @@ class AnthropicMessagesProvider:
         return payload
 
 
-class GeminiProvider:
+class GeminiProvider(BaseProviderAdapter):
     def __init__(self, agent: AgentConfig) -> None:
         self.agent = agent
 
@@ -970,6 +971,19 @@ def _gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 def create_provider(agent: AgentConfig) -> Provider:
     provider = normalize_provider(agent.provider)
+    provider_type = (agent.provider_type or agent.provider).lower()
+    if provider_type in {"ollama", "ollama-local"}:
+        from .ollama import OllamaProvider
+
+        return OllamaProvider(agent)
+    if provider_type == "groq":
+        from .groq import GroqProvider
+
+        return GroqProvider(agent)
+    if provider_type == "openrouter":
+        from .openrouter import OpenRouterProvider
+
+        return OpenRouterProvider(agent)
     if provider in {"openai", "openai-compatible"}:
         return OpenAIChatProvider(agent)
     if provider == "local-research":
@@ -980,11 +994,11 @@ def create_provider(agent: AgentConfig) -> Provider:
         return GeminiProvider(agent)
     if provider == "echo":
         return EchoProvider(agent)
-        raise ProviderError(
-            f"Unsupported provider {agent.provider!r}",
-            retryable=False,
-            error_type="configuration",
-        )
+    raise ProviderError(
+        f"Unsupported provider {agent.provider!r}",
+        retryable=False,
+        error_type="configuration",
+    )
 
 
 def provider_headers(agent: AgentConfig, api_key: str | None = None) -> dict[str, str]:

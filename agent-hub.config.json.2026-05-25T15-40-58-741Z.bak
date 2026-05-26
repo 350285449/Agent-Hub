@@ -7,17 +7,11 @@
   "archive_dir": ".agent-hub/archive",
   "workspace_dir": ".",
   "agent_max_steps": 8,
-  "agent_context_budget_tokens": 32000,
-  "agent_context_compaction_enabled": true,
-  "context_mode": "balanced",
-  "cline_compatibility_mode": true,
   "allow_shell_tools": true,
-  "approval_mode": "ask",
   "free_only": true,
   "enable_load_balancing": true,
   "include_raw_responses": false,
   "expose_routing_details": true,
-  "debug_echo_enabled": false,
   "cloud_control_selection": {
     "route_mode": "ollama-cloud",
     "api_key_models_enabled": false,
@@ -28,7 +22,8 @@
     "ollama-glm-cloud",
     "ollama-qwen-cloud",
     "ollama-nemotron-cloud",
-    "ollama-gemma-cloud"
+    "ollama-gemma-cloud",
+    "echo"
   ],
   "routes": [
     {
@@ -46,7 +41,8 @@
         "ollama-glm-cloud",
         "ollama-qwen-cloud",
         "ollama-nemotron-cloud",
-        "ollama-gemma-cloud"
+        "ollama-gemma-cloud",
+        "echo"
       ]
     },
     {
@@ -70,7 +66,8 @@
         "ollama-glm-cloud",
         "ollama-qwen-cloud",
         "ollama-nemotron-cloud",
-        "ollama-gemma-cloud"
+        "ollama-gemma-cloud",
+        "echo"
       ]
     },
     {
@@ -81,7 +78,8 @@
         "ollama-glm-cloud",
         "ollama-qwen-cloud",
         "ollama-nemotron-cloud",
-        "ollama-gemma-cloud"
+        "ollama-gemma-cloud",
+        "echo"
       ]
     },
     {
@@ -100,7 +98,8 @@
         "ollama-glm-cloud",
         "ollama-qwen-cloud",
         "ollama-nemotron-cloud",
-        "ollama-gemma-cloud"
+        "ollama-gemma-cloud",
+        "echo"
       ]
     }
   ],
@@ -427,6 +426,14 @@
       "context_window": 32768,
       "timeout_seconds": 300,
       "cooldown_seconds": 10
+    },
+    {
+      "name": "echo",
+      "provider": "echo",
+      "model": "local-echo",
+      "free": true,
+      "context_window": 1000000,
+      "cooldown_seconds": 1
     }
   ]
 }
