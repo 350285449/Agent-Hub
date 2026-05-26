@@ -81,6 +81,7 @@ class ProviderScore:
     streaming: float
     free_local: float
     quota: float
+    token_efficiency: float
     cooldown: float
 
     def to_dict(self) -> dict[str, float]:
@@ -160,6 +161,7 @@ def calculate_provider_score(
         streaming += min(4.0, streaming_speed / 25.0)
     free_local = 6.0 if is_free_agent(agent) or _is_local_or_private_agent(agent) else 0.0
     quota = 0.0
+    token_efficiency = 0.0
     cooldown = 0.0
 
     if _number_attr(health, "quota_remaining") is not None and _number_attr(health, "quota_remaining") <= 0:
@@ -178,6 +180,10 @@ def calculate_provider_score(
             coding *= 1.35
         if request.stream and agent.supports_streaming:
             streaming += 4.0
+    tokens_in = _number_attr(health, "tokens_in")
+    tokens_out = _number_attr(health, "tokens_out")
+    if tokens_in is not None and tokens_in > 0 and tokens_out is not None:
+        token_efficiency = min(3.0, max(0.0, tokens_out / tokens_in))
 
     deadline = max(
         _float_attr(health, "cooldown_until", 0.0),
@@ -196,6 +202,7 @@ def calculate_provider_score(
         + streaming
         + free_local
         + quota
+        + token_efficiency
         + cooldown
     )
     if normalize_provider(agent.provider) == "echo":
@@ -210,6 +217,7 @@ def calculate_provider_score(
         streaming=streaming,
         free_local=free_local,
         quota=quota,
+        token_efficiency=token_efficiency,
         cooldown=cooldown,
     )
 

@@ -7,6 +7,50 @@ from typing import Any
 Message = dict[str, Any]
 
 
+class ErrorCategory:
+    """Stable internal error categories for recovery and user messages."""
+
+    PROVIDER = "provider"
+    NETWORK = "network"
+    TIMEOUT = "timeout"
+    RATE_LIMIT = "rate_limit"
+    QUOTA = "quota"
+    CONTEXT_LIMIT = "context_limit"
+    CONFIGURATION = "configuration"
+    PERMISSION = "permission"
+    TOOL = "tool"
+    STREAM = "stream"
+    VALIDATION = "validation"
+    UNKNOWN = "unknown"
+
+
+@dataclass(slots=True)
+class StructuredError:
+    """Provider-neutral error payload used by routers, providers, and tools."""
+
+    category: str
+    code: str
+    message: str
+    retryable: bool = False
+    user_message: str = ""
+    status_code: int | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "category": self.category,
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+            "user_message": self.user_message or self.message,
+        }
+        if self.status_code is not None:
+            data["status_code"] = self.status_code
+        if self.details:
+            data["details"] = self.details
+        return data
+
+
 @dataclass(slots=True)
 class HubRequest:
     """Provider-neutral request used inside the hub."""

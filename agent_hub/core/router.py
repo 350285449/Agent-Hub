@@ -11,9 +11,18 @@ from typing import Any
 from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from ..context import estimate_message_tokens, is_protected_context_message
 from ..debug import debug_dir_for_state, provider_debug_context
+from ..events import (
+    CONTEXT_TRUNCATED,
+    PROVIDER_FAILED,
+    PROVIDER_SELECTED,
+    ROUTER_FALLBACK,
+    STREAM_FAILED,
+    STREAM_STARTED,
+    record_internal_event,
+)
 from ..evaluation import ProviderScoreStore
 from ..mcp import MCPServerRegistry
-from ..models import FailoverEvent, HubRequest, HubResponse, ProviderResult
+from ..models import ErrorCategory, FailoverEvent, HubRequest, HubResponse, ProviderResult, StructuredError
 from ..observability import record_event
 from ..payloads import content_to_text, request_text
 from ..permissions import (
@@ -224,6 +233,22 @@ class RouterError(Exception):
         self.suggested_fix = suggested_fix
         self.status_code = status_code
 
+    def to_structured_error(self) -> StructuredError:
+        details: dict[str, Any] = {}
+        if self.failover:
+            details["failover"] = [event.to_dict() for event in self.failover]
+        if self.suggested_fix:
+            details["suggested_fix"] = self.suggested_fix
+        return StructuredError(
+            category=_router_error_category(self.error_type),
+            code=self.error_type or "router_error",
+            message=str(self),
+            retryable=any(event.retryable for event in self.failover),
+            user_message=_router_user_message(str(self), self.suggested_fix),
+            status_code=self.status_code,
+            details=details,
+        )
+
 
 class AgentRouter:
     def __init__(
@@ -372,14 +397,18 @@ class AgentRouter:
                         "Agent stopped because it hit a token limit; "
                         "retrying with the next configured agent"
                     )
+                    unavailable_until = time.time() + agent.cooldown_seconds
                     self._record_failure(
                         agent,
                         error_type="context_limit",
                         message=reason,
-                        unavailable_until=time.time() + agent.cooldown_seconds,
+                        unavailable_until=unavailable_until,
                         metadata={},
+                        request_id=request_id,
+                        request=provider_request,
+                        routing_mode=decision.routing_mode,
                     )
-                    self._cooldowns[agent.name] = time.time() + agent.cooldown_seconds
+                    self._cooldowns[agent.name] = unavailable_until
                     failover.append(
                         FailoverEvent(
                             agent=agent.name,
@@ -389,6 +418,18 @@ class AgentRouter:
                             error_type="context_limit",
                             unavailable_until=self._cooldowns.get(agent.name),
                         )
+                    )
+                    self._record_internal_event(
+                        ROUTER_FALLBACK,
+                        request_id=request_id,
+                        request=provider_request,
+                        from_agent=agent.name,
+                        from_provider=agent.provider,
+                        from_model=agent.model,
+                        reason=reason,
+                        error_type="context_limit",
+                        next_agent=_next_candidate_name(candidates, agent),
+                        routing_mode=decision.routing_mode,
                     )
                     continue
                 self._record_success(agent, latency, result, effective_request)
@@ -414,6 +455,18 @@ class AgentRouter:
                     failover=[event.to_dict() for event in failover],
                     routing_decision=decision.to_dict(),
                 )
+                self._record_internal_event(
+                    PROVIDER_SELECTED,
+                    request_id=request_id,
+                    request=provider_request,
+                    agent=agent.name,
+                    provider=agent.provider,
+                    model=response.model,
+                    routing_mode=decision.routing_mode,
+                    latency_seconds=round(latency, 4),
+                    failover_count=len(failover),
+                    estimated_tokens=_context_usage(provider_request).get("estimated_input_tokens"),
+                )
                 return response
             except ProviderError as exc:
                 cooldown_seconds = self._cooldown_seconds(agent, exc)
@@ -425,6 +478,9 @@ class AgentRouter:
                     unavailable_until=unavailable_until,
                     status_code=exc.status_code,
                     metadata=exc.metadata or {},
+                    request_id=request_id,
+                    request=provider_request,
+                    routing_mode=decision.routing_mode,
                 )
                 failover.append(
                     FailoverEvent(
@@ -440,6 +496,19 @@ class AgentRouter:
                 )
                 if exc.retryable:
                     self._cooldowns[agent.name] = unavailable_until or time.time()
+                    self._record_internal_event(
+                        ROUTER_FALLBACK,
+                        request_id=request_id,
+                        request=provider_request,
+                        from_agent=agent.name,
+                        from_provider=agent.provider,
+                        from_model=agent.model,
+                        reason=str(exc),
+                        error_type=exc.error_type,
+                        retryable=exc.retryable,
+                        next_agent=_next_candidate_name(candidates, agent),
+                        routing_mode=decision.routing_mode,
+                    )
                     continue
                 self._record_route_event(
                     "routing_failure",
@@ -452,7 +521,12 @@ class AgentRouter:
                     message=str(exc),
                     failover=[event.to_dict() for event in failover],
                 )
-                raise RouterError(str(exc), failover=failover) from exc
+                raise RouterError(
+                    str(exc),
+                    failover=failover,
+                    error_type=exc.error_type,
+                    status_code=exc.status_code,
+                ) from exc
 
         if not tried_any:
             reason = _no_fallback_reason(failover)
@@ -599,6 +673,18 @@ class AgentRouter:
                 )
                 continue
 
+            self._record_internal_event(
+                PROVIDER_SELECTED,
+                request_id=request_id,
+                request=effective_request,
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+                routing_mode=decision.routing_mode,
+                stream_mode="native",
+                failover_count=len(failover),
+                estimated_tokens=decision.estimated_input_tokens,
+            )
             return StreamingRoute(
                 request_id=request_id,
                 session_id=effective_request.session_id,
@@ -659,6 +745,17 @@ class AgentRouter:
             decision=decision,
             stream=True,
         )
+        self._record_internal_event(
+            STREAM_STARTED,
+            request_id=request_id,
+            request=stream_request,
+            agent=agent.name,
+            provider=agent.provider,
+            model=agent.model,
+            routing_mode=decision.routing_mode,
+            stream_mode="native",
+            estimated_tokens=_context_usage(stream_request).get("estimated_input_tokens"),
+        )
         try:
             for chunk in self.provider_manager.stream(agent, stream_request):
                 if not isinstance(chunk, StreamChunk):
@@ -712,6 +809,22 @@ class AgentRouter:
                 unavailable_until=unavailable_until,
                 status_code=exc.status_code,
                 metadata=exc.metadata or {},
+                request_id=request_id,
+                request=stream_request,
+                routing_mode=decision.routing_mode,
+            )
+            self._record_internal_event(
+                STREAM_FAILED,
+                request_id=request_id,
+                request=stream_request,
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+                routing_mode=decision.routing_mode,
+                stream_mode="native",
+                error_type=exc.error_type,
+                message=str(exc),
+                retryable=exc.retryable,
             )
             self._record_route_event(
                 "native_stream_failure",
@@ -727,6 +840,21 @@ class AgentRouter:
         except Exception as exc:
             self._record_failure(
                 agent,
+                error_type="native_stream_error",
+                message=str(exc),
+                request_id=request_id,
+                request=stream_request,
+                routing_mode=decision.routing_mode,
+            )
+            self._record_internal_event(
+                STREAM_FAILED,
+                request_id=request_id,
+                request=stream_request,
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+                routing_mode=decision.routing_mode,
+                stream_mode="native",
                 error_type="native_stream_error",
                 message=str(exc),
             )
@@ -880,6 +1008,21 @@ class AgentRouter:
             model=agent.model,
             **usage,
         )
+        if usage.get("context_reduced"):
+            self._record_internal_event(
+                CONTEXT_TRUNCATED,
+                request_id=request_id,
+                request=prepared,
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+                routing_mode=decision.routing_mode,
+                estimated_input_tokens=usage.get("estimated_input_tokens"),
+                original_input_tokens=usage.get("original_input_tokens"),
+                max_context_tokens=usage.get("max_context_tokens"),
+                compression_ratio=usage.get("compression_ratio"),
+                warnings=usage.get("warnings"),
+            )
         return replace(prepared, metadata=metadata, raw=raw)
 
     def _chat_with_validation(
@@ -1898,6 +2041,25 @@ class AgentRouter:
         except Exception:
             return
 
+    def _record_internal_event(
+        self,
+        name: str,
+        *,
+        request_id: str,
+        request: HubRequest,
+        **data: Any,
+    ) -> None:
+        record_internal_event(
+            self.config.state_dir,
+            name,
+            request_id=request_id,
+            session_id=request.session_id,
+            route=request.route,
+            preferred_agent=request.preferred_agent,
+            api_shape=request.api_shape,
+            **data,
+        )
+
     def _record_success(
         self,
         agent: AgentConfig,
@@ -1934,6 +2096,9 @@ class AgentRouter:
         unavailable_until: float | None = None,
         status_code: int | None = None,
         metadata: dict[str, Any] | None = None,
+        request_id: str | None = None,
+        request: HubRequest | None = None,
+        routing_mode: str | None = None,
     ) -> None:
         health = self._health.setdefault(agent.name, ProviderHealth())
         now = time.time()
@@ -1964,6 +2129,24 @@ class AgentRouter:
         )
         health.failover_events = health.failover_events[-MAX_FAILOVER_HISTORY:]
         self._save_provider_health()
+        if request_id is not None and request is not None:
+            self._record_internal_event(
+                PROVIDER_FAILED,
+                request_id=request_id,
+                request=request,
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+                routing_mode=routing_mode,
+                error_type=error_type,
+                message=message,
+                status_code=status_code,
+                unavailable_until=unavailable_until,
+                failure_count=health.failure_count,
+                degraded=health.is_degraded(),
+                retryable=unavailable_until is not None,
+                metadata=metadata or {},
+            )
 
     def record_tool_result(self, agent_name: str, ok: bool) -> None:
         """Record whether an agent-produced tool call completed successfully."""
@@ -2391,6 +2574,26 @@ def _is_prefix(prefix: list[dict], messages: list[dict]) -> bool:
     )
 
 
+def _context_usage(request: HubRequest) -> dict[str, Any]:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw, dict) else None
+    usage = hub.get("context_usage") if isinstance(hub, dict) else None
+    return dict(usage) if isinstance(usage, dict) else {}
+
+
+def _next_candidate_name(candidates: list[AgentConfig], current: AgentConfig) -> str | None:
+    try:
+        index = next(
+            position for position, agent in enumerate(candidates) if agent.name == current.name
+        )
+    except StopIteration:
+        return None
+    for agent in candidates[index + 1 :]:
+        if agent.enabled:
+            return agent.name
+    return None
+
+
 def estimate_input_tokens(request: HubRequest) -> int:
     return estimate_context_tokens(request)
 
@@ -2545,6 +2748,26 @@ def _route_error_type(failover: list[FailoverEvent]) -> str | None:
     if invalid_events and len(invalid_events) == len(failover):
         return "invalid_provider_response"
     return None
+
+
+def _router_error_category(error_type: str | None) -> str:
+    if error_type in {CONFIGURATION_ERROR, ECHO_DISABLED, NO_TOOL_CAPABLE_MODEL}:
+        return ErrorCategory.CONFIGURATION
+    if error_type in {"permission_required", "permission_denied"}:
+        return ErrorCategory.PERMISSION
+    if error_type == "invalid_provider_response":
+        return ErrorCategory.VALIDATION
+    if error_type == "context_limit":
+        return ErrorCategory.CONTEXT_LIMIT
+    if error_type in {"rate_limited", "quota_exhausted"}:
+        return ErrorCategory.RATE_LIMIT if error_type == "rate_limited" else ErrorCategory.QUOTA
+    return ErrorCategory.PROVIDER if error_type else ErrorCategory.UNKNOWN
+
+
+def _router_user_message(message: str, suggested_fix: str | None) -> str:
+    if suggested_fix:
+        return f"{message} Suggested fix: {suggested_fix}"
+    return message
 
 
 def _route_status_code(error_type: str | None) -> int | None:

@@ -85,6 +85,8 @@ For diagnosis:
 Then reproduce the failing Cline task and inspect `.agent-hub/debug/`. Traces
 are redacted and truncated, and include request IDs, provider request IDs,
 stream IDs, finish reasons, tool calls, routing mode, and token estimates.
+For high-level recovery decisions, inspect `.agent-hub/state/events.jsonl` for
+`provider.failed`, `router.fallback`, `stream.failed`, and `context.truncated`.
 
 Security protections that remain active:
 

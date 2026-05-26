@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import HubConfig
+from ..events import TOOL_EXECUTED, record_internal_event
 from ..models import HubRequest
 from ..observability import record_event
 from .permissions import ToolPermissionLayer
@@ -39,7 +40,7 @@ class ToolExecutionPipeline:
         started = time.time()
         tool = self.registry.get(call.name)
         if tool is None:
-            return ToolResult(
+            result = ToolResult(
                 call_id=call.id,
                 name=call.name,
                 ok=False,
@@ -47,6 +48,8 @@ class ToolExecutionPipeline:
                 started_at=started,
                 finished_at=time.time(),
             )
+            _record(context, "tool_executed", result)
+            return result
         if tool.name != call.name:
             call = ToolCall(
                 id=call.id,
@@ -95,6 +98,19 @@ def _record(context: ToolExecutionContext, event_type: str, result: ToolResult) 
                 "error": result.error,
                 "metadata": result.metadata,
             },
+        )
+        record_internal_event(
+            context.config.state_dir,
+            TOOL_EXECUTED,
+            tool=result.name,
+            call_id=result.call_id,
+            ok=result.ok,
+            error=result.error,
+            event_type=event_type,
+            duration_ms=result.to_dict().get("duration_ms"),
+            result_size=len(result.to_openai_message().get("content", "")),
+            session_id=context.request.session_id if context.request is not None else None,
+            route=context.request.route if context.request is not None else None,
         )
     except Exception:
         return

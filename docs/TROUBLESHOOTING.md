@@ -62,7 +62,9 @@ For a failing provider, temporarily enable:
 ```
 
 Reproduce the issue, then inspect `.agent-hub/debug/` and
-`.agent-hub/state/routing_decisions.jsonl`. Debug traces are redacted and
+`.agent-hub/state/routing_decisions.jsonl`. Also check
+`.agent-hub/state/events.jsonl` for `provider.failed`, `router.fallback`,
+`stream.failed`, and `context.truncated`. Debug traces are redacted and
 truncated, but still show raw provider JSON, malformed stream chunks, finish
 reasons, tool calls, request IDs, provider request IDs, stream IDs, routing mode,
 and token estimates.

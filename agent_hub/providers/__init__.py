@@ -15,7 +15,7 @@ from typing import Any, Iterator, Protocol
 
 from ..config import AgentConfig, normalize_provider
 from ..debug import log_provider_debug_event
-from ..models import HubRequest, ProviderResult
+from ..models import ErrorCategory, HubRequest, ProviderResult, StructuredError
 from ..payloads import content_to_text
 from ..provider_presets import (
     chat_completions_path_for_agent,
@@ -132,6 +132,17 @@ class ProviderError(Exception):
 
     def __str__(self) -> str:
         return self.message
+
+    def to_structured_error(self) -> StructuredError:
+        return StructuredError(
+            category=_provider_error_category(self.error_type),
+            code=self.error_type or "provider_error",
+            message=self.message,
+            retryable=self.retryable,
+            user_message=_provider_user_message(self),
+            status_code=self.status_code,
+            details=dict(self.metadata or {}),
+        )
 
 
 class Provider(ProviderAdapter, Protocol):
@@ -1374,6 +1385,40 @@ def _classify_provider_error(message: str, status_code: int | None = None) -> st
     if status_code == 404:
         return "model_unavailable"
     return "provider_error"
+
+
+def _provider_error_category(error_type: str) -> str:
+    if error_type == "quota_exhausted":
+        return ErrorCategory.QUOTA
+    if error_type == "rate_limited":
+        return ErrorCategory.RATE_LIMIT
+    if error_type == "context_limit":
+        return ErrorCategory.CONTEXT_LIMIT
+    if error_type in {"configuration", "authentication"}:
+        return ErrorCategory.CONFIGURATION
+    if error_type in {"network", "model_unavailable", "temporary_unavailable"}:
+        return ErrorCategory.NETWORK
+    if error_type == "timeout":
+        return ErrorCategory.TIMEOUT
+    if error_type == "invalid_provider_response":
+        return ErrorCategory.VALIDATION
+    return ErrorCategory.PROVIDER
+
+
+def _provider_user_message(error: ProviderError) -> str:
+    if error.error_type == "quota_exhausted":
+        return "The selected provider is out of quota or free-tier credits. Agent Hub will try a fallback model when one is available."
+    if error.error_type == "rate_limited":
+        return "The selected provider is rate-limited. Agent Hub will retry or fail over when possible."
+    if error.error_type == "context_limit":
+        return "The prompt exceeded this provider's context limit. Agent Hub can reduce context or try a larger-context model."
+    if error.error_type == "authentication":
+        return "The provider rejected authentication. Check the configured API key or provider settings."
+    if error.error_type == "configuration":
+        return "The provider is not fully configured. Check Agent Hub settings and API key environment variables."
+    if error.error_type == "invalid_provider_response":
+        return "The provider returned a malformed response. Agent Hub will retry, fail over, or synthesize a safe response."
+    return error.message
 
 
 def _extract_error_message(text: str) -> str:

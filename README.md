@@ -203,6 +203,11 @@ Redacted, truncation-safe traces are written to `.agent-hub/debug/` with
 request, provider, stream, token estimate, finish reason, and tool-call details.
 Keep this off unless you are diagnosing provider instability.
 
+Internal stability events are written to `.agent-hub/state/events.jsonl`.
+Important event names include `provider.selected`, `provider.failed`,
+`router.fallback`, `tool.executed`, `stream.started`, `stream.failed`, and
+`context.truncated`.
+
 Provider trust levels are:
 
 - `LOCAL`: Ollama/local research/localhost or private OpenAI-compatible
@@ -419,6 +424,11 @@ The doctor report includes config path, backend version, Python runtime,
 enabled providers, missing API keys, local model servers, Cline/Claude
 endpoints, approval mode, safe mode, token optimization mode, context
 diagnostics, likely problems, and exact fixes.
+
+Router/provider errors also expose structured categories internally
+(`configuration`, `provider`, `rate_limit`, `quota`, `context_limit`,
+`validation`, `stream`, and `tool`) so recovery logic can distinguish retryable
+provider failures from user-fixable configuration problems.
 
 Further docs:
 

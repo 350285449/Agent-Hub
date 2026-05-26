@@ -47,6 +47,10 @@ when possible or converted to `{}`, missing tool names are skipped, duplicate
 tool-loop iterations are stopped, and oversized tool results are compacted
 before they are sent back to the provider.
 
+Tool execution emits compact internal events to
+`.agent-hub/state/events.jsonl` with the event name `tool.executed`, duration,
+success status, and result size.
+
 ## Provider Response Safety
 
 Before returning OpenAI-compatible, Anthropic, Gemini, Ollama, Groq, or
@@ -86,6 +90,10 @@ Use `validate=true` to add the optional validator stage. Use
 `validation_commands` are configured and shell tools are allowed, workflows run
 those commands through the same shell policy as normal tools.
 
+Workflow extension-point models are available for future planner/reviewer,
+parallel-provider, consensus, and result-merge strategies. They are passive
+configuration objects today and do not change workflow execution behavior.
+
 ## Health
 
 ```sh
@@ -104,6 +112,9 @@ curl http://127.0.0.1:8787/v1/provider-scores
 ```
 
 `/dashboard` renders the same core provider status in lightweight HTML.
+Internal foundation events are stored in `.agent-hub/state/events.jsonl` and
+include `provider.selected`, `provider.failed`, `router.fallback`,
+`stream.started`, `stream.failed`, `tool.executed`, and `context.truncated`.
 
 ## Provider Evaluation
 
