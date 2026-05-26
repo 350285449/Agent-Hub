@@ -12,6 +12,10 @@ Adapters should expose:
 - `stream(request)` only when the provider truly supports native streaming.
 - `supports_streaming()`, `supports_tools()`, `supports_vision()`.
 - `context_limit()` and `cost_estimate()` when known.
+- Optional config fields `cost_per_million_input` and
+  `cost_per_million_output` help adaptive routing prefer cheaper providers
+  when reliability, latency, context, and capability scores are otherwise
+  comparable.
 
 Streaming adapters yield `StreamChunk(text, delta, model, finish_reason, raw)`.
 Do not advertise streaming support unless the provider endpoint can stream
@@ -26,3 +30,7 @@ incremental chunks.
 5. Register the provider in `create_provider()`.
 6. Add config defaults or provider presets if appropriate.
 7. Add tests for payload translation, errors, streaming, and tool handling.
+
+Provider plugins can be described with a manifest under `.agent-hub/plugins`,
+but Agent Hub currently treats plugins as manifest-only metadata and does not
+execute third-party plugin code. See `docs/plugins.md`.

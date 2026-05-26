@@ -55,12 +55,16 @@ Agent-Hub is organized around modular backend systems:
 - Repository context: indexes files, important package/config files, imports,
   changed files, and compact evidence for coding/review/debug/refactor tasks.
 - Provider evaluation: stores benchmark scores and feeds them back into routing.
+- Plugin SDK foundation: discovers local manifest-only provider, tool,
+  workflow, router-strategy, and memory/context plugins without executing
+  third-party code.
 - Dashboard: `/dashboard`, `/v1/status`, `/v1/routing-history`, and
   `/v1/provider-scores` explain model selection and tool/workflow activity.
 
 More detail lives in `docs/architecture.md`, `docs/providers.md`,
 `docs/workflows.md`, `docs/tools.md`, `docs/mcp.md`, `docs/evaluation.md`,
-`docs/install-vsix.md`, and `docs/api.md`.
+`docs/install-vsix.md`, `docs/plugins.md`, `docs/deployment.md`, and
+`docs/api.md`.
 
 ## OpenAI-Compatible Usage
 
@@ -121,6 +125,12 @@ stages are available through request/config flags.
   ]
 }
 ```
+
+Migration note: Phase 2-4 config additions are optional. Existing configs keep
+working; new defaults enable context-cache metadata and plugin discovery only
+for local manifest files. Add `cost_per_million_input` /
+`cost_per_million_output` per provider only when you want cost-aware tie
+breaking.
 
 Run provider evaluation:
 
@@ -471,6 +481,18 @@ python -m agent_hub doctor
 success/failure counts, token usage, and recent failover history. `doctor`
 combines config readiness with the same provider-health and recommendation
 signals.
+
+Additional visibility endpoints:
+
+- `GET /v1/provider-health`
+- `GET /v1/events`
+- `GET /v1/tools`
+- `GET /v1/workflows/status`
+- `GET /v1/plugins`
+
+Deployment templates are included as `Dockerfile`, `docker-compose.yml`,
+`.env.example`, and `examples/agent-hub.production.json`. Community config
+starting points live in `examples/config-*.json`.
 
 ## VS Code Extension
 
@@ -898,7 +920,7 @@ python -m agent_hub recommend --route cloud-agent --prefer coding --needs-tools 
 or call `POST /v1/recommend-model` with `task`, `route`, `limit`, and optional
 `prefer` (`coding`, `reasoning`, or `speed`). Recommendations rank enabled,
 eligible agents using free/paid status, coding/reasoning/speed scores, context
-window, tool support, route order, and recent provider health.
+window, tool support, route order, known token cost, and recent provider health.
 The router uses the same scoring signals during live routing, with an extra
 bonus for tool/function-calling models when the request contains tools or is
 running in agent mode.

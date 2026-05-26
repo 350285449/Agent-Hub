@@ -109,12 +109,19 @@ limits, routing capabilities, context diagnostics, and enabled features.
 curl http://127.0.0.1:8787/v1/status
 curl http://127.0.0.1:8787/v1/routing-history
 curl http://127.0.0.1:8787/v1/provider-scores
+curl http://127.0.0.1:8787/v1/provider-health
+curl http://127.0.0.1:8787/v1/events
+curl http://127.0.0.1:8787/v1/tools
+curl http://127.0.0.1:8787/v1/workflows/status
+curl http://127.0.0.1:8787/v1/plugins
 ```
 
 `/dashboard` renders the same core provider status in lightweight HTML.
 Internal foundation events are stored in `.agent-hub/state/events.jsonl` and
 include `provider.selected`, `provider.failed`, `router.fallback`,
 `stream.started`, `stream.failed`, `tool.executed`, and `context.truncated`.
+`/metrics` also exposes metrics-ready counters for provider failures, routing
+fallbacks, stream failures, context truncation, and tool execution.
 
 ## Provider Evaluation
 

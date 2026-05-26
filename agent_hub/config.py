@@ -60,6 +60,8 @@ class AgentConfig:
     coding_score: float | None = None
     reasoning_score: float | None = None
     speed_score: float | None = None
+    cost_per_million_input: float | None = None
+    cost_per_million_output: float | None = None
     supports_tools: bool | None = None
     supports_json: bool | None = None
     supports_streaming: bool | None = None
@@ -141,6 +143,13 @@ class HubConfig:
     repo_ignore_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_REPO_IGNORE_PATTERNS))
     max_context_tokens: int | None = None
     compatibility_mode: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_COMPATIBILITY_MODE))
+    context_cache_enabled: bool = True
+    context_cache_max_entries: int = 128
+    context_summarization_enabled: bool = False
+    plugin_dirs: list[Path] = field(default_factory=list)
+    plugins_enabled: bool = True
+    enabled_plugins: list[str] = field(default_factory=list)
+    disabled_plugins: list[str] = field(default_factory=list)
     free_only: bool = True
     enable_load_balancing: bool = True
     auto_enable_available_providers: bool = True
@@ -605,6 +614,8 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             coding_score=_optional_float(item.get("coding_score")),
             reasoning_score=_optional_float(item.get("reasoning_score")),
             speed_score=_optional_float(item.get("speed_score")),
+            cost_per_million_input=_optional_float(item.get("cost_per_million_input")),
+            cost_per_million_output=_optional_float(item.get("cost_per_million_output")),
             supports_tools=_optional_bool(item.get("supports_tools")),
             supports_json=_optional_bool(item.get("supports_json")),
             supports_streaming=_optional_bool(item.get("supports_streaming")),
@@ -679,6 +690,30 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         repo_ignore_patterns=_normalize_repo_ignore_patterns(raw.get("repo_ignore_patterns")),
         max_context_tokens=_normalize_optional_context_tokens(raw.get("max_context_tokens")),
         compatibility_mode=_normalize_compatibility_mode(raw.get("compatibility_mode")),
+        context_cache_enabled=_bool_with_default(raw.get("context_cache_enabled"), True),
+        context_cache_max_entries=_normalize_context_cache_max_entries(
+            raw.get("context_cache_max_entries", 128)
+        ),
+        context_summarization_enabled=_bool_with_default(
+            raw.get("context_summarization_enabled"),
+            False,
+        ),
+        plugin_dirs=[
+            Path(str(item))
+            for item in raw.get("plugin_dirs", [])
+            if isinstance(item, (str, os.PathLike)) and str(item).strip()
+        ],
+        plugins_enabled=_bool_with_default(raw.get("plugins_enabled"), True),
+        enabled_plugins=[
+            str(item)
+            for item in raw.get("enabled_plugins", [])
+            if isinstance(item, str) and item.strip()
+        ],
+        disabled_plugins=[
+            str(item)
+            for item in raw.get("disabled_plugins", [])
+            if isinstance(item, str) and item.strip()
+        ],
         free_only=_bool_with_default(raw.get("free_only"), True),
         enable_load_balancing=_bool_with_default(raw.get("enable_load_balancing"), True),
         auto_enable_available_providers=_bool_with_default(
@@ -798,6 +833,13 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "repo_ignore_patterns": config.repo_ignore_patterns,
         "max_context_tokens": config.max_context_tokens,
         "compatibility_mode": config.compatibility_mode,
+        "context_cache_enabled": config.context_cache_enabled,
+        "context_cache_max_entries": config.context_cache_max_entries,
+        "context_summarization_enabled": config.context_summarization_enabled,
+        "plugin_dirs": [str(path) for path in config.plugin_dirs],
+        "plugins_enabled": config.plugins_enabled,
+        "enabled_plugins": config.enabled_plugins,
+        "disabled_plugins": config.disabled_plugins,
         "free_only": config.free_only,
         "enable_load_balancing": config.enable_load_balancing,
         "auto_enable_available_providers": config.auto_enable_available_providers,
@@ -866,6 +908,8 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
                     "coding_score": agent.coding_score,
                     "reasoning_score": agent.reasoning_score,
                     "speed_score": agent.speed_score,
+                    "cost_per_million_input": agent.cost_per_million_input,
+                    "cost_per_million_output": agent.cost_per_million_output,
                     "supports_tools": agent.supports_tools,
                     "supports_json": agent.supports_json,
                     "supports_streaming": agent.supports_streaming,
@@ -898,6 +942,7 @@ def _resolve_config_paths(config: HubConfig, base_dir: Path) -> None:
     config.outbox_dir = _resolve_config_path(config.outbox_dir, base)
     config.archive_dir = _resolve_config_path(config.archive_dir, base)
     config.workspace_dir = _resolve_config_path(config.workspace_dir, base)
+    config.plugin_dirs = [_resolve_config_path(path, base) for path in config.plugin_dirs]
 
 
 def _resolve_config_path(path: Path, base: Path) -> Path:
@@ -1069,6 +1114,14 @@ def _normalize_optional_context_tokens(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return max(1_000, min(number, 1_000_000))
+
+
+def _normalize_context_cache_max_entries(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 128
+    return max(0, min(number, 10_000))
 
 
 def _normalize_compatibility_mode(value: Any) -> dict[str, Any]:

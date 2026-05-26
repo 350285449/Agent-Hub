@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from ..config import HubConfig
 from ..models import FailoverEvent, HubRequest, HubResponse
+from ..observability import record_event
 from ..payloads import request_text
 from ..core.router import AgentRouter
 from ..tools import ToolCall, ToolExecutionContext, ToolExecutionPipeline, create_builtin_registry
@@ -138,6 +139,7 @@ class WorkflowEngine:
         final_response: HubResponse | None = None
 
         _emit(event_sink, "workflow_started", workflow_id=workflow_id, workflow=normalized)
+        self._record_workflow_event("workflow_started", workflow_id=workflow_id, workflow=normalized)
         for index, stage in enumerate(stages, start=1):
             final_response = self._run_model_stage(
                 normalized,
@@ -228,6 +230,13 @@ class WorkflowEngine:
         if request.record_session:
             self.router.session_store.record_turn(request, response)
         _emit(event_sink, "workflow_finished", workflow_id=workflow_id, workflow=normalized)
+        self._record_workflow_event(
+            "workflow_finished",
+            workflow_id=workflow_id,
+            workflow=normalized,
+            final_status=state.final_status,
+            stage_count=len(memory.stage_results),
+        )
         return WorkflowResult(response=response, memory=memory)
 
     def _run_model_stage(
@@ -249,6 +258,15 @@ class WorkflowEngine:
             event_sink,
             "workflow_stage_started",
             workflow_id=workflow_id,
+            stage=stage.name,
+            role=stage.role,
+            index=index,
+            total=total,
+        )
+        self._record_workflow_event(
+            "workflow_stage_started",
+            workflow_id=workflow_id,
+            workflow=normalized,
             stage=stage.name,
             role=stage.role,
             index=index,
@@ -290,7 +308,24 @@ class WorkflowEngine:
             agent=response.agent,
             model=response.model,
         )
+        self._record_workflow_event(
+            "workflow_stage_finished",
+            workflow_id=workflow_id,
+            workflow=normalized,
+            stage=stage.name,
+            role=stage.role,
+            agent=response.agent,
+            provider=response.provider,
+            model=response.model,
+            duration_ms=round((finished - started) * 1000, 2),
+        )
         return response
+
+    def _record_workflow_event(self, event_type: str, **data: Any) -> None:
+        try:
+            record_event(self.config.state_dir, "workflows", {"type": event_type, **data})
+        except Exception:
+            return
 
     def _run_validation_commands(self, memory: WorkflowMemory, workflow_id: str) -> None:
         state = memory.state or WorkflowState()

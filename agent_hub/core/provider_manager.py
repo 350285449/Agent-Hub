@@ -8,6 +8,7 @@ from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from ..models import HubRequest, ProviderResult
 from ..providers import Provider, ProviderError, create_provider
 from ..providers.base import ChatResponse, ProviderAdapter, StreamChunk
+from ..streaming import normalize_stream_chunk
 
 
 ProviderFactory = Callable[[AgentConfig], Provider]
@@ -179,28 +180,12 @@ class ProviderManager:
 
     def _as_stream_chunks(self, adapter: Provider, source: Any) -> Any:
         for item in source:
-            if isinstance(item, StreamChunk):
-                yield item
-                continue
-            if isinstance(item, dict):
-                text = str(item.get("text") or "")
-                delta = item.get("delta") if isinstance(item.get("delta"), dict) else {}
-                if text and "content" not in delta:
-                    delta = {**delta, "content": text}
-                yield StreamChunk(
-                    text=text,
-                    delta=delta,
-                    model=item.get("model") or getattr(adapter, "agent").model,
-                    finish_reason=item.get("finish_reason"),
-                    raw=dict(item),
-                )
-                continue
-            text = str(item)
-            yield StreamChunk(
-                text=text,
-                delta={"content": text},
-                model=getattr(adapter, "agent").model,
+            chunk = normalize_stream_chunk(
+                item,
+                default_model=getattr(adapter, "agent").model,
             )
+            if chunk is not None:
+                yield chunk
 
 
 __all__ = ["ProviderFactory", "ProviderManager", "ProviderModelInfo"]

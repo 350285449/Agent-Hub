@@ -35,6 +35,15 @@
     "reduced_repo_context": true,
     "max_context_tokens": 12000
   },
+  "context_cache_enabled": true,
+  "context_cache_max_entries": 128,
+  "context_summarization_enabled": false,
+  "plugins_enabled": true,
+  "plugin_dirs": [
+    ".agent-hub/plugins"
+  ],
+  "enabled_plugins": [],
+  "disabled_plugins": [],
   "include_raw_responses": false,
   "expose_routing_details": false,
   "default_route": [
@@ -88,6 +97,8 @@
       "enabled": false,
       "free": false,
       "context_window": 128000,
+      "cost_per_million_input": 0,
+      "cost_per_million_output": 0,
       "supports_streaming": true,
       "supports_tools": true
     }

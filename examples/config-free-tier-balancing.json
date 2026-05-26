@@ -1,0 +1,41 @@
+{
+  "free_only": true,
+  "enable_load_balancing": true,
+  "quota_cooldown_seconds": 1800,
+  "rate_limit_cooldown_seconds": 300,
+  "default_route": ["groq-free", "openrouter-free", "ollama-local"],
+  "agents": [
+    {
+      "name": "groq-free",
+      "provider": "groq",
+      "provider_type": "groq",
+      "base_url": "https://api.groq.com/openai/v1",
+      "api_key_env": "GROQ_API_KEY",
+      "model": "llama-3.3-70b-versatile",
+      "free": true,
+      "supports_streaming": true,
+      "context_window": 32768
+    },
+    {
+      "name": "openrouter-free",
+      "provider": "openrouter",
+      "provider_type": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "model": "meta-llama/llama-3.3-70b-instruct:free",
+      "free": true,
+      "supports_streaming": true,
+      "context_window": 32768
+    },
+    {
+      "name": "ollama-local",
+      "provider": "ollama",
+      "provider_type": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen2.5-coder",
+      "free": true,
+      "supports_streaming": true,
+      "context_window": 32768
+    }
+  ]
+}

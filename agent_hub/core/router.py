@@ -46,6 +46,7 @@ from ..repository import repo_context_for_request
 from ..security.audit import record_provider_audit
 from ..session_store import SessionStore
 from ..token_budget import TokenBudgetManager, estimate_messages_tokens
+from ..token_optimizer import ContextCache, TokenOptimizer
 from ..tools import ToolExecutionContext, ToolExecutionPipeline, create_builtin_registry
 from ..tools.loop import (
     ToolLoopMetadata,
@@ -58,7 +59,7 @@ from ..tools.loop import (
     valid_tool_calls,
 )
 from .context import estimate_context_tokens
-from .health import calculate_provider_score, health_state_label
+from .health import calculate_provider_score, health_state_label, provider_cost_efficiency_score
 from .provider_manager import ProviderManager
 
 
@@ -279,6 +280,11 @@ class AgentRouter:
             pass
         self.tool_pipeline = ToolExecutionPipeline(self.tool_registry)
         self.provider_scores = ProviderScoreStore(config.state_dir).load()
+        self.context_cache = ContextCache(
+            config.state_dir / "context_cache.json",
+            enabled=getattr(config, "context_cache_enabled", True),
+            max_entries=getattr(config, "context_cache_max_entries", 128),
+        )
 
     @property
     def provider_factory(self) -> ProviderFactory:
@@ -1086,7 +1092,14 @@ class AgentRouter:
         if original_tokens > effective_cap:
             messages, warnings = _compress_messages_for_budget(messages, effective_cap)
             warnings.append("[Context reduced for provider compatibility]")
-        final_tokens = estimate_message_tokens(messages)
+        optimizer = TokenOptimizer(
+            cache=self.context_cache,
+            summarization_enabled=getattr(self.config, "context_summarization_enabled", False),
+        )
+        optimized = optimizer.optimize(messages, max_context_tokens=effective_cap)
+        messages = optimized.messages
+        warnings.extend(optimized.warnings)
+        final_tokens = optimized.final_tokens
         ratio = round(final_tokens / original_tokens, 4) if original_tokens else 1.0
         usage = {
             "estimated_input_tokens": final_tokens,
@@ -1096,6 +1109,10 @@ class AgentRouter:
             "original_input_tokens": original_tokens,
             "compression_ratio": ratio,
             "context_reduced": bool(warnings),
+            "tokens_saved": optimized.tokens_saved,
+            "context_cache_hit": optimized.cache_hit,
+            "context_cache_enabled": self.context_cache.enabled,
+            "summarization_hook_applied": optimized.summarized,
             "warnings": warnings,
         }
         if messages == request.messages:
@@ -2015,6 +2032,7 @@ class AgentRouter:
             score -= 100.0
         if not self.config.free_only and not is_free_agent(agent):
             score -= 2.5
+        score += provider_cost_efficiency_score(agent)
         evaluation = self.provider_scores.get(agent.name) if isinstance(self.provider_scores, dict) else None
         if isinstance(evaluation, dict):
             try:

@@ -12,6 +12,7 @@ from .evaluation import ProviderScoreStore
 from .models import HubRequest
 from .observability import metrics_snapshot, permission_snapshot, recent_events, record_event, usage_snapshot
 from .permissions import UNTRUSTED_EXTERNAL
+from .plugins import discover_plugins
 from .payloads import (
     anthropic_message_response,
     anthropic_stream_events,
@@ -98,6 +99,10 @@ BACKEND_FEATURES = {
     "streaming_recovery": True,
     "context_safety_cap": True,
     "repo_ignore_patterns": True,
+    "plugin_sdk_foundation": True,
+    "enterprise_foundation_models": True,
+    "events_endpoint": True,
+    "deployment_templates": True,
 }
 
 
@@ -131,6 +136,21 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return
         if path == "/v1/provider-scores":
             self._send_json(_provider_scores_body(self.server.config))
+            return
+        if path == "/v1/provider-health":
+            self._send_json(_provider_health_body(self.server.config, self.server.router))
+            return
+        if path == "/v1/events":
+            self._send_json(_events_body(self.server.config))
+            return
+        if path == "/v1/tools":
+            self._send_json(_tools_body(self.server.router))
+            return
+        if path == "/v1/workflows/status":
+            self._send_json(_workflow_status_body(self.server.config))
+            return
+        if path == "/v1/plugins":
+            self._send_json(_plugins_body(self.server.config))
             return
         if path == "/health":
             self._send_json(
@@ -199,6 +219,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                         "force_compatibility_streaming": self.server.config.force_compatibility_streaming,
                     },
                     "repo_ignore_patterns": self.server.config.repo_ignore_patterns,
+                    "plugins": _plugins_body(self.server.config),
                     "repository_context_scoring": {
                         "enabled": self.server.config.context_change_bar_enabled,
                         "light_minimum": 3,
@@ -939,8 +960,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             include_routing_details=self.server.config.expose_routing_details,
         ):
             data = event if isinstance(event, str) else json.dumps(event, ensure_ascii=False)
-            self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
-        self.wfile.flush()
+            if not _safe_write(self, f"data: {data}\n\n"):
+                return
+        _safe_flush(self)
 
     def _send_openai_native_stream(self, stream: Any) -> None:
         created = int(time.time())
@@ -1057,9 +1079,11 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             response,
             include_routing_details=self.server.config.expose_routing_details,
         ):
-            self.wfile.write(f"event: {name}\n".encode("utf-8"))
-            self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
-        self.wfile.flush()
+            if not _safe_write(self, f"event: {name}\n"):
+                return
+            if not _safe_write(self, f"data: {json.dumps(event, ensure_ascii=False)}\n\n"):
+                return
+        _safe_flush(self)
 
     def _send_openai_response_stream(self, response: Any) -> None:
         self.send_response(200)
@@ -1075,8 +1099,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             include_routing_details=self.server.config.expose_routing_details,
         ):
             data = event if isinstance(event, str) else json.dumps(event, ensure_ascii=False)
-            self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
-        self.wfile.flush()
+            if not _safe_write(self, f"data: {data}\n\n"):
+                return
+        _safe_flush(self)
 
 
 def serve(config: HubConfig) -> None:
@@ -1253,6 +1278,21 @@ def _safe_header_value(value: Any) -> str:
     return text[:1000]
 
 
+def _safe_write(handler: AgentHubHandler, text: str) -> bool:
+    try:
+        handler.wfile.write(text.encode("utf-8"))
+        return True
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        return False
+
+
+def _safe_flush(handler: AgentHubHandler) -> None:
+    try:
+        handler.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        return
+
+
 def _response_token_metadata(response: Any) -> dict[str, Any]:
     raw = response.raw if isinstance(getattr(response, "raw", None), dict) else {}
     metadata = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
@@ -1330,6 +1370,48 @@ def _provider_scores_body(config: HubConfig) -> dict[str, Any]:
         ],
         "data": scores,
     }
+
+
+def _provider_health_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
+    health = router.health_snapshot(include_history=True)
+    return {
+        "object": "agent_hub.provider_health",
+        "providers": router.provider_status(),
+        "health": health,
+        "recent_failures": metrics_snapshot(config.state_dir, health).get("recent_failures", []),
+    }
+
+
+def _events_body(config: HubConfig) -> dict[str, Any]:
+    return {
+        "object": "agent_hub.events",
+        "events": recent_events(config.state_dir, "events", limit=100),
+        "routing": recent_events(config.state_dir, "routing", limit=50),
+        "workflows": recent_events(config.state_dir, "workflows", limit=50),
+    }
+
+
+def _tools_body(router: AgentRouter) -> dict[str, Any]:
+    tools = [tool.to_agent_hub_spec() for tool in router.tool_registry.list()]
+    return {
+        "object": "agent_hub.tools",
+        "count": len(tools),
+        "tools": tools,
+    }
+
+
+def _workflow_status_body(config: HubConfig) -> dict[str, Any]:
+    events = recent_events(config.state_dir, "workflows", limit=100)
+    return {
+        "object": "agent_hub.workflow_status",
+        "recent": events,
+        "active": [],
+        "count": len(events),
+    }
+
+
+def _plugins_body(config: HubConfig) -> dict[str, Any]:
+    return discover_plugins(config).to_dict()
 
 
 def _provider_row_html(row: dict[str, Any]) -> str:

@@ -1,0 +1,25 @@
+{
+  "free_only": false,
+  "default_route": ["openai-mini", "anthropic-sonnet"],
+  "agents": [
+    {
+      "name": "openai-mini",
+      "provider": "openai",
+      "model": "gpt-4.1-mini",
+      "api_key_env": "OPENAI_API_KEY",
+      "supports_streaming": true,
+      "supports_tools": true,
+      "context_window": 128000,
+      "cost_per_million_input": 0.4,
+      "cost_per_million_output": 1.6
+    },
+    {
+      "name": "anthropic-sonnet",
+      "provider": "anthropic",
+      "model": "claude-sonnet-4",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "supports_tools": true,
+      "context_window": 200000
+    }
+  ]
+}

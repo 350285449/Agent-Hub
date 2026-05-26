@@ -1,0 +1,15 @@
+{
+  "approval_mode": "auto",
+  "cline_compatibility_mode": true,
+  "force_compatibility_streaming": true,
+  "tool_loop_enabled_for_cline": false,
+  "compatibility_mode": {
+    "minimal_tool_schema": true,
+    "reduced_repo_context": true,
+    "max_context_tokens": 12000
+  },
+  "default_route": ["local-coder", "cloud-coder"],
+  "routes": [
+    {"name": "coding", "keywords": ["code", "fix", "debug", "test"], "agents": ["local-coder", "cloud-coder"]}
+  ]
+}

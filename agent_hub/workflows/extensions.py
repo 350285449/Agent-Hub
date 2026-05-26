@@ -4,6 +4,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+PLANNER_ROLE = "planner"
+REVIEWER_ROLE = "reviewer"
+WORKER_ROLE = "worker"
+
+
 @dataclass(slots=True)
 class ProviderCallPlan:
     """Declarative hook for future parallel provider calls."""
@@ -80,11 +85,39 @@ class WorkflowExtensionPoints:
             "merge": self.merge.to_dict(),
         }
 
+    @classmethod
+    def planner_reviewer(
+        cls,
+        *,
+        planner_agent: str | None = None,
+        reviewer_agent: str | None = None,
+    ) -> "WorkflowExtensionPoints":
+        assignments = {
+            role: agent
+            for role, agent in {
+                PLANNER_ROLE: planner_agent,
+                REVIEWER_ROLE: reviewer_agent,
+            }.items()
+            if agent
+        }
+        plans = [
+            ProviderCallPlan(agent_names=[planner_agent], role=PLANNER_ROLE)
+            if planner_agent
+            else ProviderCallPlan(role=PLANNER_ROLE),
+            ProviderCallPlan(agent_names=[reviewer_agent], role=REVIEWER_ROLE)
+            if reviewer_agent
+            else ProviderCallPlan(role=REVIEWER_ROLE),
+        ]
+        return cls(provider_calls=plans, roles=RoleStrategy(assignments=assignments))
+
 
 __all__ = [
     "ConsensusStrategy",
     "MergeStrategy",
+    "PLANNER_ROLE",
     "ProviderCallPlan",
+    "REVIEWER_ROLE",
     "RoleStrategy",
+    "WORKER_ROLE",
     "WorkflowExtensionPoints",
 ]

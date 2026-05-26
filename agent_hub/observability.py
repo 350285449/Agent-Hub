@@ -12,9 +12,11 @@ STREAM_FILES = {
     "requests": "request_trace.jsonl",
     "routing": "routing_decisions.jsonl",
     "events": "events.jsonl",
+    "logs": "structured_logs.jsonl",
     "permissions": "permission_audit.jsonl",
     "security_audit": "security_audit.jsonl",
     "tools": "tool_execution_history.jsonl",
+    "workflows": "workflow_execution.jsonl",
 }
 
 
@@ -78,6 +80,10 @@ def metrics_snapshot(state_dir: str | Path, provider_health: dict[str, dict[str,
     usage = usage_snapshot(state_dir, provider_health)
     available = sum(1 for row in provider_health.values() if row.get("available"))
     degraded = sum(1 for row in provider_health.values() if row.get("degraded"))
+    routing = recent_events(state_dir, "routing", limit=50)
+    requests = recent_events(state_dir, "requests", limit=50)
+    internal = recent_events(state_dir, "events", limit=MAX_RECENT_EVENTS)
+    workflows = recent_events(state_dir, "workflows", limit=50)
     return {
         "object": "agent_hub.metrics",
         "providers_total": len(provider_health),
@@ -90,8 +96,47 @@ def metrics_snapshot(state_dir: str | Path, provider_health: dict[str, dict[str,
             "tool_executions": usage["tool_executions"],
             "permission_events": usage["permission_events"],
         },
-        "routing_decisions": recent_events(state_dir, "routing", limit=50),
-        "request_traces": recent_events(state_dir, "requests", limit=50),
+        "counters": metrics_counters(provider_health, internal_events=internal),
+        "recent_failures": _recent_failures(provider_health, internal),
+        "workflow_events": workflows,
+        "routing_decisions": routing,
+        "request_traces": requests,
+        "internal_events": internal[-50:],
+    }
+
+
+def record_structured_log(
+    state_dir: str | Path,
+    level: str,
+    message: str,
+    **fields: Any,
+) -> None:
+    record_event(
+        state_dir,
+        "logs",
+        {
+            "type": "log",
+            "level": str(level or "info").lower(),
+            "message": message,
+            **fields,
+        },
+    )
+
+
+def metrics_counters(
+    provider_health: dict[str, dict[str, Any]],
+    *,
+    internal_events: list[dict[str, Any]] | None = None,
+) -> dict[str, int]:
+    internal_events = internal_events or []
+    return {
+        "provider_successes": sum(_safe_int(row.get("success_count")) for row in provider_health.values()),
+        "provider_failures": sum(_safe_int(row.get("failure_count")) for row in provider_health.values()),
+        "provider_timeouts": sum(_safe_int(row.get("timeout_count")) for row in provider_health.values()),
+        "routing_fallbacks": sum(1 for event in internal_events if event.get("name") == "router.fallback"),
+        "stream_failures": sum(1 for event in internal_events if event.get("name") == "stream.failed"),
+        "context_truncations": sum(1 for event in internal_events if event.get("name") == "context.truncated"),
+        "tool_executions": sum(1 for event in internal_events if event.get("name") == "tool.executed"),
     }
 
 
@@ -134,3 +179,19 @@ def _safe_int(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _recent_failures(
+    provider_health: dict[str, dict[str, Any]],
+    internal_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    failures = [
+        event
+        for event in internal_events
+        if event.get("name") in {"provider.failed", "stream.failed"}
+    ]
+    for row in provider_health.values():
+        for event in row.get("failover_events", []) or []:
+            if isinstance(event, dict):
+                failures.append(event)
+    return failures[-25:]

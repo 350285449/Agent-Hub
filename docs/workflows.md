@@ -42,3 +42,10 @@ context, making execution explainable and repeatable.
 
 The workflow state records `stages`, `retries`, `files_touched`,
 `validation_result`, and `final_status`.
+
+Workflow execution events are written to
+`.agent-hub/state/workflow_execution.jsonl` and surfaced by
+`GET /v1/workflows/status`. Passive extension-point models are available for
+planner/reviewer roles, parallel provider calls, consensus/voting, and result
+merging; they are SDK foundation objects and do not change deterministic
+workflow execution yet.

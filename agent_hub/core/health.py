@@ -81,6 +81,7 @@ class ProviderScore:
     streaming: float
     free_local: float
     quota: float
+    cost_efficiency: float
     token_efficiency: float
     cooldown: float
 
@@ -160,6 +161,7 @@ def calculate_provider_score(
     if streaming_speed:
         streaming += min(4.0, streaming_speed / 25.0)
     free_local = 6.0 if is_free_agent(agent) or _is_local_or_private_agent(agent) else 0.0
+    cost_efficiency = provider_cost_efficiency_score(agent)
     quota = 0.0
     token_efficiency = 0.0
     cooldown = 0.0
@@ -201,6 +203,7 @@ def calculate_provider_score(
         + tool_support
         + streaming
         + free_local
+        + cost_efficiency
         + quota
         + token_efficiency
         + cooldown
@@ -217,9 +220,40 @@ def calculate_provider_score(
         streaming=streaming,
         free_local=free_local,
         quota=quota,
+        cost_efficiency=cost_efficiency,
         token_efficiency=token_efficiency,
         cooldown=cooldown,
     )
+
+
+def provider_cost_efficiency_score(agent: AgentConfig) -> float:
+    """Return a small routing bonus for low known token cost."""
+
+    input_cost = _optional_cost(getattr(agent, "cost_per_million_input", None))
+    output_cost = _optional_cost(getattr(agent, "cost_per_million_output", None))
+    costs = [value for value in (input_cost, output_cost) if value is not None]
+    if not costs:
+        return 0.0
+    average = sum(costs) / len(costs)
+    if average <= 0:
+        return 5.0
+    if average <= 0.25:
+        return 4.0
+    if average <= 1.0:
+        return 3.0
+    if average <= 5.0:
+        return 1.5
+    if average <= 15.0:
+        return 0.5
+    return -2.0
+
+
+def _optional_cost(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def health_to_state(health: Any) -> dict[str, Any]:
@@ -294,4 +328,5 @@ __all__ = [
     "calculate_provider_score",
     "health_state_label",
     "health_to_state",
+    "provider_cost_efficiency_score",
 ]

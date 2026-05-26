@@ -12,3 +12,8 @@ approval for risky operations and blocks critical commands.
 
 API keys saved through the VS Code extension are stored in VS Code Secret
 Storage and injected into the backend environment when the server is started.
+
+Provider keys and authorization-like headers are masked before being exposed by
+security helper models. Plugin discovery is sandboxed to configured local
+plugin directories and is manifest-only: Agent Hub validates plugin metadata and
+entrypoint paths but does not execute plugin code.
