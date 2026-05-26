@@ -22,6 +22,7 @@ from .payloads import (
 from .core.router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
 from .team_agent_runner import TeamAgentRunner
 from .version import backend_version, build_metadata, config_runtime_hash
+from .workflows import WorkflowEngine
 
 
 BACKEND_VERSION = backend_version()
@@ -47,6 +48,8 @@ BACKEND_FEATURES = {
     "persistent_provider_health": True,
     "adaptive_latency_routing": True,
     "provider_health_metrics": True,
+    "provider_health_scoring": True,
+    "native_provider_streaming": True,
     "shell_command_permission_policy": True,
     "agent_hub_model_aliases": True,
     "openai_tool_call_passthrough": True,
@@ -80,6 +83,9 @@ BACKEND_FEATURES = {
     "cline_compatibility_mode": True,
     "protected_context_categories": True,
     "context_debug_endpoints": True,
+    "context_engine_v2": True,
+    "deterministic_workflows": True,
+    "mcp_tool_compatibility_layer": True,
 }
 
 
@@ -90,6 +96,7 @@ class AgentHubHTTPServer(ThreadingHTTPServer):
         self.router = AgentRouter(config)
         self.agent_runner = AgentRunner(config, self.router)
         self.team_agent_runner = TeamAgentRunner(config, self.router)
+        self.workflow_engine = WorkflowEngine(config, self.router)
         self.debug_requests: list[dict[str, Any]] = []
 
 
@@ -180,7 +187,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "workspace_dir": str(self.server.config.workspace_dir),
                     "initialization": self.server.config.initialization_report,
                     "provider_health": self.server.router.health_snapshot(),
-                    "providers": self.server.router.provider_manager.available_models(),
+                    "providers": self.server.router.provider_status(),
                     "capability_graph": self.server.router.capability_graph(),
                     "active_providers": _active_provider_names(
                         self.server.config,
@@ -329,6 +336,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 agent_mode_default=True,
             )
             return
+        if path.startswith("/v1/workflows/"):
+            workflow = path.rsplit("/", 1)[-1]
+            self._handle_workflow(payload, workflow)
+            return
         if path in {"/v1/recommend-model", "/api/v1/recommend-model"}:
             self._handle_recommendation(payload)
             return
@@ -388,6 +399,28 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             }
         )
 
+    def _handle_workflow(self, payload: dict[str, Any], workflow: str) -> None:
+        payload = _payload_with_header_metadata(payload, self.headers)
+        request = request_from_payload(payload, api_shape="native")
+        try:
+            result = self.server.workflow_engine.execute(workflow, request)
+        except ValueError as exc:
+            self._send_json({"error": {"message": str(exc), "type": "unknown_workflow"}}, status=404)
+            return
+        except RouterError as exc:
+            self._send_json(
+                {
+                    "error": {"message": str(exc), "type": getattr(exc, "error_type", None) or "workflow_route_error"},
+                    "failover": [event.to_dict() for event in exc.failover],
+                },
+                status=getattr(exc, "status_code", None) or 503,
+            )
+            return
+        self._send_json(
+            result.to_dict(include_routing_details=self.server.config.expose_routing_details),
+            headers=_response_headers(result.response, self.server.router),
+        )
+
     def log_message(self, format: str, *args: Any) -> None:
         if self.server.config.include_raw_responses:
             super().log_message(format, *args)
@@ -435,8 +468,13 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 agent_mode=_wants_agent_mode(payload, default=agent_mode_default),
             )
             return
+        mode = _payload_mode(payload, default_agent=agent_mode_default)
+        if request.stream and response_shape == "openai-chat" and mode == "route":
+            native_stream = self.server.router.native_stream(request)
+            if native_stream is not None:
+                self._send_openai_native_stream(native_stream)
+                return
         try:
-            mode = _payload_mode(payload, default_agent=agent_mode_default)
             if mode == "group-agent":
                 response = self.server.team_agent_runner.run(request)
             elif mode == "agent":
@@ -670,7 +708,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 "X-Agent-Hub-Active-Model, X-Agent-Hub-Requests-Remaining, "
                 "X-Agent-Hub-Tokens-Remaining, X-Agent-Hub-Credits-Remaining, "
                 "X-Agent-Hub-Quota-Remaining, X-Agent-Hub-Reset-At, "
-                "X-Agent-Hub-Cooldown-Until, X-Agent-Hub-Fallback-Models"
+                "X-Agent-Hub-Cooldown-Until, X-Agent-Hub-Fallback-Models, "
+                "X-Agent-Hub-Stream-Mode, X-Agent-Hub-Provider-Score"
             ),
         )
 
@@ -775,6 +814,91 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             data = event if isinstance(event, str) else json.dumps(event, ensure_ascii=False)
             self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
         self.wfile.flush()
+
+    def _send_openai_native_stream(self, stream: Any) -> None:
+        created = int(time.time())
+        chunk_id = f"chatcmpl-{stream.request_id}"
+        model = stream.public_model or stream.model
+        saw_finish = False
+        client_connected = True
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Agent-Hub-Stream-Mode", "native")
+        self._send_common_headers()
+        for name, value in _stream_response_headers(stream, self.server.router).items():
+            self.send_header(name, value)
+        self.end_headers()
+
+        def write_data(data: dict[str, Any] | str) -> None:
+            nonlocal client_connected
+            if not client_connected:
+                return
+            try:
+                payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                client_connected = False
+
+        write_data(
+            {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            }
+        )
+        try:
+            for chunk in stream.chunks:
+                if not client_connected:
+                    break
+                delta = dict(chunk.delta or {})
+                if chunk.text and "content" not in delta:
+                    delta["content"] = chunk.text
+                finish_reason = chunk.finish_reason
+                if finish_reason:
+                    saw_finish = True
+                if not delta and not finish_reason:
+                    continue
+                write_data(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": chunk.model or model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": delta,
+                                "finish_reason": finish_reason,
+                            }
+                        ],
+                    }
+                )
+            if client_connected and not saw_finish:
+                write_data(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    }
+                )
+        except Exception as exc:
+            write_data(
+                {
+                    "error": {
+                        "message": str(exc),
+                        "type": "agent_hub_native_stream_error",
+                    }
+                }
+            )
+        finally:
+            write_data("[DONE]")
 
     def _send_anthropic_stream(self, response: Any) -> None:
         self.send_response(200)
@@ -944,6 +1068,31 @@ def _response_headers(response: Any, router: AgentRouter) -> dict[str, str]:
         "X-AgentHub-Permission-Status": permission_status,
         "X-AgentHub-Safe-Mode": safe_mode,
         "X-AgentHub-Context-Warning": context_warning,
+    }
+    return {
+        name: _safe_header_value(value)
+        for name, value in values.items()
+        if _safe_header_value(value)
+    }
+
+
+def _stream_response_headers(stream: Any, router: AgentRouter) -> dict[str, str]:
+    health = router.health_snapshot().get(stream.agent.name, {})
+    fallback_models = [
+        event.model
+        for event in stream.failover
+        if event and event.model
+    ]
+    values = {
+        "X-Agent-Hub-Agent": stream.agent.name,
+        "X-Agent-Hub-Provider": stream.agent.provider,
+        "X-Agent-Hub-Model": stream.model,
+        "X-Agent-Hub-Active-Model": stream.model,
+        "X-Agent-Hub-Provider-Score": health.get("score"),
+        "X-Agent-Hub-Fallback-Models": ",".join(fallback_models),
+        "X-AgentHub-Provider": stream.agent.provider,
+        "X-AgentHub-Model": stream.model,
+        "X-AgentHub-Fallback": ",".join(fallback_models),
     }
     return {
         name: _safe_header_value(value)

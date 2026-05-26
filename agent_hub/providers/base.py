@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Iterable
 from typing import Any, Protocol, runtime_checkable
 
 from ..config import AgentConfig, is_free_agent
@@ -190,7 +191,7 @@ class ProviderAdapter(Protocol):
     def chat(self, request: ChatRequest | HubRequest) -> ChatResponse:
         ...
 
-    def stream(self, request: ChatRequest | HubRequest) -> Any:
+    def stream(self, request: ChatRequest | HubRequest) -> Iterable["StreamChunk"]:
         ...
 
     def health_check(self) -> ProviderHealth:
@@ -245,7 +246,7 @@ class BaseProviderAdapter:
         result = self.complete(hub_request)
         return self.normalize_response(result)
 
-    def stream(self, request: ChatRequest | HubRequest) -> Any:
+    def stream(self, request: ChatRequest | HubRequest) -> Iterable[StreamChunk]:
         if not self.supports_streaming():
             raise NotImplementedError(f"{self.name} does not support streaming")
         raise NotImplementedError(f"{self.name} has not implemented native streaming yet")

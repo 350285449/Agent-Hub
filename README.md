@@ -33,6 +33,112 @@ proprietary vendor models.
 - Session logs: `.agent-hub/state/sessions/*.json`
 - Context diagnostics: `GET /debug/context` and `POST /debug/request`
 
+## Architecture Overview
+
+Agent-Hub is organized around modular backend systems:
+
+- Router: ranks providers by route, task type, health score, context window,
+  streaming support, tool support, quota state, and user preference.
+- Provider manager: bridges legacy `complete()` adapters with strict
+  `chat()` / `stream()` adapters.
+- Provider adapters: isolate OpenAI, OpenAI-compatible, Ollama, Anthropic,
+  Gemini, local research, and debug echo behavior.
+- Streaming system: uses native provider streams when supported and preserves
+  compatibility streaming as a fallback.
+- Health system: persists latency, reliability, cooldowns, quota state,
+  streaming speed, and tool-call reliability between restarts.
+- Context engine: estimates tokens, summarizes old messages, preserves recent
+  and protected context, and tracks repository memory.
+- Workflow engine: runs deterministic Planner -> Worker -> Reviewer workflows.
+- Tool layer: exposes MCP-shaped tools, registry, permission checks, execution
+  events, and OpenAI-compatible tool schemas.
+
+More detail lives in `docs/architecture.md`, `docs/providers.md`,
+`docs/workflows.md`, `docs/tools.md`, and `docs/api.md`.
+
+## OpenAI-Compatible Usage
+
+Chat completions:
+
+```sh
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"agent-hub-coding","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Streaming:
+
+```sh
+curl -N http://127.0.0.1:8787/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"agent-hub-coding","stream":true,"messages":[{"role":"user","content":"Write a plan"}]}'
+```
+
+Streaming responses include `X-Agent-Hub-Stream-Mode: native` when the selected
+provider supports true token streaming, otherwise `compatibility`.
+
+## Workflows
+
+Workflow endpoints are available for coding tasks:
+
+- `POST /v1/workflows/code`
+- `POST /v1/workflows/review`
+- `POST /v1/workflows/debug`
+- `POST /v1/workflows/explain`
+- `POST /v1/workflows/refactor`
+
+Each workflow is deterministic and explainable: planner, worker, reviewer.
+
+## Configuration Example
+
+```json
+{
+  "free_only": true,
+  "expose_routing_details": false,
+  "approval_mode": "ask",
+  "routes": [{"name": "coding", "agents": ["ollama-qwen-coder", "custom-local"]}],
+  "agents": [
+    {
+      "name": "custom-local",
+      "provider": "openai-compatible",
+      "model": "local-model",
+      "base_url": "http://127.0.0.1:8000",
+      "supports_streaming": true,
+      "supports_tools": true,
+      "context_window": 32768
+    }
+  ]
+}
+```
+
+Keep real `agent-hub.config.json`, backups, logs, state folders, provider health
+state, `.vsix` packages, and API keys out of git. Use
+`agent-hub.config.example.json` for shareable examples.
+
+## Cline And Continue
+
+Cline:
+
+- Base URL: `http://127.0.0.1:8787/v1`
+- API key: any local placeholder
+- Model: `agent-hub-coding`
+
+Continue:
+
+```json
+{
+  "title": "Agent-Hub",
+  "provider": "openai",
+  "model": "agent-hub-coding",
+  "apiBase": "http://127.0.0.1:8787/v1",
+  "apiKey": "local"
+}
+```
+
+Supported provider families include OpenAI, OpenAI-compatible local/cloud
+servers, Ollama, OpenRouter, Groq, Anthropic, Gemini, local research, and echo
+diagnostics.
+
 ## Quick Start
 
 Fresh clone on Windows:

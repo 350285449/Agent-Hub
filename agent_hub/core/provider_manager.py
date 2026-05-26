@@ -7,7 +7,7 @@ from typing import Any
 from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from ..models import HubRequest, ProviderResult
 from ..providers import Provider, ProviderError, create_provider
-from ..providers.base import ChatResponse, ProviderAdapter
+from ..providers.base import ChatResponse, ProviderAdapter, StreamChunk
 
 
 ProviderFactory = Callable[[AgentConfig], Provider]
@@ -103,7 +103,7 @@ class ProviderManager:
                 retryable=False,
                 error_type="configuration",
             )
-        return stream(request)
+        return self._as_stream_chunks(adapter, stream(request))
 
     def provider_names(self, *, available_only: bool = False) -> list[str]:
         rows = self.models(include_unavailable=not available_only)
@@ -176,6 +176,31 @@ class ProviderManager:
             retryable=False,
             error_type="invalid_provider_response",
         )
+
+    def _as_stream_chunks(self, adapter: Provider, source: Any) -> Any:
+        for item in source:
+            if isinstance(item, StreamChunk):
+                yield item
+                continue
+            if isinstance(item, dict):
+                text = str(item.get("text") or "")
+                delta = item.get("delta") if isinstance(item.get("delta"), dict) else {}
+                if text and "content" not in delta:
+                    delta = {**delta, "content": text}
+                yield StreamChunk(
+                    text=text,
+                    delta=delta,
+                    model=item.get("model") or getattr(adapter, "agent").model,
+                    finish_reason=item.get("finish_reason"),
+                    raw=dict(item),
+                )
+                continue
+            text = str(item)
+            yield StreamChunk(
+                text=text,
+                delta={"content": text},
+                model=getattr(adapter, "agent").model,
+            )
 
 
 __all__ = ["ProviderFactory", "ProviderManager", "ProviderModelInfo"]

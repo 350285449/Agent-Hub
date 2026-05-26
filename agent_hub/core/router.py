@@ -19,8 +19,11 @@ from ..permissions import (
     provider_permission_request,
 )
 from ..providers import Provider, ProviderError, create_provider
+from ..providers.base import StreamChunk
 from ..session_store import SessionStore
 from ..token_budget import TokenBudgetManager, estimate_messages_tokens
+from .context import estimate_context_tokens
+from .health import calculate_provider_score, health_state_label
 from .provider_manager import ProviderManager
 
 
@@ -70,6 +73,27 @@ class RoutingDecision:
             "fallback_chain": list(self.fallback_chain),
             "estimated_input_tokens": self.estimated_input_tokens,
         }
+
+
+@dataclass(slots=True)
+class StreamingRoute:
+    """Native streaming route selected before HTTP SSE emission."""
+
+    request_id: str
+    session_id: str
+    agent: AgentConfig
+    public_model: str
+    decision: RoutingDecision
+    failover: list[FailoverEvent]
+    chunks: Any
+
+    @property
+    def provider(self) -> str:
+        return self.agent.provider
+
+    @property
+    def model(self) -> str:
+        return self.agent.model
 
 
 @dataclass(slots=True)
@@ -410,6 +434,213 @@ class AgentRouter:
             suggested_fix=_suggested_fix(error_type, failover),
             status_code=_route_status_code(error_type),
         )
+
+    def native_stream(self, request: HubRequest) -> StreamingRoute | None:
+        """Return a provider-native stream route, or None for compatibility streaming."""
+
+        effective_request = self._with_session_history(request)
+        request_id = f"hub-{uuid.uuid4().hex}"
+        decision = self.decide(effective_request)
+        candidates = self._candidate_agents(effective_request, decision=decision)
+        failover: list[FailoverEvent] = []
+        self._record_route_event(
+            "stream_request_started",
+            request_id=request_id,
+            request=effective_request,
+            routing_decision=decision.to_dict(),
+            candidates=[agent.name for agent in candidates],
+        )
+
+        for agent in candidates:
+            if self._is_on_cooldown(agent.name) and len(candidates) > 1:
+                failover.append(
+                    FailoverEvent(
+                        agent=agent.name,
+                        provider=agent.provider,
+                        model=agent.model,
+                        reason="Agent is in temporary cooldown from a previous failure",
+                        unavailable_until=self._cooldown_until(agent.name),
+                    )
+                )
+                continue
+
+            skip_reason = self._preflight_skip_reason(agent, effective_request)
+            if skip_reason:
+                failover.append(
+                    FailoverEvent(
+                        agent=agent.name,
+                        provider=agent.provider,
+                        model=agent.model,
+                        reason=skip_reason,
+                        retryable=False,
+                        error_type=self._preflight_error_type(agent, effective_request, skip_reason),
+                    )
+                )
+                continue
+
+            permission = self._provider_permission_decision(agent, effective_request)
+            if permission is not None and not permission.allowed:
+                failover.append(
+                    FailoverEvent(
+                        agent=agent.name,
+                        provider=agent.provider,
+                        model=agent.model,
+                        reason=permission.reason or "Permission required before using this provider.",
+                        retryable=False,
+                        error_type="permission_required" if permission.requires_approval else "permission_denied",
+                        metadata={"permission": permission.request.to_dict() if permission.request else None},
+                    )
+                )
+                continue
+
+            if not self._adapter_supports_native_streaming(agent):
+                failover.append(
+                    FailoverEvent(
+                        agent=agent.name,
+                        provider=agent.provider,
+                        model=agent.model,
+                        reason="Provider adapter does not advertise native streaming support.",
+                        retryable=False,
+                        error_type="native_streaming_unavailable",
+                    )
+                )
+                continue
+
+            return StreamingRoute(
+                request_id=request_id,
+                session_id=effective_request.session_id,
+                agent=agent,
+                public_model=_public_model_name(effective_request),
+                decision=decision,
+                failover=failover,
+                chunks=self._native_stream_chunks(
+                    request_id=request_id,
+                    request=effective_request,
+                    agent=agent,
+                    failover=failover,
+                    decision=decision,
+                ),
+            )
+
+        self._record_route_event(
+            "stream_fallback_to_compatibility",
+            request_id=request_id,
+            request=effective_request,
+            routing_decision=decision.to_dict(),
+            failover=[event.to_dict() for event in failover],
+        )
+        return None
+
+    def _adapter_supports_native_streaming(self, agent: AgentConfig) -> bool:
+        if not agent.supports_streaming:
+            return False
+        try:
+            adapter = self.provider_manager.create(agent)
+        except ProviderError:
+            return False
+        supports = getattr(adapter, "supports_streaming", None)
+        stream = getattr(adapter, "stream", None)
+        try:
+            return callable(stream) and callable(supports) and bool(supports())
+        except Exception:
+            return False
+
+    def _native_stream_chunks(
+        self,
+        *,
+        request_id: str,
+        request: HubRequest,
+        agent: AgentConfig,
+        failover: list[FailoverEvent],
+        decision: RoutingDecision,
+    ) -> Any:
+        started = time.perf_counter()
+        text_parts: list[str] = []
+        usage_tokens = 0
+        model = agent.model
+        finish_reason: str | None = None
+        try:
+            for chunk in self.provider_manager.stream(agent, request):
+                if not isinstance(chunk, StreamChunk):
+                    chunk = StreamChunk(text=str(chunk), delta={"content": str(chunk)}, model=agent.model)
+                if chunk.text:
+                    text_parts.append(chunk.text)
+                    usage_tokens += max(1, len(chunk.text) // 4)
+                if chunk.model:
+                    model = chunk.model
+                if chunk.finish_reason:
+                    finish_reason = chunk.finish_reason
+                yield chunk
+            latency = time.perf_counter() - started
+            result = ProviderResult(
+                text="".join(text_parts),
+                model=model,
+                raw={"agent_hub_stream": {"mode": "native"}},
+                usage={"completion_tokens": usage_tokens, "output_tokens": usage_tokens},
+                finish_reason=finish_reason or "stop",
+            )
+            self._record_success(agent, latency, result, request)
+            response = self._response_from_result(
+                request_id=request_id,
+                request=request,
+                agent=agent,
+                result=result,
+                failover=failover,
+                decision=decision,
+            )
+            if request.record_session:
+                self.session_store.record_turn(request, response)
+            self._record_route_event(
+                "native_stream_finished",
+                request_id=request_id,
+                request=request,
+                agent=agent.name,
+                provider=agent.provider,
+                model=model,
+                latency_seconds=round(latency, 4),
+                stream_mode="native",
+                failover=[event.to_dict() for event in failover],
+                routing_decision=decision.to_dict(),
+            )
+        except ProviderError as exc:
+            cooldown_seconds = self._cooldown_seconds(agent, exc)
+            unavailable_until = time.time() + cooldown_seconds if exc.retryable and cooldown_seconds > 0 else None
+            self._record_failure(
+                agent,
+                error_type=exc.error_type,
+                message=str(exc),
+                unavailable_until=unavailable_until,
+                status_code=exc.status_code,
+                metadata=exc.metadata or {},
+            )
+            self._record_route_event(
+                "native_stream_failure",
+                request_id=request_id,
+                request=request,
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+                error_type=exc.error_type,
+                message=str(exc),
+            )
+            raise
+        except Exception as exc:
+            self._record_failure(
+                agent,
+                error_type="native_stream_error",
+                message=str(exc),
+            )
+            self._record_route_event(
+                "native_stream_failure",
+                request_id=request_id,
+                request=request,
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+                error_type="native_stream_error",
+                message=str(exc),
+            )
+            raise
 
     def _provider_permission_decision(self, agent: AgentConfig, request: HubRequest):
         permission_request = provider_permission_request(agent, request)
@@ -801,8 +1032,10 @@ class AgentRouter:
                 available = False
             if agent and _is_echo_agent(agent) and not self.config.debug_echo_enabled:
                 available = False
+            score = calculate_provider_score(agent, health) if agent else None
             row: dict[str, Any] = {
                 "agent": name,
+                "name": name,
                 "provider": agent.provider if agent else "",
                 "provider_name": agent.provider if agent else "",
                 "provider_type": (
@@ -812,6 +1045,9 @@ class AgentRouter:
                 "model": agent.model if agent else "",
                 "available": available,
                 "degraded": health.is_degraded(now),
+                "streaming": bool(agent.supports_streaming) if agent else False,
+                "supports_streaming": bool(agent.supports_streaming) if agent else False,
+                "tool_support": bool(agent.supports_tools or agent.supports_function_calling) if agent else False,
                 "quota_remaining": health.quota_remaining,
                 "requests_remaining": health.requests_remaining,
                 "tokens_remaining": health.tokens_remaining,
@@ -819,10 +1055,13 @@ class AgentRouter:
                 "cooldown_until": cooldown_until,
                 "unavailable_until": cooldown_until,
                 "rate_limit_reset_at": health.rate_limit_reset_at,
+                "latency_ms": round(health.average_latency_ms, 2),
                 "average_latency_ms": round(health.average_latency_ms, 2),
                 "average_latency_seconds": round(health.average_latency_seconds, 4),
                 "streaming_tokens_per_second": round(health.streaming_tokens_per_second, 4),
                 "reliability_score": round(health.reliability_score, 4),
+                "score": round(score.total, 3) if score else 0.0,
+                "score_components": score.to_dict() if score else {},
                 "success_count": health.success_count,
                 "failure_count": health.failure_count,
                 "timeout_count": health.timeout_count,
@@ -845,10 +1084,38 @@ class AgentRouter:
                 row["available"] = False
             if health.tokens_remaining is not None and health.tokens_remaining <= 0:
                 row["available"] = False
+            row["health"] = health_state_label(row)
             if include_history:
                 row["failover_events"] = list(health.failover_events)
             snapshot[name] = row
         return snapshot
+
+    def provider_status(self) -> list[dict[str, Any]]:
+        """Return health-centered provider rows for the /health endpoint."""
+
+        snapshot = self.health_snapshot(include_history=False)
+        rows: list[dict[str, Any]] = []
+        for name, agent in sorted(self.config.agents.items()):
+            row = snapshot.get(name, {})
+            rows.append(
+                {
+                    "name": name,
+                    "agent": name,
+                    "provider": agent.provider,
+                    "provider_type": agent.provider_type or normalize_provider(agent.provider),
+                    "model": agent.model,
+                    "available": bool(row.get("available")),
+                    "health": row.get("health", "unknown"),
+                    "latency_ms": row.get("latency_ms", 0.0),
+                    "score": row.get("score", 0.0),
+                    "streaming": bool(agent.supports_streaming),
+                    "supports_tools": bool(agent.supports_tools or agent.supports_function_calling),
+                    "cooldown_until": row.get("cooldown_until"),
+                    "unavailable_until": row.get("unavailable_until"),
+                    "recent_failures": row.get("failure_count", 0),
+                }
+            )
+        return rows
 
     def capability_graph(self) -> dict[str, Any]:
         """Expose provider/model capabilities for transparent routing decisions."""
@@ -1070,6 +1337,8 @@ class AgentRouter:
             text = request_text(request).lower()
             if has_tools and (agent.supports_tools or agent.supports_function_calling):
                 score += 18
+            if request.stream and agent.supports_streaming:
+                score += 6
             if _looks_like_coding_task(text):
                 score += float(agent.coding_score or 0.0) * 12
             if _looks_like_reasoning_task(text):
@@ -1490,7 +1759,7 @@ def _is_prefix(prefix: list[dict], messages: list[dict]) -> bool:
 
 
 def estimate_input_tokens(request: HubRequest) -> int:
-    return estimate_messages_tokens(request.messages)
+    return estimate_context_tokens(request)
 
 
 def expected_output_tokens(request: HubRequest, agent: AgentConfig) -> int:

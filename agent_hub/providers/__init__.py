@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urlencode, urlparse
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from ..config import AgentConfig, normalize_provider
 from ..models import HubRequest, ProviderResult
@@ -21,7 +21,7 @@ from ..provider_presets import (
     default_headers_for_agent,
     provider_kind_for_agent,
 )
-from .base import BaseProviderAdapter, ProviderAdapter
+from .base import BaseProviderAdapter, ProviderAdapter, StreamChunk
 
 
 FAILOVER_STATUSES = {401, 402, 403, 404, 408, 409, 429, 500, 502, 503}
@@ -186,6 +186,30 @@ class OpenAIChatProvider(BaseProviderAdapter):
             usage=dict(raw.get("usage") or {}),
             finish_reason=choice.get("finish_reason"),
         )
+
+    def stream(self, request: HubRequest) -> Iterator[StreamChunk]:
+        if not self.supports_streaming():
+            raise NotImplementedError(f"{self.name} does not support native streaming")
+        api_key = self.agent.resolved_api_key
+        if not api_key and normalize_provider(self.agent.provider) == "openai":
+            raise ProviderError(
+                f"{self.agent.name} is missing API key env {self.agent.api_key_env}",
+                retryable=True,
+                error_type="configuration",
+            )
+
+        payload = self._payload(request)
+        payload["stream"] = True
+        headers = provider_headers(self.agent, api_key)
+        for data in _post_stream_json(
+            url=_chat_completions_url(self.agent),
+            headers=headers,
+            payload=payload,
+            timeout=self.agent.timeout_seconds,
+        ):
+            chunk = _stream_chunk_from_openai_data(data, default_model=self.agent.model)
+            if chunk is not None:
+                yield chunk
 
     def _payload(self, request: HubRequest) -> dict[str, Any]:
         payload = _copy_allowed(
@@ -1070,6 +1094,98 @@ def _post_json(
             retryable=True,
             error_type="invalid_provider_response",
         ) from exc
+
+
+def _post_stream_json(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout: float,
+) -> Iterator[dict[str, Any]]:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            metadata = _quota_metadata_from_headers(dict(response.headers.items()))
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or line.startswith(":") or line.startswith("event:"):
+                    continue
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ProviderError(
+                        f"Provider returned invalid stream JSON: {exc}",
+                        retryable=True,
+                        error_type="invalid_provider_response",
+                    ) from exc
+                if not isinstance(data, dict):
+                    raise ProviderError(
+                        "Provider returned a non-object stream chunk",
+                        retryable=True,
+                        error_type="invalid_provider_response",
+                    )
+                if isinstance(data, dict) and data.get("error"):
+                    raise _provider_error_from_payload(
+                        data,
+                        status_code=response.status,
+                        metadata=metadata,
+                    )
+                if metadata:
+                    provider_metadata = data.setdefault("agent_hub_provider", {})
+                    if isinstance(provider_metadata, dict):
+                        provider_metadata["quota"] = metadata
+                yield data
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode("utf-8", errors="replace")
+        raise _provider_error_from_http(
+            exc.code,
+            text,
+            headers=dict(exc.headers.items()) if exc.headers else None,
+        ) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise ProviderError(f"Provider stream timed out: {exc}", retryable=True, error_type="timeout") from exc
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        error_type = "timeout" if _looks_like_timeout(reason) else "network"
+        prefix = "Provider stream timed out" if error_type == "timeout" else "Network error"
+        raise ProviderError(f"{prefix}: {reason}", retryable=True, error_type=error_type) from exc
+
+
+def _stream_chunk_from_openai_data(
+    data: dict[str, Any],
+    *,
+    default_model: str,
+) -> StreamChunk | None:
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    delta = choice.get("delta")
+    if not isinstance(delta, dict):
+        delta = {}
+    finish_reason = choice.get("finish_reason")
+    text = _stream_delta_text(delta)
+    return StreamChunk(
+        text=text,
+        delta=delta,
+        model=str(data.get("model") or default_model),
+        finish_reason=str(finish_reason) if finish_reason is not None else None,
+        raw=dict(data),
+    )
+
+
+def _stream_delta_text(delta: dict[str, Any]) -> str:
+    content = delta.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return content_to_text(content)
+    return ""
 
 
 def _provider_error_from_http(
