@@ -33,7 +33,7 @@ from .provider_presets import (
     provider_metadata,
     provider_metadata_rows,
 )
-from .router import AgentRouter, RouterError
+from .core.router import AgentRouter, RouterError
 from .server import serve
 from .team_agent_runner import TeamAgentRunner
 from .version import backend_version

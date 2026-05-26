@@ -20,7 +20,7 @@ from .config import (
 )
 from .models import HubRequest, HubResponse, ProviderResult  # Data models for hub communication
 from .reasoning import ExecutionNode, ExecutionPlan, WorkspaceReasoningState
-from .router import AgentRouter  # Routes requests to appropriate agents
+from .core.router import AgentRouter  # Routes requests to appropriate agents
 from .team_agent_runner import TeamAgentRunner  # Runs a team of agents collaboratively
 from .version import backend_version
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from agent_hub.config import AgentConfig, HubConfig, RouteRule
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.providers import ProviderError
-from agent_hub.router import AgentRouter, RouterError
+from agent_hub.core.router import AgentRouter, RouterError
 
 
 class _FakeProvider:

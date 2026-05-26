@@ -10,7 +10,7 @@ from agent_hub.agent_tools import AgentToolbox, create_workspace_checkpoint, res
 from agent_hub.agent_runner import AgentRunner, _is_repository_file_path
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.models import HubRequest, HubResponse, ProviderResult
-from agent_hub.router import AgentRouter, estimate_input_tokens
+from agent_hub.core.router import AgentRouter, estimate_input_tokens
 from agent_hub.providers import ProviderError
 
 

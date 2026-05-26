@@ -14,7 +14,7 @@ from .config import AgentConfig, HubConfig, is_free_agent
 from .models import FailoverEvent, HubRequest, HubResponse
 from .payloads import content_to_text, request_text
 from .reasoning import WorkspaceReasoningState
-from .router import AgentRouter, RouterError
+from .core.router import AgentRouter, RouterError
 
 
 TEAM_ROLES = ("planner", "researcher", "coder", "reviewer", "validator", "repair", "fixer", "finalizer")

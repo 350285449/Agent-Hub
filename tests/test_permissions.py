@@ -8,7 +8,7 @@ from agent_hub.agent_tools import AgentToolbox
 from agent_hub.config import AgentConfig, HubConfig, config_from_dict, free_local_config
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.permissions import PermissionManager, PermissionRequest
-from agent_hub.router import AgentRouter, RouterError
+from agent_hub.core.router import AgentRouter, RouterError
 
 
 class PermissionManagerTests(unittest.TestCase):

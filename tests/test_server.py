@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 
 from agent_hub.config import AgentConfig, HubConfig, RouteRule
 from agent_hub.models import HubRequest, ProviderResult
-from agent_hub.router import AgentRouter
+from agent_hub.core.router import AgentRouter
 from agent_hub.server import (
     BACKEND_FEATURES,
     BACKEND_VERSION,
@@ -169,7 +169,7 @@ class ServerCompatibilityTests(unittest.TestCase):
                     payload,
                     headers={"Authorization": "Bearer anything-local"},
                 )
-                stream = _post_text(
+                stream, stream_headers = _post_text_with_headers(
                     f"{base}/v1/chat/completions",
                     {**payload, "stream": True},
                     headers={"Authorization": "Bearer anything-local"},
@@ -185,6 +185,7 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(calls[0].session_id, "cline-session")
             self.assertIn("chat.completion.chunk", stream)
             self.assertIn("data: [DONE]", stream)
+            self.assertEqual(stream_headers.get("X-Agent-Hub-Stream-Mode"), "compatibility")
 
     def test_anthropic_messages_accepts_claude_code_style_request_and_streams(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -280,6 +281,11 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("agent-hub-cloud", ids)
             self.assertIn("agent-hub-local", ids)
             self.assertIn("agent:tooly", ids)
+            for item in data["data"]:
+                self.assertEqual(item["object"], "model")
+                self.assertEqual(item["created"], 0)
+                self.assertIn("owned_by", item)
+                self.assertNotIn("agent_hub", item)
 
     def test_models_endpoint_does_not_expose_echo_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -440,6 +446,8 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertTrue(health["running"])
             self.assertEqual(health["server_status"], "running")
             self.assertIn("limits", health)
+            self.assertIn("providers", health)
+            self.assertTrue(any(row["agent"] == "tooly" for row in health["providers"]))
             self.assertEqual(health["provider_health"]["tooly"]["requests_remaining"], 7)
             self.assertEqual(health["provider_health"]["tooly"]["tokens_remaining"], 12345)
 

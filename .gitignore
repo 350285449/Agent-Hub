@@ -1,6 +1,15 @@
 __pycache__/
 *.py[cod]
 .agent-hub/
+.agent-hub-state/
+agent-hub.config.json
+*.config.local.json
+*.config.backup.json
+*.bak
+*.tmp
+provider_health.json
+*.log
+.pytest_cache/
 .venv/
 dist/
 build/

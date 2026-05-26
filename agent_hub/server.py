@@ -19,7 +19,7 @@ from .payloads import (
     openai_stream_events,
     request_from_payload,
 )
-from .router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
+from .core.router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
 from .team_agent_runner import TeamAgentRunner
 from .version import backend_version, build_metadata, config_runtime_hash
 
@@ -180,6 +180,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "workspace_dir": str(self.server.config.workspace_dir),
                     "initialization": self.server.config.initialization_report,
                     "provider_health": self.server.router.health_snapshot(),
+                    "providers": self.server.router.provider_manager.available_models(),
                     "capability_graph": self.server.router.capability_graph(),
                     "active_providers": _active_provider_names(
                         self.server.config,
@@ -254,7 +255,11 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "object": "list",
-                    "data": _model_rows(self.server.config, self.server.router),
+                    "data": _openai_model_rows(
+                        self.server.config,
+                        self.server.router,
+                        include_routing_details=self.server.config.expose_routing_details,
+                    ),
                 }
             )
             return
@@ -537,6 +542,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Agent-Hub-Stream-Mode", "compatibility")
         self._send_common_headers()
         self.end_headers()
 
@@ -757,6 +763,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Agent-Hub-Stream-Mode", "compatibility")
         self._send_common_headers()
         for name, value in _response_headers(response, self.server.router).items():
             self.send_header(name, value)
@@ -789,6 +796,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Agent-Hub-Stream-Mode", "compatibility")
         self._send_common_headers()
         for name, value in _response_headers(response, self.server.router).items():
             self.send_header(name, value)
@@ -1103,6 +1111,29 @@ def _available_model_ids(config: HubConfig, router: AgentRouter) -> list[str]:
     return ids
 
 
+def _openai_model_rows(
+    config: HubConfig,
+    router: AgentRouter,
+    *,
+    include_routing_details: bool = False,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in _model_rows(config, router):
+        metadata = row.get("agent_hub") if isinstance(row, dict) else None
+        if isinstance(metadata, dict) and metadata.get("available") is False:
+            continue
+        public_row = {
+            "id": row["id"],
+            "object": "model",
+            "created": row.get("created", 0),
+            "owned_by": row.get("owned_by", "agent-hub"),
+        }
+        if include_routing_details and isinstance(metadata, dict):
+            public_row["agent_hub"] = metadata
+        rows.append(public_row)
+    return rows
+
+
 def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1123,6 +1154,7 @@ def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:
         row = {
             "id": model_id,
             "object": "model",
+            "created": 0,
             "owned_by": "agent-hub",
             "agent_hub": {
                 "type": "route",
@@ -1146,6 +1178,7 @@ def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:
             {
                 "id": route.name,
                 "object": "model",
+                "created": 0,
                 "owned_by": "agent-hub",
                 "agent_hub": {
                     "type": "route",
@@ -1166,6 +1199,7 @@ def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:
                 {
                     "id": model_id,
                     "object": "model",
+                    "created": 0,
                     "owned_by": "agent-hub" if model_id.startswith("agent:") else agent.provider,
                     "agent_hub": {
                         "type": "agent_alias" if model_id.startswith("agent:") else "agent",

@@ -8,7 +8,7 @@ from pathlib import Path
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.inbox import InboxProcessor
 from agent_hub.models import HubRequest, ProviderResult
-from agent_hub.router import AgentRouter
+from agent_hub.core.router import AgentRouter
 
 
 class InboxTests(unittest.TestCase):

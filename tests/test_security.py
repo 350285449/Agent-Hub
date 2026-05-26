@@ -8,7 +8,7 @@ from agent_hub.agent_tools import AgentToolbox
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.permissions import PermissionManager, tool_permission_request
-from agent_hub.router import AgentRouter, RouterError
+from agent_hub.core.router import AgentRouter, RouterError
 from agent_hub.security import classify_shell_command, detect_secrets
 
 

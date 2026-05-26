@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import json
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,10 +12,34 @@ from agent_hub.core.provider_manager import ProviderManager
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.providers import OpenAIChatProvider, create_provider
 from agent_hub.providers.base import ChatResponse
-from agent_hub.router import AgentRouter
+from agent_hub.core.router import AgentRouter
 
 
 class ArchitectureTests(unittest.TestCase):
+    def test_router_import_paths_resolve_to_same_class(self) -> None:
+        from agent_hub.core.router import AgentRouter as CoreRouter
+        from agent_hub.router import AgentRouter as LegacyRouter
+
+        self.assertIs(CoreRouter, LegacyRouter)
+
+    def test_config_example_is_safe_and_local_config_is_ignored(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        example = root / "agent-hub.config.example.json"
+        data = json.loads(example.read_text(encoding="utf-8"))
+        ignore_text = (root / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn("agents", data)
+        self.assertIn("agent-hub.config.json", ignore_text)
+        self.assertNotIn('"api_key"', example.read_text(encoding="utf-8"))
+
+        check = subprocess.run(
+            ["git", "check-ignore", "agent-hub.config.json"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(check.returncode, 0, check.stderr)
+
     def test_openai_compatible_adapter_exposes_strict_interface(self) -> None:
         agent = AgentConfig(
             name="local",

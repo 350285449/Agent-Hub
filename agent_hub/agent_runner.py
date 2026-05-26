@@ -28,7 +28,7 @@ from .context import (
 )
 from .models import FailoverEvent, HubRequest, HubResponse
 from .reasoning import WorkspaceReasoningState
-from .router import AgentRouter
+from .core.router import AgentRouter
 from .token_budget import TokenBudget, TokenBudgetManager, estimate_messages_tokens
 
 

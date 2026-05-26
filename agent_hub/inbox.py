@@ -12,7 +12,7 @@ from .payloads import (
     openai_chat_response,
     request_from_payload,
 )
-from .router import AgentRouter, RouterError
+from .core.router import AgentRouter, RouterError
 
 
 class InboxProcessor:

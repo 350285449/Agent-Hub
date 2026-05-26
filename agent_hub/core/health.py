@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from ..router import ProviderHealth
 from ..providers.base import ProviderHealth as AdapterHealth
+from .router import ProviderHealth
 
 
 __all__ = ["AdapterHealth", "ProviderHealth"]
