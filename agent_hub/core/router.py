@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
+from ..context import estimate_message_tokens, is_protected_context_message
+from ..debug import debug_dir_for_state, provider_debug_context
 from ..evaluation import ProviderScoreStore
 from ..mcp import MCPServerRegistry
 from ..models import FailoverEvent, HubRequest, HubResponse, ProviderResult
@@ -27,6 +29,10 @@ from ..permissions import (
 )
 from ..providers import Provider, ProviderError, create_provider
 from ..providers.base import StreamChunk
+from ..response_normalization import (
+    safe_empty_provider_result,
+    validate_provider_result,
+)
 from ..repository import repo_context_for_request
 from ..security.audit import record_provider_audit
 from ..session_store import SessionStore
@@ -35,9 +41,12 @@ from ..tools import ToolExecutionContext, ToolExecutionPipeline, create_builtin_
 from ..tools.loop import (
     ToolLoopMetadata,
     assistant_message_from_result,
+    compact_tool_result_for_loop,
     extract_tool_calls,
     max_loop_result,
     merge_tool_loop_metadata,
+    tool_call_signature,
+    valid_tool_calls,
 )
 from .context import estimate_context_tokens
 from .health import calculate_provider_score, health_state_label
@@ -291,9 +300,15 @@ class AgentRouter:
                 )
                 continue
 
-            skip_reason = self._preflight_skip_reason(agent, effective_request)
+            provider_request = self._request_for_agent(
+                request_id=request_id,
+                request=effective_request,
+                agent=agent,
+                decision=decision,
+            )
+            skip_reason = self._preflight_skip_reason(agent, provider_request)
             if skip_reason:
-                error_type = self._preflight_error_type(agent, effective_request, skip_reason)
+                error_type = self._preflight_error_type(agent, provider_request, skip_reason)
                 failover.append(
                     FailoverEvent(
                         agent=agent.name,
@@ -306,7 +321,7 @@ class AgentRouter:
                 )
                 continue
 
-            permission = self._provider_permission_decision(agent, effective_request)
+            permission = self._provider_permission_decision(agent, provider_request)
             if permission is not None and not permission.allowed:
                 reason = permission.reason or "Permission required before using this provider."
                 failover.append(
@@ -337,12 +352,17 @@ class AgentRouter:
             tried_any = True
             started = time.perf_counter()
             try:
-                result = self.provider_manager.chat(agent, effective_request)
+                result = self._chat_with_validation(
+                    request_id=request_id,
+                    agent=agent,
+                    request=provider_request,
+                    decision=decision,
+                )
                 latency = time.perf_counter() - started
                 tool_loop = self._run_tool_loop(
                     request_id=request_id,
                     agent=agent,
-                    request=effective_request,
+                    request=provider_request,
                     initial_result=result,
                 )
                 result = tool_loop["result"]
@@ -374,19 +394,19 @@ class AgentRouter:
                 self._record_success(agent, latency, result, effective_request)
                 response = self._response_from_result(
                     request_id=request_id,
-                    request=effective_request,
+                    request=provider_request,
                     agent=agent,
                     result=result,
                     failover=failover,
                     decision=decision,
                     tool_loop_metadata=tool_loop["metadata"],
                 )
-                if effective_request.record_session:
-                    self.session_store.record_turn(effective_request, response)
+                if provider_request.record_session:
+                    self.session_store.record_turn(provider_request, response)
                 self._record_route_event(
                     "routing_decision",
                     request_id=request_id,
-                    request=effective_request,
+                    request=provider_request,
                     agent=agent.name,
                     provider=agent.provider,
                     model=response.model,
@@ -463,6 +483,36 @@ class AgentRouter:
             error_type=error_type,
             failover=[event.to_dict() for event in failover],
         )
+        if error_type == "invalid_provider_response":
+            agent = (
+                self.config.agents.get(failover[-1].agent)
+                if failover and failover[-1].agent in self.config.agents
+                else candidates[0]
+            )
+            result = safe_empty_provider_result(
+                model=agent.model,
+                reason="all_provider_responses_invalid",
+            )
+            response = self._response_from_result(
+                request_id=request_id,
+                request=effective_request,
+                agent=agent,
+                result=result,
+                failover=failover,
+                decision=decision,
+            )
+            if effective_request.record_session:
+                self.session_store.record_turn(effective_request, response)
+            self._record_route_event(
+                "safe_empty_response_generated",
+                request_id=request_id,
+                request=effective_request,
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+                failover=[event.to_dict() for event in failover],
+            )
+            return response
         raise RouterError(
             reason,
             failover=failover,
@@ -474,6 +524,10 @@ class AgentRouter:
     def native_stream(self, request: HubRequest) -> StreamingRoute | None:
         """Return a provider-native stream route, or None for compatibility streaming."""
 
+        if getattr(self.config, "force_compatibility_streaming", False) or (
+            _request_is_cline(request) and getattr(self.config, "cline_compatibility_mode", True)
+        ):
+            return None
         effective_request = self._prepare_request(self._with_session_history(request), include_tools=False)
         request_id = f"hub-{uuid.uuid4().hex}"
         decision = self.decide(effective_request)
@@ -598,8 +652,15 @@ class AgentRouter:
         usage_tokens = 0
         model = agent.model
         finish_reason: str | None = None
+        stream_request = self._request_for_agent(
+            request_id=request_id,
+            request=request,
+            agent=agent,
+            decision=decision,
+            stream=True,
+        )
         try:
-            for chunk in self.provider_manager.stream(agent, request):
+            for chunk in self.provider_manager.stream(agent, stream_request):
                 if not isinstance(chunk, StreamChunk):
                     chunk = StreamChunk(text=str(chunk), delta={"content": str(chunk)}, model=agent.model)
                 if chunk.text:
@@ -618,21 +679,21 @@ class AgentRouter:
                 usage={"completion_tokens": usage_tokens, "output_tokens": usage_tokens},
                 finish_reason=finish_reason or "stop",
             )
-            self._record_success(agent, latency, result, request)
+            self._record_success(agent, latency, result, stream_request)
             response = self._response_from_result(
                 request_id=request_id,
-                request=request,
+                request=stream_request,
                 agent=agent,
                 result=result,
                 failover=failover,
                 decision=decision,
             )
-            if request.record_session:
-                self.session_store.record_turn(request, response)
+            if stream_request.record_session:
+                self.session_store.record_turn(stream_request, response)
             self._record_route_event(
                 "native_stream_finished",
                 request_id=request_id,
-                request=request,
+                request=stream_request,
                 agent=agent.name,
                 provider=agent.provider,
                 model=model,
@@ -781,6 +842,123 @@ class AgentRouter:
         )
         return decision
 
+    def _request_for_agent(
+        self,
+        *,
+        request_id: str,
+        request: HubRequest,
+        agent: AgentConfig,
+        decision: RoutingDecision,
+        stream: bool = False,
+    ) -> HubRequest:
+        prepared, usage = self._apply_context_safety_cap(agent, request)
+        metadata = dict(prepared.metadata)
+        output_tokens = prepared.max_tokens or agent.max_tokens or 1024
+        metadata["agent_hub_debug"] = provider_debug_context(
+            enabled=getattr(self.config, "debug_raw_provider_responses", False),
+            debug_dir=debug_dir_for_state(self.config.state_dir),
+            request_id=request_id,
+            provider=agent.provider,
+            provider_name=agent.provider_type or agent.provider,
+            model=agent.model,
+            routing_mode=decision.routing_mode,
+            estimated_input_tokens=int(usage["estimated_input_tokens"]),
+            estimated_output_tokens=int(output_tokens),
+            provider_limit=agent.context_window,
+            stream_id=f"stream-{uuid.uuid4().hex}" if stream else None,
+        )
+        raw = dict(prepared.raw or {})
+        hub = dict(raw.get("agent_hub") or {})
+        hub["context_usage"] = usage
+        raw["agent_hub"] = hub
+        self._record_route_event(
+            "context_token_estimate",
+            request_id=request_id,
+            request=prepared,
+            agent=agent.name,
+            provider=agent.provider,
+            model=agent.model,
+            **usage,
+        )
+        return replace(prepared, metadata=metadata, raw=raw)
+
+    def _chat_with_validation(
+        self,
+        *,
+        request_id: str,
+        agent: AgentConfig,
+        request: HubRequest,
+        decision: RoutingDecision,
+    ) -> ProviderResult:
+        del decision
+        result = self.provider_manager.chat(agent, request)
+        validation = validate_provider_result(result)
+        if validation.valid:
+            return result
+        self._record_route_event(
+            "provider_response_invalid",
+            request_id=request_id,
+            request=request,
+            agent=agent.name,
+            provider=agent.provider,
+            model=agent.model,
+            reason=validation.reason,
+            issues=validation.issues,
+            retrying=True,
+        )
+        result = self.provider_manager.chat(agent, request)
+        validation = validate_provider_result(result)
+        if validation.valid:
+            self._record_route_event(
+                "provider_response_retry_recovered",
+                request_id=request_id,
+                request=request,
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+            )
+            return result
+        raise ProviderError(
+            f"Provider returned invalid response: {validation.reason}",
+            retryable=True,
+            error_type="invalid_provider_response",
+            metadata={"issues": validation.issues},
+        )
+
+    def _apply_context_safety_cap(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+    ) -> tuple[HubRequest, dict[str, Any]]:
+        original_messages = [dict(message) for message in request.messages]
+        original_tokens = estimate_message_tokens(original_messages)
+        cap = _context_cap(self.config, request, agent)
+        output_tokens = request.max_tokens or agent.max_tokens or 1024
+        provider_limit = agent.context_window
+        effective_cap = cap
+        if provider_limit is not None:
+            effective_cap = min(effective_cap, max(1000, int(provider_limit) - int(output_tokens)))
+        messages = original_messages
+        warnings: list[str] = []
+        if original_tokens > effective_cap:
+            messages, warnings = _compress_messages_for_budget(messages, effective_cap)
+            warnings.append("[Context reduced for provider compatibility]")
+        final_tokens = estimate_message_tokens(messages)
+        ratio = round(final_tokens / original_tokens, 4) if original_tokens else 1.0
+        usage = {
+            "estimated_input_tokens": final_tokens,
+            "estimated_output_tokens": int(output_tokens),
+            "provider_limit": provider_limit,
+            "max_context_tokens": effective_cap,
+            "original_input_tokens": original_tokens,
+            "compression_ratio": ratio,
+            "context_reduced": bool(warnings),
+            "warnings": warnings,
+        }
+        if messages == request.messages:
+            return request, usage
+        return replace(request, messages=messages), usage
+
     def _with_session_history(self, request: HubRequest) -> HubRequest:
         if not request.use_session_history:
             return request
@@ -808,12 +986,18 @@ class AgentRouter:
             return request
         if any(message.get("agent_hub_repo_context") for message in request.messages if isinstance(message, dict)):
             return request
+        max_files = self.config.repo_context_max_files
+        max_chars = self.config.repo_context_max_chars
+        if _compatibility_reductions_enabled(self.config, request, "reduced_repo_context"):
+            max_files = min(max_files, 3)
+            max_chars = min(max_chars, 4_000)
         try:
             selection = repo_context_for_request(
                 request,
                 self.config.workspace_dir,
-                max_files=self.config.repo_context_max_files,
-                max_chars=self.config.repo_context_max_chars,
+                max_files=max_files,
+                max_chars=max_chars,
+                ignore_patterns=self.config.repo_ignore_patterns,
             )
         except Exception:
             return request
@@ -829,6 +1013,8 @@ class AgentRouter:
     def _with_builtin_tool_specs(self, request: HubRequest) -> HubRequest:
         if not getattr(self.config, "tool_loop_enabled", True):
             return request
+        if _request_is_cline(request) and not getattr(self.config, "tool_loop_enabled_for_cline", False):
+            return request
         if _agent_runner_managed_request(request):
             return request
         if _request_has_client_tool_specs(request):
@@ -842,7 +1028,10 @@ class AgentRouter:
         raw = dict(request.raw or {})
         if isinstance(raw.get("agent_hub_tools"), list) and raw["agent_hub_tools"]:
             return request
-        raw["agent_hub_tools"] = [tool.to_agent_hub_spec() for tool in self.tool_registry.list()]
+        tool_specs = [tool.to_agent_hub_spec() for tool in self.tool_registry.list()]
+        if _compatibility_reductions_enabled(self.config, request, "minimal_tool_schema"):
+            tool_specs = [_minimal_tool_schema(spec) for spec in tool_specs]
+        raw["agent_hub_tools"] = tool_specs
         hub = dict(raw.get("agent_hub") or {})
         hub["auto_execute_tools"] = True
         raw["agent_hub"] = hub
@@ -870,13 +1059,21 @@ class AgentRouter:
     ) -> dict[str, Any]:
         max_iterations = _max_tool_iterations(request, self.config.max_tool_iterations)
         metadata = ToolLoopMetadata(max_tool_iterations=max_iterations)
-        if max_iterations <= 0 or not getattr(self.config, "tool_loop_enabled", True):
+        if (
+            max_iterations <= 0
+            or not getattr(self.config, "tool_loop_enabled", True)
+            or (
+                _request_is_cline(request)
+                and not getattr(self.config, "tool_loop_enabled_for_cline", False)
+            )
+        ):
             return {"result": initial_result, "metadata": metadata, "latency_seconds": 0.0}
         current = initial_result
         messages = [dict(message) for message in request.messages]
         latency_seconds = 0.0
+        seen_signatures: set[str] = set()
         while True:
-            calls = extract_tool_calls(current)
+            calls = valid_tool_calls(extract_tool_calls(current), metadata)
             if not calls:
                 if metadata.tool_calls or metadata.tool_results:
                     current = replace_provider_result_raw(
@@ -899,6 +1096,23 @@ class AgentRouter:
                     tool_iteration_count=metadata.tool_iteration_count,
                 )
                 return {"result": stopped, "metadata": metadata, "latency_seconds": latency_seconds}
+            signatures = [tool_call_signature(call) for call in calls]
+            duplicate = next((signature for signature in signatures if signature in seen_signatures), None)
+            if duplicate is not None:
+                metadata.duplicate_tool_call_detected = True
+                stopped = max_loop_result(current, metadata)
+                self._record_route_event(
+                    "tool_loop_duplicate_stopped",
+                    request_id=request_id,
+                    request=request,
+                    agent=agent.name,
+                    provider=agent.provider,
+                    model=agent.model,
+                    duplicate_signature=duplicate,
+                    tool_iteration_count=metadata.tool_iteration_count,
+                )
+                return {"result": stopped, "metadata": metadata, "latency_seconds": latency_seconds}
+            seen_signatures.update(signatures)
 
             metadata.tool_iteration_count += 1
             messages.append(assistant_message_from_result(current, calls))
@@ -906,6 +1120,7 @@ class AgentRouter:
             results = []
             for call in calls:
                 result = self.tool_pipeline.execute(call, context)
+                result = compact_tool_result_for_loop(result)
                 results.append(result)
                 self.record_tool_result(agent.name, result.ok)
                 metadata.tool_calls.append(
@@ -927,6 +1142,14 @@ class AgentRouter:
                 model=agent.model,
                 tool_calls=[call.name for call in calls],
                 tool_results=[result.ok for result in results],
+                tool_result_sizes=[
+                    len(json.dumps(result.to_dict(), ensure_ascii=False, default=str))
+                    for result in results
+                ],
+                tool_execution_ms=[
+                    result.to_dict().get("duration_ms")
+                    for result in results
+                ],
                 tool_iteration_count=metadata.tool_iteration_count,
             )
             next_raw = _tool_loop_raw(request, metadata)
@@ -1878,6 +2101,136 @@ def _request_option(request: HubRequest, *keys: str) -> Any:
     return None
 
 
+def _request_is_cline(request: HubRequest) -> bool:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    text = " ".join(
+        str(value or "").lower()
+        for value in (
+            raw.get("source"),
+            raw.get("client"),
+            raw.get("client_name"),
+            metadata.get("source"),
+            metadata.get("client"),
+            metadata.get("client_name"),
+            metadata.get("user_agent"),
+            metadata.get("client_user_agent"),
+            metadata.get("cline_version"),
+        )
+    )
+    return "cline" in text
+
+
+def _compatibility_reductions_enabled(config: HubConfig, request: HubRequest, key: str) -> bool:
+    mode = getattr(config, "compatibility_mode", {}) or {}
+    if not isinstance(mode, dict) or not mode.get(key):
+        return False
+    if _request_is_cline(request):
+        return True
+    return bool(getattr(config, "force_compatibility_streaming", False))
+
+
+def _context_cap(config: HubConfig, request: HubRequest, agent: AgentConfig) -> int:
+    request_cap = _request_option(request, "max_context_tokens")
+    if request_cap is not None:
+        try:
+            return max(1_000, int(request_cap))
+        except (TypeError, ValueError):
+            pass
+    configured = getattr(config, "max_context_tokens", None)
+    if configured:
+        return max(1_000, int(configured))
+    mode = getattr(config, "compatibility_mode", {}) or {}
+    if isinstance(mode, dict) and (_request_is_cline(request) or getattr(config, "force_compatibility_streaming", False)):
+        try:
+            return max(1_000, int(mode.get("max_context_tokens") or 12_000))
+        except (TypeError, ValueError):
+            return 12_000
+    return max(1_000, int(agent.context_window or config.agent_context_budget_tokens))
+
+
+def _compress_messages_for_budget(
+    messages: list[dict[str, Any]],
+    budget: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    warnings: list[str] = []
+    compacted = [_compact_repo_context_message(message) for message in messages]
+    if estimate_message_tokens(compacted) <= budget:
+        warnings.append("repo_context_compacted")
+        return compacted, warnings
+
+    protected: list[dict[str, Any]] = []
+    tail: list[dict[str, Any]] = []
+    for index, message in enumerate(compacted):
+        if is_protected_context_message(message, recent=index >= max(0, len(compacted) - 8)):
+            protected.append(message)
+        elif index >= max(0, len(compacted) - 6):
+            tail.append(message)
+    reduced = _dedupe_messages([*protected, *tail])
+    while len(reduced) > 1 and estimate_message_tokens(reduced) > budget:
+        removed = False
+        for index, message in enumerate(reduced):
+            if not is_protected_context_message(message, recent=index >= max(0, len(reduced) - 8)):
+                reduced.pop(index)
+                removed = True
+                break
+        if not removed:
+            break
+    if estimate_message_tokens(reduced) > budget:
+        reduced = [_truncate_message_content(message, 2_000) for message in reduced]
+    warnings.append("messages_compacted")
+    return reduced, warnings
+
+
+def _compact_repo_context_message(message: dict[str, Any]) -> dict[str, Any]:
+    if not message.get("agent_hub_repo_context"):
+        return message
+    copied = dict(message)
+    text = content_to_text(copied.get("content"))
+    if len(text) > 2_500:
+        copied["content"] = text[:2_500].rstrip() + "\n[Context reduced for provider compatibility]"
+    return copied
+
+
+def _truncate_message_content(message: dict[str, Any], maximum: int) -> dict[str, Any]:
+    copied = dict(message)
+    text = content_to_text(copied.get("content"))
+    if len(text) > maximum:
+        copied["content"] = text[:maximum].rstrip() + "\n[Context reduced for provider compatibility]"
+    return copied
+
+
+def _dedupe_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for message in messages:
+        signature = json.dumps(message, sort_keys=True, ensure_ascii=False, default=str)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        deduped.append(message)
+    return deduped
+
+
+def _minimal_tool_schema(spec: dict[str, Any]) -> dict[str, Any]:
+    name = str(spec.get("name") or "")
+    parameters = spec.get("parameters") if isinstance(spec.get("parameters"), dict) else {}
+    properties = parameters.get("properties") if isinstance(parameters.get("properties"), dict) else {}
+    minimal_properties = {
+        key: {"type": value.get("type", "string")} if isinstance(value, dict) else {"type": "string"}
+        for key, value in properties.items()
+    }
+    return {
+        "name": name,
+        "description": str(spec.get("description") or "")[:160],
+        "parameters": {
+            "type": parameters.get("type", "object"),
+            "properties": minimal_properties,
+            **({"required": parameters["required"]} if isinstance(parameters.get("required"), list) else {}),
+        },
+    }
+
+
 def _privacy_requested(request: HubRequest) -> bool:
     value = _request_option(
         request,
@@ -2188,6 +2541,9 @@ def _route_error_type(failover: list[FailoverEvent]) -> str | None:
     ]
     if permission_events and len(permission_events) == len(failover):
         return permission_events[-1].error_type
+    invalid_events = [event for event in failover if event.error_type == "invalid_provider_response"]
+    if invalid_events and len(invalid_events) == len(failover):
+        return "invalid_provider_response"
     return None
 
 

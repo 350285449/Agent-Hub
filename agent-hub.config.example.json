@@ -8,14 +8,33 @@
   "workspace_dir": ".",
   "approval_mode": "auto",
   "cline_compatibility_mode": true,
+  "force_compatibility_streaming": true,
+  "debug_raw_provider_responses": true,
   "free_only": true,
   "enable_load_balancing": true,
   "auto_detect_local_models": false,
   "tool_loop_enabled": true,
+  "tool_loop_enabled_for_cline": false,
+  "tool_loop_debug": true,
   "max_tool_iterations": 4,
   "repo_context_enabled": true,
   "repo_context_max_files": 8,
   "repo_context_max_chars": 12000,
+  "repo_ignore_patterns": [
+    ".agent-hub/**",
+    "state/**",
+    "sessions/**",
+    "logs/**",
+    "*.log",
+    "__pycache__/**",
+    ".pytest_cache/**"
+  ],
+  "max_context_tokens": null,
+  "compatibility_mode": {
+    "minimal_tool_schema": true,
+    "reduced_repo_context": true,
+    "max_context_tokens": 12000
+  },
   "include_raw_responses": false,
   "expose_routing_details": false,
   "default_route": [

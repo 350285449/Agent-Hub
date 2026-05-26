@@ -44,7 +44,14 @@ Recommended config for Cline:
 {
   "approval_mode": "auto",
   "cline_compatibility_mode": true,
-  "tool_loop_enabled": true
+  "tool_loop_enabled": true,
+  "tool_loop_enabled_for_cline": false,
+  "force_compatibility_streaming": true,
+  "compatibility_mode": {
+    "minimal_tool_schema": true,
+    "reduced_repo_context": true,
+    "max_context_tokens": 12000
+  }
 }
 ```
 
@@ -53,6 +60,31 @@ without an interactive prompt and an audit event is written instead. Local
 providers are always allowed. Unknown external endpoints can still require
 explicit approval, and requests that appear to contain secrets still trigger the
 security gate.
+
+`tool_loop_enabled_for_cline=false` is recommended because Cline manages its own
+tool loop. Agent-Hub still preserves routing, failover, provider balancing, and
+client-provided tool schemas, but avoids injecting extra backend-owned tool loop
+behavior into Cline requests.
+
+## Invalid API Response
+
+If Cline reports `Invalid API Response`, the usual cause is an unstable provider
+returning an empty response, truncated stream chunk, malformed tool-call JSON, or
+an incomplete OpenAI-compatible payload. Agent-Hub now sanitizes those cases and
+falls back to compatibility streaming for Cline.
+
+For diagnosis:
+
+```json
+{
+  "debug_raw_provider_responses": true,
+  "force_compatibility_streaming": true
+}
+```
+
+Then reproduce the failing Cline task and inspect `.agent-hub/debug/`. Traces
+are redacted and truncated, and include request IDs, provider request IDs,
+stream IDs, finish reasons, tool calls, routing mode, and token estimates.
 
 Security protections that remain active:
 

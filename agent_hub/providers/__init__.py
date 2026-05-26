@@ -14,12 +14,21 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from typing import Any, Iterator, Protocol
 
 from ..config import AgentConfig, normalize_provider
+from ..debug import log_provider_debug_event
 from ..models import HubRequest, ProviderResult
 from ..payloads import content_to_text
 from ..provider_presets import (
     chat_completions_path_for_agent,
     default_headers_for_agent,
     provider_kind_for_agent,
+)
+from ..response_normalization import (
+    normalize_anthropic_result,
+    normalize_gemini_result,
+    normalize_groq_openrouter_result,
+    normalize_ollama_result,
+    normalize_openai_compatible_result,
+    normalize_openai_stream_data,
 )
 from .base import BaseProviderAdapter, ProviderAdapter, StreamChunk
 
@@ -176,16 +185,9 @@ class OpenAIChatProvider(BaseProviderAdapter):
             headers=headers,
             payload=payload,
             timeout=self.agent.timeout_seconds,
+            debug=_provider_debug(request, self.agent),
         )
-        choice = (raw.get("choices") or [{}])[0]
-        message = choice.get("message") or {}
-        return ProviderResult(
-            text=content_to_text(message.get("content")),
-            model=raw.get("model") or self.agent.model,
-            raw=raw,
-            usage=dict(raw.get("usage") or {}),
-            finish_reason=choice.get("finish_reason"),
-        )
+        return _normalize_chat_result_for_agent(raw, self.agent)
 
     def stream(self, request: HubRequest) -> Iterator[StreamChunk]:
         if not self.supports_streaming():
@@ -206,6 +208,7 @@ class OpenAIChatProvider(BaseProviderAdapter):
             headers=headers,
             payload=payload,
             timeout=self.agent.timeout_seconds,
+            debug=_provider_debug(request, self.agent),
         ):
             chunk = _stream_chunk_from_openai_data(data, default_model=self.agent.model)
             if chunk is not None:
@@ -396,14 +399,9 @@ class AnthropicMessagesProvider(BaseProviderAdapter):
             },
             payload=self._payload(request),
             timeout=self.agent.timeout_seconds,
+            debug=_provider_debug(request, self.agent),
         )
-        return ProviderResult(
-            text=content_to_text(raw.get("content")),
-            model=raw.get("model") or self.agent.model,
-            raw=raw,
-            usage=dict(raw.get("usage") or {}),
-            finish_reason=raw.get("stop_reason"),
-        )
+        return normalize_anthropic_result(raw, default_model=self.agent.model)
 
     def _payload(self, request: HubRequest) -> dict[str, Any]:
         payload = _copy_allowed(
@@ -502,16 +500,9 @@ class GeminiProvider(BaseProviderAdapter):
             },
             payload=self._payload(request),
             timeout=self.agent.timeout_seconds,
+            debug=_provider_debug(request, self.agent),
         )
-        candidate = (raw.get("candidates") or [{}])[0]
-        content = candidate.get("content") or {}
-        return ProviderResult(
-            text=content_to_text(content.get("parts")),
-            model=self.agent.model,
-            raw=raw,
-            usage=dict(raw.get("usageMetadata") or {}),
-            finish_reason=candidate.get("finishReason"),
-        )
+        return normalize_gemini_result(raw, default_model=self.agent.model)
 
     def _url(self) -> str:
         base_url = self.agent.base_url or "https://generativelanguage.googleapis.com"
@@ -1050,17 +1041,69 @@ def _chat_completions_url(agent: AgentConfig) -> str:
     return _join_url(base_url, chat_completions_path_for_agent(agent))
 
 
+def _provider_debug(request: HubRequest, agent: AgentConfig) -> dict[str, Any] | None:
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    debug = metadata.get("agent_hub_debug")
+    if not isinstance(debug, dict):
+        return None
+    context = dict(debug)
+    context.setdefault("provider", agent.provider)
+    context.setdefault("provider_name", agent.provider_type or agent.provider)
+    context.setdefault("model", agent.model)
+    return context
+
+
+def _normalize_chat_result_for_agent(raw: dict[str, Any], agent: AgentConfig) -> ProviderResult:
+    provider_type = (agent.provider_type or agent.provider or "").lower()
+    provider_kind = provider_kind_for_agent(agent)
+    if provider_kind.startswith("ollama") or provider_type in {"ollama", "ollama-cloud"}:
+        return normalize_ollama_result(raw, default_model=agent.model)
+    if provider_kind in {"groq", "openrouter"} or provider_type in {"groq", "openrouter"}:
+        return normalize_groq_openrouter_result(
+            raw,
+            default_model=agent.model,
+            provider_name=provider_kind or provider_type,
+        )
+    return normalize_openai_compatible_result(
+        raw,
+        default_model=agent.model,
+        provider_name=provider_kind or provider_type or "openai-compatible",
+    )
+
+
 def _post_json(
     url: str,
     headers: dict[str, str],
     payload: dict[str, Any],
     timeout: float,
+    debug: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    log_provider_debug_event(
+        debug,
+        {
+            "type": "provider_request",
+            "url": url,
+            "payload": payload,
+        },
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
+            response_headers = dict(response.headers.items())
+            provider_request_id = _provider_request_id(response_headers)
             text = response.read().decode("utf-8")
+            log_provider_debug_event(
+                debug,
+                {
+                    "type": "raw_provider_response",
+                    "provider_request_id": provider_request_id,
+                    "status": response.status,
+                    "headers": response_headers,
+                    "raw_json": text,
+                    "empty_response": not bool(text.strip()),
+                },
+            )
             data = json.loads(text) if text else {}
             metadata = _quota_metadata_from_headers(dict(response.headers.items()))
             if isinstance(data, dict) and data.get("error"):
@@ -1076,6 +1119,15 @@ def _post_json(
             return data
     except urllib.error.HTTPError as exc:
         text = exc.read().decode("utf-8", errors="replace")
+        log_provider_debug_event(
+            debug,
+            {
+                "type": "provider_http_error",
+                "status": exc.code,
+                "headers": dict(exc.headers.items()) if exc.headers else {},
+                "raw_json": text,
+            },
+        )
         raise _provider_error_from_http(
             exc.code,
             text,
@@ -1089,6 +1141,13 @@ def _post_json(
         prefix = "Provider request timed out" if error_type == "timeout" else "Network error"
         raise ProviderError(f"{prefix}: {reason}", retryable=True, error_type=error_type) from exc
     except json.JSONDecodeError as exc:
+        log_provider_debug_event(
+            debug,
+            {
+                "type": "malformed_provider_json",
+                "message": str(exc),
+            },
+        )
         raise ProviderError(
             f"Provider returned invalid JSON: {exc}",
             retryable=True,
@@ -1101,34 +1160,67 @@ def _post_stream_json(
     headers: dict[str, str],
     payload: dict[str, Any],
     timeout: float,
+    debug: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    log_provider_debug_event(
+        debug,
+        {
+            "type": "provider_stream_request",
+            "url": url,
+            "payload": payload,
+        },
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            metadata = _quota_metadata_from_headers(dict(response.headers.items()))
+            response_headers = dict(response.headers.items())
+            provider_request_id = _provider_request_id(response_headers)
+            metadata = _quota_metadata_from_headers(response_headers)
+            saw_done = False
+            yielded = 0
             for raw_line in response:
                 line = raw_line.decode("utf-8", errors="replace").strip()
+                log_provider_debug_event(
+                    debug,
+                    {
+                        "type": "raw_stream_chunk",
+                        "provider_request_id": provider_request_id,
+                        "chunk": line,
+                        "empty_chunk": not bool(line),
+                    },
+                )
                 if not line or line.startswith(":") or line.startswith("event:"):
                     continue
                 if line.startswith("data:"):
                     line = line[5:].strip()
                 if line == "[DONE]":
+                    saw_done = True
                     break
                 try:
                     data = json.loads(line)
                 except json.JSONDecodeError as exc:
-                    raise ProviderError(
-                        f"Provider returned invalid stream JSON: {exc}",
-                        retryable=True,
-                        error_type="invalid_provider_response",
-                    ) from exc
-                if not isinstance(data, dict):
-                    raise ProviderError(
-                        "Provider returned a non-object stream chunk",
-                        retryable=True,
-                        error_type="invalid_provider_response",
+                    log_provider_debug_event(
+                        debug,
+                        {
+                            "type": "malformed_stream_chunk",
+                            "provider_request_id": provider_request_id,
+                            "message": str(exc),
+                            "chunk": line,
+                        },
                     )
+                    continue
+                if not isinstance(data, dict):
+                    log_provider_debug_event(
+                        debug,
+                        {
+                            "type": "malformed_stream_chunk",
+                            "provider_request_id": provider_request_id,
+                            "message": "Provider returned a non-object stream chunk",
+                            "chunk": data,
+                        },
+                    )
+                    continue
                 if isinstance(data, dict) and data.get("error"):
                     raise _provider_error_from_payload(
                         data,
@@ -1139,9 +1231,28 @@ def _post_stream_json(
                     provider_metadata = data.setdefault("agent_hub_provider", {})
                     if isinstance(provider_metadata, dict):
                         provider_metadata["quota"] = metadata
+                yielded += 1
                 yield data
+            if not saw_done:
+                log_provider_debug_event(
+                    debug,
+                    {
+                        "type": "stream_missing_done",
+                        "provider_request_id": provider_request_id,
+                        "yielded_chunks": yielded,
+                    },
+                )
     except urllib.error.HTTPError as exc:
         text = exc.read().decode("utf-8", errors="replace")
+        log_provider_debug_event(
+            debug,
+            {
+                "type": "provider_stream_http_error",
+                "status": exc.code,
+                "headers": dict(exc.headers.items()) if exc.headers else {},
+                "raw_json": text,
+            },
+        )
         raise _provider_error_from_http(
             exc.code,
             text,
@@ -1161,21 +1272,19 @@ def _stream_chunk_from_openai_data(
     *,
     default_model: str,
 ) -> StreamChunk | None:
-    choices = data.get("choices")
-    if not isinstance(choices, list) or not choices:
+    normalized = normalize_openai_stream_data(data, default_model=default_model)
+    if normalized is None:
         return None
-    choice = choices[0] if isinstance(choices[0], dict) else {}
-    delta = choice.get("delta")
-    if not isinstance(delta, dict):
-        delta = {}
-    finish_reason = choice.get("finish_reason")
-    text = _stream_delta_text(delta)
     return StreamChunk(
-        text=text,
-        delta=delta,
-        model=str(data.get("model") or default_model),
-        finish_reason=str(finish_reason) if finish_reason is not None else None,
-        raw=dict(data),
+        text=str(normalized.get("text") or ""),
+        delta=dict(normalized.get("delta") or {}),
+        model=str(normalized.get("model") or default_model),
+        finish_reason=(
+            str(normalized["finish_reason"])
+            if normalized.get("finish_reason") is not None
+            else None
+        ),
+        raw=dict(normalized.get("raw") or data),
     )
 
 
@@ -1209,6 +1318,21 @@ def _provider_error_from_http(
         cooldown_seconds=_metadata_cooldown_seconds(metadata),
         metadata=metadata,
     )
+
+
+def _provider_request_id(headers: dict[str, str]) -> str | None:
+    lower = {str(key).lower(): str(value) for key, value in headers.items() if value is not None}
+    for name in (
+        "x-request-id",
+        "request-id",
+        "x-amzn-requestid",
+        "x-goog-request-id",
+        "cf-ray",
+    ):
+        value = lower.get(name)
+        if value:
+            return value
+    return None
 
 
 def _provider_error_from_payload(

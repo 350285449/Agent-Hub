@@ -174,9 +174,34 @@ Recommended IDE config:
 {
   "approval_mode": "auto",
   "cline_compatibility_mode": true,
-  "tool_loop_enabled": true
+  "tool_loop_enabled": true,
+  "tool_loop_enabled_for_cline": false,
+  "force_compatibility_streaming": true,
+  "compatibility_mode": {
+    "minimal_tool_schema": true,
+    "reduced_repo_context": true,
+    "max_context_tokens": 12000
+  }
 }
 ```
+
+For weak, free, or OpenAI-compatible providers, Agent-Hub now validates and
+normalizes provider output before returning it to IDE clients. Empty responses,
+missing `choices`, malformed tool-call arguments, malformed stream chunks, and
+early stream termination are retried or converted into a minimal valid response
+instead of surfacing as Cline `Invalid API Response`.
+
+Debug provider payloads with:
+
+```json
+{
+  "debug_raw_provider_responses": true
+}
+```
+
+Redacted, truncation-safe traces are written to `.agent-hub/debug/` with
+request, provider, stream, token estimate, finish reason, and tool-call details.
+Keep this off unless you are diagnosing provider instability.
 
 Provider trust levels are:
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -230,7 +231,7 @@ def _search_repo(call: ToolCall, context: Any) -> ToolResult:
     for path in files:
         if len(matches) >= limit:
             break
-        if not path.is_file() or _skip_path(path):
+        if not path.is_file() or _skip_path(path, context.workspace_dir, getattr(context, "config", None)):
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -270,8 +271,39 @@ def _workspace_path(root: Path, value: Any, *, allow_missing: bool = False) -> P
     return path
 
 
-def _skip_path(path: Path) -> bool:
-    return any(part in {".git", ".agent-hub", "__pycache__", "node_modules", ".venv"} for part in path.parts)
+def _skip_path(path: Path, root: Path, config: HubConfig | None = None) -> bool:
+    skipped = {
+        ".git",
+        ".agent-hub",
+        "__pycache__",
+        ".pytest_cache",
+        "node_modules",
+        ".venv",
+        "state",
+        "sessions",
+        "logs",
+    }
+    if any(part in skipped for part in path.parts):
+        return True
+    patterns = getattr(config, "repo_ignore_patterns", []) if config is not None else []
+    try:
+        relative = path.relative_to(root).as_posix()
+    except ValueError:
+        relative = path.as_posix()
+    return _matches_repo_ignore(relative, patterns)
+
+
+def _matches_repo_ignore(relative: str, patterns: list[str]) -> bool:
+    normalized = relative.replace("\\", "/").strip("./")
+    for pattern in patterns:
+        clean = str(pattern).replace("\\", "/").strip()
+        if not clean:
+            continue
+        if fnmatch.fnmatch(normalized, clean) or fnmatch.fnmatch(normalized, clean.rstrip("/**")):
+            return True
+        if clean.endswith("/**") and normalized.startswith(clean[:-3].rstrip("/") + "/"):
+            return True
+    return False
 
 
 def _int_arg(args: dict[str, Any], name: str, default: int, minimum: int, maximum: int) -> int:

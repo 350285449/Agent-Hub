@@ -29,6 +29,11 @@ The response header `X-Agent-Hub-Stream-Mode` is `native` when the selected
 provider streams live chunks and `compatibility` when Agent-Hub streams a
 completed response.
 
+Set `"force_compatibility_streaming": true` to bypass provider-native streaming
+for fragile clients or providers. Malformed, empty, or partial provider SSE
+chunks are ignored and logged when raw debugging is enabled; Agent-Hub always
+terminates OpenAI-compatible streams with a valid final chunk and `[DONE]`.
+
 ## Tool Calls
 
 For Agent-Hub-owned built-in tools, model `tool_calls` are executed locally,
@@ -36,6 +41,35 @@ tool results are appended to message history, and the provider is called again
 until a final answer or `max_tool_iterations` is reached. Routing metadata
 includes `tool_calls`, `tool_results`, and `tool_iteration_count` when detailed
 routing is enabled.
+
+Tool-call arguments are validated before execution. Invalid JSON is repaired
+when possible or converted to `{}`, missing tool names are skipped, duplicate
+tool-loop iterations are stopped, and oversized tool results are compacted
+before they are sent back to the provider.
+
+## Provider Response Safety
+
+Before returning OpenAI-compatible, Anthropic, Gemini, Ollama, Groq, or
+OpenRouter responses, Agent-Hub normalizes provider-specific payloads into a
+strict shape. If a provider returns empty content, missing `choices`, malformed
+tool calls, or an incomplete response, Agent-Hub retries once, falls back to the
+next route candidate, and finally returns:
+
+```json
+{
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "[Provider returned malformed response]"
+      }
+    }
+  ]
+}
+```
+
+Use `"debug_raw_provider_responses": true` to write redacted traces to
+`.agent-hub/debug/`.
 
 ## Workflows
 

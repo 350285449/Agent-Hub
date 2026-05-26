@@ -20,6 +20,20 @@ from .provider_presets import OPENAI_COMPATIBLE_PROVIDER_TYPES
 
 
 DEFAULT_CONFIG_PATH = Path("agent-hub.config.json")
+DEFAULT_REPO_IGNORE_PATTERNS = [
+    ".agent-hub/**",
+    "state/**",
+    "sessions/**",
+    "logs/**",
+    "*.log",
+    "__pycache__/**",
+    ".pytest_cache/**",
+]
+DEFAULT_COMPATIBILITY_MODE = {
+    "minimal_tool_schema": True,
+    "reduced_repo_context": True,
+    "max_context_tokens": 12000,
+}
 
 
 @dataclass(slots=True)
@@ -113,13 +127,20 @@ class HubConfig:
     agent_context_compaction_enabled: bool = True
     context_mode: str = "balanced"
     cline_compatibility_mode: bool = True
+    force_compatibility_streaming: bool = False
+    debug_raw_provider_responses: bool = False
     allow_shell_tools: bool = True
     shell_command_policy: str = "allow"
     tool_loop_enabled: bool = True
+    tool_loop_enabled_for_cline: bool = False
+    tool_loop_debug: bool = False
     max_tool_iterations: int = 4
     repo_context_enabled: bool = True
     repo_context_max_files: int = 8
     repo_context_max_chars: int = 12_000
+    repo_ignore_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_REPO_IGNORE_PATTERNS))
+    max_context_tokens: int | None = None
+    compatibility_mode: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_COMPATIBILITY_MODE))
     free_only: bool = True
     enable_load_balancing: bool = True
     auto_enable_available_providers: bool = True
@@ -464,13 +485,20 @@ def free_local_config() -> HubConfig:
         agent_context_compaction_enabled=True,
         context_mode="balanced",
         cline_compatibility_mode=True,
+        force_compatibility_streaming=False,
+        debug_raw_provider_responses=False,
         allow_shell_tools=True,
         shell_command_policy="ask",
         tool_loop_enabled=True,
+        tool_loop_enabled_for_cline=False,
+        tool_loop_debug=False,
         max_tool_iterations=4,
         repo_context_enabled=True,
         repo_context_max_files=8,
         repo_context_max_chars=12_000,
+        repo_ignore_patterns=list(DEFAULT_REPO_IGNORE_PATTERNS),
+        max_context_tokens=None,
+        compatibility_mode=dict(DEFAULT_COMPATIBILITY_MODE),
         free_only=True,
         auto_enable_available_providers=True,
         auto_detect_local_models=True,
@@ -626,15 +654,31 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         ),
         context_mode=_normalize_context_mode(raw.get("context_mode", "balanced")),
         cline_compatibility_mode=_bool_with_default(raw.get("cline_compatibility_mode"), True),
+        force_compatibility_streaming=_bool_with_default(
+            raw.get("force_compatibility_streaming"),
+            False,
+        ),
+        debug_raw_provider_responses=_bool_with_default(
+            raw.get("debug_raw_provider_responses"),
+            False,
+        ),
         allow_shell_tools=_bool_with_default(raw.get("allow_shell_tools"), True),
         shell_command_policy=_normalize_shell_command_policy(
             raw.get("shell_command_policy", raw.get("shell_tools_policy", "ask"))
         ),
         tool_loop_enabled=_bool_with_default(raw.get("tool_loop_enabled"), True),
+        tool_loop_enabled_for_cline=_bool_with_default(
+            raw.get("tool_loop_enabled_for_cline"),
+            False,
+        ),
+        tool_loop_debug=_bool_with_default(raw.get("tool_loop_debug"), False),
         max_tool_iterations=_normalize_max_tool_iterations(raw.get("max_tool_iterations", 4)),
         repo_context_enabled=_bool_with_default(raw.get("repo_context_enabled"), True),
         repo_context_max_files=_normalize_repo_context_max_files(raw.get("repo_context_max_files", 8)),
         repo_context_max_chars=_normalize_repo_context_max_chars(raw.get("repo_context_max_chars", 12_000)),
+        repo_ignore_patterns=_normalize_repo_ignore_patterns(raw.get("repo_ignore_patterns")),
+        max_context_tokens=_normalize_optional_context_tokens(raw.get("max_context_tokens")),
+        compatibility_mode=_normalize_compatibility_mode(raw.get("compatibility_mode")),
         free_only=_bool_with_default(raw.get("free_only"), True),
         enable_load_balancing=_bool_with_default(raw.get("enable_load_balancing"), True),
         auto_enable_available_providers=_bool_with_default(
@@ -740,13 +784,20 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "agent_context_compaction_enabled": config.agent_context_compaction_enabled,
         "context_mode": config.context_mode,
         "cline_compatibility_mode": config.cline_compatibility_mode,
+        "force_compatibility_streaming": config.force_compatibility_streaming,
+        "debug_raw_provider_responses": config.debug_raw_provider_responses,
         "allow_shell_tools": config.allow_shell_tools,
         "shell_command_policy": config.shell_command_policy,
         "tool_loop_enabled": config.tool_loop_enabled,
+        "tool_loop_enabled_for_cline": config.tool_loop_enabled_for_cline,
+        "tool_loop_debug": config.tool_loop_debug,
         "max_tool_iterations": config.max_tool_iterations,
         "repo_context_enabled": config.repo_context_enabled,
         "repo_context_max_files": config.repo_context_max_files,
         "repo_context_max_chars": config.repo_context_max_chars,
+        "repo_ignore_patterns": config.repo_ignore_patterns,
+        "max_context_tokens": config.max_context_tokens,
+        "compatibility_mode": config.compatibility_mode,
         "free_only": config.free_only,
         "enable_load_balancing": config.enable_load_balancing,
         "auto_enable_available_providers": config.auto_enable_available_providers,
@@ -1008,6 +1059,44 @@ def _normalize_context_mode(value: Any) -> str:
     if text in {"minimal", "balanced", "deep"}:
         return text
     return "balanced"
+
+
+def _normalize_optional_context_tokens(value: Any) -> int | None:
+    if value in (None, "", False):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(1_000, min(number, 1_000_000))
+
+
+def _normalize_compatibility_mode(value: Any) -> dict[str, Any]:
+    source = dict(value) if isinstance(value, dict) else {}
+    defaults = dict(DEFAULT_COMPATIBILITY_MODE)
+    max_context = _normalize_optional_context_tokens(
+        source.get("max_context_tokens", defaults["max_context_tokens"])
+    )
+    return {
+        "minimal_tool_schema": _bool_with_default(
+            source.get("minimal_tool_schema"),
+            bool(defaults["minimal_tool_schema"]),
+        ),
+        "reduced_repo_context": _bool_with_default(
+            source.get("reduced_repo_context"),
+            bool(defaults["reduced_repo_context"]),
+        ),
+        "max_context_tokens": max_context or defaults["max_context_tokens"],
+    }
+
+
+def _normalize_repo_ignore_patterns(value: Any) -> list[str]:
+    patterns = list(DEFAULT_REPO_IGNORE_PATTERNS)
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item.strip() and item.strip() not in patterns:
+                patterns.append(item.strip().replace("\\", "/"))
+    return patterns
 
 
 def _expand_env_string(value: Any) -> Any:

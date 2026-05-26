@@ -30,3 +30,43 @@ Common fixes:
   and keep `cline_compatibility_mode=true`.
 - Echo disabled: configure a real provider or set `debug_echo_enabled=true`
   only for diagnostics.
+
+## Cline `Invalid API Response`
+
+This usually means the upstream provider returned an empty body, malformed JSON,
+truncated SSE chunk, invalid tool-call arguments, or a partial
+OpenAI-compatible response.
+
+Recommended stability settings:
+
+```json
+{
+  "cline_compatibility_mode": true,
+  "force_compatibility_streaming": true,
+  "tool_loop_enabled_for_cline": false,
+  "compatibility_mode": {
+    "minimal_tool_schema": true,
+    "reduced_repo_context": true,
+    "max_context_tokens": 12000
+  }
+}
+```
+
+For a failing provider, temporarily enable:
+
+```json
+{
+  "debug_raw_provider_responses": true,
+  "tool_loop_debug": true
+}
+```
+
+Reproduce the issue, then inspect `.agent-hub/debug/` and
+`.agent-hub/state/routing_decisions.jsonl`. Debug traces are redacted and
+truncated, but still show raw provider JSON, malformed stream chunks, finish
+reasons, tool calls, request IDs, provider request IDs, stream IDs, routing mode,
+and token estimates.
+
+If the failure happens only on long or multi-file tasks, lower
+`compatibility_mode.max_context_tokens`, reduce `repo_context_max_files`, or use
+a provider with a larger reliable context window.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import fnmatch
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from .payloads import request_text
 from .models import HubRequest
 
 
-SKIP_DIRS = {".git", ".agent-hub", "__pycache__", "node_modules", ".venv", "dist", "build"}
+SKIP_DIRS = {".git", ".agent-hub", "__pycache__", "node_modules", ".venv", "dist", "build", ".pytest_cache"}
 IMPORTANT_NAMES = {
     "README.md",
     "pyproject.toml",
@@ -135,14 +136,15 @@ class RepoContextSelection:
 
 
 class RepositoryIndexer:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, ignore_patterns: list[str] | None = None) -> None:
         self.root = root.expanduser().resolve()
+        self.ignore_patterns = [pattern.replace("\\", "/") for pattern in (ignore_patterns or [])]
 
     def index(self, *, max_files: int = 2000) -> RepositoryIndex:
         changed = set(_git_changed_files(self.root))
         files: list[FileInfo] = []
         languages: dict[str, int] = {}
-        for path in _iter_files(self.root, max_files=max_files):
+        for path in _iter_files(self.root, max_files=max_files, ignore_patterns=self.ignore_patterns):
             rel = path.relative_to(self.root).as_posix()
             language = _language(path)
             languages[language] = languages.get(language, 0) + 1
@@ -227,8 +229,15 @@ class RepoContextSelector:
         )
 
 
-def repo_context_for_request(request: HubRequest, root: Path, *, max_files: int, max_chars: int) -> RepoContextSelection:
-    index = RepositoryIndexer(root).index()
+def repo_context_for_request(
+    request: HubRequest,
+    root: Path,
+    *,
+    max_files: int,
+    max_chars: int,
+    ignore_patterns: list[str] | None = None,
+) -> RepoContextSelection:
+    index = RepositoryIndexer(root, ignore_patterns=ignore_patterns).index()
     return RepoContextSelector(index).select(request_text(request), max_files=max_files, max_chars=max_chars)
 
 
@@ -242,12 +251,16 @@ def detect_uncontextualized_file_references(text: str, index: RepositoryIndex, s
     return warnings[:20]
 
 
-def _iter_files(root: Path, *, max_files: int) -> list[Path]:
+def _iter_files(root: Path, *, max_files: int, ignore_patterns: list[str] | None = None) -> list[Path]:
     files: list[Path] = []
+    patterns = [pattern.replace("\\", "/") for pattern in (ignore_patterns or [])]
     for path in root.rglob("*"):
         if len(files) >= max_files:
             break
+        rel = _relative_posix(root, path)
         if any(part in SKIP_DIRS for part in path.parts):
+            continue
+        if _matches_ignore(rel, patterns):
             continue
         if not path.is_file():
             continue
@@ -255,6 +268,26 @@ def _iter_files(root: Path, *, max_files: int) -> list[Path]:
             continue
         files.append(path)
     return files
+
+
+def _matches_ignore(relative: str, patterns: list[str]) -> bool:
+    normalized = relative.strip("./")
+    for pattern in patterns:
+        clean = pattern.strip().replace("\\", "/")
+        if not clean:
+            continue
+        if fnmatch.fnmatch(normalized, clean) or fnmatch.fnmatch(normalized, clean.rstrip("/**")):
+            return True
+        if clean.endswith("/**") and normalized.startswith(clean[:-3].rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _relative_posix(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def _git_changed_files(root: Path) -> list[str]:

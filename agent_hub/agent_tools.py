@@ -4,6 +4,7 @@ import json
 import os
 import re
 import ast
+import fnmatch
 import shutil
 import subprocess
 import tempfile
@@ -27,7 +28,19 @@ from .permissions import (
 )
 
 
-SKIPPED_DIRS = {".agent-hub", ".git", ".hg", ".svn", ".venv", "__pycache__", "node_modules"}
+SKIPPED_DIRS = {
+    ".agent-hub",
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    "node_modules",
+    "state",
+    "sessions",
+    "logs",
+}
 RUNTIME_DIR_OPTIONS = ("state_dir", "inbox_dir", "outbox_dir", "archive_dir")
 MAX_FILE_CHARS = 80_000
 MAX_TOOL_OUTPUT_CHARS = 20_000
@@ -1490,9 +1503,13 @@ class AgentToolbox:
     def _is_skipped(self, path: Path) -> bool:
         try:
             parts = path.relative_to(self.root).parts
+            relative = path.relative_to(self.root).as_posix()
         except ValueError:
             parts = path.parts
+            relative = path.as_posix()
         if any(part in SKIPPED_DIRS for part in parts):
+            return True
+        if _matches_repo_ignore(relative, getattr(self.config, "repo_ignore_patterns", [])):
             return True
         return self._is_runtime_path(path)
 
@@ -2142,6 +2159,19 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _matches_repo_ignore(relative: str, patterns: list[str]) -> bool:
+    normalized = relative.replace("\\", "/").strip("./")
+    for pattern in patterns:
+        clean = str(pattern).replace("\\", "/").strip()
+        if not clean:
+            continue
+        if fnmatch.fnmatch(normalized, clean) or fnmatch.fnmatch(normalized, clean.rstrip("/**")):
+            return True
+        if clean.endswith("/**") and normalized.startswith(clean[:-3].rstrip("/") + "/"):
+            return True
+    return False
 
 
 def _request_option(request: HubRequest, key: str, default: Any) -> Any:

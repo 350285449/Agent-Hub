@@ -17,6 +17,8 @@ class ToolLoopMetadata:
     tool_iteration_count: int = 0
     max_tool_iterations: int = 0
     max_tool_iterations_reached: bool = False
+    invalid_tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    duplicate_tool_call_detected: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -25,6 +27,8 @@ class ToolLoopMetadata:
             "tool_iteration_count": self.tool_iteration_count,
             "max_tool_iterations": self.max_tool_iterations,
             "max_tool_iterations_reached": self.max_tool_iterations_reached,
+            "invalid_tool_calls": list(self.invalid_tool_calls),
+            "duplicate_tool_call_detected": self.duplicate_tool_call_detected,
         }
 
 
@@ -38,6 +42,62 @@ def extract_tool_calls(result: ProviderResult) -> list[ToolCall]:
     if not calls:
         calls = _gemini_tool_calls(raw)
     return [ToolCall.from_openai(call) for call in calls]
+
+
+def valid_tool_calls(calls: list[ToolCall], metadata: ToolLoopMetadata) -> list[ToolCall]:
+    valid: list[ToolCall] = []
+    for call in calls:
+        if not call.name:
+            metadata.invalid_tool_calls.append(
+                {
+                    "id": call.id,
+                    "reason": "missing_tool_name",
+                    "raw": dict(call.raw),
+                }
+            )
+            continue
+        if not isinstance(call.arguments, dict):
+            metadata.invalid_tool_calls.append(
+                {
+                    "id": call.id,
+                    "name": call.name,
+                    "reason": "arguments_not_object",
+                }
+            )
+            call.arguments = {}
+        valid.append(call)
+    return valid
+
+
+def tool_call_signature(call: ToolCall) -> str:
+    try:
+        args = json.dumps(call.arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):
+        args = "{}"
+    return f"{call.name}:{args}"
+
+
+def compact_tool_result_for_loop(result: ToolResult, *, max_chars: int = 12_000) -> ToolResult:
+    data = result.to_dict()
+    text = json.dumps(data, ensure_ascii=False, default=str)
+    if len(text) <= max_chars:
+        return result
+    preview = text[: max(0, max_chars - 500)]
+    return ToolResult(
+        call_id=result.call_id,
+        name=result.name,
+        ok=result.ok,
+        content={
+            "summary": "Tool result was reduced before being sent back to the provider.",
+            "truncated": True,
+            "original_chars": len(text),
+            "preview": preview,
+        },
+        error=result.error[:1000] if result.error else "",
+        started_at=result.started_at,
+        finished_at=result.finished_at,
+        metadata={**dict(result.metadata), "compacted_for_provider": True},
+    )
 
 
 def assistant_message_from_result(result: ProviderResult, calls: list[ToolCall]) -> dict[str, Any]:

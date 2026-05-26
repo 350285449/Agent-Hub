@@ -93,6 +93,11 @@ BACKEND_FEATURES = {
     "repo_aware_coding": True,
     "provider_evaluation": True,
     "dashboard_status_endpoints": True,
+    "raw_provider_response_debugging": True,
+    "response_normalization_hardening": True,
+    "streaming_recovery": True,
+    "context_safety_cap": True,
+    "repo_ignore_patterns": True,
 }
 
 
@@ -175,6 +180,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "token_budget": {
                         "mode": self.server.config.context_mode,
                         "budget_tokens": self.server.config.agent_context_budget_tokens,
+                        "max_context_tokens": self.server.config.max_context_tokens,
+                        "compatibility_mode": self.server.config.compatibility_mode,
                         "adaptive_modes": ["minimal", "balanced", "deep"],
                         "cline_compatibility_mode": self.server.config.cline_compatibility_mode,
                         "protected_categories": [
@@ -188,6 +195,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                         ],
                     },
                     "context_diagnostics": _debug_context_summary(self.server),
+                    "streaming": {
+                        "force_compatibility_streaming": self.server.config.force_compatibility_streaming,
+                    },
+                    "repo_ignore_patterns": self.server.config.repo_ignore_patterns,
                     "repository_context_scoring": {
                         "enabled": self.server.config.context_change_bar_enabled,
                         "light_minimum": 3,
@@ -1007,10 +1018,28 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             write_data(
                 {
-                    "error": {
-                        "message": str(exc),
-                        "type": "agent_hub_native_stream_error",
-                    }
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": "[Provider stream interrupted; switched to safe termination]"
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
+            write_data(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                 }
             )
         finally:
