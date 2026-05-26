@@ -15,14 +15,20 @@ from ..models import FailoverEvent, HubRequest, HubResponse, ProviderResult
 from ..observability import record_event
 from ..payloads import content_to_text, request_text
 from ..permissions import (
+    TRUSTED_CLOUD,
+    UNTRUSTED_EXTERNAL,
     PermissionManager,
+    PermissionDecision,
     approval_mode_from_request,
+    client_compatibility_mode_enabled,
     provider_approval_granted_from_request,
     provider_permission_request,
+    provider_trust_level,
 )
 from ..providers import Provider, ProviderError, create_provider
 from ..providers.base import StreamChunk
 from ..repository import repo_context_for_request
+from ..security.audit import record_provider_audit
 from ..session_store import SessionStore
 from ..token_budget import TokenBudgetManager, estimate_messages_tokens
 from ..tools import ToolExecutionContext, ToolExecutionPipeline, create_builtin_registry
@@ -311,7 +317,10 @@ class AgentRouter:
                         reason=reason,
                         retryable=False,
                         error_type="permission_required" if permission.requires_approval else "permission_denied",
-                        metadata={"permission": permission.request.to_dict() if permission.request else None},
+                        metadata={
+                            "permission": permission.request.to_dict() if permission.request else None,
+                            "trust_level": provider_trust_level(agent),
+                        },
                     )
                 )
                 self._record_route_event(
@@ -515,7 +524,10 @@ class AgentRouter:
                         reason=permission.reason or "Permission required before using this provider.",
                         retryable=False,
                         error_type="permission_required" if permission.requires_approval else "permission_denied",
-                        metadata={"permission": permission.request.to_dict() if permission.request else None},
+                        metadata={
+                            "permission": permission.request.to_dict() if permission.request else None,
+                            "trust_level": provider_trust_level(agent),
+                        },
                     )
                 )
                 continue
@@ -671,12 +683,68 @@ class AgentRouter:
 
     def _provider_permission_decision(self, agent: AgentConfig, request: HubRequest):
         permission_request = provider_permission_request(agent, request)
+        trust_level = provider_trust_level(agent)
+        approval_mode = approval_mode_from_request(request, self.config.approval_mode)
         if permission_request is None:
+            record_provider_audit(
+                self.config.state_dir,
+                request=request,
+                agent=agent,
+                trust_level=trust_level,
+                allowed=True,
+                reason="Provider is local or does not require interactive approval.",
+                approval_mode=approval_mode,
+                interactive_approval_required=False,
+            )
             return None
-        decision = PermissionManager(
-            approval_mode_from_request(request, self.config.approval_mode),
-            approval_granted=provider_approval_granted_from_request(request),
-        ).check(permission_request)
+        explicit_approval = provider_approval_granted_from_request(request)
+        compatibility = client_compatibility_mode_enabled(request, self.config)
+        security = (
+            permission_request.details.get("security")
+            if isinstance(permission_request.details, dict)
+            else None
+        )
+        explicit_security_approval = bool(
+            isinstance(security, dict)
+            and (security.get("blocked") or security.get("explicit_approval_required"))
+        )
+        if (
+            trust_level == TRUSTED_CLOUD
+            and not explicit_approval
+            and not explicit_security_approval
+            and (approval_mode == "auto" or compatibility)
+        ):
+            reason = (
+                "Allowed trusted cloud provider without interactive approval "
+                "because approval_mode=auto or IDE compatibility mode is enabled."
+            )
+            decision = PermissionDecision(
+                True,
+                requires_approval=False,
+                denied=False,
+                reason=reason,
+                mode=approval_mode,
+                request=permission_request,
+            )
+        elif trust_level == UNTRUSTED_EXTERNAL and not explicit_approval:
+            reason = (
+                "Provider requires approval. Set approval_mode=auto or enable "
+                "cline_compatibility_mode for trusted providers; unknown external "
+                "endpoints require explicit approval."
+            )
+            decision = PermissionDecision(
+                False,
+                requires_approval=True,
+                denied=False,
+                reason=reason,
+                mode=approval_mode,
+                request=permission_request,
+            )
+        else:
+            decision = PermissionManager(
+                approval_mode,
+                approval_granted=explicit_approval,
+            ).check(permission_request)
         record_event(
             self.config.state_dir,
             "permissions",
@@ -691,10 +759,25 @@ class AgentRouter:
                 "denied": decision.denied,
                 "reason": decision.reason,
                 "mode": decision.mode,
+                "trust_level": trust_level,
+                "compatibility_bypass": bool(
+                    decision.allowed and trust_level == TRUSTED_CLOUD and (approval_mode == "auto" or compatibility)
+                ),
                 "category": permission_request.category,
                 "risk_level": permission_request.risk_level,
                 "resource": permission_request.resource,
             },
+        )
+        record_provider_audit(
+            self.config.state_dir,
+            request=request,
+            agent=agent,
+            trust_level=trust_level,
+            allowed=decision.allowed,
+            reason=decision.reason,
+            approval_mode=approval_mode,
+            interactive_approval_required=not decision.allowed and decision.requires_approval,
+            permission=decision.to_dict(),
         )
         return decision
 
@@ -2054,8 +2137,8 @@ def _no_fallback_reason(failover: list[FailoverEvent]) -> str:
         if latest.error_type == "permission_denied":
             return f"Permission denied before using {latest.agent}: {latest.reason}"
         return (
-            "Approval required before Agent Hub can use an external provider "
-            f"or send workspace content. Provider: {latest.agent}. {latest.reason}"
+            "Provider requires approval. Set approval_mode=auto or enable "
+            f"cline_compatibility_mode for trusted providers. Provider: {latest.agent}. {latest.reason}"
         )
     echo_events = [
         event

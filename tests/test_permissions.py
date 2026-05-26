@@ -87,7 +87,7 @@ class PermissionManagerTests(unittest.TestCase):
             with self.assertRaises(RouterError) as error:
                 router.route(request)
 
-            self.assertIn("Approval required", str(error.exception))
+            self.assertIn("Provider requires approval", str(error.exception))
             self.assertEqual(error.exception.failover[0].error_type, "permission_required")
 
             approved = router.route(

@@ -558,11 +558,54 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("failed_models", hub)
             self.assertIn("fallback_models", hub)
 
-    def test_openai_compatible_proxy_blocks_external_provider_without_permission(self) -> None:
+    def test_openai_compatible_proxy_blocks_unknown_external_provider_without_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                approval_mode="auto",
+                free_only=False,
+                default_route=["unknown"],
+                agents={
+                    "unknown": AgentConfig(
+                        name="unknown",
+                        provider="openai-compatible",
+                        provider_type="custom-external",
+                        base_url="https://unknown.example.invalid/v1",
+                        model="unknown-model",
+                        api_key="secret",
+                    )
+                },
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with self.assertRaises(HTTPError) as error:
+                    _post_json(
+                        f"{base}/v1/chat/completions",
+                        {
+                            "model": "unknown-model",
+                            "messages": [{"role": "user", "content": "Current file: app.py\nhello"}],
+                        },
+                    )
+                body = json.loads(error.exception.read().decode("utf-8"))
+                error.exception.close()
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(error.exception.code, 403)
+            self.assertEqual(body["error"]["type"], "agent_hub_permission_required")
+            self.assertTrue(body["agent_hub"]["permission_required"])
+            self.assertEqual(body["error"]["provider"], "unknown")
+            self.assertEqual(body["agent_hub"]["trust_level"], "UNTRUSTED_EXTERNAL")
+            self.assertTrue(body["error"]["suggested_fix"]["provider_approval_granted"])
+
+    def test_openai_compatible_proxy_returns_actionable_permission_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp) / "state",
                 approval_mode="ask",
+                cline_compatibility_mode=False,
                 free_only=False,
                 default_route=["paid"],
                 agents={
@@ -593,7 +636,14 @@ class ServerCompatibilityTests(unittest.TestCase):
 
             self.assertEqual(error.exception.code, 403)
             self.assertEqual(body["error"]["type"], "agent_hub_permission_required")
-            self.assertTrue(body["agent_hub"]["permission_required"])
+            self.assertEqual(
+                body["error"]["message"],
+                "Provider requires approval. Set approval_mode=auto or enable cline_compatibility_mode.",
+            )
+            self.assertEqual(
+                body["error"]["suggested_fix"],
+                {"approval_mode": "auto", "cline_compatibility_mode": True},
+            )
 
     def test_debug_request_preserves_cline_structured_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

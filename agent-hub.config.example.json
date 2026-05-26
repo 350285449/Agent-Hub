@@ -6,6 +6,8 @@
   "outbox_dir": ".agent-hub/outbox",
   "archive_dir": ".agent-hub/archive",
   "workspace_dir": ".",
+  "approval_mode": "auto",
+  "cline_compatibility_mode": true,
   "free_only": true,
   "enable_load_balancing": true,
   "auto_detect_local_models": false,

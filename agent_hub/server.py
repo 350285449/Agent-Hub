@@ -11,6 +11,7 @@ from .context import request_context_diagnostics
 from .evaluation import ProviderScoreStore
 from .models import HubRequest
 from .observability import metrics_snapshot, permission_snapshot, recent_events, record_event, usage_snapshot
+from .permissions import UNTRUSTED_EXTERNAL
 from .payloads import (
     anthropic_message_response,
     anthropic_stream_events,
@@ -537,8 +538,75 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "approval_mode": self.server.config.approval_mode,
                     "message": str(exc),
                 }
-                if permission_event and permission_event.metadata.get("permission"):
-                    error_body["agent_hub"]["permission"] = permission_event.metadata["permission"]
+                if permission_event:
+                    permission = (
+                        permission_event.metadata.get("permission")
+                        if isinstance(permission_event.metadata, dict)
+                        else None
+                    )
+                    permission_details = (
+                        permission.get("details")
+                        if isinstance(permission, dict) and isinstance(permission.get("details"), dict)
+                        else {}
+                    )
+                    security = (
+                        permission_details.get("security")
+                        if isinstance(permission_details.get("security"), dict)
+                        else {}
+                    )
+                    trust_level = (
+                        permission_event.metadata.get("trust_level")
+                        if isinstance(permission_event.metadata, dict)
+                        else None
+                    )
+                    explicit_security_approval = bool(
+                        security.get("blocked") or security.get("explicit_approval_required")
+                    )
+                    unknown_external = (
+                        trust_level == UNTRUSTED_EXTERNAL
+                        or "unknown external" in permission_event.reason.lower()
+                    )
+                    error_body["error"]["provider"] = permission_event.agent
+                    if explicit_security_approval:
+                        error_body["error"]["message"] = (
+                            "Provider request requires explicit approval because "
+                            "the request content triggered a security rule."
+                        )
+                        error_body["error"]["suggested_fix"] = {
+                            "remove_sensitive_content": True,
+                            "provider_approval_granted": True,
+                        }
+                    elif unknown_external:
+                        error_body["error"]["message"] = (
+                            "Unknown external provider endpoint requires explicit approval. "
+                            "Use a local endpoint, configure a known trusted provider type, "
+                            "or approve this provider explicitly."
+                        )
+                        error_body["error"]["suggested_fix"] = {
+                            "provider_approval_granted": True,
+                            "trusted_provider_types": [
+                                "openai",
+                                "anthropic",
+                                "gemini",
+                                "groq",
+                                "openrouter",
+                                "ollama-cloud",
+                            ],
+                        }
+                    else:
+                        error_body["error"]["message"] = (
+                            "Provider requires approval. Set approval_mode=auto or "
+                            "enable cline_compatibility_mode."
+                        )
+                        error_body["error"]["suggested_fix"] = {
+                            "approval_mode": "auto",
+                            "cline_compatibility_mode": True,
+                        }
+                    error_body["agent_hub"]["provider"] = permission_event.agent
+                    if isinstance(permission_event.metadata, dict) and permission_event.metadata.get("permission"):
+                        error_body["agent_hub"]["permission"] = permission_event.metadata["permission"]
+                    if trust_level:
+                        error_body["agent_hub"]["trust_level"] = trust_level
             elif route_error_type == NO_TOOL_CAPABLE_MODEL:
                 error_body["agent_hub"] = {
                     "error_type": NO_TOOL_CAPABLE_MODEL,
@@ -1644,11 +1712,43 @@ def _payload_with_header_metadata(payload: dict[str, Any], headers: Any) -> dict
         if isinstance(value, str) and value.strip() and not _has_session_key(metadata):
             metadata[key] = value.strip()
             break
+    user_agent = headers.get("User-Agent")
+    if isinstance(user_agent, str) and user_agent.strip():
+        metadata.setdefault("user_agent", user_agent.strip()[:300])
+        client = _known_client_from_user_agent(user_agent)
+        if client:
+            metadata.setdefault("client", client)
+            metadata.setdefault("source", client)
+    for header_name, key in (
+        ("X-Agent-Hub-Client", "client"),
+        ("X-Cline-Version", "cline_version"),
+        ("X-Continue-Version", "continue_version"),
+        ("Anthropic-Version", "anthropic_version"),
+        ("OpenAI-Organization", "openai_compatible_header"),
+    ):
+        value = headers.get(header_name)
+        if isinstance(value, str) and value.strip():
+            metadata.setdefault(key, value.strip()[:200])
     if not metadata:
         return payload
     copied = dict(payload)
     copied["metadata"] = metadata
     return copied
+
+
+def _known_client_from_user_agent(value: str) -> str:
+    lowered = value.lower()
+    for marker, client in (
+        ("cline", "cline"),
+        ("continue", "continue"),
+        ("claude-code", "claude-code"),
+        ("claude_code", "claude-code"),
+        ("vscode", "vscode"),
+        ("visual studio code", "vscode"),
+    ):
+        if marker in lowered:
+            return client
+    return ""
 
 
 def _has_session_key(data: dict[str, Any]) -> bool:

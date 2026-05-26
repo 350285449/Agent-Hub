@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config import AgentConfig, _is_local_or_private_url, normalize_provider
+from .config import AgentConfig, HubConfig, _is_local_or_private_url, normalize_provider
 from .models import HubRequest
 from .security import (
     RISK_ORDER,
@@ -15,6 +15,29 @@ from .token_budget import estimate_messages_tokens
 
 
 APPROVAL_MODES = {"ask", "auto", "safe", "readonly", "shell-ask", "deny"}
+LOCAL = "LOCAL"
+TRUSTED_CLOUD = "TRUSTED_CLOUD"
+UNTRUSTED_EXTERNAL = "UNTRUSTED_EXTERNAL"
+TRUSTED_CLOUD_PROVIDER_TYPES = {
+    "openai",
+    "anthropic",
+    "gemini",
+    "openrouter",
+    "groq",
+    "ollama-cloud",
+}
+KNOWN_IDE_CLIENT_MARKERS = {
+    "cline",
+    "continue",
+    "claude-code",
+    "claude_code",
+    "vscode",
+    "visual studio code",
+    "agent hub",
+    "agent-hub",
+    "vscode-agent-hub-chat",
+    "vscode-chat-participant",
+}
 SENSITIVE_CATEGORIES = {
     "config_edit",
     "external_download",
@@ -258,6 +281,41 @@ def approval_mode_from_request(request: HubRequest, default: str) -> str:
     return normalize_approval_mode(_request_option(request, "approval_mode", default))
 
 
+def client_compatibility_mode_enabled(request: HubRequest, config: HubConfig) -> bool:
+    """Return True when provider approval should be non-interactive for IDE clients."""
+
+    if not getattr(config, "cline_compatibility_mode", True):
+        return False
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    explicit = _first_present(
+        raw,
+        metadata,
+        "cline_compatibility_mode",
+        "continue_compatibility_mode",
+        "ide_compatibility_mode",
+        "preserve_structured_context",
+    )
+    if explicit is not None:
+        return _truthy(explicit)
+    if request.api_shape in {"openai-chat", "openai-responses", "anthropic-messages"}:
+        return True
+    client_text = " ".join(
+        str(value or "").lower()
+        for value in (
+            raw.get("source"),
+            raw.get("client"),
+            raw.get("client_name"),
+            metadata.get("source"),
+            metadata.get("client"),
+            metadata.get("client_name"),
+            metadata.get("user_agent"),
+            metadata.get("client_user_agent"),
+        )
+    )
+    return any(marker in client_text for marker in KNOWN_IDE_CLIENT_MARKERS)
+
+
 def tool_permission_request(tool_name: str, args: dict[str, Any]) -> PermissionRequest:
     security = classify_tool_action(tool_name, args).to_dict()
     if tool_name == "run_command":
@@ -360,19 +418,25 @@ def provider_permission_request(agent: AgentConfig, request: HubRequest) -> Perm
 
 
 def provider_requires_permission(agent: AgentConfig) -> bool:
+    if provider_trust_level(agent) == LOCAL:
+        return False
+    return True
+
+
+def provider_trust_level(agent: AgentConfig) -> str:
     provider = normalize_provider(agent.provider)
     provider_type = str(agent.provider_type or "").lower()
     if provider in {"echo", "local-research"}:
-        return False
-    if "cloud" in provider_type:
-        return True
-    if agent.api_key_env or agent.resolved_api_key:
-        return True
-    if provider in {"openai", "anthropic", "gemini"}:
-        return True
-    if provider == "openai-compatible":
-        return not _is_local_or_private_url(agent.base_url)
-    return provider not in {"echo", "local-research"}
+        return LOCAL
+    if (provider == "ollama" or provider_type == "ollama") and (
+        not agent.base_url or _is_local_or_private_url(agent.base_url)
+    ):
+        return LOCAL
+    if provider == "openai-compatible" and _is_local_or_private_url(agent.base_url):
+        return LOCAL
+    if provider in TRUSTED_CLOUD_PROVIDER_TYPES or provider_type in TRUSTED_CLOUD_PROVIDER_TYPES:
+        return TRUSTED_CLOUD
+    return UNTRUSTED_EXTERNAL
 
 
 def request_text_has_workspace_context(request: HubRequest) -> bool:
@@ -395,6 +459,15 @@ def _request_option(request: HubRequest, key: str, default: Any) -> Any:
     if isinstance(hub_options, dict) and key in hub_options:
         return hub_options[key]
     return raw.get(key, default)
+
+
+def _first_present(raw: dict[str, Any], metadata: dict[str, Any], *keys: str) -> Any:
+    hub_options = raw.get("agent_hub")
+    for source in (raw, metadata, hub_options if isinstance(hub_options, dict) else {}):
+        for key in keys:
+            if key in source:
+                return source[key]
+    return None
 
 
 def _truthy(value: Any) -> bool:

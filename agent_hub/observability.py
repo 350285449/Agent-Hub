@@ -12,6 +12,7 @@ STREAM_FILES = {
     "requests": "request_trace.jsonl",
     "routing": "routing_decisions.jsonl",
     "permissions": "permission_audit.jsonl",
+    "security_audit": "security_audit.jsonl",
     "tools": "tool_execution_history.jsonl",
 }
 

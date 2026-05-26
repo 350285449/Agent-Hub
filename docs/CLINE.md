@@ -23,6 +23,45 @@ Agent-Hub preserves Cline's client-provided tool schema by default. Built-in
 Agent-Hub tools are executed by the backend only when Agent-Hub owns the tool
 schema or `agent_hub.auto_execute_tools=true` is sent.
 
+## Approval Errors
+
+Cline cannot answer Agent-Hub's interactive approval prompts. If a routed model
+uses Ollama Cloud, OpenRouter, OpenAI, Anthropic, Groq, Gemini, or another
+hosted provider while `approval_mode` is interactive, Cline can see:
+
+```json
+{
+  "error": {
+    "type": "agent_hub_permission_required",
+    "message": "Provider requires approval. Set approval_mode=auto or enable cline_compatibility_mode."
+  }
+}
+```
+
+Recommended config for Cline:
+
+```json
+{
+  "approval_mode": "auto",
+  "cline_compatibility_mode": true,
+  "tool_loop_enabled": true
+}
+```
+
+With compatibility mode enabled, trusted cloud provider routing is allowed
+without an interactive prompt and an audit event is written instead. Local
+providers are always allowed. Unknown external endpoints can still require
+explicit approval, and requests that appear to contain secrets still trigger the
+security gate.
+
+Security protections that remain active:
+
+- shell safety and `shell_command_policy`
+- workspace path restrictions and path escape protection
+- dangerous command blocking
+- file/tool permission checks
+- provider audit logging in `.agent-hub/state/security_audit.jsonl`
+
 Diagnostics:
 
 ```powershell

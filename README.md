@@ -139,6 +139,8 @@ Cline:
 - Base URL: `http://127.0.0.1:8787/v1`
 - API key: any local placeholder
 - Model: `agent-hub-coding`
+- Recommended config: `"approval_mode": "auto"` and
+  `"cline_compatibility_mode": true`
 
 Continue:
 
@@ -151,6 +153,43 @@ Continue:
   "apiKey": "local"
 }
 ```
+
+### Approval Compatibility
+
+Older configs using `approval_mode: "ask"` can return a 403 like
+`agent_hub_permission_required` when an IDE client routes workspace context to a
+cloud provider. Cline, Continue, Claude Code, and many VS Code extensions cannot
+answer Agent-Hub's interactive approval prompt, so Agent-Hub supports
+non-interactive client compatibility mode.
+
+With `cline_compatibility_mode: true`, OpenAI-compatible IDE requests can use
+trusted cloud providers without an interactive provider prompt. Agent-Hub still
+records a permission and security audit event, and it still blocks dangerous
+tools, unsafe shell commands, path escapes, unknown external endpoints, and
+requests that trigger explicit security rules such as secret detection.
+
+Recommended IDE config:
+
+```json
+{
+  "approval_mode": "auto",
+  "cline_compatibility_mode": true,
+  "tool_loop_enabled": true
+}
+```
+
+Provider trust levels are:
+
+- `LOCAL`: Ollama/local research/localhost or private OpenAI-compatible
+  endpoints. These are always allowed.
+- `TRUSTED_CLOUD`: OpenAI, Anthropic, Gemini, Groq, OpenRouter, and
+  Ollama Cloud provider types. These are allowed automatically in
+  `approval_mode: "auto"` or compatibility mode.
+- `UNTRUSTED_EXTERNAL`: unknown external OpenAI-compatible endpoints. These may
+  still require explicit approval before workspace content is sent.
+
+Provider routing decisions are written to
+`.agent-hub/state/security_audit.jsonl` without prompt content.
 
 Supported provider families include OpenAI, OpenAI-compatible local/cloud
 servers, Ollama, OpenRouter, Groq, Anthropic, Gemini, local research, and echo
