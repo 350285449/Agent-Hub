@@ -6,6 +6,7 @@ from .engine import (
     WorkflowResult,
     WorkflowStage,
     WorkflowStageResult,
+    WorkflowState,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "WorkflowResult",
     "WorkflowStage",
     "WorkflowStageResult",
+    "WorkflowState",
 ]

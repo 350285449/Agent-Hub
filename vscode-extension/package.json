@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub Workspace",
   "description": "Universal AI router, Cline/Claude Code gateway, and permissioned workspace-agent platform for VS Code.",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
@@ -62,6 +62,8 @@
   "main": "./extension.js",
   "scripts": {
     "check": "node --check extension.js",
+    "compile": "npm run check",
+    "test": "npm run check",
     "install-extension": "node scripts/install-extension.js",
     "mount": "node scripts/install-extension.js",
     "prepare-backend": "node scripts/prepare-backend.js",

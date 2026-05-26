@@ -51,10 +51,16 @@ Agent-Hub is organized around modular backend systems:
   and protected context, and tracks repository memory.
 - Workflow engine: runs deterministic Planner -> Worker -> Reviewer workflows.
 - Tool layer: exposes MCP-shaped tools, registry, permission checks, execution
-  events, and OpenAI-compatible tool schemas.
+  events, OpenAI-compatible tool schemas, and a real provider tool-call loop.
+- Repository context: indexes files, important package/config files, imports,
+  changed files, and compact evidence for coding/review/debug/refactor tasks.
+- Provider evaluation: stores benchmark scores and feeds them back into routing.
+- Dashboard: `/dashboard`, `/v1/status`, `/v1/routing-history`, and
+  `/v1/provider-scores` explain model selection and tool/workflow activity.
 
 More detail lives in `docs/architecture.md`, `docs/providers.md`,
-`docs/workflows.md`, `docs/tools.md`, and `docs/api.md`.
+`docs/workflows.md`, `docs/tools.md`, `docs/mcp.md`, `docs/evaluation.md`,
+`docs/install-vsix.md`, and `docs/api.md`.
 
 ## OpenAI-Compatible Usage
 
@@ -88,6 +94,8 @@ Workflow endpoints are available for coding tasks:
 - `POST /v1/workflows/refactor`
 
 Each workflow is deterministic and explainable: planner, worker, reviewer.
+Optional validation, retry-on-review-failure, test command, and patch summary
+stages are available through request/config flags.
 
 ## Configuration Example
 
@@ -96,6 +104,9 @@ Each workflow is deterministic and explainable: planner, worker, reviewer.
   "free_only": true,
   "expose_routing_details": false,
   "approval_mode": "ask",
+  "tool_loop_enabled": true,
+  "max_tool_iterations": 4,
+  "repo_context_enabled": true,
   "routes": [{"name": "coding", "agents": ["ollama-qwen-coder", "custom-local"]}],
   "agents": [
     {
@@ -109,6 +120,12 @@ Each workflow is deterministic and explainable: planner, worker, reviewer.
     }
   ]
 }
+```
+
+Run provider evaluation:
+
+```sh
+python -m agent_hub eval --route coding --json
 ```
 
 Keep real `agent-hub.config.json`, backups, logs, state folders, provider health

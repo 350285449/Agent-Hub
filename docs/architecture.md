@@ -34,20 +34,35 @@ tool reliability, streaming speed, recent failures, and cooldowns. Health is
 persisted in `.agent-hub/state/provider_health.json` and contributes to dynamic
 provider scores.
 
+Provider evaluation scores are stored in `.agent-hub/state/provider_scores.json`
+and can add a small routing bias after real benchmark runs.
+
 ## Context Engine
 
 `agent_hub.core.context.ContextEngine` estimates tokens, compresses old
 conversation turns into rolling summaries, preserves protected/recent context,
 tracks repository memory, and exposes future embedding/retrieval interfaces.
 
+`agent_hub.repository` adds a repository indexer and selector for coding tasks:
+file lists, language detection, important package/config files, changed files,
+imports/references, compact file summaries, and anti-hallucination warnings for
+referenced files that were not selected as evidence.
+
 ## Workflows
 
 `agent_hub.workflows.WorkflowEngine` runs deterministic non-recursive
 Planner -> Worker -> Reviewer workflows for code, review, debug, explain, and
-refactor tasks. Workflow stages share explicit memory and progress metadata.
+refactor tasks. Optional stages add reviewer retry, shell validation commands,
+validator review, patch summary, and a workflow state object.
 
 ## Tool System
 
 `agent_hub.tools` defines MCP-shaped `Tool`, `ToolCall`, and `ToolResult`
 objects, a registry, a permission layer, an execution pipeline, OpenAI tool
-schema conversion, and built-in local tools.
+schema conversion, built-in local tools, and the provider tool-call loop.
+
+## Dashboard
+
+The root page and `/dashboard` expose a lightweight HTML dashboard. JSON status
+lives at `/v1/status`, recent routing events at `/v1/routing-history`, and
+stored benchmark scores at `/v1/provider-scores`.

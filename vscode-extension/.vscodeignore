@@ -2,6 +2,14 @@
 .vscode-test/**
 node_modules/**
 *.vsix
+agent-hub.config.json
+*.config.local.json
+*.config.backup.json
+*.bak
+*.log
+provider_health.json
+.agent-hub/**
+.agent-hub-state/**
 npm-debug.log
 yarn.lock
 pnpm-lock.yaml

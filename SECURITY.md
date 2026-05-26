@@ -25,4 +25,9 @@ maintainers with:
   keys, provider health state, logs, or packaged `.vsix` artifacts.
 - External provider calls may transmit prompt and workspace context.
 - File writes and shell execution are guarded by the permission layer.
+- File tools resolve paths under `workspace_dir` and reject workspace escapes.
+- Shell tools respect `allow_shell_tools`, `shell_command_policy`, and
+  dangerous-command blocking before execution.
+- Packaged VSIX builds exclude local configs, logs, provider health, state
+  folders, and existing VSIX artifacts.
 - Keep `approval_mode` conservative for untrusted workspaces.

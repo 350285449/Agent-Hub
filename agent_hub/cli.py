@@ -24,6 +24,7 @@ from .config import (
     normalize_provider,
 )
 from .context import request_context_diagnostics
+from .evaluation import BenchmarkRunner, ProviderScoreStore, default_benchmark_tasks
 from .inbox import InboxProcessor
 from .payloads import request_from_payload
 from .provider_presets import (
@@ -227,6 +228,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     benchmark_parser.add_argument("--route", default="cloud-agent")
     benchmark_parser.add_argument("--prompt", default="Reply with one short sentence.")
     benchmark_parser.add_argument("--json", action="store_true")
+
+    eval_parser = subparsers.add_parser("eval", help="Evaluate configured providers and store provider scores.")
+    eval_parser.add_argument("--route", default="cloud-agent")
+    eval_parser.add_argument("--json", action="store_true")
+    eval_parser.add_argument("--limit", type=int, default=6, help="Maximum benchmark tasks to run.")
 
     route_test_parser = subparsers.add_parser("route-test", help="Route a prompt and show selected provider.")
     route_test_parser.add_argument("prompt", nargs="*", default=["hello"])
@@ -454,6 +460,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if command == "benchmark":
         return _benchmark(config, route=args.route, prompt=args.prompt, as_json=args.json)
+    if command == "eval":
+        return _eval_providers(config, route=args.route, limit=args.limit, as_json=args.json)
     if command == "route-test":
         return _route_test(config, route=args.route, prompt=" ".join(args.prompt), as_json=args.json)
     if command == "chat":
@@ -1641,6 +1649,30 @@ def _benchmark(config: HubConfig, *, route: str, prompt: str, as_json: bool) -> 
                 f"avg_latency={health['average_latency_seconds']}s"
             )
     return 0
+
+
+def _eval_providers(config: HubConfig, *, route: str, limit: int, as_json: bool) -> int:
+    router = AgentRouter(config)
+    tasks = default_benchmark_tasks(route=route)[: max(1, min(limit, 20))]
+    runner = BenchmarkRunner(router, store=ProviderScoreStore(config.state_dir))
+    results = runner.run(tasks)
+    scores = ProviderScoreStore(config.state_dir).load()
+    data = {
+        "object": "agent_hub.provider_evaluation",
+        "route": route,
+        "results": [result.to_dict() for result in results],
+        "provider_scores": scores,
+    }
+    if as_json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        print(f"Provider evaluation for route {route}")
+        _print_table(
+            data["results"],
+            ["agent", "provider", "model", "task_type", "score", "latency_ms", "ok", "error"],
+        )
+        print(f"Stored scores: {config.state_dir / 'provider_scores.json'}")
+    return 0 if any(result.ok for result in results) else 1
 
 
 def _route_test(config: HubConfig, *, route: str, prompt: str, as_json: bool) -> int:

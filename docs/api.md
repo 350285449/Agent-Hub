@@ -29,6 +29,14 @@ The response header `X-Agent-Hub-Stream-Mode` is `native` when the selected
 provider streams live chunks and `compatibility` when Agent-Hub streams a
 completed response.
 
+## Tool Calls
+
+For Agent-Hub-owned built-in tools, model `tool_calls` are executed locally,
+tool results are appended to message history, and the provider is called again
+until a final answer or `max_tool_iterations` is reached. Routing metadata
+includes `tool_calls`, `tool_results`, and `tool_iteration_count` when detailed
+routing is enabled.
+
 ## Workflows
 
 ```sh
@@ -39,6 +47,11 @@ curl http://127.0.0.1:8787/v1/workflows/code \
   }'
 ```
 
+Use `validate=true` to add the optional validator stage. Use
+`patch_summary=true` to include a deterministic patch-summary stage. If
+`validation_commands` are configured and shell tools are allowed, workflows run
+those commands through the same shell policy as normal tools.
+
 ## Health
 
 ```sh
@@ -47,6 +60,25 @@ curl http://127.0.0.1:8787/health
 
 Health includes provider status, latency, score, cooldowns, streaming support,
 limits, routing capabilities, context diagnostics, and enabled features.
+
+## Dashboard And Debugging
+
+```sh
+curl http://127.0.0.1:8787/v1/status
+curl http://127.0.0.1:8787/v1/routing-history
+curl http://127.0.0.1:8787/v1/provider-scores
+```
+
+`/dashboard` renders the same core provider status in lightweight HTML.
+
+## Provider Evaluation
+
+```sh
+python -m agent_hub eval --route coding --json
+```
+
+The command runs benchmark task types for coding, reasoning, summarization,
+tool calling, long context, and latency, then stores scores in local state.
 
 ## Cline
 

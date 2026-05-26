@@ -47,6 +47,13 @@ class ToolExecutionPipeline:
                 started_at=started,
                 finished_at=time.time(),
             )
+        if tool.name != call.name:
+            call = ToolCall(
+                id=call.id,
+                name=tool.name,
+                arguments=dict(call.arguments),
+                raw={**call.raw, "alias": call.name},
+            )
         permission_layer = self.permission_layer or ToolPermissionLayer(context.config, context.request)
         denied = permission_layer.check(tool, call)
         if denied is not None:

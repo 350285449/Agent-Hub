@@ -82,6 +82,20 @@ class RouteRule:
 
 
 @dataclass(slots=True)
+class MCPServerConfig:
+    """Configuration for a future external MCP server bridge."""
+
+    name: str
+    enabled: bool = True
+    command: str | None = None
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    tools: list[dict[str, Any]] = field(default_factory=list)
+    permissions: list[str] = field(default_factory=list)
+    description: str = ""
+
+
+@dataclass(slots=True)
 class HubConfig:
     """Complete server, workspace, routing, and agent configuration."""
 
@@ -101,6 +115,11 @@ class HubConfig:
     cline_compatibility_mode: bool = True
     allow_shell_tools: bool = True
     shell_command_policy: str = "allow"
+    tool_loop_enabled: bool = True
+    max_tool_iterations: int = 4
+    repo_context_enabled: bool = True
+    repo_context_max_files: int = 8
+    repo_context_max_chars: int = 12_000
     free_only: bool = True
     enable_load_balancing: bool = True
     auto_enable_available_providers: bool = True
@@ -125,6 +144,7 @@ class HubConfig:
     default_route: list[str] = field(default_factory=list)
     routes: list[RouteRule] = field(default_factory=list)
     agents: dict[str, AgentConfig] = field(default_factory=dict)
+    mcp_servers: list[MCPServerConfig] = field(default_factory=list)
     group_roles: dict[str, str] = field(default_factory=dict)
     initialization_report: dict[str, Any] = field(default_factory=dict)
 
@@ -446,6 +466,11 @@ def free_local_config() -> HubConfig:
         cline_compatibility_mode=True,
         allow_shell_tools=True,
         shell_command_policy="ask",
+        tool_loop_enabled=True,
+        max_tool_iterations=4,
+        repo_context_enabled=True,
+        repo_context_max_files=8,
+        repo_context_max_chars=12_000,
         free_only=True,
         auto_enable_available_providers=True,
         auto_detect_local_models=True,
@@ -569,6 +594,20 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         )
         for item in raw.get("routes", [])
     ]
+    mcp_servers = [
+        MCPServerConfig(
+            name=str(item.get("name") or ""),
+            enabled=_bool_with_default(item.get("enabled"), True),
+            command=item.get("command") if isinstance(item.get("command"), str) else None,
+            args=[str(arg) for arg in item.get("args", []) if isinstance(arg, (str, int, float))],
+            env={str(key): str(value) for key, value in dict(item.get("env", {})).items()},
+            tools=[dict(tool) for tool in item.get("tools", []) if isinstance(tool, dict)],
+            permissions=[str(permission) for permission in item.get("permissions", []) if isinstance(permission, str)],
+            description=str(item.get("description") or ""),
+        )
+        for item in raw.get("mcp_servers", [])
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    ]
     return HubConfig(
         host=raw.get("host", "127.0.0.1"),
         port=int(raw.get("port", 8787)),
@@ -591,6 +630,11 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         shell_command_policy=_normalize_shell_command_policy(
             raw.get("shell_command_policy", raw.get("shell_tools_policy", "ask"))
         ),
+        tool_loop_enabled=_bool_with_default(raw.get("tool_loop_enabled"), True),
+        max_tool_iterations=_normalize_max_tool_iterations(raw.get("max_tool_iterations", 4)),
+        repo_context_enabled=_bool_with_default(raw.get("repo_context_enabled"), True),
+        repo_context_max_files=_normalize_repo_context_max_files(raw.get("repo_context_max_files", 8)),
+        repo_context_max_chars=_normalize_repo_context_max_chars(raw.get("repo_context_max_chars", 12_000)),
         free_only=_bool_with_default(raw.get("free_only"), True),
         enable_load_balancing=_bool_with_default(raw.get("enable_load_balancing"), True),
         auto_enable_available_providers=_bool_with_default(
@@ -635,6 +679,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         default_route=list(raw.get("default_route", agents.keys())),
         routes=routes,
         agents=agents,
+        mcp_servers=mcp_servers,
         group_roles=dict(raw.get("group_roles", {})),
         include_raw_responses=_bool_with_default(raw.get("include_raw_responses"), False),
         expose_routing_details=_bool_with_default(raw.get("expose_routing_details"), False),
@@ -697,6 +742,11 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "cline_compatibility_mode": config.cline_compatibility_mode,
         "allow_shell_tools": config.allow_shell_tools,
         "shell_command_policy": config.shell_command_policy,
+        "tool_loop_enabled": config.tool_loop_enabled,
+        "max_tool_iterations": config.max_tool_iterations,
+        "repo_context_enabled": config.repo_context_enabled,
+        "repo_context_max_files": config.repo_context_max_files,
+        "repo_context_max_chars": config.repo_context_max_chars,
         "free_only": config.free_only,
         "enable_load_balancing": config.enable_load_balancing,
         "auto_enable_available_providers": config.auto_enable_available_providers,
@@ -728,6 +778,21 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
                 "agents": route.agents,
             }
             for route in config.routes
+        ],
+        "mcp_servers": [
+            _drop_empty(
+                {
+                    "name": server.name,
+                    "enabled": server.enabled,
+                    "command": server.command,
+                    "args": server.args,
+                    "env": server.env,
+                    "tools": server.tools,
+                    "permissions": server.permissions,
+                    "description": server.description,
+                }
+            )
+            for server in config.mcp_servers
         ],
         "agents": [
             _drop_empty(
@@ -912,6 +977,30 @@ def _normalize_agent_context_budget(value: Any) -> int:
     except (TypeError, ValueError):
         number = 32_000
     return max(1_000, min(number, 1_000_000))
+
+
+def _normalize_max_tool_iterations(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 4
+    return max(0, min(number, 20))
+
+
+def _normalize_repo_context_max_files(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 8
+    return max(1, min(number, 80))
+
+
+def _normalize_repo_context_max_chars(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 12_000
+    return max(1_000, min(number, 200_000))
 
 
 def _normalize_context_mode(value: Any) -> str:

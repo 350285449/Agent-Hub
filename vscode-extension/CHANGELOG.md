@@ -4,6 +4,14 @@
 
 No changes yet.
 
+## 0.7.5
+
+- Adds backend tool-call execution for Agent-Hub-owned built-in tools with max-iteration protection.
+- Hardens workspace file tools, shell command denial, MCP-shaped metadata, and OpenAI tool schema conversion.
+- Adds future-ready external MCP bridge config, normalization, and documentation.
+- Adds repo-aware coding context selection, workflow retry/validation metadata, provider evaluation scores, and dashboard status endpoints.
+- Documents Cline/Continue setup and VSIX installation for the packaged release.
+
 ## 0.7.4
 
 - Adds first-run sidebar checks for backend packaging, Python, config, providers, API keys, Ollama, LM Studio, and Start Server readiness.

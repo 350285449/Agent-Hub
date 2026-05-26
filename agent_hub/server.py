@@ -8,8 +8,9 @@ from typing import Any
 from .agent_runner import AgentRunner
 from .config import HubConfig, normalize_provider
 from .context import request_context_diagnostics
+from .evaluation import ProviderScoreStore
 from .models import HubRequest
-from .observability import metrics_snapshot, permission_snapshot, record_event, usage_snapshot
+from .observability import metrics_snapshot, permission_snapshot, recent_events, record_event, usage_snapshot
 from .payloads import (
     anthropic_message_response,
     anthropic_stream_events,
@@ -86,6 +87,11 @@ BACKEND_FEATURES = {
     "context_engine_v2": True,
     "deterministic_workflows": True,
     "mcp_tool_compatibility_layer": True,
+    "tool_execution_loop": True,
+    "external_mcp_bridge": True,
+    "repo_aware_coding": True,
+    "provider_evaluation": True,
+    "dashboard_status_endpoints": True,
 }
 
 
@@ -107,6 +113,18 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         path = _request_path(self.path)
         if path in {"/", ""}:
             self._send_html(self._root_html())
+            return
+        if path == "/dashboard":
+            self._send_html(self._root_html())
+            return
+        if path == "/v1/status":
+            self._send_json(_status_body(self.server.config, self.server.router))
+            return
+        if path == "/v1/routing-history":
+            self._send_json(_routing_history_body(self.server.config))
+            return
+        if path == "/v1/provider-scores":
+            self._send_json(_provider_scores_body(self.server.config))
             return
         if path == "/health":
             self._send_json(
@@ -448,6 +466,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             },
         )
         _apply_model_routing(self.server.config, request)
+        model_error = _model_lookup_error(self.server.config, request)
+        if model_error is not None:
+            self._send_json({"error": model_error}, status=404)
+            return
         diagnostics = request_context_diagnostics(request)
         _record_debug_request(
             self.server,
@@ -715,12 +737,14 @@ class AgentHubHandler(BaseHTTPRequestHandler):
 
     def _root_html(self) -> str:
         config = self.server.config
+        status = _status_body(config, self.server.router)
         enabled_agents = [
             name
             for name, agent in config.agents.items()
             if agent.enabled
         ]
         agents = ", ".join(enabled_agents) or "none"
+        active = ", ".join(status["active_providers"]) or "none"
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -737,7 +761,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       line-height: 1.5;
     }}
     main {{
-      max-width: 760px;
+      max-width: 980px;
       margin: 0 auto;
     }}
     h1 {{
@@ -765,6 +789,17 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     dd {{
       margin: 0;
     }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      margin: 18px 0;
+    }}
+    th, td {{
+      padding: 8px 6px;
+      border-bottom: 1px solid #303030;
+      text-align: left;
+      font-size: 14px;
+    }}
     a {{
       color: #8ab4ff;
     }}
@@ -779,17 +814,30 @@ class AgentHubHandler(BaseHTTPRequestHandler):
   <main>
     <h1>Agent Hub</h1>
     <div class="status">Running</div>
-    <p>This is the local Agent Hub backend. Use the VS Code extension chat for the UI, or call the HTTP endpoints directly.</p>
     <dl>
       <dt>Version</dt><dd>{BACKEND_VERSION}</dd>
       <dt>Config hash</dt><dd><code>{config_runtime_hash(config)}</code></dd>
       <dt>Workspace</dt><dd><code>{config.workspace_dir}</code></dd>
       <dt>Shell tools</dt><dd>{str(config.allow_shell_tools).lower()}</dd>
+      <dt>Tool loop</dt><dd>{str(config.tool_loop_enabled).lower()} / max {config.max_tool_iterations}</dd>
+      <dt>Repo context</dt><dd>{str(config.repo_context_enabled).lower()} / {config.repo_context_max_files} files</dd>
       <dt>Free only</dt><dd>{str(config.free_only).lower()}</dd>
       <dt>Patch preference</dt><dd>{str(config.prefer_multi_file_patches).lower()}</dd>
       <dt>Context bar</dt><dd>{config.context_change_bar_mode} / threshold {config.context_change_bar_threshold} / enabled {str(config.context_change_bar_enabled).lower()}</dd>
       <dt>Agents</dt><dd>{agents}</dd>
+      <dt>Active</dt><dd>{active}</dd>
     </dl>
+    <table>
+      <thead><tr><th>Provider</th><th>Model</th><th>Health</th><th>Score</th><th>Latency</th><th>Tools</th></tr></thead>
+      <tbody>
+        {''.join(_provider_row_html(row) for row in status["providers"][:12])}
+      </tbody>
+    </table>
+    <p>
+      <a href="/v1/status">Status JSON</a> |
+      <a href="/v1/routing-history">Routing History</a> |
+      <a href="/v1/provider-scores">Provider Scores</a>
+    </p>
     <p>
       <a href="/health">Health JSON</a> ·
       <a href="/v1/models">Models JSON</a>
@@ -1136,6 +1184,99 @@ def _response_permission_status(response: Any) -> str:
     return "allowed"
 
 
+def _status_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
+    health = router.health_snapshot(include_history=True)
+    routing = recent_events(config.state_dir, "routing", limit=50)
+    tools = recent_events(config.state_dir, "tools", limit=50)
+    latest = routing[-1] if routing else {}
+    return {
+        "object": "agent_hub.status",
+        "status": "running",
+        "running": True,
+        "version": BACKEND_VERSION,
+        "features": BACKEND_FEATURES,
+        "workspace_dir": str(config.workspace_dir),
+        "active_providers": _active_provider_names(config, router),
+        "providers": router.provider_status(),
+        "provider_health": health,
+        "provider_scores": ProviderScoreStore(config.state_dir).load(),
+        "selected_model": latest.get("model") or latest.get("selected_model"),
+        "stream_mode": latest.get("stream_mode") or ("native" if latest.get("type") == "streaming_decision" else "compatibility"),
+        "token_usage": usage_snapshot(config.state_dir, health),
+        "fallback_history": _routing_failures(routing),
+        "workflow_stages": _recent_workflow_stages(routing),
+        "tool_calls": tools[-25:],
+        "routing_history_count": len(routing),
+    }
+
+
+def _routing_history_body(config: HubConfig) -> dict[str, Any]:
+    events = recent_events(config.state_dir, "routing", limit=100)
+    return {
+        "object": "agent_hub.routing_history",
+        "data": events,
+        "count": len(events),
+    }
+
+
+def _provider_scores_body(config: HubConfig) -> dict[str, Any]:
+    scores = ProviderScoreStore(config.state_dir).load()
+    return {
+        "object": "agent_hub.provider_scores",
+        "benchmark_types": [
+            "coding",
+            "reasoning",
+            "summarization",
+            "tool_calling",
+            "long_context",
+            "latency",
+        ],
+        "data": scores,
+    }
+
+
+def _provider_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(row.get('health'))}</td>"
+        f"<td>{_html(row.get('score'))}</td>"
+        f"<td>{_html(row.get('latency_ms'))} ms</td>"
+        f"<td>{str(bool(row.get('supports_tools'))).lower()}</td>"
+        "</tr>"
+    )
+
+
+def _routing_failures(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for event in events:
+        failover = event.get("failover")
+        if isinstance(failover, list) and failover:
+            failures.extend(item for item in failover if isinstance(item, dict))
+        elif event.get("type") == "routing_failure":
+            failures.append(event)
+    return failures[-25:]
+
+
+def _recent_workflow_stages(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        event
+        for event in events[-50:]
+        if isinstance(event.get("workflow_stage"), str) or str(event.get("type", "")).startswith("workflow_")
+    ][-25:]
+
+
+def _html(value: Any) -> str:
+    text = str(value if value is not None else "")
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
 def _limits_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
     health = router.health_snapshot(include_history=True)
     recommendations = router.recommend(
@@ -1421,6 +1562,34 @@ def _apply_model_routing(config: HubConfig, request: HubRequest) -> None:
             if agent.model.lower() == normalized:
                 request.preferred_agent = agent.name
                 return
+
+
+def _model_lookup_error(config: HubConfig, request: HubRequest) -> dict[str, Any] | None:
+    if request.api_shape not in {"openai-chat", "openai-responses", "anthropic-messages"}:
+        return None
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    model = raw.get("model")
+    if not isinstance(model, str) or not model.strip():
+        return None
+    normalized = model.strip().lower()
+    known_routes = {route.name.lower() for route in config.routes}
+    known_agents = {agent.name.lower() for agent in config.agents.values()}
+    known_models = {agent.model.lower() for agent in config.agents.values()}
+    known_aliases = set(ROUTE_MODEL_ALIASES)
+    if normalized in known_routes | known_agents | known_models | known_aliases:
+        return None
+    for prefix in ("agent:", "agent-hub-agent:"):
+        if normalized.startswith(prefix):
+            target = model.strip()[len(prefix) :].strip().lower()
+            if target in known_agents:
+                return None
+    if normalized.startswith("agent:") or normalized.startswith("agent-hub"):
+        return {
+            "message": f"Model {model!r} was not found in Agent Hub routes or agents.",
+            "type": "model_not_found",
+            "suggested_fix": "Use /v1/models, agent-hub-coding, a configured route name, or agent:<agent-name>.",
+        }
+    return None
 
 
 def _wants_agent_mode(payload: dict[str, Any], default: bool = False) -> bool:

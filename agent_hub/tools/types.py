@@ -18,12 +18,21 @@ class ToolExecutionContextLike:
 
 @dataclass(slots=True)
 class Tool:
+    """Executable tool metadata plus its permission and schema contract.
+
+    The shape intentionally mirrors MCP/OpenAI function metadata while keeping
+    the executor provider-agnostic. Provider adapters should only serialize the
+    metadata; execution always flows through ToolExecutionPipeline.
+    """
+
     name: str
     description: str
     input_schema: dict[str, Any]
     executor: ToolExecutor
     read_only: bool = True
     permission: str = "read"
+    output_schema: dict[str, Any] = field(default_factory=dict)
+    permissions: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_openai_tool(self) -> dict[str, Any]:
@@ -36,9 +45,27 @@ class Tool:
             },
         }
 
+    def to_agent_hub_spec(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.input_schema,
+            "input_schema": self.input_schema,
+            "output": self.output_schema,
+            "permissions": self.effective_permissions(),
+            "metadata": dict(self.metadata),
+        }
+
+    def effective_permissions(self) -> list[str]:
+        if self.permissions:
+            return list(self.permissions)
+        return [self.permission] if self.permission else []
+
 
 @dataclass(slots=True)
 class ToolCall:
+    """A provider-neutral request to execute one registered tool."""
+
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=lambda: f"call_{uuid.uuid4().hex}")
@@ -66,6 +93,8 @@ class ToolCall:
 
 @dataclass(slots=True)
 class ToolResult:
+    """A provider-neutral result that can be fed back as an OpenAI tool message."""
+
     call_id: str
     name: str
     ok: bool

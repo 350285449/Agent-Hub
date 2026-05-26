@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
+from ..evaluation import ProviderScoreStore
+from ..mcp import MCPServerRegistry
 from ..models import FailoverEvent, HubRequest, HubResponse, ProviderResult
 from ..observability import record_event
 from ..payloads import content_to_text, request_text
@@ -20,8 +22,17 @@ from ..permissions import (
 )
 from ..providers import Provider, ProviderError, create_provider
 from ..providers.base import StreamChunk
+from ..repository import repo_context_for_request
 from ..session_store import SessionStore
 from ..token_budget import TokenBudgetManager, estimate_messages_tokens
+from ..tools import ToolExecutionContext, ToolExecutionPipeline, create_builtin_registry
+from ..tools.loop import (
+    ToolLoopMetadata,
+    assistant_message_from_result,
+    extract_tool_calls,
+    max_loop_result,
+    merge_tool_loop_metadata,
+)
 from .context import estimate_context_tokens
 from .health import calculate_provider_score, health_state_label
 from .provider_manager import ProviderManager
@@ -221,6 +232,13 @@ class AgentRouter:
             provider_factory=self._provider_factory,
             health_snapshot=self.health_snapshot,
         )
+        self.tool_registry = create_builtin_registry(config)
+        try:
+            self.tool_registry.extend(MCPServerRegistry(config).agent_hub_tools())
+        except Exception:
+            pass
+        self.tool_pipeline = ToolExecutionPipeline(self.tool_registry)
+        self.provider_scores = ProviderScoreStore(config.state_dir).load()
 
     @property
     def provider_factory(self) -> ProviderFactory:
@@ -233,7 +251,7 @@ class AgentRouter:
             self.provider_manager.provider_factory = value
 
     def route(self, request: HubRequest) -> HubResponse:
-        effective_request = self._with_session_history(request)
+        effective_request = self._prepare_request(self._with_session_history(request))
         request_id = f"hub-{uuid.uuid4().hex}"
         failover: list[FailoverEvent] = []
         decision = self.decide(effective_request)
@@ -312,6 +330,14 @@ class AgentRouter:
             try:
                 result = self.provider_manager.chat(agent, effective_request)
                 latency = time.perf_counter() - started
+                tool_loop = self._run_tool_loop(
+                    request_id=request_id,
+                    agent=agent,
+                    request=effective_request,
+                    initial_result=result,
+                )
+                result = tool_loop["result"]
+                latency += float(tool_loop["latency_seconds"])
                 if _token_limit_finish_reason(result.finish_reason) and agent != candidates[-1]:
                     reason = (
                         "Agent stopped because it hit a token limit; "
@@ -344,6 +370,7 @@ class AgentRouter:
                     result=result,
                     failover=failover,
                     decision=decision,
+                    tool_loop_metadata=tool_loop["metadata"],
                 )
                 if effective_request.record_session:
                     self.session_store.record_turn(effective_request, response)
@@ -438,7 +465,7 @@ class AgentRouter:
     def native_stream(self, request: HubRequest) -> StreamingRoute | None:
         """Return a provider-native stream route, or None for compatibility streaming."""
 
-        effective_request = self._with_session_history(request)
+        effective_request = self._prepare_request(self._with_session_history(request), include_tools=False)
         request_id = f"hub-{uuid.uuid4().hex}"
         decision = self.decide(effective_request)
         candidates = self._candidate_agents(effective_request, decision=decision)
@@ -682,6 +709,163 @@ class AgentRouter:
         if _is_prefix(request.messages, history):
             return replace(request, messages=list(history))
         return replace(request, messages=[*history, *request.messages])
+
+    def _prepare_request(self, request: HubRequest, *, include_tools: bool = True) -> HubRequest:
+        if include_tools:
+            request = self._with_builtin_tool_specs(request)
+        prepared = self._with_repo_context(request)
+        return prepared
+
+    def _with_repo_context(self, request: HubRequest) -> HubRequest:
+        if not getattr(self.config, "repo_context_enabled", True):
+            return request
+        if _agent_runner_managed_request(request):
+            return request
+        if not _repo_context_useful(request):
+            return request
+        if any(message.get("agent_hub_repo_context") for message in request.messages if isinstance(message, dict)):
+            return request
+        try:
+            selection = repo_context_for_request(
+                request,
+                self.config.workspace_dir,
+                max_files=self.config.repo_context_max_files,
+                max_chars=self.config.repo_context_max_chars,
+            )
+        except Exception:
+            return request
+        message = selection.to_message()
+        if message is None:
+            return request
+        raw = dict(request.raw or {})
+        hub = dict(raw.get("agent_hub") or {})
+        hub["repo_context"] = selection.to_dict()
+        raw["agent_hub"] = hub
+        return replace(request, messages=[message, *request.messages], raw=raw)
+
+    def _with_builtin_tool_specs(self, request: HubRequest) -> HubRequest:
+        if not getattr(self.config, "tool_loop_enabled", True):
+            return request
+        if _agent_runner_managed_request(request):
+            return request
+        if _request_has_client_tool_specs(request):
+            return request
+        if _request_option(request, "disable_builtin_tools", "disable_agent_hub_tools") is True:
+            return request
+        if not _repo_or_tool_task(request):
+            return request
+        if not self._has_tool_capable_candidate(request):
+            return request
+        raw = dict(request.raw or {})
+        if isinstance(raw.get("agent_hub_tools"), list) and raw["agent_hub_tools"]:
+            return request
+        raw["agent_hub_tools"] = [tool.to_agent_hub_spec() for tool in self.tool_registry.list()]
+        hub = dict(raw.get("agent_hub") or {})
+        hub["auto_execute_tools"] = True
+        raw["agent_hub"] = hub
+        return replace(request, raw=raw)
+
+    def _has_tool_capable_candidate(self, request: HubRequest) -> bool:
+        names: list[str] = []
+        if request.preferred_agent:
+            names.append(request.preferred_agent)
+        names.extend(self._manual_model_or_provider_agent_names(request))
+        names.extend(self._route_names(request))
+        return any(
+            _agent_supports_tools(agent)
+            for name in names
+            if (agent := self.config.agents.get(name)) is not None and agent.enabled
+        )
+
+    def _run_tool_loop(
+        self,
+        *,
+        request_id: str,
+        agent: AgentConfig,
+        request: HubRequest,
+        initial_result: ProviderResult,
+    ) -> dict[str, Any]:
+        max_iterations = _max_tool_iterations(request, self.config.max_tool_iterations)
+        metadata = ToolLoopMetadata(max_tool_iterations=max_iterations)
+        if max_iterations <= 0 or not getattr(self.config, "tool_loop_enabled", True):
+            return {"result": initial_result, "metadata": metadata, "latency_seconds": 0.0}
+        current = initial_result
+        messages = [dict(message) for message in request.messages]
+        latency_seconds = 0.0
+        while True:
+            calls = extract_tool_calls(current)
+            if not calls:
+                if metadata.tool_calls or metadata.tool_results:
+                    current = replace_provider_result_raw(
+                        current,
+                        merge_tool_loop_metadata(current.raw if isinstance(current.raw, dict) else {}, metadata),
+                    )
+                return {"result": current, "metadata": metadata, "latency_seconds": latency_seconds}
+            if not self._should_execute_tool_calls(request, calls):
+                return {"result": current, "metadata": metadata, "latency_seconds": latency_seconds}
+            if metadata.tool_iteration_count >= max_iterations:
+                metadata.max_tool_iterations_reached = True
+                stopped = max_loop_result(current, metadata)
+                self._record_route_event(
+                    "tool_loop_max_reached",
+                    request_id=request_id,
+                    request=request,
+                    agent=agent.name,
+                    provider=agent.provider,
+                    model=agent.model,
+                    tool_iteration_count=metadata.tool_iteration_count,
+                )
+                return {"result": stopped, "metadata": metadata, "latency_seconds": latency_seconds}
+
+            metadata.tool_iteration_count += 1
+            messages.append(assistant_message_from_result(current, calls))
+            context = ToolExecutionContext(config=self.config, request=request)
+            results = []
+            for call in calls:
+                result = self.tool_pipeline.execute(call, context)
+                results.append(result)
+                self.record_tool_result(agent.name, result.ok)
+                metadata.tool_calls.append(
+                    {
+                        "id": call.id,
+                        "name": call.name,
+                        "arguments": dict(call.arguments),
+                        "iteration": metadata.tool_iteration_count,
+                    }
+                )
+                metadata.tool_results.append(result.to_dict())
+                messages.append(result.to_openai_message())
+            self._record_route_event(
+                "tool_loop_iteration",
+                request_id=request_id,
+                request=request,
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+                tool_calls=[call.name for call in calls],
+                tool_results=[result.ok for result in results],
+                tool_iteration_count=metadata.tool_iteration_count,
+            )
+            next_raw = _tool_loop_raw(request, metadata)
+            next_request = replace(
+                request,
+                messages=messages,
+                raw=next_raw,
+                stream=False,
+                record_session=False,
+            )
+            started = time.perf_counter()
+            current = self.provider_manager.chat(agent, next_request)
+            latency_seconds += time.perf_counter() - started
+
+    def _should_execute_tool_calls(self, request: HubRequest, calls: list[Any]) -> bool:
+        if _agent_runner_managed_request(request):
+            return False
+        if _request_option(request, "auto_execute_tools", "execute_tools") is True:
+            return True
+        if _request_has_client_tool_specs(request) and not isinstance(request.raw.get("agent_hub_tools"), list):
+            return False
+        return all(self.tool_registry.get(call.name) is not None for call in calls)
 
     def decide(self, request: HubRequest) -> RoutingDecision:
         """Choose a ranked fallback chain before execution."""
@@ -936,8 +1120,13 @@ class AgentRouter:
         result: ProviderResult,
         failover: list[FailoverEvent],
         decision: RoutingDecision | None = None,
+        tool_loop_metadata: ToolLoopMetadata | None = None,
     ) -> HubResponse:
         raw = result.raw
+        if tool_loop_metadata is not None and (
+            tool_loop_metadata.tool_calls or tool_loop_metadata.tool_results
+        ):
+            raw = merge_tool_loop_metadata(raw if isinstance(raw, dict) else {}, tool_loop_metadata)
         if self.config.expose_routing_details and isinstance(raw, dict):
             raw = dict(raw)
             agent_metadata = dict(raw.get("agent_hub") or {})
@@ -973,6 +1162,8 @@ class AgentRouter:
             ]
             if decision is not None:
                 agent_metadata["routing_decision"] = decision.to_dict()
+            if tool_loop_metadata is not None:
+                agent_metadata.update(tool_loop_metadata.to_dict())
             raw["agent_hub"] = agent_metadata
         return HubResponse(
             request_id=request_id,
@@ -1375,6 +1566,12 @@ class AgentRouter:
             score -= 100.0
         if not self.config.free_only and not is_free_agent(agent):
             score -= 2.5
+        evaluation = self.provider_scores.get(agent.name) if isinstance(self.provider_scores, dict) else None
+        if isinstance(evaluation, dict):
+            try:
+                score += float(evaluation.get("overall_score", 0.0)) * 8.0
+            except (TypeError, ValueError):
+                pass
         return score
 
     def _record_route_event(self, event_type: str, *, request_id: str, request: HubRequest, **data: Any) -> None:
@@ -2047,6 +2244,95 @@ def _request_has_tools(request: HubRequest) -> bool:
         return True
     hub_options = raw.get("agent_hub")
     return isinstance(hub_options, dict) and bool(hub_options.get("agent_mode"))
+
+
+def _request_has_client_tool_specs(request: HubRequest) -> bool:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    return bool(
+        (isinstance(raw.get("tools"), list) and raw["tools"])
+        or (isinstance(raw.get("functions"), list) and raw["functions"])
+    )
+
+
+def _repo_or_tool_task(request: HubRequest) -> bool:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub_options = raw.get("agent_hub")
+    if isinstance(hub_options, dict) and hub_options.get("enable_builtin_tools") is False:
+        return False
+    if isinstance(hub_options, dict) and hub_options.get("enable_builtin_tools") is True:
+        return True
+    return _tool_task_requested(request)
+
+
+def _tool_task_requested(request: HubRequest) -> bool:
+    text = request_text(request).lower()
+    return any(
+        marker in text
+        for marker in (
+            "read ",
+            "search",
+            "file",
+            "repo",
+            "workspace",
+            "run ",
+            "command",
+            "test",
+            "edit",
+            "write",
+            "debug",
+            "refactor",
+        )
+    )
+
+
+def _repo_context_useful(request: HubRequest) -> bool:
+    if _agent_runner_managed_request(request):
+        return False
+    route = str(request.route or "").lower()
+    if route in {"coding", "local-agent", "agent-hub-coding", "debug", "review", "refactor"}:
+        return True
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    workflow = str(raw.get("workflow") or raw.get("workflow_stage") or "").lower()
+    if workflow in {"code", "debug", "review", "refactor"}:
+        return True
+    return _looks_like_coding_task(request_text(request).lower())
+
+
+def _agent_runner_managed_request(request: HubRequest) -> bool:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    return isinstance(raw.get("agent_hub_runtime"), dict)
+
+
+def _max_tool_iterations(request: HubRequest, default: int) -> int:
+    value = _request_option(request, "max_tool_iterations", "tool_loop_max_iterations")
+    try:
+        number = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        number = default
+    return max(0, min(number, 20))
+
+
+def _tool_loop_raw(request: HubRequest, metadata: ToolLoopMetadata) -> dict[str, Any]:
+    raw = dict(request.raw or {})
+    hub = dict(raw.get("agent_hub") or {})
+    hub["tool_loop"] = metadata.to_dict()
+    hub["auto_execute_tools"] = True
+    raw["agent_hub"] = hub
+    return raw
+
+
+def replace_provider_result_raw(result: ProviderResult, raw: dict[str, Any]) -> ProviderResult:
+    return ProviderResult(
+        text=result.text,
+        model=result.model,
+        raw=raw,
+        usage=dict(result.usage),
+        finish_reason=result.finish_reason,
+        citations=list(result.citations),
+        search_results=list(result.search_results),
+        images=list(result.images),
+        related_questions=list(result.related_questions),
+    )
 
 
 def _recommendation_reason(

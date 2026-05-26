@@ -9,6 +9,11 @@
   "free_only": true,
   "enable_load_balancing": true,
   "auto_detect_local_models": false,
+  "tool_loop_enabled": true,
+  "max_tool_iterations": 4,
+  "repo_context_enabled": true,
+  "repo_context_max_files": 8,
+  "repo_context_max_chars": 12000,
   "include_raw_responses": false,
   "expose_routing_details": false,
   "default_route": [
@@ -64,6 +69,18 @@
       "context_window": 128000,
       "supports_streaming": true,
       "supports_tools": true
+    }
+  ],
+  "mcp_servers": [
+    {
+      "name": "example",
+      "enabled": false,
+      "command": "npx",
+      "args": [
+        "-y",
+        "example-mcp-server"
+      ],
+      "tools": []
     }
   ],
   "group_roles": {

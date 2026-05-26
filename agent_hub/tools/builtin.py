@@ -35,9 +35,19 @@ def register_builtin_tools(registry: ToolRegistry, *, config: HubConfig | None =
                 },
                 "required": ["path"],
             },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "truncated": {"type": "boolean"},
+                },
+            },
             executor=_file_read,
             read_only=True,
             permission="read",
+            permissions=["filesystem:read"],
+            metadata={"mcp_compatible": True, "safe_by_default": True},
         )
     )
     registry.register(
@@ -53,9 +63,18 @@ def register_builtin_tools(registry: ToolRegistry, *, config: HubConfig | None =
                 },
                 "required": ["path", "content"],
             },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "bytes": {"type": "integer"},
+                },
+            },
             executor=_file_write,
             read_only=False,
             permission="file_write",
+            permissions=["filesystem:write"],
+            metadata={"mcp_compatible": True, "requires_permission": True},
         )
     )
     registry.register(
@@ -71,9 +90,23 @@ def register_builtin_tools(registry: ToolRegistry, *, config: HubConfig | None =
                 },
                 "required": ["command"],
             },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "returncode": {"type": "integer"},
+                    "output": {"type": "string"},
+                    "truncated": {"type": "boolean"},
+                },
+            },
             executor=_shell_execute,
             read_only=False,
             permission="shell_command",
+            permissions=["shell:execute"],
+            metadata={
+                "mcp_compatible": True,
+                "requires_permission": True,
+                "dangerous_commands_blocked": True,
+            },
         )
     )
     registry.register(
@@ -91,11 +124,29 @@ def register_builtin_tools(registry: ToolRegistry, *, config: HubConfig | None =
                 },
                 "required": ["query"],
             },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "matches": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                    }
+                },
+            },
             executor=_search_repo,
             read_only=True,
             permission="read",
+            permissions=["filesystem:read", "repo:search"],
+            metadata={"mcp_compatible": True, "safe_by_default": True},
         )
     )
+    for alias, target in {
+        "read_file": "file_read",
+        "write_file": "file_write",
+        "run_command": "shell_execute",
+        "search_files": "search_repo",
+    }.items():
+        registry.register_alias(alias, target)
 
 
 def _file_read(call: ToolCall, context: Any) -> ToolResult:
