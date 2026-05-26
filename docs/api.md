@@ -114,7 +114,17 @@ curl http://127.0.0.1:8787/v1/events
 curl http://127.0.0.1:8787/v1/tools
 curl http://127.0.0.1:8787/v1/workflows/status
 curl http://127.0.0.1:8787/v1/plugins
+curl http://127.0.0.1:8787/v1/enterprise/audit
 ```
+
+If Agent Hub is configured with a public bind host such as `0.0.0.0`, the
+diagnostic endpoints above require `Authorization: Bearer <token>` or
+`X-Agent-Hub-Diagnostics-Token`. Configure the token with
+`diagnostics_auth_token` or `diagnostics_auth_token_env`.
+
+Diagnostic responses are recursively redacted before they are returned. Provider
+errors, audit rows, and plugin metadata should keep useful context while
+masking API keys, bearer tokens, auth headers, and secret-looking strings.
 
 `/dashboard` renders the same core provider status in lightweight HTML.
 Internal foundation events are stored in `.agent-hub/state/events.jsonl` and

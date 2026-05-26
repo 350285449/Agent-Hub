@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from agent_hub.config import (
@@ -16,6 +17,7 @@ from agent_hub.config import (
     normalize_provider,
     ollama_cloud_agent_names,
 )
+from agent_hub.config_reference import documented_config_keys, generate_config_reference
 from agent_hub.discovery import auto_configure_config
 
 
@@ -113,6 +115,51 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(data["agent_context_budget_tokens"], 12345)
         self.assertFalse(data["agent_context_compaction_enabled"])
         self.assertFalse(data["prefer_multi_file_patches"])
+
+    def test_phase5_hardening_settings_round_trip(self) -> None:
+        config = config_from_dict(
+            {
+                "native_stream_failure_policy": "fallback_provider",
+                "diagnostics_auth_token_env": "AGENT_HUB_DIAG_TOKEN",
+                "trusted_plugins": ["provider.demo"],
+                "plugin_trust_registry": ".agent-hub/plugin-trust.json",
+                "plugin_signature_key_env": "AGENT_HUB_PLUGIN_SIGNATURE_KEY",
+                "plugin_allow_unsigned": True,
+                "plugin_execution_enabled": False,
+                "plugin_capability_grants": {"provider.demo": ["provider.read"]},
+                "enterprise_mode_enabled": True,
+                "enterprise_default_workspace_id": "workspace-1",
+                "enterprise_users": [{"id": "alice", "roles": ["developer"]}],
+                "enterprise_roles": [{"name": "developer", "permissions": ["file_write"]}],
+                "enterprise_permission_grants": [
+                    {
+                        "subject_id": "alice",
+                        "workspace_id": "workspace-1",
+                        "permission": "workspace_cloud",
+                    }
+                ],
+                "agents": [],
+            }
+        )
+
+        data = config_to_dict(config)
+
+        self.assertEqual(data["native_stream_failure_policy"], "fallback_provider")
+        self.assertEqual(data["diagnostics_auth_token_env"], "AGENT_HUB_DIAG_TOKEN")
+        self.assertEqual(data["trusted_plugins"], ["provider.demo"])
+        self.assertEqual(data["plugin_trust_registry"].replace("\\", "/"), ".agent-hub/plugin-trust.json")
+        self.assertEqual(data["plugin_signature_key_env"], "AGENT_HUB_PLUGIN_SIGNATURE_KEY")
+        self.assertTrue(data["plugin_allow_unsigned"])
+        self.assertFalse(data["plugin_execution_enabled"])
+        self.assertEqual(data["plugin_capability_grants"], {"provider.demo": ["provider.read"]})
+        self.assertTrue(data["enterprise_mode_enabled"])
+        self.assertEqual(data["enterprise_users"][0]["id"], "alice")
+
+    def test_generated_config_reference_is_current(self) -> None:
+        reference = Path("docs/config-reference.md").read_text(encoding="utf-8")
+
+        self.assertEqual(reference, generate_config_reference())
+        self.assertLessEqual(set(config_to_dict(free_local_config())), documented_config_keys())
 
     def test_cloud_agents_can_be_configured_from_environment(self) -> None:
         with patch.dict(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -167,6 +168,279 @@ class ResponseResilienceTests(unittest.TestCase):
             self.assertIn("compat", text)
             self.assertIn("data: [DONE]", text)
 
+    def test_native_streaming_optimizes_context_before_preflight_and_provider_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            captured: list[HubRequest] = []
+            config = _routing_config(Path(tmp), ["native"])
+            config.routes = [RouteRule(name="coding", agents=["native"])]
+            config.max_context_tokens = 1000
+            config.agents["native"].supports_streaming = True
+            config.agents["native"].context_window = 1200
+            config.agents["native"].max_tokens = 200
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    return ProviderResult(text="compat", model=self.agent.model, finish_reason="stop")
+
+                def supports_streaming(self) -> bool:
+                    return True
+
+                def stream(self, request: HubRequest):
+                    captured.append(request)
+                    yield {
+                        "choices": [
+                            {"delta": {"content": "native-ok"}, "finish_reason": "stop"}
+                        ],
+                        "model": self.agent.model,
+                    }
+
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            server.router.provider_factory = Provider
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                text, headers = _post_text_with_headers(
+                    f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "stream": True,
+                        "messages": [
+                            {"role": "user", "content": f"message {index} " + ("x" * 1000)}
+                            for index in range(20)
+                        ],
+                    },
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(headers.get("X-Agent-Hub-Stream-Mode"), "native")
+            self.assertIn("native-ok", text)
+            self.assertTrue(captured)
+            usage = captured[0].raw["agent_hub"]["context_usage"]
+            self.assertTrue(usage["context_reduced"])
+            self.assertLessEqual(usage["estimated_input_tokens"], usage["max_context_tokens"])
+
+    def test_native_stream_failure_default_terminates_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _routing_config(Path(tmp), ["native"])
+            config.routes = [RouteRule(name="coding", agents=["native"])]
+            config.agents["native"].supports_streaming = True
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def supports_streaming(self) -> bool:
+                    return True
+
+                def stream(self, request: HubRequest):
+                    yield StreamChunk(text="first", delta={"content": "first"}, model=self.agent.model)
+                    raise ProviderError("stream sk-secretsecretsecret failed", error_type="network")
+
+            server.router.provider_factory = Provider
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                text, headers = _post_text_with_headers(
+                    f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "stream": True,
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(headers.get("X-Agent-Hub-Stream-Mode"), "native")
+            self.assertIn("first", text)
+            self.assertIn("Provider stream interrupted", text)
+            self.assertIn("data: [DONE]", text)
+
+    def test_native_stream_retry_requires_replay_safe_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            attempts = {"count": 0}
+            config = _routing_config(Path(tmp), ["native"])
+            config.native_stream_failure_policy = "retry_same_provider"
+            config.routes = [RouteRule(name="coding", agents=["native"])]
+            config.agents["native"].supports_streaming = True
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def supports_streaming(self) -> bool:
+                    return True
+
+                def stream(self, request: HubRequest):
+                    attempts["count"] += 1
+                    if attempts["count"] == 1:
+                        yield StreamChunk(text="first", delta={"content": "first"}, model=self.agent.model)
+                        raise ProviderError("interrupted", error_type="network")
+                    yield StreamChunk(text="retried", delta={"content": "retried"}, model=self.agent.model, finish_reason="stop")
+
+            server.router.provider_factory = Provider
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                text = _post_text(
+                    f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "stream": True,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "agent_hub": {"stream_replay_safe": True},
+                    },
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(attempts["count"], 2)
+            self.assertIn("Agent Hub stream recovery started", text)
+            self.assertIn("retried", text)
+
+    def test_native_stream_fallback_uses_second_provider_only_when_replay_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            attempts: list[str] = []
+            config = _routing_config(Path(tmp), ["primary", "backup"])
+            config.native_stream_failure_policy = "fallback_provider"
+            config.routes = [RouteRule(name="coding", agents=["primary", "backup"])]
+            config.agents["primary"].supports_streaming = True
+            config.agents["backup"].supports_streaming = True
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def supports_streaming(self) -> bool:
+                    return True
+
+                def stream(self, request: HubRequest):
+                    attempts.append(self.agent.name)
+                    if self.agent.name == "primary":
+                        yield StreamChunk(text="partial", delta={"content": "partial"}, model=self.agent.model)
+                        raise ProviderError("interrupted", error_type="network")
+                    yield StreamChunk(text="backup", delta={"content": "backup"}, model=self.agent.model, finish_reason="stop")
+
+            server.router.provider_factory = Provider
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                text = _post_text(
+                    f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "stream": True,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "agent_hub": {"stream_replay_safe": True},
+                    },
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(attempts, ["primary", "backup"])
+            self.assertIn("Agent Hub stream recovery started", text)
+            self.assertIn("backup", text)
+
+    def test_native_stream_fallback_does_not_replay_unsafe_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            attempts: list[str] = []
+            config = _routing_config(Path(tmp), ["primary", "backup"])
+            config.native_stream_failure_policy = "fallback_provider"
+            config.routes = [RouteRule(name="coding", agents=["primary", "backup"])]
+            config.agents["primary"].supports_streaming = True
+            config.agents["backup"].supports_streaming = True
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def supports_streaming(self) -> bool:
+                    return True
+
+                def stream(self, request: HubRequest):
+                    attempts.append(self.agent.name)
+                    yield StreamChunk(text="partial", delta={"content": "partial"}, model=self.agent.model)
+                    raise ProviderError("interrupted", error_type="network")
+
+            server.router.provider_factory = Provider
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                text = _post_text(
+                    f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "stream": True,
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(attempts, ["primary"])
+            self.assertNotIn("Agent Hub stream recovery started", text)
+            self.assertIn("Provider stream interrupted", text)
+
+    def test_native_stream_tolerates_malformed_empty_and_slow_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _routing_config(Path(tmp), ["chaos"])
+            config.routes = [RouteRule(name="coding", agents=["chaos"])]
+            config.agents["chaos"].supports_streaming = True
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def supports_streaming(self) -> bool:
+                    return True
+
+                def stream(self, request: HubRequest):
+                    yield StreamChunk(text="", delta={}, model=self.agent.model)
+                    yield {"malformed": "chunk"}
+                    yield {"text": "rescued"}
+                    time.sleep(0.01)
+                    yield StreamChunk(text="done", delta={"content": "done"}, model=self.agent.model, finish_reason="stop")
+
+            server.router.provider_factory = Provider
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                text = _post_text(
+                    f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "stream": True,
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertIn("rescued", text)
+            self.assertIn("done", text)
+            self.assertIn("data: [DONE]", text)
+
     def test_context_safety_cap_reduces_large_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             captured: list[HubRequest] = []
@@ -313,6 +587,11 @@ def _routing_config(path: Path, agents: list[str]) -> HubConfig:
 
 def _request() -> HubRequest:
     return HubRequest(session_id="s", route="coding", messages=[{"role": "user", "content": "hello"}])
+
+
+def _post_text(url: str, payload: dict, headers: dict[str, str] | None = None) -> str:
+    text, _headers = _post_text_with_headers(url, payload, headers=headers)
+    return text
 
 
 def _post_text_with_headers(url: str, payload: dict, headers: dict[str, str] | None = None) -> tuple[str, object]:

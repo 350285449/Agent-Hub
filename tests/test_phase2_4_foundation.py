@@ -3,13 +3,17 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request
 from urllib.request import urlopen
 
 from agent_hub.config import AgentConfig, HubConfig, RouteRule, config_from_dict, config_to_dict
 from agent_hub.core.router import AgentRouter
 from agent_hub.models import HubRequest, ProviderResult
+from agent_hub.observability import record_event
 from agent_hub.plugins import discover_plugins
 from agent_hub.security.secrets import masked_agent_config
 from agent_hub.server import AgentHubHTTPServer
@@ -94,6 +98,67 @@ class PhaseTwoFourFoundationTests(unittest.TestCase):
             self.assertEqual(response.agent, "cheap")
             self.assertEqual(calls, ["cheap"])
 
+    def test_fastest_adaptive_routing_uses_observed_latency_in_real_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                workspace_dir=Path(tmp),
+                approval_mode="auto",
+                free_only=False,
+                default_route=["slow", "fast"],
+                agents={
+                    "slow": AgentConfig(
+                        name="slow",
+                        provider="openai-compatible",
+                        model="slow-model",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                    "fast": AgentConfig(
+                        name="fast",
+                        provider="openai-compatible",
+                        model="fast-model",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    if self.agent.name == "slow":
+                        time.sleep(0.02)
+                    return ProviderResult(text=self.agent.name, model=self.agent.model, finish_reason="stop")
+
+            router = AgentRouter(config, provider_factory=Provider)
+            router.route(
+                HubRequest(
+                    session_id="slow",
+                    preferred_agent="slow",
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+            )
+            router.route(
+                HubRequest(
+                    session_id="fast",
+                    preferred_agent="fast",
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+            )
+            response = router.route(
+                HubRequest(
+                    session_id="adaptive",
+                    messages=[{"role": "user", "content": "hello"}],
+                    raw={"routing_mode": "fastest"},
+                )
+            )
+
+            self.assertEqual(response.agent, "fast")
+            self.assertEqual(calls[-1], "fast")
+
     def test_token_optimizer_cache_summarization_and_safe_truncation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache = ContextCache(Path(tmp) / "cache.json", enabled=True, max_entries=4)
@@ -163,6 +228,120 @@ class PhaseTwoFourFoundationTests(unittest.TestCase):
             self.assertTrue(result.plugins[0].enabled)
             self.assertFalse(result.plugins[0].sandbox["code_execution"])
             self.assertTrue(result.plugins[0].sandbox["entrypoint_allowed"])
+            self.assertFalse(result.plugins[0].trusted)
+            self.assertFalse(result.plugins[0].registerable)
+
+    def test_plugin_discovery_does_not_execute_or_allow_escaping_entrypoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "demo"
+            plugin_dir.mkdir(parents=True)
+            (root / "boom.py").write_text("raise RuntimeError('should not import')", encoding="utf-8")
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "tool.demo",
+                        "name": "Demo Tool",
+                        "type": "tool",
+                        "entrypoint": "../../boom.py",
+                        "enabled_by_default": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                plugin_dirs=[root / "plugins"],
+            )
+
+            result = discover_plugins(config)
+
+            self.assertEqual(len(result.plugins), 1)
+            self.assertTrue(result.plugins[0].enabled)
+            self.assertFalse(result.plugins[0].sandbox["code_execution"])
+            self.assertFalse(result.plugins[0].sandbox["entrypoint_allowed"])
+
+    def test_trusted_plugins_register_metadata_only_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "demo"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "provider.demo",
+                        "name": "Demo Provider",
+                        "type": "provider",
+                        "enabled_by_default": True,
+                        "metadata": {"models": ["demo-model"], "supports_streaming": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                plugin_dirs=[root / "plugins"],
+                trusted_plugins=["provider.demo"],
+            )
+
+            body = discover_plugins(config).to_dict()
+
+            self.assertEqual(body["registered_count"], 1)
+            provider = body["registered_capabilities"]["providers"][0]
+            self.assertEqual(provider["id"], "provider.demo")
+            self.assertEqual(provider["metadata"]["models"], ["demo-model"])
+
+    def test_untrusted_plugins_do_not_register_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "demo"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "tool.demo",
+                        "name": "Demo Tool",
+                        "type": "tool",
+                        "enabled_by_default": True,
+                        "metadata": {"tool": "demo"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                plugin_dirs=[root / "plugins"],
+            )
+
+            body = discover_plugins(config).to_dict()
+
+            self.assertEqual(body["registered_count"], 0)
+            self.assertEqual(body["plugins"][0]["registration_reason"], "plugin_untrusted")
+
+    def test_plugin_manifest_schema_rejects_unknown_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "bad"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "bad.demo",
+                        "type": "tool",
+                        "exec": "bad.py",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = HubConfig(state_dir=root / "state", workspace_dir=root, plugin_dirs=[root / "plugins"])
+
+            result = discover_plugins(config)
+
+            self.assertEqual(result.plugins, [])
+            self.assertIn("Unknown manifest keys", result.errors[0].message)
 
     def test_secret_masking_for_provider_configs(self) -> None:
         agent = AgentConfig(
@@ -216,9 +395,117 @@ class PhaseTwoFourFoundationTests(unittest.TestCase):
             self.assertEqual(events["object"], "agent_hub.events")
             self.assertEqual(workflows["object"], "agent_hub.workflow_status")
 
+    def test_public_bind_diagnostics_require_auth_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                host="0.0.0.0",
+                state_dir=root / "state",
+                workspace_dir=root,
+                diagnostics_auth_token="diagnostic-secret",
+                agents={
+                    "echo": AgentConfig(name="echo", provider="echo", model="echo", free=True)
+                },
+                default_route=["echo"],
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with self.assertRaises(HTTPError) as error:
+                    _get_json(f"{base}/v1/provider-health")
+                body = json.loads(error.exception.read().decode("utf-8"))
+                error.exception.close()
+                authed = _get_json(
+                    f"{base}/v1/provider-health",
+                    headers={"X-Agent-Hub-Diagnostics-Token": "diagnostic-secret"},
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
 
-def _get_json(url: str) -> dict:
-    with urlopen(url, timeout=5) as response:
+            self.assertEqual(error.exception.code, 401)
+            self.assertEqual(body["error"]["type"], "diagnostics_auth_required")
+            self.assertEqual(authed["object"], "agent_hub.provider_health")
+
+    def test_localhost_diagnostics_remain_backward_compatible_without_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                host="127.0.0.1",
+                state_dir=root / "state",
+                workspace_dir=root,
+                agents={
+                    "echo": AgentConfig(name="echo", provider="echo", model="echo", free=True)
+                },
+                default_route=["echo"],
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                body = _get_json(f"http://127.0.0.1:{server.server_address[1]}/v1/plugins")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(body["object"], "agent_hub.plugins")
+
+    def test_observability_endpoints_do_not_expose_provider_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                approval_mode="auto",
+                free_only=False,
+                agents={
+                    "cloud": AgentConfig(
+                        name="cloud",
+                        provider="openai-compatible",
+                        model="cloud-model",
+                        base_url="https://example.invalid/v1",
+                        api_key="super-secret-key",
+                        headers={"Authorization": "Bearer hidden-token"},
+                    )
+                },
+                default_route=["cloud"],
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            record_event(
+                config.state_dir,
+                "events",
+                {
+                    "type": "provider.failed",
+                    "message": "provider leaked Authorization: Bearer hidden-token and sk-secretsecretsecret",
+                    "api_key": "super-secret-key",
+                },
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                health = json.dumps(_get_json(f"{base}/health"))
+                status = json.dumps(_get_json(f"{base}/v1/status"))
+                metrics = json.dumps(_get_json(f"{base}/metrics"))
+                events = json.dumps(_get_json(f"{base}/v1/events"))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            combined = "\n".join([health, status, metrics, events])
+            self.assertNotIn("super-secret-key", combined)
+            self.assertNotIn("hidden-token", combined)
+            self.assertNotIn("sk-secretsecretsecret", combined)
+
+
+def _get_json(url: str, headers: dict[str, str] | None = None) -> dict:
+    request = Request(url, headers=headers or {})
+    with urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
 
 

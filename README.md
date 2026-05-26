@@ -489,6 +489,19 @@ Additional visibility endpoints:
 - `GET /v1/tools`
 - `GET /v1/workflows/status`
 - `GET /v1/plugins`
+- `GET /v1/enterprise/audit`
+
+When `host` is `0.0.0.0` or another public bind address, these diagnostics
+endpoints require `diagnostics_auth_token` or `diagnostics_auth_token_env`.
+Localhost keeps the previous no-auth behavior. The generated config reference
+is in `docs/config-reference.md`.
+
+Phase 6 adds platform hardening without enabling risky behavior by default:
+plugin manifests can be trusted by registry hash/signature or explicit
+allowlist, plugin execution remains disabled behind a deny-by-default sandbox
+interface, enterprise permission decisions are audited to local state, and
+`python -m agent_hub migrate-config` can detect and write small config key
+migrations.
 
 Deployment templates are included as `Dockerfile`, `docker-compose.yml`,
 `.env.example`, and `examples/agent-hub.production.json`. Community config

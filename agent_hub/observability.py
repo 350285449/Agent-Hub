@@ -15,6 +15,7 @@ STREAM_FILES = {
     "logs": "structured_logs.jsonl",
     "permissions": "permission_audit.jsonl",
     "security_audit": "security_audit.jsonl",
+    "enterprise_audit": "enterprise_audit.jsonl",
     "tools": "tool_execution_history.jsonl",
     "workflows": "workflow_execution.jsonl",
 }

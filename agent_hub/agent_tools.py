@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import HubConfig
+from .enterprise import EnterprisePolicy, enterprise_subject_from_request, enterprise_workspace_from_request
 from .models import HubRequest
 from .observability import record_event
 from .permissions import (
@@ -535,6 +536,9 @@ class AgentToolbox:
             self._get_approval_mode(),
             approval_granted=self._approval_granted(),
             callback=self.shell_permission_callback,
+            enterprise_policy=EnterprisePolicy.from_config(self.config),
+            enterprise_user_id=enterprise_subject_from_request(self.request),
+            enterprise_workspace_id=enterprise_workspace_from_request(self.config, self.request),
         ).check(tool_permission_request(name, args))
 
     def _is_approval_needed(self, name: str, args: dict[str, Any]) -> bool:

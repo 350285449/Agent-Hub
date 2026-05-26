@@ -11,6 +11,11 @@ from typing import Any
 from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from ..context import estimate_message_tokens, is_protected_context_message
 from ..debug import debug_dir_for_state, provider_debug_context
+from ..enterprise import (
+    EnterprisePolicy,
+    enterprise_subject_from_request,
+    enterprise_workspace_from_request,
+)
 from ..events import (
     CONTEXT_TRUNCATED,
     PROVIDER_FAILED,
@@ -45,7 +50,6 @@ from ..response_normalization import (
 from ..repository import repo_context_for_request
 from ..security.audit import record_provider_audit
 from ..session_store import SessionStore
-from ..token_budget import TokenBudgetManager, estimate_messages_tokens
 from ..token_optimizer import ContextCache, TokenOptimizer
 from ..tools import ToolExecutionContext, ToolExecutionPipeline, create_builtin_registry
 from ..tools.loop import (
@@ -121,6 +125,7 @@ class StreamingRoute:
     public_model: str
     decision: RoutingDecision
     failover: list[FailoverEvent]
+    request: HubRequest
     chunks: Any
 
     @property
@@ -634,7 +639,15 @@ class AgentRouter:
                 )
                 continue
 
-            skip_reason = self._preflight_skip_reason(agent, effective_request)
+            stream_request = self._request_for_agent(
+                request_id=request_id,
+                request=effective_request,
+                agent=agent,
+                decision=decision,
+                stream=True,
+            )
+
+            skip_reason = self._preflight_skip_reason(agent, stream_request)
             if skip_reason:
                 failover.append(
                     FailoverEvent(
@@ -643,12 +656,12 @@ class AgentRouter:
                         model=agent.model,
                         reason=skip_reason,
                         retryable=False,
-                        error_type=self._preflight_error_type(agent, effective_request, skip_reason),
+                        error_type=self._preflight_error_type(agent, stream_request, skip_reason),
                     )
                 )
                 continue
 
-            permission = self._provider_permission_decision(agent, effective_request)
+            permission = self._provider_permission_decision(agent, stream_request)
             if permission is not None and not permission.allowed:
                 failover.append(
                     FailoverEvent(
@@ -689,18 +702,19 @@ class AgentRouter:
                 routing_mode=decision.routing_mode,
                 stream_mode="native",
                 failover_count=len(failover),
-                estimated_tokens=decision.estimated_input_tokens,
+                estimated_tokens=_context_usage(stream_request).get("estimated_input_tokens"),
             )
             return StreamingRoute(
                 request_id=request_id,
-                session_id=effective_request.session_id,
+                session_id=stream_request.session_id,
                 agent=agent,
-                public_model=_public_model_name(effective_request),
+                public_model=_public_model_name(stream_request),
                 decision=decision,
                 failover=failover,
+                request=stream_request,
                 chunks=self._native_stream_chunks(
                     request_id=request_id,
-                    request=effective_request,
+                    request=stream_request,
                     agent=agent,
                     failover=failover,
                     decision=decision,
@@ -715,6 +729,44 @@ class AgentRouter:
             failover=[event.to_dict() for event in failover],
         )
         return None
+
+    def native_stream_for_agent(self, request: HubRequest, agent_name: str) -> StreamingRoute | None:
+        """Create a native stream for an explicit agent, used for replay-safe recovery."""
+
+        agent = self.config.agents.get(agent_name)
+        if agent is None or not agent.enabled or not self._adapter_supports_native_streaming(agent):
+            return None
+        request_id = f"hub-{uuid.uuid4().hex}"
+        decision = self.decide(request)
+        stream_request = self._request_for_agent(
+            request_id=request_id,
+            request=request,
+            agent=agent,
+            decision=decision,
+            stream=True,
+        )
+        skip_reason = self._preflight_skip_reason(agent, stream_request)
+        if skip_reason:
+            return None
+        permission = self._provider_permission_decision(agent, stream_request)
+        if permission is not None and not permission.allowed:
+            return None
+        return StreamingRoute(
+            request_id=request_id,
+            session_id=stream_request.session_id,
+            agent=agent,
+            public_model=_public_model_name(stream_request),
+            decision=decision,
+            failover=[],
+            request=stream_request,
+            chunks=self._native_stream_chunks(
+                request_id=request_id,
+                request=stream_request,
+                agent=agent,
+                failover=[],
+                decision=decision,
+            ),
+        )
 
     def _adapter_supports_native_streaming(self, agent: AgentConfig) -> bool:
         if not agent.supports_streaming:
@@ -744,13 +796,7 @@ class AgentRouter:
         usage_tokens = 0
         model = agent.model
         finish_reason: str | None = None
-        stream_request = self._request_for_agent(
-            request_id=request_id,
-            request=request,
-            agent=agent,
-            decision=decision,
-            stream=True,
-        )
+        stream_request = request
         self._record_internal_event(
             STREAM_STARTED,
             request_id=request_id,
@@ -909,18 +955,26 @@ class AgentRouter:
             and not explicit_security_approval
             and (approval_mode == "auto" or compatibility)
         ):
-            reason = (
-                "Allowed trusted cloud provider without interactive approval "
-                "because approval_mode=auto or IDE compatibility mode is enabled."
+            enterprise_decision = self._enterprise_permission_decision(
+                permission_request,
+                request,
+                approval_mode,
             )
-            decision = PermissionDecision(
-                True,
-                requires_approval=False,
-                denied=False,
-                reason=reason,
-                mode=approval_mode,
-                request=permission_request,
-            )
+            if enterprise_decision is not None:
+                decision = enterprise_decision
+            else:
+                reason = (
+                    "Allowed trusted cloud provider without interactive approval "
+                    "because approval_mode=auto or IDE compatibility mode is enabled."
+                )
+                decision = PermissionDecision(
+                    True,
+                    requires_approval=False,
+                    denied=False,
+                    reason=reason,
+                    mode=approval_mode,
+                    request=permission_request,
+                )
         elif trust_level == UNTRUSTED_EXTERNAL and not explicit_approval:
             reason = (
                 "Provider requires approval. Set approval_mode=auto or enable "
@@ -939,6 +993,9 @@ class AgentRouter:
             decision = PermissionManager(
                 approval_mode,
                 approval_granted=explicit_approval,
+                enterprise_policy=EnterprisePolicy.from_config(self.config),
+                enterprise_user_id=enterprise_subject_from_request(request),
+                enterprise_workspace_id=enterprise_workspace_from_request(self.config, request),
             ).check(permission_request)
         record_event(
             self.config.state_dir,
@@ -975,6 +1032,19 @@ class AgentRouter:
             permission=decision.to_dict(),
         )
         return decision
+
+    def _enterprise_permission_decision(
+        self,
+        permission_request: Any,
+        request: HubRequest,
+        approval_mode: str,
+    ) -> PermissionDecision | None:
+        return PermissionManager(
+            approval_mode,
+            enterprise_policy=EnterprisePolicy.from_config(self.config),
+            enterprise_user_id=enterprise_subject_from_request(request),
+            enterprise_workspace_id=enterprise_workspace_from_request(self.config, request),
+        ).check_enterprise(permission_request)
 
     def _request_for_agent(
         self,

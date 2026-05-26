@@ -29,6 +29,29 @@ Mount a config file at `/config/agent-hub.config.json`, workspace files at
 `/workspace`, and state at `/data/.agent-hub`. Keep real `.env` values and
 provider keys out of git.
 
+Because the example container binds to `0.0.0.0`, configure
+`diagnostics_auth_token_env` and provide that environment variable before
+exposing diagnostics endpoints. Enterprise audit events are written under the
+configured state directory.
+
+Before carrying an older config forward, inspect migrations:
+
+```sh
+python -m agent_hub --config /config/agent-hub.config.json migrate-config --json
+```
+
+Add `--write` to update renamed keys in place, or `--output` to write a new
+file.
+
+Optional real-provider stress checks are disabled unless explicitly requested:
+
+```sh
+AGENT_HUB_RUN_REAL_PROVIDER_STRESS=1 python scripts/real_provider_stress.py
+```
+
+The harness exercises repeated provider calls and failover reporting without
+requiring API keys in the normal test suite.
+
 For production-style local use, start from
 `examples/agent-hub.production.json` and adjust provider keys, routes, plugin
 directories, and context limits for your environment.

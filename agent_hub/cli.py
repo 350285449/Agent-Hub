@@ -23,6 +23,7 @@ from .config import (
     load_config,
     normalize_provider,
 )
+from .config_migration import migrate_config_file
 from .context import request_context_diagnostics
 from .evaluation import BenchmarkRunner, ProviderScoreStore, default_benchmark_tasks
 from .inbox import InboxProcessor
@@ -76,6 +77,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Compatibility shape used to normalize the payload.",
     )
     inspect_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    migrate_parser = subparsers.add_parser(
+        "migrate-config",
+        help="Detect deprecated config keys and optionally write a migrated config.",
+    )
+    migrate_parser.add_argument("--write", action="store_true", help="Write the migrated config.")
+    migrate_parser.add_argument("--output", help="Write migrated config to a different path.")
+    migrate_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     health_parser = subparsers.add_parser("health", help="Show live provider health and best route candidates.")
     health_parser.add_argument("--route", default="cloud-agent", help="Route to summarize.")
@@ -308,6 +317,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.config,
             route=args.route,
             enabled=args.enable,
+        )
+    if command == "migrate-config":
+        return _migrate_config(
+            args.config,
+            write=args.write,
+            output=args.output,
+            as_json=args.json,
         )
 
     config = load_config(args.config)
@@ -1116,6 +1132,30 @@ def _inspect_request(path: str | None, *, api_shape: str, as_json: bool) -> int:
         if diagnostics.get("suspiciously_empty"):
             print()
             print("Warning: context looks empty. Check that the client is sending messages, task_progress, and active file metadata.")
+    return 0
+
+
+def _migrate_config(path: str, *, write: bool, output: str | None, as_json: bool) -> int:
+    try:
+        report = migrate_config_file(path, output_path=output, write=write)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"Could not migrate config: {exc}")
+        return 1
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+    migrations = report["migrations"]
+    if not migrations:
+        print("No deprecated config keys detected.")
+        return 0
+    print(f"Detected {len(migrations)} config migration(s):")
+    for migration in migrations:
+        status = "applied" if migration["applied"] else "suggested"
+        print(f"- {migration['old_key']} -> {migration['new_key']} ({status})")
+    if write:
+        print(f"Wrote migrated config: {report['output_path']}")
+    else:
+        print("Run with migrate-config --write to save the migrated config.")
     return 0
 
 

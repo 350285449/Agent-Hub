@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import hmac
+import os
 import time
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .agent_runner import AgentRunner
 from .config import HubConfig, normalize_provider
 from .context import request_context_diagnostics
+from .enterprise import enterprise_audit_events
 from .evaluation import ProviderScoreStore
 from .models import HubRequest
 from .observability import metrics_snapshot, permission_snapshot, recent_events, record_event, usage_snapshot
 from .permissions import UNTRUSTED_EXTERNAL
+from .security.secrets import redact_secrets
 from .plugins import discover_plugins
 from .payloads import (
     anthropic_message_response,
@@ -100,9 +105,21 @@ BACKEND_FEATURES = {
     "context_safety_cap": True,
     "repo_ignore_patterns": True,
     "plugin_sdk_foundation": True,
+    "signed_plugin_manifests": True,
+    "plugin_sandbox_foundation": True,
     "enterprise_foundation_models": True,
+    "enterprise_audit_logs": True,
+    "config_migration": True,
     "events_endpoint": True,
     "deployment_templates": True,
+}
+DIAGNOSTIC_ENDPOINTS = {
+    "/v1/provider-health",
+    "/v1/events",
+    "/v1/tools",
+    "/v1/workflows/status",
+    "/v1/plugins",
+    "/v1/enterprise/audit",
 }
 
 
@@ -138,19 +155,22 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_json(_provider_scores_body(self.server.config))
             return
         if path == "/v1/provider-health":
-            self._send_json(_provider_health_body(self.server.config, self.server.router))
+            self._send_diagnostics_json(_provider_health_body(self.server.config, self.server.router))
             return
         if path == "/v1/events":
-            self._send_json(_events_body(self.server.config))
+            self._send_diagnostics_json(_events_body(self.server.config))
             return
         if path == "/v1/tools":
-            self._send_json(_tools_body(self.server.router))
+            self._send_diagnostics_json(_tools_body(self.server.router))
             return
         if path == "/v1/workflows/status":
-            self._send_json(_workflow_status_body(self.server.config))
+            self._send_diagnostics_json(_workflow_status_body(self.server.config))
             return
         if path == "/v1/plugins":
-            self._send_json(_plugins_body(self.server.config))
+            self._send_diagnostics_json(_plugins_body(self.server.config))
+            return
+        if path == "/v1/enterprise/audit":
+            self._send_diagnostics_json(_enterprise_audit_body(self.server.config))
             return
         if path == "/health":
             self._send_json(
@@ -269,44 +289,54 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return
         if path == "/usage":
             self._send_json(
-                usage_snapshot(
-                    self.server.config.state_dir,
-                    self.server.router.health_snapshot(include_history=True),
+                redact_secrets(
+                    usage_snapshot(
+                        self.server.config.state_dir,
+                        self.server.router.health_snapshot(include_history=True),
+                    )
                 )
             )
             return
         if path == "/permissions":
             self._send_json(
-                permission_snapshot(
-                    self.server.config.state_dir,
-                    approval_mode=self.server.config.approval_mode,
-                    safe_mode=self.server.config.approval_mode == "safe",
+                redact_secrets(
+                    permission_snapshot(
+                        self.server.config.state_dir,
+                        approval_mode=self.server.config.approval_mode,
+                        safe_mode=self.server.config.approval_mode == "safe",
+                    )
                 )
             )
             return
         if path == "/metrics":
             self._send_json(
-                metrics_snapshot(
-                    self.server.config.state_dir,
-                    self.server.router.health_snapshot(include_history=True),
+                redact_secrets(
+                    metrics_snapshot(
+                        self.server.config.state_dir,
+                        self.server.router.health_snapshot(include_history=True),
+                    )
                 )
             )
             return
         if path == "/debug/request":
             self._send_json(
-                {
-                    "object": "agent_hub.debug.request",
-                    "recent": list(reversed(self.server.debug_requests[-20:])),
-                }
+                redact_secrets(
+                    {
+                        "object": "agent_hub.debug.request",
+                        "recent": list(reversed(self.server.debug_requests[-20:])),
+                    }
+                )
             )
             return
         if path == "/debug/context":
             self._send_json(
-                {
-                    "object": "agent_hub.debug.context",
-                    "summary": _debug_context_summary(self.server),
-                    "recent": list(reversed(self.server.debug_requests[-20:])),
-                }
+                redact_secrets(
+                    {
+                        "object": "agent_hub.debug.context",
+                        "summary": _debug_context_summary(self.server),
+                        "recent": list(reversed(self.server.debug_requests[-20:])),
+                    }
+                )
             )
             return
         if path in {"/models", "/v1/models", "/api/v1/models"}:
@@ -335,7 +365,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             (
                 "Authorization, Content-Type, X-API-Key, API-Key, "
                 "Anthropic-Version, Anthropic-Beta, X-Agent-Hub-Session-ID, "
-                "X-Session-ID, X-Conversation-ID, X-Thread-ID"
+                "X-Session-ID, X-Conversation-ID, X-Thread-ID, "
+                "X-Agent-Hub-Diagnostics-Token"
             ),
         )
         self.end_headers()
@@ -807,6 +838,14 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_diagnostics_json(self, data: dict[str, Any]) -> None:
+        auth_error = _diagnostics_auth_error(self.server.config, self.headers)
+        if auth_error is not None:
+            body, status = auth_error
+            self._send_json(body, status=status)
+            return
+        self._send_json(redact_secrets(data))
+
     def _send_html(self, html: str, status: int = 200) -> None:
         body = html.encode("utf-8")
         self.send_response(status)
@@ -1000,33 +1039,38 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
             }
         )
+
+        def write_chunk(source_chunk: Any) -> None:
+            nonlocal saw_finish
+            delta = dict(source_chunk.delta or {})
+            if source_chunk.text and "content" not in delta:
+                delta["content"] = source_chunk.text
+            finish_reason = source_chunk.finish_reason
+            if finish_reason:
+                saw_finish = True
+            if not delta and not finish_reason:
+                return
+            write_data(
+                {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": source_chunk.model or model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": delta,
+                            "finish_reason": finish_reason,
+                        }
+                    ],
+                }
+            )
+
         try:
             for chunk in stream.chunks:
                 if not client_connected:
                     break
-                delta = dict(chunk.delta or {})
-                if chunk.text and "content" not in delta:
-                    delta["content"] = chunk.text
-                finish_reason = chunk.finish_reason
-                if finish_reason:
-                    saw_finish = True
-                if not delta and not finish_reason:
-                    continue
-                write_data(
-                    {
-                        "id": chunk_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": chunk.model or model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": delta,
-                                "finish_reason": finish_reason,
-                            }
-                        ],
-                    }
-                )
+                write_chunk(chunk)
             if client_connected and not saw_finish:
                 write_data(
                     {
@@ -1038,6 +1082,41 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     }
                 )
         except Exception as exc:
+            recovered = _recover_native_stream(self.server, stream)
+            if recovered is not None:
+                write_data(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": "[Agent Hub stream recovery started]"},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
+                try:
+                    for chunk in recovered.chunks:
+                        if not client_connected:
+                            break
+                        write_chunk(chunk)
+                    if client_connected and not saw_finish:
+                        write_data(
+                            {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                            }
+                        )
+                    return
+                except Exception:
+                    pass
             write_data(
                 {
                     "id": chunk_id,
@@ -1271,6 +1350,44 @@ def _stream_response_headers(stream: Any, router: AgentRouter) -> dict[str, str]
     }
 
 
+def _recover_native_stream(server: AgentHubHTTPServer, stream: Any) -> Any | None:
+    policy = str(getattr(server.config, "native_stream_failure_policy", "terminate") or "terminate")
+    if policy == "terminate" or not _stream_replay_safe(getattr(stream, "request", None)):
+        return None
+    if policy == "retry_same_provider":
+        request = _stream_recovery_request(stream.request, recovery="retry_same_provider")
+        return server.router.native_stream_for_agent(request, stream.agent.name)
+    if policy == "fallback_provider":
+        server.router.cooldown_agent(stream.agent.name, getattr(stream.agent, "cooldown_seconds", 1.0))
+        request = _stream_recovery_request(stream.request, recovery="fallback_provider")
+        return server.router.native_stream(request)
+    return None
+
+
+def _stream_replay_safe(request: Any) -> bool:
+    raw = request.raw if request is not None and isinstance(getattr(request, "raw", None), dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    for value in (
+        hub.get("stream_replay_safe"),
+        hub.get("replay_safe"),
+        raw.get("stream_replay_safe"),
+        raw.get("replay_safe"),
+    ):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
+def _stream_recovery_request(request: Any, *, recovery: str) -> Any:
+    raw = dict(request.raw or {})
+    hub = dict(raw.get("agent_hub") or {})
+    hub["stream_recovery_attempt"] = recovery
+    raw["agent_hub"] = hub
+    return replace(request, raw=raw, record_session=False)
+
+
 def _safe_header_value(value: Any) -> str:
     if value is None:
         return ""
@@ -1412,6 +1529,15 @@ def _workflow_status_body(config: HubConfig) -> dict[str, Any]:
 
 def _plugins_body(config: HubConfig) -> dict[str, Any]:
     return discover_plugins(config).to_dict()
+
+
+def _enterprise_audit_body(config: HubConfig) -> dict[str, Any]:
+    events = enterprise_audit_events(config.state_dir, limit=100)
+    return {
+        "object": "agent_hub.enterprise_audit",
+        "count": len(events),
+        "recent": events,
+    }
 
 
 def _provider_row_html(row: dict[str, Any]) -> str:
@@ -1809,6 +1935,76 @@ def _positive_int(value: Any, *, default: int, maximum: int) -> int:
 
 def _request_path(path: str) -> str:
     return path.split("?", 1)[0]
+
+
+def _diagnostics_auth_error(config: HubConfig, headers: Any) -> tuple[dict[str, Any], int] | None:
+    if not _diagnostics_auth_required(config):
+        return None
+    expected = _diagnostics_token(config)
+    if not expected:
+        return (
+            {
+                "error": {
+                    "type": "diagnostics_auth_not_configured",
+                    "message": (
+                        "Diagnostics endpoints require diagnostics_auth_token or "
+                        "diagnostics_auth_token_env when Agent Hub is bound publicly."
+                    ),
+                }
+            },
+            403,
+        )
+    provided = _diagnostics_token_from_headers(headers)
+    if provided and hmac.compare_digest(provided, expected):
+        return None
+    return (
+        {
+            "error": {
+                "type": "diagnostics_auth_required",
+                "message": "Diagnostics authentication is required for this endpoint.",
+            }
+        },
+        401,
+    )
+
+
+def _diagnostics_auth_required(config: HubConfig) -> bool:
+    return _public_bind_host(str(getattr(config, "host", "127.0.0.1") or "127.0.0.1"))
+
+
+def _diagnostics_token(config: HubConfig) -> str:
+    explicit = getattr(config, "diagnostics_auth_token", None)
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    env_name = getattr(config, "diagnostics_auth_token_env", None)
+    if isinstance(env_name, str) and env_name:
+        return os.environ.get(env_name, "")
+    return ""
+
+
+def _diagnostics_token_from_headers(headers: Any) -> str:
+    direct = headers.get("X-Agent-Hub-Diagnostics-Token")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    auth = headers.get("Authorization")
+    if isinstance(auth, str) and auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
+
+
+def _public_bind_host(host: str) -> bool:
+    value = host.strip().lower()
+    if value in {"", "localhost", "127.0.0.1", "::1"}:
+        return False
+    if value in {"0.0.0.0", "::", "[::]"}:
+        return True
+    try:
+        import ipaddress
+
+        address = ipaddress.ip_address(value.strip("[]"))
+    except ValueError:
+        return True
+    return not address.is_loopback
 
 
 def _payload_with_header_metadata(payload: dict[str, Any], headers: Any) -> dict[str, Any]:

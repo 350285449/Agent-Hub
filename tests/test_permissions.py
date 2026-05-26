@@ -99,6 +99,57 @@ class PermissionManagerTests(unittest.TestCase):
             )
             self.assertEqual(approved.text, "ok")
 
+    def test_enterprise_permissions_are_enforced_only_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                approval_mode="auto",
+                free_only=False,
+                default_route=["cloud"],
+                agents={
+                    "cloud": AgentConfig(
+                        name="cloud",
+                        provider="openai",
+                        model="paid-model",
+                        api_key="secret",
+                    )
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    return ProviderResult(text="ok", model=self.agent.model, finish_reason="stop")
+
+            request = HubRequest(
+                session_id="s",
+                messages=[{"role": "user", "content": "Current file: app.py\nhello"}],
+            )
+            self.assertEqual(AgentRouter(config, provider_factory=Provider).route(request).text, "ok")
+
+            config.enterprise_mode_enabled = True
+            with self.assertRaises(RouterError) as error:
+                AgentRouter(config, provider_factory=Provider).route(request)
+            self.assertIn("Enterprise mode requires a user_id", str(error.exception))
+
+            config.enterprise_users = [{"id": "alice", "roles": ["developer"]}]
+            config.enterprise_roles = [
+                {"name": "developer", "permissions": ["workspace_cloud"]}
+            ]
+            allowed = AgentRouter(config, provider_factory=Provider).route(
+                HubRequest(
+                    session_id="s",
+                    messages=request.messages,
+                    raw={"agent_hub": {"user_id": "alice", "workspace_id": "default"}},
+                )
+            )
+
+            self.assertEqual(allowed.text, "ok")
+
 
 if __name__ == "__main__":
     unittest.main()

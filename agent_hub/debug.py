@@ -6,24 +6,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .security.secrets import redact_secret_like_text, secret_key
+
 
 MAX_DEBUG_VALUE_CHARS = 20_000
-SECRET_KEY_MARKERS = (
-    "api_key",
-    "apikey",
-    "authorization",
-    "bearer",
-    "cookie",
-    "password",
-    "secret",
-    "token",
-    "x-api-key",
-)
-SECRET_VALUE_PATTERNS = (
-    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
-    re.compile(r"(?i)sk-[A-Za-z0-9_\-]{12,}"),
-    re.compile(r"(?i)ghp_[A-Za-z0-9_]{12,}"),
-)
 
 
 def debug_dir_for_state(state_dir: str | Path) -> Path:
@@ -107,17 +93,14 @@ def redact_and_truncate(value: Any, *, max_chars: int = MAX_DEBUG_VALUE_CHARS) -
 
 
 def _redact(value: Any, key: str = "") -> Any:
-    if _secret_key(key):
+    if secret_key(key):
         return "[REDACTED]"
     if isinstance(value, dict):
         return {str(item_key): _redact(item_value, str(item_key)) for item_key, item_value in value.items()}
     if isinstance(value, list):
         return [_redact(item) for item in value]
     if isinstance(value, str):
-        text = value
-        for pattern in SECRET_VALUE_PATTERNS:
-            text = pattern.sub(_redacted_secret_match, text)
-        return text
+        return redact_secret_like_text(value)
     return value
 
 
@@ -137,17 +120,6 @@ def _truncate(value: Any, *, max_chars: int) -> Any:
     if len(text) <= max_chars:
         return value
     return text[: max(0, max_chars - 32)] + f"... [truncated {len(text)} chars]"
-
-
-def _secret_key(key: str) -> bool:
-    lowered = key.lower().replace("-", "_")
-    return any(marker in lowered for marker in SECRET_KEY_MARKERS)
-
-
-def _redacted_secret_match(match: re.Match[str]) -> str:
-    if match.lastindex:
-        return f"{match.group(1)}[REDACTED]"
-    return "[REDACTED]"
 
 
 def _safe_filename(value: str) -> str:

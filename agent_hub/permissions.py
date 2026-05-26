@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import AgentConfig, HubConfig, _is_local_or_private_url, normalize_provider
+from .enterprise import EnterprisePolicy
 from .models import HubRequest
 from .security import (
     RISK_ORDER,
@@ -114,10 +115,16 @@ class PermissionManager:
         *,
         approval_granted: bool = False,
         callback: PermissionCallback | None = None,
+        enterprise_policy: EnterprisePolicy | None = None,
+        enterprise_user_id: str = "",
+        enterprise_workspace_id: str = "",
     ) -> None:
         self.mode = normalize_approval_mode(mode)
         self.approval_granted = approval_granted
         self.callback = callback
+        self.enterprise_policy = enterprise_policy
+        self.enterprise_user_id = enterprise_user_id
+        self.enterprise_workspace_id = enterprise_workspace_id
 
     def check(self, request: PermissionRequest) -> PermissionDecision:
         security = request.details.get("security") if isinstance(request.details, dict) else None
@@ -136,6 +143,10 @@ class PermissionManager:
 
         if request.category not in SENSITIVE_CATEGORIES:
             return PermissionDecision(True, mode=self.mode, request=request)
+
+        enterprise_decision = self.check_enterprise(request)
+        if enterprise_decision is not None:
+            return enterprise_decision
 
         if self.mode == "readonly":
             return PermissionDecision(
@@ -233,6 +244,28 @@ class PermissionManager:
             False,
             requires_approval=True,
             reason="User approval is required before this action can continue.",
+            mode=self.mode,
+            request=request,
+        )
+
+    def check_enterprise(self, request: PermissionRequest) -> PermissionDecision | None:
+        if self.enterprise_policy is None or not self.enterprise_policy.enabled:
+            return None
+        if request.category not in SENSITIVE_CATEGORIES:
+            return None
+        allowed, reason = self.enterprise_policy.allows(
+            user_id=self.enterprise_user_id,
+            workspace_id=self.enterprise_workspace_id,
+            action=request.action,
+            category=request.category,
+            resource=request.resource,
+        )
+        if allowed:
+            return None
+        return PermissionDecision(
+            False,
+            denied=True,
+            reason=reason,
             mode=self.mode,
             request=request,
         )

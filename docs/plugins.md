@@ -18,7 +18,15 @@ Local plugin directories:
   "plugins_enabled": true,
   "plugin_dirs": [".agent-hub/plugins"],
   "enabled_plugins": ["provider.demo"],
-  "disabled_plugins": []
+  "trusted_plugins": ["provider.demo"],
+  "disabled_plugins": [],
+  "plugin_trust_registry": ".agent-hub/plugin-trust.json",
+  "plugin_signature_key_env": "AGENT_HUB_PLUGIN_SIGNATURE_KEY",
+  "plugin_allow_unsigned": false,
+  "plugin_execution_enabled": false,
+  "plugin_capability_grants": {
+    "provider.demo": ["provider.read", "network.call"]
+  }
 }
 ```
 
@@ -39,6 +47,21 @@ Example:
 }
 ```
 
-Discovery validates JSON, plugin type, duplicate IDs, and whether entrypoints
-stay inside the configured plugin directory. Agent Hub does not execute plugin
-code yet. Inspect loaded manifests with `GET /v1/plugins`.
+Discovery validates JSON, manifest keys, plugin type, duplicate IDs, and
+whether entrypoints stay inside the configured plugin directory. Agent Hub does
+not execute plugin code yet. Only plugins listed in `trusted_plugins` can
+register manifest metadata for provider, tool, workflow, router strategy, or
+memory/context capabilities. Inspect loaded manifests and registered metadata
+with `GET /v1/plugins`.
+
+Phase 6 also supports a trust registry. A registry entry can pin `id`,
+`version`, and `manifest_hash`, and can grant capability scopes such as
+`provider.read`, `provider.call`, `tool.register`, `workflow.register`,
+`memory.read`, `memory.write`, `filesystem.read`, `filesystem.write`, and
+`network.call`. Unsigned entries without a hash are rejected unless
+`plugin_allow_unsigned` is explicitly enabled.
+
+Plugin execution remains disabled by default. The sandbox interface checks
+requested scopes against configured grants and then denies execution unless
+`plugin_execution_enabled` is enabled; unrestricted third-party imports are not
+run by Agent Hub.

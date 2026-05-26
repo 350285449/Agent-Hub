@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import HubConfig
+from .sandbox import PluginExecutionSandbox
 from .models import (
     MANIFEST_NAMES,
     PLUGIN_TYPES,
@@ -13,6 +14,8 @@ from .models import (
     PluginLoadError,
     PluginManifest,
 )
+from .trust import evaluate_plugin_trust, normalize_capability_scopes
+from .trust import manifest_hash_from_data
 
 
 def discover_plugins(config: HubConfig) -> PluginDiscoveryResult:
@@ -38,11 +41,24 @@ def discover_plugins(config: HubConfig) -> PluginDiscoveryResult:
                 result.errors.append(PluginLoadError(path=path, message=f"Duplicate plugin id {loaded.id!r}"))
                 continue
             seen.add(loaded.id)
+            enabled = _plugin_enabled(config, loaded)
+            trust = evaluate_plugin_trust(config, loaded)
+            sandbox = plugin_sandbox_policy(
+                loaded,
+                root=directory,
+                granted_scopes=trust.granted_scopes,
+                execution_enabled=bool(getattr(config, "plugin_execution_enabled", False)),
+            )
+            registerable, reason = _registration_status(enabled, trust.trusted, sandbox, trust.reason)
             result.plugins.append(
                 DiscoveredPlugin(
                     manifest=loaded,
-                    enabled=_plugin_enabled(config, loaded),
-                    sandbox=plugin_sandbox_policy(loaded, root=directory),
+                    enabled=enabled,
+                    trusted=trust.trusted,
+                    registerable=registerable,
+                    registration_reason=reason,
+                    sandbox=sandbox,
+                    trust=trust.to_dict(),
                 )
             )
     result.plugins.sort(key=lambda plugin: plugin.manifest.id)
@@ -78,7 +94,13 @@ def load_plugin_manifest(path: str | Path, *, root: str | Path | None = None) ->
         return PluginLoadError(path=manifest_path, message=str(exc))
 
 
-def plugin_sandbox_policy(manifest: PluginManifest, *, root: str | Path) -> dict[str, Any]:
+def plugin_sandbox_policy(
+    manifest: PluginManifest,
+    *,
+    root: str | Path,
+    granted_scopes: list[str] | None = None,
+    execution_enabled: bool = False,
+) -> dict[str, Any]:
     root_path = Path(root).expanduser().resolve()
     entrypoint = None
     entrypoint_allowed = False
@@ -86,13 +108,22 @@ def plugin_sandbox_policy(manifest: PluginManifest, *, root: str | Path) -> dict
         candidate = (manifest.path.parent / manifest.entrypoint).resolve() if manifest.path else root_path
         entrypoint = str(candidate)
         entrypoint_allowed = _within(candidate, root_path)
+    else:
+        entrypoint_allowed = True
+    scopes = normalize_capability_scopes(granted_scopes or [])
+    execution = PluginExecutionSandbox(
+        execution_enabled=execution_enabled,
+        granted_scopes=scopes,
+    )
     return {
         "manifest_only": True,
         "code_execution": False,
+        "execution_enabled": execution.execution_enabled,
         "root": str(root_path),
         "entrypoint": entrypoint,
         "entrypoint_allowed": entrypoint_allowed,
         "allowed_permissions": list(manifest.permissions),
+        "capability_scopes": scopes,
     }
 
 
@@ -114,13 +145,37 @@ def _manifest_candidates(directory: Path) -> list[Path]:
 
 
 def _manifest_from_dict(data: dict[str, Any], path: Path) -> PluginManifest:
+    allowed = {
+        "id",
+        "name",
+        "type",
+        "version",
+        "enabled_by_default",
+        "entrypoint",
+        "description",
+        "permissions",
+        "metadata",
+        "signature",
+        "manifest_hash",
+    }
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise ValueError(f"Unknown manifest keys: {', '.join(unknown)}")
     plugin_id = str(data.get("id") or data.get("name") or "").strip()
     if not plugin_id:
         raise ValueError("Plugin id is required")
+    if not _safe_plugin_id(plugin_id):
+        raise ValueError("Plugin id may only contain letters, numbers, dots, underscores, and dashes")
     plugin_type = str(data.get("type") or "").strip().lower().replace("-", "_")
     if plugin_type not in PLUGIN_TYPES:
         raise ValueError(f"Plugin type must be one of {', '.join(sorted(PLUGIN_TYPES))}")
     name = str(data.get("name") or plugin_id).strip()
+    if data.get("permissions") is not None and not isinstance(data.get("permissions"), list):
+        raise ValueError("Plugin permissions must be an array of strings")
+    if data.get("metadata") is not None and not isinstance(data.get("metadata"), dict):
+        raise ValueError("Plugin metadata must be an object")
+    if data.get("entrypoint") is not None and not isinstance(data.get("entrypoint"), str):
+        raise ValueError("Plugin entrypoint must be a relative path string")
     permissions = [
         str(permission)
         for permission in data.get("permissions", [])
@@ -134,9 +189,11 @@ def _manifest_from_dict(data: dict[str, Any], path: Path) -> PluginManifest:
         version=str(data.get("version") or "0.1.0"),
         enabled_by_default=bool(data.get("enabled_by_default", False)),
         entrypoint=str(data.get("entrypoint")) if data.get("entrypoint") else None,
+        signature=str(data.get("signature") or ""),
         description=str(data.get("description") or ""),
         permissions=permissions,
         metadata=dict(metadata),
+        manifest_hash=manifest_hash_from_data(data),
         path=path,
     )
 
@@ -149,6 +206,28 @@ def _plugin_enabled(config: HubConfig, manifest: PluginManifest) -> bool:
     if enabled:
         return manifest.id in enabled
     return manifest.enabled_by_default
+
+
+def _registration_status(
+    enabled: bool,
+    trusted: bool,
+    sandbox: dict[str, Any],
+    trust_reason: str = "",
+) -> tuple[bool, str]:
+    if not enabled:
+        return False, "plugin_disabled"
+    if not trusted:
+        return False, trust_reason or "plugin_untrusted"
+    if not bool(sandbox.get("entrypoint_allowed")):
+        return False, "entrypoint_escapes_plugin_directory"
+    return True, trust_reason or "trusted_manifest_metadata_registered"
+
+
+def _safe_plugin_id(value: str) -> bool:
+    return bool(value) and all(
+        character.isalnum() or character in {".", "_", "-"}
+        for character in value
+    )
 
 
 def _within(path: Path, root: Path) -> bool:

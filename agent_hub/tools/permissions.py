@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..config import HubConfig
+from ..enterprise import EnterprisePolicy, enterprise_subject_from_request, enterprise_workspace_from_request
 from ..models import HubRequest
 from ..permissions import PermissionManager, tool_permission_request
 from .types import Tool, ToolCall, ToolResult
@@ -22,6 +23,9 @@ class ToolPermissionLayer:
         decision = PermissionManager(
             getattr(self.config, "approval_mode", "ask"),
             approval_granted=_approval_granted(self.request),
+            enterprise_policy=EnterprisePolicy.from_config(self.config),
+            enterprise_user_id=enterprise_subject_from_request(self.request),
+            enterprise_workspace_id=enterprise_workspace_from_request(self.config, self.request),
         ).check(request)
         if decision.allowed:
             return None

@@ -130,7 +130,10 @@ class HubConfig:
     context_mode: str = "balanced"
     cline_compatibility_mode: bool = True
     force_compatibility_streaming: bool = False
+    native_stream_failure_policy: str = "terminate"
     debug_raw_provider_responses: bool = False
+    diagnostics_auth_token: str | None = None
+    diagnostics_auth_token_env: str | None = None
     allow_shell_tools: bool = True
     shell_command_policy: str = "allow"
     tool_loop_enabled: bool = True
@@ -150,6 +153,12 @@ class HubConfig:
     plugins_enabled: bool = True
     enabled_plugins: list[str] = field(default_factory=list)
     disabled_plugins: list[str] = field(default_factory=list)
+    trusted_plugins: list[str] = field(default_factory=list)
+    plugin_trust_registry: Path | None = None
+    plugin_signature_key_env: str | None = None
+    plugin_allow_unsigned: bool = False
+    plugin_execution_enabled: bool = False
+    plugin_capability_grants: dict[str, list[str]] = field(default_factory=dict)
     free_only: bool = True
     enable_load_balancing: bool = True
     auto_enable_available_providers: bool = True
@@ -158,6 +167,12 @@ class HubConfig:
     quota_cooldown_seconds: float = 1800.0
     rate_limit_cooldown_seconds: float = 300.0
     approval_mode: str = "auto"
+    enterprise_mode_enabled: bool = False
+    enterprise_default_workspace_id: str = "default"
+    enterprise_users: list[dict[str, Any]] = field(default_factory=list)
+    enterprise_workspaces: list[dict[str, Any]] = field(default_factory=list)
+    enterprise_roles: list[dict[str, Any]] = field(default_factory=list)
+    enterprise_permission_grants: list[dict[str, Any]] = field(default_factory=list)
     debug_echo_enabled: bool = False
     fast_write_finalize: bool = False
     validation_mode: str = "basic"
@@ -495,6 +510,7 @@ def free_local_config() -> HubConfig:
         context_mode="balanced",
         cline_compatibility_mode=True,
         force_compatibility_streaming=False,
+        native_stream_failure_policy="terminate",
         debug_raw_provider_responses=False,
         allow_shell_tools=True,
         shell_command_policy="ask",
@@ -669,9 +685,22 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             raw.get("force_compatibility_streaming"),
             False,
         ),
+        native_stream_failure_policy=_normalize_native_stream_failure_policy(
+            raw.get("native_stream_failure_policy", "terminate")
+        ),
         debug_raw_provider_responses=_bool_with_default(
             raw.get("debug_raw_provider_responses"),
             False,
+        ),
+        diagnostics_auth_token=(
+            str(raw.get("diagnostics_auth_token"))
+            if raw.get("diagnostics_auth_token") not in (None, "")
+            else None
+        ),
+        diagnostics_auth_token_env=(
+            str(raw.get("diagnostics_auth_token_env"))
+            if raw.get("diagnostics_auth_token_env") not in (None, "")
+            else None
         ),
         allow_shell_tools=_bool_with_default(raw.get("allow_shell_tools"), True),
         shell_command_policy=_normalize_shell_command_policy(
@@ -714,6 +743,24 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             for item in raw.get("disabled_plugins", [])
             if isinstance(item, str) and item.strip()
         ],
+        trusted_plugins=[
+            str(item)
+            for item in raw.get("trusted_plugins", [])
+            if isinstance(item, str) and item.strip()
+        ],
+        plugin_trust_registry=(
+            Path(str(raw.get("plugin_trust_registry")))
+            if raw.get("plugin_trust_registry") not in (None, "")
+            else None
+        ),
+        plugin_signature_key_env=(
+            str(raw.get("plugin_signature_key_env"))
+            if raw.get("plugin_signature_key_env") not in (None, "")
+            else None
+        ),
+        plugin_allow_unsigned=_bool_with_default(raw.get("plugin_allow_unsigned"), False),
+        plugin_execution_enabled=_bool_with_default(raw.get("plugin_execution_enabled"), False),
+        plugin_capability_grants=_string_list_map(raw.get("plugin_capability_grants")),
         free_only=_bool_with_default(raw.get("free_only"), True),
         enable_load_balancing=_bool_with_default(raw.get("enable_load_balancing"), True),
         auto_enable_available_providers=_bool_with_default(
@@ -727,6 +774,12 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         quota_cooldown_seconds=float(raw.get("quota_cooldown_seconds", 1800.0)),
         rate_limit_cooldown_seconds=float(raw.get("rate_limit_cooldown_seconds", 300.0)),
         approval_mode=_normalize_approval_mode(raw.get("approval_mode", "ask")),
+        enterprise_mode_enabled=_bool_with_default(raw.get("enterprise_mode_enabled"), False),
+        enterprise_default_workspace_id=str(raw.get("enterprise_default_workspace_id") or "default"),
+        enterprise_users=_dict_list(raw.get("enterprise_users")),
+        enterprise_workspaces=_dict_list(raw.get("enterprise_workspaces")),
+        enterprise_roles=_dict_list(raw.get("enterprise_roles")),
+        enterprise_permission_grants=_dict_list(raw.get("enterprise_permission_grants")),
         debug_echo_enabled=_bool_with_default(raw.get("debug_echo_enabled"), False),
         fast_write_finalize=_bool_with_default(raw.get("fast_write_finalize"), False),
         validation_mode=_normalize_validation_mode(raw.get("validation_mode", "basic")),
@@ -820,7 +873,10 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "context_mode": config.context_mode,
         "cline_compatibility_mode": config.cline_compatibility_mode,
         "force_compatibility_streaming": config.force_compatibility_streaming,
+        "native_stream_failure_policy": config.native_stream_failure_policy,
         "debug_raw_provider_responses": config.debug_raw_provider_responses,
+        "diagnostics_auth_token": config.diagnostics_auth_token,
+        "diagnostics_auth_token_env": config.diagnostics_auth_token_env,
         "allow_shell_tools": config.allow_shell_tools,
         "shell_command_policy": config.shell_command_policy,
         "tool_loop_enabled": config.tool_loop_enabled,
@@ -840,6 +896,12 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "plugins_enabled": config.plugins_enabled,
         "enabled_plugins": config.enabled_plugins,
         "disabled_plugins": config.disabled_plugins,
+        "trusted_plugins": config.trusted_plugins,
+        "plugin_trust_registry": str(config.plugin_trust_registry) if config.plugin_trust_registry else None,
+        "plugin_signature_key_env": config.plugin_signature_key_env,
+        "plugin_allow_unsigned": config.plugin_allow_unsigned,
+        "plugin_execution_enabled": config.plugin_execution_enabled,
+        "plugin_capability_grants": config.plugin_capability_grants,
         "free_only": config.free_only,
         "enable_load_balancing": config.enable_load_balancing,
         "auto_enable_available_providers": config.auto_enable_available_providers,
@@ -848,6 +910,12 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "quota_cooldown_seconds": config.quota_cooldown_seconds,
         "rate_limit_cooldown_seconds": config.rate_limit_cooldown_seconds,
         "approval_mode": config.approval_mode,
+        "enterprise_mode_enabled": config.enterprise_mode_enabled,
+        "enterprise_default_workspace_id": config.enterprise_default_workspace_id,
+        "enterprise_users": config.enterprise_users,
+        "enterprise_workspaces": config.enterprise_workspaces,
+        "enterprise_roles": config.enterprise_roles,
+        "enterprise_permission_grants": config.enterprise_permission_grants,
         "debug_echo_enabled": config.debug_echo_enabled,
         "fast_write_finalize": config.fast_write_finalize,
         "validation_mode": config.validation_mode,
@@ -943,6 +1011,8 @@ def _resolve_config_paths(config: HubConfig, base_dir: Path) -> None:
     config.archive_dir = _resolve_config_path(config.archive_dir, base)
     config.workspace_dir = _resolve_config_path(config.workspace_dir, base)
     config.plugin_dirs = [_resolve_config_path(path, base) for path in config.plugin_dirs]
+    if config.plugin_trust_registry is not None:
+        config.plugin_trust_registry = _resolve_config_path(config.plugin_trust_registry, base)
 
 
 def _resolve_config_path(path: Path, base: Path) -> Path:
@@ -1052,6 +1122,13 @@ def _normalize_validation_mode(value: Any) -> str:
     return "basic"
 
 
+def _normalize_native_stream_failure_policy(value: Any) -> str:
+    text = str(value or "terminate").strip().lower().replace("-", "_")
+    if text in {"terminate", "retry_same_provider", "fallback_provider"}:
+        return text
+    return "terminate"
+
+
 def _normalize_context_change_bar_mode(value: Any) -> str:
     text = str(value or "light").strip().lower()
     if text in {"off", "light", "strict"}:
@@ -1150,6 +1227,27 @@ def _normalize_repo_ignore_patterns(value: Any) -> list[str]:
             if isinstance(item, str) and item.strip() and item.strip() not in patterns:
                 patterns.append(item.strip().replace("\\", "/"))
     return patterns
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _string_list_map(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for key, items in value.items():
+        if not isinstance(key, str):
+            continue
+        if not isinstance(items, list):
+            continue
+        scopes = [str(item) for item in items if isinstance(item, str) and item.strip()]
+        if scopes:
+            result[key] = scopes
+    return result
 
 
 def _expand_env_string(value: Any) -> Any:
