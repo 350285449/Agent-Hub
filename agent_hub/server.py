@@ -1909,6 +1909,7 @@ def _provider_limit_row(
         "output_limit": health.get("max_output_tokens"),
         "last_request_source": health.get("last_request_source"),
         "last_failover_attempts": health.get("last_failover_attempts"),
+        "stream_interruption_count": health.get("stream_interruption_count", 0),
         "success_count": health.get("success_count", 0),
         "failure_count": health.get("failure_count", 0),
     }

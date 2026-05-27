@@ -63,7 +63,13 @@ from ..tools.loop import (
     valid_tool_calls,
 )
 from .context import estimate_context_tokens
-from .health import calculate_provider_score, health_state_label, provider_cost_efficiency_score
+from .health import (
+    ProviderHealth,
+    ProviderHealthTracker,
+    calculate_provider_score,
+    health_state_label,
+    provider_cost_efficiency_score,
+)
 from .provider_manager import ProviderManager
 
 
@@ -147,124 +153,6 @@ class StreamingRoute:
         return self.agent.model
 
 
-@dataclass(slots=True)
-class ProviderHealth:
-    """Rolling health data used for provider balancing and diagnostics."""
-
-    success_count: int = 0
-    failure_count: int = 0
-    timeout_count: int = 0
-    tool_call_success_count: int = 0
-    tool_call_failure_count: int = 0
-    total_latency_seconds: float = 0.0
-    total_tokens_per_second: float = 0.0
-    tokens_per_second_sample_count: int = 0
-    total_streaming_tokens_per_second: float = 0.0
-    streaming_sample_count: int = 0
-    last_success_at: float = 0.0
-    last_failure_at: float = 0.0
-    last_checked_at: float = 0.0
-    tokens_in: int = 0
-    tokens_out: int = 0
-    unavailable_until: float = 0.0
-    cooldown_until: float = 0.0
-    last_error_type: str = ""
-    last_error_message: str = ""
-    quota_remaining: float | None = None
-    requests_remaining: int | None = None
-    tokens_remaining: int | None = None
-    credits_remaining: float | None = None
-    rate_limit_reset_at: float | None = None
-    rate_limited: bool = False
-    quota_exhausted: bool = False
-    context_window: int | None = None
-    max_output_tokens: int | None = None
-    supports_streaming: bool | None = None
-    supports_tools: bool | None = None
-    supports_json: bool | None = None
-    supports_function_calling: bool | None = None
-    last_request_source: str = ""
-    last_route: str = ""
-    last_request_started_at: float = 0.0
-    last_first_token_latency_seconds: float = 0.0
-    last_total_latency_seconds: float = 0.0
-    last_input_tokens: int = 0
-    last_output_tokens: int = 0
-    last_tokens_per_second: float = 0.0
-    last_finish_reason: str = ""
-    last_failover_attempts: int = 0
-    last_context_compaction_usage: dict[str, Any] = field(default_factory=dict)
-    quota_state: str = "unknown"
-    failover_events: list[dict[str, Any]] = field(default_factory=list)
-
-    @property
-    def success_rate(self) -> float:
-        attempts = self.success_count + self.failure_count
-        return 0.5 if attempts == 0 else self.success_count / attempts
-
-    @property
-    def reliability_score(self) -> float:
-        attempts = self.success_count + self.failure_count
-        score = 0.7 if attempts == 0 else self.success_count / attempts
-        tool_attempts = self.tool_call_success_count + self.tool_call_failure_count
-        if tool_attempts:
-            tool_score = self.tool_call_success_count / tool_attempts
-            score = (score * 0.75) + (tool_score * 0.25)
-        if attempts:
-            score -= min(0.35, (self.timeout_count / attempts) * 0.25)
-        return max(0.0, min(1.0, score))
-
-    @property
-    def average_latency_seconds(self) -> float:
-        return 0.0 if self.success_count == 0 else self.total_latency_seconds / self.success_count
-
-    @property
-    def average_latency_ms(self) -> float:
-        return self.average_latency_seconds * 1000
-
-    @property
-    def streaming_tokens_per_second(self) -> float:
-        if self.streaming_sample_count <= 0:
-            return 0.0
-        return self.total_streaming_tokens_per_second / self.streaming_sample_count
-
-    @property
-    def average_tokens_per_second(self) -> float:
-        if self.tokens_per_second_sample_count <= 0:
-            return 0.0
-        return self.total_tokens_per_second / self.tokens_per_second_sample_count
-
-    def cooldown_deadline(self) -> float:
-        return max(self.cooldown_until, self.unavailable_until)
-
-    def is_available(self, now: float | None = None) -> bool:
-        now = now or time.time()
-        if self.cooldown_deadline() > now:
-            return False
-        if self.quota_exhausted:
-            return False
-        if self.quota_remaining is not None and self.quota_remaining <= 0:
-            return False
-        if self.requests_remaining is not None and self.requests_remaining <= 0:
-            return False
-        return True
-
-    def is_degraded(self, now: float | None = None) -> bool:
-        now = now or time.time()
-        attempts = self.success_count + self.failure_count
-        if self.cooldown_deadline() > now:
-            return True
-        if self.rate_limited:
-            return True
-        if attempts >= 3 and self.reliability_score < 0.45:
-            return True
-        if self.timeout_count >= 2 and self.timeout_count >= self.success_count:
-            return True
-        if self.success_count >= 2 and self.average_latency_seconds > 45:
-            return True
-        return False
-
-
 class RouterError(Exception):
     def __init__(
         self,
@@ -309,6 +197,7 @@ class AgentRouter:
         self._provider_factory = provider_factory
         self.session_store = session_store or SessionStore(config.state_dir)
         self._health_path = config.state_dir / HEALTH_STATE_FILE
+        self.health_tracker = ProviderHealthTracker(self._health_path)
         self._health: dict[str, ProviderHealth] = self._load_provider_health()
         self._cooldowns: dict[str, float] = {
             name: health.cooldown_deadline()
@@ -2063,6 +1952,7 @@ class AgentRouter:
                 available = False
             score = calculate_provider_score(agent, health) if agent else None
             quota_state = _health_quota_state(health)
+            quota_exhaustion_active = health.quota_exhausted and cooldown_until > now
             row: dict[str, Any] = {
                 "agent": name,
                 "name": name,
@@ -2093,8 +1983,8 @@ class AgentRouter:
                 "quota_source": "provider" if quota_state != "unknown" else "unknown",
                 "rate_limited": health.rate_limited,
                 "rate_limit_state": "limited" if health.rate_limited else "ok",
-                "quota_exhausted": health.quota_exhausted,
-                "quota_exhausted_state": "exhausted" if health.quota_exhausted else "ok",
+                "quota_exhausted": quota_exhaustion_active,
+                "quota_exhausted_state": "exhausted" if quota_exhaustion_active else "ok",
                 "cooldown_until": cooldown_until,
                 "unavailable_until": cooldown_until,
                 "rate_limit_reset_at": health.rate_limit_reset_at,
@@ -2127,6 +2017,7 @@ class AgentRouter:
                 "last_finish_reason": health.last_finish_reason,
                 "last_failover_attempts": health.last_failover_attempts,
                 "last_context_compaction_usage": dict(health.last_context_compaction_usage),
+                "stream_interruption_count": health.stream_interruption_count,
                 "tokens_in": health.tokens_in,
                 "tokens_out": health.tokens_out,
                 "last_error_type": health.last_error_type,
@@ -2136,7 +2027,7 @@ class AgentRouter:
                 row["available"] = False
             if health.quota_remaining is not None and health.quota_remaining <= 0:
                 row["available"] = False
-            if health.quota_exhausted:
+            if health.quota_exhausted and cooldown_until > now:
                 row["available"] = False
             if health.requests_remaining is not None and health.requests_remaining <= 0:
                 row["available"] = False
@@ -2179,6 +2070,7 @@ class AgentRouter:
                     "output_limit": row.get("max_output_tokens"),
                     "last_request_source": row.get("last_request_source"),
                     "last_failover_attempts": row.get("last_failover_attempts", 0),
+                    "stream_interruption_count": row.get("stream_interruption_count", 0),
                 }
             )
         return rows
@@ -2439,7 +2331,9 @@ class AgentRouter:
                 score -= 20.0
             if health.requests_remaining is not None and health.requests_remaining <= 1:
                 score -= 25.0
-            if health.quota_exhausted or (health.quota_remaining is not None and health.quota_remaining <= 0):
+            if (health.quota_exhausted and health.cooldown_deadline() > time.time()) or (
+                health.quota_remaining is not None and health.quota_remaining <= 0
+            ):
                 score -= 100.0
             if request is not None:
                 required_tokens = estimate_input_tokens(request) + expected_output_tokens(request, agent)
@@ -2645,6 +2539,8 @@ class AgentRouter:
             health.last_error_type = normalized_error_type
         if message:
             health.last_error_message = message[:500]
+        if (request is not None and request.stream) or "stream" in normalized_error_type:
+            health.stream_interruption_count += 1
         health.rate_limited = normalized_error_type == "temporary_rate_limit"
         if normalized_error_type == "quota_exhausted":
             health.quota_exhausted = True
@@ -2699,24 +2595,9 @@ class AgentRouter:
         path = self._health_path
         if not path.exists():
             return {}
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        agents = raw.get("agents") if isinstance(raw, dict) else None
-        if not isinstance(agents, dict):
-            return {}
-        valid_fields = {item.name for item in fields(ProviderHealth)}
         now = time.time()
         health_by_agent: dict[str, ProviderHealth] = {}
-        for name, data in agents.items():
-            if not isinstance(name, str) or not isinstance(data, dict):
-                continue
-            values = {key: data[key] for key in valid_fields if key in data}
-            try:
-                health = ProviderHealth(**values)
-            except TypeError:
-                continue
+        for name, health in self.health_tracker.load().items():
             if not isinstance(health.failover_events, list):
                 health.failover_events = []
             last_seen = max(health.last_checked_at, health.last_success_at, health.last_failure_at)
@@ -2726,19 +2607,8 @@ class AgentRouter:
         return health_by_agent
 
     def _save_provider_health(self) -> None:
-        data = {
-            "version": HEALTH_STATE_VERSION,
-            "updated_at": time.time(),
-            "agents": {
-                name: _provider_health_to_state(health)
-                for name, health in sorted(self._health.items())
-            },
-        }
         try:
-            self._health_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = _temporary_health_path(self._health_path)
-            tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-            tmp_path.replace(self._health_path)
+            self.health_tracker.save(self._health)
         except OSError:
             return
 
@@ -3182,7 +3052,7 @@ def _apply_provider_metadata(
 
 def _health_quota_state(health: ProviderHealth) -> str:
     now = time.time()
-    if health.quota_exhausted:
+    if health.quota_exhausted and health.cooldown_deadline() > now:
         return "exhausted"
     if health.rate_limited and (health.cooldown_deadline() > now or health.rate_limit_reset_at):
         return "rate_limited"
@@ -3227,7 +3097,7 @@ def _quota_skip_reason(health: ProviderHealth | None, *, required_tokens: int) -
     now = time.time()
     if health.rate_limit_reset_at is not None and health.rate_limit_reset_at <= now:
         return None
-    if health.quota_exhausted:
+    if health.quota_exhausted and health.cooldown_deadline() > now:
         return _availability_reason("Provider appears to be out of quota or credits", health)
     if health.rate_limited and health.cooldown_deadline() > now:
         return _availability_reason("Provider is temporarily rate-limited", health)

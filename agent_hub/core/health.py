@@ -59,6 +59,7 @@ class ProviderHealth:
     last_finish_reason: str = ""
     last_failover_attempts: int = 0
     last_context_compaction_usage: dict[str, Any] = field(default_factory=dict)
+    stream_interruption_count: int = 0
     quota_state: str = "unknown"
     failover_events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -83,6 +84,10 @@ class ProviderHealth:
         return 0.0 if self.success_count == 0 else self.total_latency_seconds / self.success_count
 
     @property
+    def average_latency_ms(self) -> float:
+        return self.average_latency_seconds * 1000
+
+    @property
     def streaming_tokens_per_second(self) -> float:
         if self.streaming_sample_count <= 0:
             return 0.0
@@ -96,6 +101,36 @@ class ProviderHealth:
 
     def cooldown_deadline(self) -> float:
         return max(self.cooldown_until, self.unavailable_until)
+
+    def is_available(self, now: float | None = None) -> bool:
+        now = now or time.time()
+        deadline = self.cooldown_deadline()
+        if deadline > now:
+            return False
+        if self.quota_exhausted and deadline > now:
+            return False
+        if self.quota_remaining is not None and self.quota_remaining <= 0:
+            return False
+        if self.requests_remaining is not None and self.requests_remaining <= 0:
+            return False
+        return True
+
+    def is_degraded(self, now: float | None = None) -> bool:
+        now = now or time.time()
+        attempts = self.success_count + self.failure_count
+        if self.cooldown_deadline() > now:
+            return True
+        if self.rate_limited:
+            return True
+        if self.quota_exhausted and self.cooldown_deadline() > now:
+            return True
+        if attempts >= 3 and self.reliability_score < 0.45:
+            return True
+        if self.timeout_count >= 2 and self.timeout_count >= self.success_count:
+            return True
+        if self.success_count >= 2 and self.average_latency_seconds > 45:
+            return True
+        return False
 
 
 @dataclass(slots=True)
@@ -206,8 +241,12 @@ def calculate_provider_score(
     quota = 0.0
     token_efficiency = 0.0
     cooldown = 0.0
+    deadline = max(
+        _float_attr(health, "cooldown_until", 0.0),
+        _float_attr(health, "unavailable_until", 0.0),
+    )
 
-    if bool(getattr(health, "quota_exhausted", False)):
+    if bool(getattr(health, "quota_exhausted", False)) and deadline > now:
         quota -= 80.0
     if _number_attr(health, "quota_remaining") is not None and _number_attr(health, "quota_remaining") <= 0:
         quota -= 80.0
@@ -233,10 +272,6 @@ def calculate_provider_score(
     if average_tps:
         token_efficiency += min(3.0, average_tps / 25.0)
 
-    deadline = max(
-        _float_attr(health, "cooldown_until", 0.0),
-        _float_attr(health, "unavailable_until", 0.0),
-    )
     if deadline > now:
         cooldown -= 100.0
 
