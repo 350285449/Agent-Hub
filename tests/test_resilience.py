@@ -307,10 +307,10 @@ class ResponseResilienceTests(unittest.TestCase):
                 thread.join(timeout=5)
 
             self.assertEqual(attempts["count"], 2)
-            self.assertIn("Agent Hub stream recovery started", text)
+            self.assertNotIn("Agent Hub stream recovery started", text)
             self.assertIn("retried", text)
 
-    def test_native_stream_retry_does_not_replay_unsafe_request(self) -> None:
+    def test_native_stream_retry_continues_partial_without_duplicate_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             attempts = {"count": 0}
             config = _routing_config(Path(tmp), ["native"])
@@ -348,7 +348,8 @@ class ResponseResilienceTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
-            self.assertEqual(attempts["count"], 1)
+            self.assertEqual(attempts["count"], 2)
+            self.assertEqual(text.count("partial"), 1)
             self.assertNotIn("Agent Hub stream recovery started", text)
             self.assertIn("Provider stream interrupted", text)
 
@@ -395,10 +396,10 @@ class ResponseResilienceTests(unittest.TestCase):
                 thread.join(timeout=5)
 
             self.assertEqual(attempts, ["primary", "backup"])
-            self.assertIn("Agent Hub stream recovery started", text)
+            self.assertNotIn("Agent Hub stream recovery started", text)
             self.assertIn("backup", text)
 
-    def test_native_stream_fallback_does_not_replay_unsafe_request(self) -> None:
+    def test_native_stream_fallback_continues_partial_without_replay_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             attempts: list[str] = []
             config = _routing_config(Path(tmp), ["primary", "backup"])
@@ -417,8 +418,10 @@ class ResponseResilienceTests(unittest.TestCase):
 
                 def stream(self, request: HubRequest):
                     attempts.append(self.agent.name)
-                    yield StreamChunk(text="partial", delta={"content": "partial"}, model=self.agent.model)
-                    raise ProviderError("interrupted", error_type="network")
+                    if self.agent.name == "primary":
+                        yield StreamChunk(text="partial", delta={"content": "partial"}, model=self.agent.model)
+                        raise ProviderError("interrupted", error_type="network")
+                    yield StreamChunk(text="backup", delta={"content": "backup"}, model=self.agent.model, finish_reason="stop")
 
             server.router.provider_factory = Provider
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -437,9 +440,10 @@ class ResponseResilienceTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
-            self.assertEqual(attempts, ["primary"])
+            self.assertEqual(attempts, ["primary", "backup"])
             self.assertNotIn("Agent Hub stream recovery started", text)
-            self.assertIn("Provider stream interrupted", text)
+            self.assertEqual(text.count("partial"), 1)
+            self.assertIn("backup", text)
 
     def test_native_stream_tolerates_malformed_empty_and_slow_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -509,6 +513,35 @@ class ResponseResilienceTests(unittest.TestCase):
             self.assertTrue(usage["context_reduced"])
             self.assertLessEqual(usage["estimated_input_tokens"], 1200)
             self.assertIn("[Context reduced for provider compatibility]", usage["warnings"])
+
+    def test_cline_compatibility_context_uses_provider_window_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            captured: list[HubRequest] = []
+            config = _routing_config(Path(tmp), ["wide"])
+            config.compatibility_mode["max_context_tokens"] = None
+            config.agents["wide"].context_window = 50_000
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    captured.append(request)
+                    return ProviderResult(text="ok", model=self.agent.model, finish_reason="stop")
+
+            AgentRouter(config, provider_factory=Provider).route(
+                HubRequest(
+                    session_id="s",
+                    route="coding",
+                    api_shape="openai-chat",
+                    metadata={"source": "cline"},
+                    messages=[{"role": "user", "content": "x" * 60_000}],
+                )
+            )
+
+            usage = captured[0].raw["agent_hub"]["context_usage"]
+            self.assertGreater(usage["max_context_tokens"], 12_000)
+            self.assertFalse(usage["context_reduced"])
 
     def test_tool_call_and_result_recovery(self) -> None:
         result = ProviderResult(

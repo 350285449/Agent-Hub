@@ -20,7 +20,8 @@ entrypoint paths, trust registry entries, manifest hashes, and optional
 signatures, but does not execute plugin code.
 
 When the HTTP server is bound to a public host, diagnostic endpoints such as
-`/v1/provider-health`, `/v1/events`, `/v1/tools`, `/v1/workflows/status`, and
+`/v1/provider-health`, `/v1/routing/status`, `/v1/limits`, `/v1/usage`,
+`/v1/client-sources`, `/v1/events`, `/v1/tools`, `/v1/workflows/status`,
 `/v1/plugins`, and `/v1/enterprise/audit` require a diagnostics token. Set
 `diagnostics_auth_token_env` for
 deployments. Enterprise permissions are optional; when

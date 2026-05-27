@@ -713,7 +713,6 @@ def _enable_cloud_provider(
             "name": agent_name,
             "provider": provider_name,
             "free": not paid,
-            "max_tokens": 4096,
         }
         agents.append(agent)
 
@@ -772,7 +771,6 @@ def _add_provider(
         "headers": dict(metadata.default_headers) if metadata else {},
         "chat_completions_path": metadata.chat_completions_path if metadata else None,
         "timeout_seconds": 120,
-        "max_tokens": 4096,
         "cooldown_seconds": 120,
         "supports_tools": metadata.supports_tools if metadata else None,
         "supports_json": metadata.supports_json if metadata else None,
@@ -987,7 +985,6 @@ def _cloud_example_agents() -> list[dict[str, Any]]:
             "enabled": False,
             "free": True,
             "api_key_env": "OPENAI_API_KEY",
-            "max_tokens": 4096,
             "context_window": 128000,
         },
         {
@@ -997,7 +994,6 @@ def _cloud_example_agents() -> list[dict[str, Any]]:
             "enabled": False,
             "free": True,
             "api_key_env": "GEMINI_API_KEY",
-            "max_tokens": 4096,
             "context_window": 1000000,
         },
         {
@@ -1007,7 +1003,6 @@ def _cloud_example_agents() -> list[dict[str, Any]]:
             "enabled": False,
             "free": True,
             "api_key_env": "ANTHROPIC_API_KEY",
-            "max_tokens": 4096,
             "context_window": 200000,
         },
         {
@@ -1017,7 +1012,6 @@ def _cloud_example_agents() -> list[dict[str, Any]]:
             "enabled": False,
             "free": True,
             "base_url": "http://127.0.0.1:8000",
-            "max_tokens": 4096,
             "context_window": 8192,
         },
     ]

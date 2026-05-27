@@ -10,8 +10,10 @@ from agent_hub.providers import (
     OpenAIChatProvider,
     GeminiProvider,
     LocalResearchProvider,
+    ProviderError,
     create_provider,
     provider_headers,
+    _classify_provider_error,
     _join_url,
     _provider_error_from_http,
     _quota_metadata_from_headers,
@@ -38,6 +40,28 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(error.error_type, "quota_exhausted")
         self.assertEqual(error.cooldown_seconds, 42)
         self.assertEqual(error.metadata["requests_remaining"], 0)
+
+    def test_provider_errors_use_unlimited_routing_taxonomy(self) -> None:
+        self.assertEqual(
+            _classify_provider_error("rate limit exceeded", status_code=429),
+            "temporary_rate_limit",
+        )
+        self.assertEqual(
+            _classify_provider_error("context length exceeded"),
+            "context_too_large",
+        )
+        self.assertEqual(
+            _classify_provider_error("max_output_tokens is too high"),
+            "output_too_large",
+        )
+        self.assertEqual(
+            _classify_provider_error("model is temporarily overloaded", status_code=503),
+            "provider_overloaded",
+        )
+        self.assertEqual(
+            _classify_provider_error("tool use is not supported"),
+            "unsupported_feature",
+        )
 
     def test_quota_metadata_is_normalized_from_headers(self) -> None:
         metadata = _quota_metadata_from_headers(
@@ -230,6 +254,36 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(payload["tools"][0]["type"], "function")
         self.assertEqual(payload["tools"][0]["function"]["name"], "read_file")
         self.assertEqual(payload["tool_choice"], "auto")
+        self.assertNotIn("max_tokens", payload)
+
+    def test_output_token_limit_error_retries_with_agent_maximum(self) -> None:
+        agent = AgentConfig(
+            name="openai",
+            provider="openai-compatible",
+            model="model",
+            base_url="http://127.0.0.1:9999",
+            max_tokens=4096,
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=100000,
+            raw={"agent_hub": {"auto_retry": True}},
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.side_effect = [
+                ProviderError("max_tokens is too high", error_type="output_too_large"),
+                {
+                    "choices": [{"message": {"content": "Done"}, "finish_reason": "stop"}],
+                    "usage": {},
+                },
+            ]
+            result = OpenAIChatProvider(agent).complete(request)
+
+        self.assertEqual(result.text, "Done")
+        self.assertEqual(post_json.call_args_list[0].kwargs["payload"]["max_tokens"], 100000)
+        self.assertEqual(post_json.call_args_list[1].kwargs["payload"]["max_tokens"], 4096)
 
     def test_openai_provider_carries_protected_client_metadata_to_model(self) -> None:
         agent = AgentConfig(

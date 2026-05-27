@@ -76,6 +76,16 @@ TRANSPARENT_API_SHAPES = {"openai-chat", "openai-responses", "anthropic-messages
 NO_TOOL_CAPABLE_MODEL = "no_tool_capable_model"
 ECHO_DISABLED = "echo_disabled"
 CONFIGURATION_ERROR = "configuration_error"
+ERROR_TYPE_ALIASES = {
+    "rate_limited": "temporary_rate_limit",
+    "context_limit": "context_too_large",
+    "temporary_unavailable": "provider_overloaded",
+    "authentication": "authentication_error",
+    "model_unavailable": "provider_unavailable",
+    "network": "provider_unavailable",
+    "timeout": "provider_unavailable",
+    "provider_error": "unknown_error",
+}
 ROUTING_MODES = {
     "manual",
     "fastest",
@@ -147,6 +157,8 @@ class ProviderHealth:
     tool_call_success_count: int = 0
     tool_call_failure_count: int = 0
     total_latency_seconds: float = 0.0
+    total_tokens_per_second: float = 0.0
+    tokens_per_second_sample_count: int = 0
     total_streaming_tokens_per_second: float = 0.0
     streaming_sample_count: int = 0
     last_success_at: float = 0.0
@@ -163,6 +175,26 @@ class ProviderHealth:
     tokens_remaining: int | None = None
     credits_remaining: float | None = None
     rate_limit_reset_at: float | None = None
+    rate_limited: bool = False
+    quota_exhausted: bool = False
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    supports_streaming: bool | None = None
+    supports_tools: bool | None = None
+    supports_json: bool | None = None
+    supports_function_calling: bool | None = None
+    last_request_source: str = ""
+    last_route: str = ""
+    last_request_started_at: float = 0.0
+    last_first_token_latency_seconds: float = 0.0
+    last_total_latency_seconds: float = 0.0
+    last_input_tokens: int = 0
+    last_output_tokens: int = 0
+    last_tokens_per_second: float = 0.0
+    last_finish_reason: str = ""
+    last_failover_attempts: int = 0
+    last_context_compaction_usage: dict[str, Any] = field(default_factory=dict)
+    quota_state: str = "unknown"
     failover_events: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -196,12 +228,20 @@ class ProviderHealth:
             return 0.0
         return self.total_streaming_tokens_per_second / self.streaming_sample_count
 
+    @property
+    def average_tokens_per_second(self) -> float:
+        if self.tokens_per_second_sample_count <= 0:
+            return 0.0
+        return self.total_tokens_per_second / self.tokens_per_second_sample_count
+
     def cooldown_deadline(self) -> float:
         return max(self.cooldown_until, self.unavailable_until)
 
     def is_available(self, now: float | None = None) -> bool:
         now = now or time.time()
         if self.cooldown_deadline() > now:
+            return False
+        if self.quota_exhausted:
             return False
         if self.quota_remaining is not None and self.quota_remaining <= 0:
             return False
@@ -213,6 +253,8 @@ class ProviderHealth:
         now = now or time.time()
         attempts = self.success_count + self.failure_count
         if self.cooldown_deadline() > now:
+            return True
+        if self.rate_limited:
             return True
         if attempts >= 3 and self.reliability_score < 0.45:
             return True
@@ -323,7 +365,23 @@ class AgentRouter:
             )
 
         tried_any = False
+        provider_attempts = 0
+        max_provider_attempts = _routing_int(self.config, "max_provider_attempts", 5)
+        continuation_text = ""
+        continuation_reason = ""
         for agent in candidates:
+            if provider_attempts >= max_provider_attempts:
+                failover.append(
+                    FailoverEvent(
+                        agent=agent.name,
+                        provider=agent.provider,
+                        model=agent.model,
+                        reason=f"Max provider attempts reached ({max_provider_attempts})",
+                        retryable=True,
+                        error_type="max_provider_attempts_reached",
+                    )
+                )
+                break
             if self._is_on_cooldown(agent.name) and len(candidates) > 1:
                 failover.append(
                     FailoverEvent(
@@ -336,9 +394,14 @@ class AgentRouter:
                 )
                 continue
 
+            base_request = (
+                _continuation_request(effective_request, continuation_text, continuation_reason)
+                if continuation_text
+                else effective_request
+            )
             provider_request = self._request_for_agent(
                 request_id=request_id,
-                request=effective_request,
+                request=base_request,
                 agent=agent,
                 decision=decision,
             )
@@ -386,6 +449,7 @@ class AgentRouter:
                 continue
 
             tried_any = True
+            provider_attempts += 1
             started = time.perf_counter()
             try:
                 result = self._chat_with_validation(
@@ -403,21 +467,49 @@ class AgentRouter:
                 )
                 result = tool_loop["result"]
                 latency += float(tool_loop["latency_seconds"])
+                if continuation_text:
+                    result = _merge_continuation_result(
+                        continuation_text,
+                        result,
+                        model=result.model or agent.model,
+                        raw_reason=continuation_reason,
+                    )
+                    continuation_text = ""
+                    continuation_reason = ""
+                if (
+                    _token_limit_finish_reason(result.finish_reason)
+                    and _routing_bool(self.config, "continue_after_output_limit", True)
+                    and result.text
+                ):
+                    continued_result, continuation_latency = self._continue_after_output_limit(
+                        request_id=request_id,
+                        agent=agent,
+                        request=provider_request,
+                        decision=decision,
+                        result=result,
+                    )
+                    latency += continuation_latency
+                    if continued_result is not None:
+                        result = continued_result
                 if _token_limit_finish_reason(result.finish_reason) and agent != candidates[-1]:
                     reason = (
-                        "Agent stopped because it hit a token limit; "
-                        "retrying with the next configured agent"
+                        "Agent stopped because it hit an output token limit; "
+                        "continuing with the next configured agent"
                     )
+                    if _routing_bool(self.config, "continue_after_output_limit", True) and result.text:
+                        continuation_text = result.text
+                        continuation_reason = "fallback_provider_output_limit"
                     unavailable_until = time.time() + agent.cooldown_seconds
                     self._record_failure(
                         agent,
-                        error_type="context_limit",
+                        error_type="output_too_large",
                         message=reason,
                         unavailable_until=unavailable_until,
                         metadata={},
                         request_id=request_id,
                         request=provider_request,
                         routing_mode=decision.routing_mode,
+                        failover_attempts=len(failover),
                     )
                     self._cooldowns[agent.name] = unavailable_until
                     failover.append(
@@ -426,7 +518,7 @@ class AgentRouter:
                             provider=agent.provider,
                             model=agent.model,
                             reason=reason,
-                            error_type="context_limit",
+                            error_type="output_too_large",
                             unavailable_until=self._cooldowns.get(agent.name),
                         )
                     )
@@ -438,12 +530,65 @@ class AgentRouter:
                         from_provider=agent.provider,
                         from_model=agent.model,
                         reason=reason,
-                        error_type="context_limit",
+                        error_type="output_too_large",
                         next_agent=_next_candidate_name(candidates, agent),
                         routing_mode=decision.routing_mode,
                     )
                     continue
-                self._record_success(agent, latency, result, effective_request)
+                performance_reason = self._performance_failover_reason(
+                    agent=agent,
+                    request=provider_request,
+                    result=result,
+                    latency_seconds=latency,
+                )
+                if performance_reason and agent != candidates[-1] and _routing_bool(self.config, "auto_failover", True):
+                    unavailable_until = time.time() + _routing_float(
+                        self.config,
+                        "cooldown_overload_seconds",
+                        60.0,
+                    )
+                    self._record_failure(
+                        agent,
+                        error_type="provider_overloaded",
+                        message=performance_reason,
+                        unavailable_until=unavailable_until,
+                        metadata={},
+                        request_id=request_id,
+                        request=provider_request,
+                        routing_mode=decision.routing_mode,
+                        failover_attempts=len(failover),
+                    )
+                    self._cooldowns[agent.name] = unavailable_until
+                    failover.append(
+                        FailoverEvent(
+                            agent=agent.name,
+                            provider=agent.provider,
+                            model=agent.model,
+                            reason=performance_reason,
+                            error_type="provider_overloaded",
+                            unavailable_until=unavailable_until,
+                        )
+                    )
+                    self._record_internal_event(
+                        ROUTER_FALLBACK,
+                        request_id=request_id,
+                        request=provider_request,
+                        from_agent=agent.name,
+                        from_provider=agent.provider,
+                        from_model=agent.model,
+                        reason=performance_reason,
+                        error_type="provider_overloaded",
+                        next_agent=_next_candidate_name(candidates, agent),
+                        routing_mode=decision.routing_mode,
+                    )
+                    continue
+                self._record_success(
+                    agent,
+                    latency,
+                    result,
+                    provider_request,
+                    failover_attempts=len(failover),
+                )
                 response = self._response_from_result(
                     request_id=request_id,
                     request=provider_request,
@@ -492,6 +637,7 @@ class AgentRouter:
                     request_id=request_id,
                     request=provider_request,
                     routing_mode=decision.routing_mode,
+                    failover_attempts=len(failover),
                 )
                 failover.append(
                     FailoverEvent(
@@ -505,7 +651,7 @@ class AgentRouter:
                         unavailable_until=unavailable_until,
                     )
                 )
-                if exc.retryable:
+                if exc.retryable and _routing_bool(self.config, "auto_failover", True):
                     self._cooldowns[agent.name] = unavailable_until or time.time()
                     self._record_internal_event(
                         ROUTER_FALLBACK,
@@ -792,10 +938,12 @@ class AgentRouter:
         decision: RoutingDecision,
     ) -> Any:
         started = time.perf_counter()
+        last_chunk_at = started
         text_parts: list[str] = []
         usage_tokens = 0
         model = agent.model
         finish_reason: str | None = None
+        first_token_latency_seconds = 0.0
         stream_request = request
         self._record_internal_event(
             STREAM_STARTED,
@@ -810,12 +958,75 @@ class AgentRouter:
         )
         try:
             for chunk in self.provider_manager.stream(agent, stream_request):
+                now = time.perf_counter()
                 chunk = normalize_stream_chunk(chunk, default_model=agent.model)
                 if chunk is None:
                     continue
                 if chunk.text:
+                    first_token_seconds = now - started
+                    if not text_parts:
+                        first_token_latency_seconds = first_token_seconds
+                    gap_seconds = now - last_chunk_at
+                    slow_first_token = _routing_float(
+                        self.config,
+                        "slow_first_token_timeout_seconds",
+                        20.0,
+                    )
+                    stream_stall = _routing_float(
+                        self.config,
+                        "stream_stall_timeout_seconds",
+                        30.0,
+                    )
+                    failover_on_slow_stream = _routing_bool(self.config, "failover_on_slow_stream", True)
+                    if (
+                        failover_on_slow_stream
+                        and not text_parts
+                        and slow_first_token > 0
+                        and first_token_seconds > slow_first_token
+                    ):
+                        raise ProviderError(
+                            (
+                                "Provider time-to-first-token exceeded failover threshold: "
+                                f"{first_token_seconds:.2f}s > {slow_first_token:.2f}s"
+                            ),
+                            retryable=True,
+                            error_type="provider_overloaded",
+                        )
+                    if (
+                        failover_on_slow_stream
+                        and text_parts
+                        and stream_stall > 0
+                        and gap_seconds > stream_stall
+                    ):
+                        raise ProviderError(
+                            (
+                                "Provider stream stalled beyond failover threshold: "
+                                f"{gap_seconds:.2f}s > {stream_stall:.2f}s"
+                            ),
+                            retryable=True,
+                            error_type="provider_overloaded",
+                        )
+                if chunk.text:
                     text_parts.append(chunk.text)
                     usage_tokens += max(1, len(chunk.text) // 4)
+                    elapsed = max(0.001, now - started)
+                    minimum_tps = _routing_float(self.config, "min_tokens_per_second", 2.0)
+                    if (
+                        _routing_bool(self.config, "failover_on_slow_stream", True)
+                        and minimum_tps > 0
+                        and usage_tokens >= 4
+                        and elapsed > 1.0
+                        and (usage_tokens / elapsed) < minimum_tps
+                    ):
+                        raise ProviderError(
+                            (
+                                "Provider stream throughput fell below failover threshold: "
+                                f"{usage_tokens / elapsed:.2f} tokens/s < {minimum_tps:.2f} tokens/s"
+                            ),
+                            retryable=True,
+                            error_type="provider_overloaded",
+                        )
+                    last_chunk_at = now
                 if chunk.model:
                     model = chunk.model
                 if chunk.finish_reason:
@@ -825,11 +1036,27 @@ class AgentRouter:
             result = ProviderResult(
                 text="".join(text_parts),
                 model=model,
-                raw={"agent_hub_stream": {"mode": "native"}},
+                raw={
+                    "agent_hub_stream": {
+                        "mode": "native",
+                        "first_token_latency_seconds": round(first_token_latency_seconds, 4),
+                    }
+                },
                 usage={"completion_tokens": usage_tokens, "output_tokens": usage_tokens},
                 finish_reason=finish_reason or "stop",
             )
-            self._record_success(agent, latency, result, stream_request)
+            self._record_success(
+                agent,
+                latency,
+                result,
+                stream_request,
+                failover_attempts=len(failover),
+                first_token_latency_seconds=float(
+                    result.raw.get("agent_hub_stream", {}).get("first_token_latency_seconds") or 0.0
+                )
+                if isinstance(result.raw.get("agent_hub_stream"), dict)
+                else None,
+            )
             response = self._response_from_result(
                 request_id=request_id,
                 request=stream_request,
@@ -865,6 +1092,7 @@ class AgentRouter:
                 request_id=request_id,
                 request=stream_request,
                 routing_mode=decision.routing_mode,
+                failover_attempts=len(failover),
             )
             self._record_internal_event(
                 STREAM_FAILED,
@@ -898,6 +1126,7 @@ class AgentRouter:
                 request_id=request_id,
                 request=stream_request,
                 routing_mode=decision.routing_mode,
+                failover_attempts=len(failover),
             )
             self._record_internal_event(
                 STREAM_FAILED,
@@ -1058,7 +1287,7 @@ class AgentRouter:
     ) -> HubRequest:
         prepared, usage = self._apply_context_safety_cap(agent, request)
         metadata = dict(prepared.metadata)
-        output_tokens = prepared.max_tokens or agent.max_tokens or 1024
+        output_tokens = expected_output_tokens(prepared, agent)
         metadata["agent_hub_debug"] = provider_debug_context(
             enabled=getattr(self.config, "debug_raw_provider_responses", False),
             debug_dir=debug_dir_for_state(self.config.state_dir),
@@ -1075,6 +1304,8 @@ class AgentRouter:
         raw = dict(prepared.raw or {})
         hub = dict(raw.get("agent_hub") or {})
         hub["context_usage"] = usage
+        hub.setdefault("auto_retry", _routing_bool(self.config, "auto_retry", True))
+        hub.setdefault("auto_failover", _routing_bool(self.config, "auto_failover", True))
         raw["agent_hub"] = hub
         self._record_route_event(
             "context_token_estimate",
@@ -1115,6 +1346,13 @@ class AgentRouter:
         validation = validate_provider_result(result)
         if validation.valid:
             return result
+        if not _routing_bool(self.config, "auto_retry", True):
+            raise ProviderError(
+                f"Provider returned invalid response: {validation.reason}",
+                retryable=True,
+                error_type="invalid_provider_response",
+                metadata={"issues": validation.issues},
+            )
         self._record_route_event(
             "provider_response_invalid",
             request_id=request_id,
@@ -1145,6 +1383,67 @@ class AgentRouter:
             metadata={"issues": validation.issues},
         )
 
+    def _continue_after_output_limit(
+        self,
+        *,
+        request_id: str,
+        agent: AgentConfig,
+        request: HubRequest,
+        decision: RoutingDecision,
+        result: ProviderResult,
+    ) -> tuple[ProviderResult | None, float]:
+        continuation_request = _continuation_request(
+            request,
+            result.text,
+            "same_provider_output_limit",
+        )
+        continuation_request = self._request_for_agent(
+            request_id=request_id,
+            request=continuation_request,
+            agent=agent,
+            decision=decision,
+        )
+        started = time.perf_counter()
+        try:
+            continuation = self._chat_with_validation(
+                request_id=request_id,
+                agent=agent,
+                request=continuation_request,
+                decision=decision,
+            )
+        except ProviderError as exc:
+            latency = time.perf_counter() - started
+            self._record_route_event(
+                "output_continuation_failed",
+                request_id=request_id,
+                request=continuation_request,
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+                error_type=exc.error_type,
+                message=str(exc),
+            )
+            return None, latency
+        latency = time.perf_counter() - started
+        self._record_route_event(
+            "output_continuation_succeeded",
+            request_id=request_id,
+            request=continuation_request,
+            agent=agent.name,
+            provider=agent.provider,
+            model=agent.model,
+            continuation_finish_reason=continuation.finish_reason,
+        )
+        return (
+            _merge_continuation_result(
+                result.text,
+                continuation,
+                model=continuation.model or result.model,
+                raw_reason="same_provider_output_limit",
+            ),
+            latency,
+        )
+
     def _apply_context_safety_cap(
         self,
         agent: AgentConfig,
@@ -1153,7 +1452,7 @@ class AgentRouter:
         original_messages = [dict(message) for message in request.messages]
         original_tokens = estimate_message_tokens(original_messages)
         cap = _context_cap(self.config, request, agent)
-        output_tokens = request.max_tokens or agent.max_tokens or 1024
+        output_tokens = expected_output_tokens(request, agent)
         provider_limit = agent.context_window
         effective_cap = cap
         if provider_limit is not None:
@@ -1212,6 +1511,8 @@ class AgentRouter:
         if not getattr(self.config, "repo_context_enabled", True):
             return request
         if _agent_runner_managed_request(request):
+            return request
+        if _request_has_client_tool_specs(request):
             return request
         if not _repo_context_useful(request):
             return request
@@ -1761,6 +2062,7 @@ class AgentRouter:
             if agent and _is_echo_agent(agent) and not self.config.debug_echo_enabled:
                 available = False
             score = calculate_provider_score(agent, health) if agent else None
+            quota_state = _health_quota_state(health)
             row: dict[str, Any] = {
                 "agent": name,
                 "name": name,
@@ -1776,16 +2078,30 @@ class AgentRouter:
                 "streaming": bool(agent.supports_streaming) if agent else False,
                 "supports_streaming": bool(agent.supports_streaming) if agent else False,
                 "tool_support": bool(agent.supports_tools or agent.supports_function_calling) if agent else False,
+                "supports_tools": bool(agent.supports_tools or agent.supports_function_calling) if agent else False,
+                "function_support": bool(agent.supports_function_calling) if agent else False,
+                "json_mode_support": bool(agent.supports_json) if agent else False,
+                "supports_json": bool(agent.supports_json) if agent else False,
+                "context_window": agent.context_window if agent else health.context_window,
+                "max_output_tokens": agent.max_tokens if agent and agent.max_tokens is not None else health.max_output_tokens,
                 "quota_remaining": health.quota_remaining,
                 "requests_remaining": health.requests_remaining,
                 "tokens_remaining": health.tokens_remaining,
                 "credits_remaining": health.credits_remaining,
+                "remaining": _remaining_quota_value(health),
+                "quota_state": quota_state,
+                "quota_source": "provider" if quota_state != "unknown" else "unknown",
+                "rate_limited": health.rate_limited,
+                "rate_limit_state": "limited" if health.rate_limited else "ok",
+                "quota_exhausted": health.quota_exhausted,
+                "quota_exhausted_state": "exhausted" if health.quota_exhausted else "ok",
                 "cooldown_until": cooldown_until,
                 "unavailable_until": cooldown_until,
                 "rate_limit_reset_at": health.rate_limit_reset_at,
                 "latency_ms": round(health.average_latency_ms, 2),
                 "average_latency_ms": round(health.average_latency_ms, 2),
                 "average_latency_seconds": round(health.average_latency_seconds, 4),
+                "average_tokens_per_second": round(health.average_tokens_per_second, 4),
                 "streaming_tokens_per_second": round(health.streaming_tokens_per_second, 4),
                 "reliability_score": round(health.reliability_score, 4),
                 "score": round(score.total, 3) if score else 0.0,
@@ -1798,7 +2114,19 @@ class AgentRouter:
                 "success_rate": round(health.success_rate, 4),
                 "last_success_at": health.last_success_at,
                 "last_failure_at": health.last_failure_at,
+                "last_error_time": health.last_failure_at,
                 "last_checked_at": health.last_checked_at,
+                "last_request_source": health.last_request_source,
+                "last_route": health.last_route,
+                "last_request_started_at": health.last_request_started_at,
+                "last_first_token_latency_seconds": round(health.last_first_token_latency_seconds, 4),
+                "last_total_latency_seconds": round(health.last_total_latency_seconds, 4),
+                "last_input_tokens": health.last_input_tokens,
+                "last_output_tokens": health.last_output_tokens,
+                "last_tokens_per_second": round(health.last_tokens_per_second, 4),
+                "last_finish_reason": health.last_finish_reason,
+                "last_failover_attempts": health.last_failover_attempts,
+                "last_context_compaction_usage": dict(health.last_context_compaction_usage),
                 "tokens_in": health.tokens_in,
                 "tokens_out": health.tokens_out,
                 "last_error_type": health.last_error_type,
@@ -1807,6 +2135,8 @@ class AgentRouter:
             if cooldown_until > now:
                 row["available"] = False
             if health.quota_remaining is not None and health.quota_remaining <= 0:
+                row["available"] = False
+            if health.quota_exhausted:
                 row["available"] = False
             if health.requests_remaining is not None and health.requests_remaining <= 0:
                 row["available"] = False
@@ -1841,6 +2171,14 @@ class AgentRouter:
                     "cooldown_until": row.get("cooldown_until"),
                     "unavailable_until": row.get("unavailable_until"),
                     "recent_failures": row.get("failure_count", 0),
+                    "average_latency_seconds": row.get("average_latency_seconds", 0.0),
+                    "tokens_per_second": row.get("average_tokens_per_second", 0.0),
+                    "quota_state": row.get("quota_state", "unknown"),
+                    "remaining": row.get("remaining", "unknown"),
+                    "context_limit": row.get("context_window"),
+                    "output_limit": row.get("max_output_tokens"),
+                    "last_request_source": row.get("last_request_source"),
+                    "last_failover_attempts": row.get("last_failover_attempts", 0),
                 }
             )
         return rows
@@ -1966,6 +2304,8 @@ class AgentRouter:
                     "average_latency_ms": round(health.average_latency_ms, 2) if health else 0.0,
                     "degraded": health.is_degraded() if health else False,
                     "cooldown_until": self._cooldown_until(agent.name),
+                    "remaining": _remaining_quota_value(health) if health else "unknown",
+                    "quota_state": _health_quota_state(health) if health else "unknown",
                     "quota_remaining": health.quota_remaining if health else None,
                     "requests_remaining": health.requests_remaining if health else None,
                     "tokens_remaining": health.tokens_remaining if health else None,
@@ -2043,6 +2383,15 @@ class AgentRouter:
             return ECHO_DISABLED
         if "missing API key" in reason:
             return CONFIGURATION_ERROR
+        lowered = reason.lower()
+        if "context window" in lowered or "too small" in lowered:
+            return "context_too_large"
+        if "rate-limited" in lowered or "remaining requests" in lowered:
+            return "temporary_rate_limit"
+        if "quota" in lowered or "credits" in lowered:
+            return "quota_exhausted"
+        if "remaining tokens" in lowered:
+            return "context_too_large"
         return None
 
     def _balanced_agents(self, agents: list[AgentConfig], request: HubRequest | None = None) -> list[AgentConfig]:
@@ -2080,11 +2429,17 @@ class AgentRouter:
             score -= min(8.0, health.timeout_count * 1.5)
             if health.average_latency_seconds:
                 score -= min(5.0, health.average_latency_seconds / 5)
+            if health.average_tokens_per_second:
+                minimum_tps = _routing_float(self.config, "min_tokens_per_second", 2.0)
+                if health.average_tokens_per_second < minimum_tps:
+                    score -= min(10.0, (minimum_tps - health.average_tokens_per_second) * 2.0)
+                else:
+                    score += min(3.0, health.average_tokens_per_second / 25.0)
             if health.is_degraded():
                 score -= 20.0
             if health.requests_remaining is not None and health.requests_remaining <= 1:
                 score -= 25.0
-            if health.quota_remaining is not None and health.quota_remaining <= 0:
+            if health.quota_exhausted or (health.quota_remaining is not None and health.quota_remaining <= 0):
                 score -= 100.0
             if request is not None:
                 required_tokens = estimate_input_tokens(request) + expected_output_tokens(request, agent)
@@ -2101,6 +2456,13 @@ class AgentRouter:
                 score += min(3.0, token_efficiency)
         if self._is_on_cooldown(agent.name):
             score -= 100.0
+        if _routing_bool(self.config, "free_first", True) and not self.config.free_only and is_free_agent(agent):
+            score += 4.0
+        if _routing_bool(self.config, "prefer_available_quota", True) and health:
+            if health.quota_remaining is not None and health.quota_remaining > 0:
+                score += min(3.0, float(health.quota_remaining) / 1000.0)
+            if health.requests_remaining is not None and health.requests_remaining > 1:
+                score += min(2.0, float(health.requests_remaining) / 100.0)
         if not self.config.free_only and not is_free_agent(agent):
             score -= 2.5
         score += provider_cost_efficiency_score(agent)
@@ -2111,6 +2473,40 @@ class AgentRouter:
             except (TypeError, ValueError):
                 pass
         return score
+
+    def _performance_failover_reason(
+        self,
+        *,
+        agent: AgentConfig,
+        request: HubRequest,
+        result: ProviderResult,
+        latency_seconds: float,
+    ) -> str | None:
+        if not _routing_bool(self.config, "auto_failover", True):
+            return None
+        slow_threshold = _routing_float(self.config, "slow_first_token_timeout_seconds", 20.0)
+        if slow_threshold > 0 and latency_seconds > slow_threshold:
+            return (
+                "Provider response latency exceeded failover threshold: "
+                f"{latency_seconds:.2f}s > {slow_threshold:.2f}s"
+            )
+        minimum_tps = _routing_float(self.config, "min_tokens_per_second", 2.0)
+        output_tokens = _result_output_tokens(result)
+        if minimum_tps > 0 and output_tokens >= 4 and latency_seconds > 1.0:
+            tokens_per_second = output_tokens / latency_seconds
+            if tokens_per_second < minimum_tps:
+                return (
+                    "Provider throughput fell below failover threshold: "
+                    f"{tokens_per_second:.2f} tokens/s < {minimum_tps:.2f} tokens/s"
+                )
+        health = self._health.get(agent.name)
+        if health and health.average_latency_seconds and health.success_count >= 2:
+            if health.average_latency_seconds > max(slow_threshold, latency_seconds * 2):
+                return (
+                    "Provider average latency is degraded: "
+                    f"{health.average_latency_seconds:.2f}s average"
+                )
+        return None
 
     def _record_route_event(self, event_type: str, *, request_id: str, request: HubRequest, **data: Any) -> None:
         try:
@@ -2124,6 +2520,7 @@ class AgentRouter:
                     "route": request.route,
                     "preferred_agent": request.preferred_agent,
                     "api_shape": request.api_shape,
+                    "source": _request_source(request),
                     **data,
                 },
             )
@@ -2146,6 +2543,7 @@ class AgentRouter:
             route=request.route,
             preferred_agent=request.preferred_agent,
             api_shape=request.api_shape,
+            source=_request_source(request),
             **data,
         )
 
@@ -2155,6 +2553,9 @@ class AgentRouter:
         latency_seconds: float,
         result: ProviderResult,
         request: HubRequest,
+        *,
+        failover_attempts: int = 0,
+        first_token_latency_seconds: float | None = None,
     ) -> None:
         health = self._health.setdefault(agent.name, ProviderHealth())
         now = time.time()
@@ -2162,18 +2563,43 @@ class AgentRouter:
         health.total_latency_seconds += max(0.0, latency_seconds)
         health.last_success_at = now
         health.last_checked_at = now
+        health.last_request_source = _request_source(request)
+        health.last_route = request.route or ""
+        health.last_request_started_at = max(0.0, now - max(0.0, latency_seconds))
+        health.last_first_token_latency_seconds = max(
+            0.0,
+            float(first_token_latency_seconds)
+            if first_token_latency_seconds is not None
+            else float(_provider_stream_metadata(result.raw).get("first_token_latency_seconds") or 0.0),
+        )
+        health.last_total_latency_seconds = max(0.0, latency_seconds)
+        health.last_finish_reason = str(result.finish_reason or "")
+        health.last_failover_attempts = max(0, int(failover_attempts))
+        health.rate_limited = False
+        health.quota_exhausted = False
         tokens_in = _usage_int(result.usage, "prompt_tokens", "input_tokens")
         tokens_out = _usage_int(result.usage, "completion_tokens", "output_tokens")
+        if tokens_out <= 0:
+            tokens_out = _result_output_tokens(result)
+        health.last_input_tokens = tokens_in
+        health.last_output_tokens = tokens_out
+        health.last_tokens_per_second = tokens_out / latency_seconds if latency_seconds > 0 and tokens_out > 0 else 0.0
         health.tokens_in += tokens_in
         health.tokens_out += tokens_out
+        if latency_seconds > 0 and tokens_out > 0:
+            health.total_tokens_per_second += tokens_out / latency_seconds
+            health.tokens_per_second_sample_count += 1
         if request.stream and latency_seconds > 0 and tokens_out > 0:
             health.total_streaming_tokens_per_second += tokens_out / latency_seconds
             health.streaming_sample_count += 1
+        _apply_agent_capabilities(health, agent)
         _apply_provider_metadata(
             health,
             _provider_metadata_from_raw(result.raw),
             agent=agent,
         )
+        health.last_context_compaction_usage = _context_usage(request)
+        health.quota_state = _health_quota_state(health)
         self._save_provider_health()
 
     def _record_failure(
@@ -2188,22 +2614,43 @@ class AgentRouter:
         request_id: str | None = None,
         request: HubRequest | None = None,
         routing_mode: str | None = None,
+        failover_attempts: int = 0,
     ) -> None:
         health = self._health.setdefault(agent.name, ProviderHealth())
         now = time.time()
         health.failure_count += 1
         health.last_failure_at = now
         health.last_checked_at = now
-        if error_type == "timeout" or "timed out" in message.lower() or "timeout" in message.lower():
+        if request is not None:
+            usage = _context_usage(request)
+            health.last_request_source = _request_source(request)
+            health.last_route = request.route or ""
+            health.last_request_started_at = now
+            health.last_input_tokens = int(usage.get("estimated_input_tokens") or estimate_input_tokens(request))
+            health.last_output_tokens = 0
+            health.last_context_compaction_usage = usage
+        health.last_total_latency_seconds = 0.0
+        health.last_tokens_per_second = 0.0
+        health.last_finish_reason = ""
+        health.last_failover_attempts = max(0, int(failover_attempts))
+        normalized_error_type = _canonical_error_type(error_type)
+        if normalized_error_type == "provider_unavailable" and (
+            "timed out" in message.lower() or "timeout" in message.lower()
+        ):
             health.timeout_count += 1
         if unavailable_until is not None:
             health.unavailable_until = max(health.unavailable_until, unavailable_until)
             health.cooldown_until = max(health.cooldown_until, unavailable_until)
-        if error_type:
-            health.last_error_type = error_type
+        if normalized_error_type:
+            health.last_error_type = normalized_error_type
         if message:
             health.last_error_message = message[:500]
+        health.rate_limited = normalized_error_type == "temporary_rate_limit"
+        if normalized_error_type == "quota_exhausted":
+            health.quota_exhausted = True
+        _apply_agent_capabilities(health, agent)
         _apply_provider_metadata(health, metadata or {}, agent=agent)
+        health.quota_state = _health_quota_state(health)
         health.failover_events.append(
             {
                 "time": now,
@@ -2212,7 +2659,7 @@ class AgentRouter:
                 "model": agent.model,
                 "reason": message[:500],
                 "status_code": status_code,
-                "error_type": error_type,
+                "error_type": normalized_error_type,
                 "unavailable_until": unavailable_until,
             }
         )
@@ -2227,7 +2674,7 @@ class AgentRouter:
                 provider=agent.provider,
                 model=agent.model,
                 routing_mode=routing_mode,
-                error_type=error_type,
+                error_type=normalized_error_type,
                 message=message,
                 status_code=status_code,
                 unavailable_until=unavailable_until,
@@ -2298,10 +2745,13 @@ class AgentRouter:
     def _cooldown_seconds(self, agent: AgentConfig, error: ProviderError) -> float:
         if error.cooldown_seconds is not None:
             return max(0.0, error.cooldown_seconds)
-        if error.error_type == "quota_exhausted":
-            return max(agent.cooldown_seconds, float(self.config.quota_cooldown_seconds))
-        if error.error_type == "rate_limited":
-            return max(agent.cooldown_seconds, float(self.config.rate_limit_cooldown_seconds))
+        error_type = _canonical_error_type(error.error_type)
+        if error_type == "quota_exhausted":
+            return max(agent.cooldown_seconds, _routing_float(self.config, "cooldown_quota_seconds", float(self.config.quota_cooldown_seconds)))
+        if error_type == "temporary_rate_limit":
+            return max(agent.cooldown_seconds, _routing_float(self.config, "cooldown_rate_limit_seconds", float(self.config.rate_limit_cooldown_seconds)))
+        if error_type == "provider_overloaded":
+            return max(agent.cooldown_seconds, _routing_float(self.config, "cooldown_overload_seconds", 60.0))
         return max(0.0, agent.cooldown_seconds)
 
     def _recommendation_score(
@@ -2373,6 +2823,42 @@ def _request_option(request: HubRequest, *keys: str) -> Any:
     return None
 
 
+def _routing_value(config: HubConfig, key: str, default: Any) -> Any:
+    routing = getattr(config, "routing", {}) or {}
+    if isinstance(routing, dict) and routing.get(key) not in (None, ""):
+        return routing[key]
+    return default
+
+
+def _routing_bool(config: HubConfig, key: str, default: bool) -> bool:
+    value = _routing_value(config, key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _routing_int(config: HubConfig, key: str, default: int) -> int:
+    try:
+        return max(1, int(_routing_value(config, key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _routing_float(config: HubConfig, key: str, default: float) -> float:
+    try:
+        return max(0.0, float(_routing_value(config, key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _canonical_error_type(error_type: str | None) -> str:
+    if not error_type:
+        return ""
+    return ERROR_TYPE_ALIASES.get(error_type, error_type)
+
+
 def _request_is_cline(request: HubRequest) -> bool:
     raw = request.raw if isinstance(request.raw, dict) else {}
     metadata = request.metadata if isinstance(request.metadata, dict) else {}
@@ -2414,10 +2900,12 @@ def _context_cap(config: HubConfig, request: HubRequest, agent: AgentConfig) -> 
         return max(1_000, int(configured))
     mode = getattr(config, "compatibility_mode", {}) or {}
     if isinstance(mode, dict) and (_request_is_cline(request) or getattr(config, "force_compatibility_streaming", False)):
+        if mode.get("max_context_tokens") in (None, "", "auto"):
+            return max(1_000, int(agent.context_window or config.agent_context_budget_tokens))
         try:
             return max(1_000, int(mode.get("max_context_tokens") or 12_000))
         except (TypeError, ValueError):
-            return 12_000
+            return max(1_000, int(agent.context_window or config.agent_context_budget_tokens))
     return max(1_000, int(agent.context_window or config.agent_context_budget_tokens))
 
 
@@ -2450,6 +2938,9 @@ def _compress_messages_for_budget(
             break
     if estimate_message_tokens(reduced) > budget:
         reduced = [_truncate_message_content(message, 2_000) for message in reduced]
+    reduced, summary_added = _with_compaction_summary(compacted, reduced, budget)
+    if summary_added:
+        warnings.append("internal_summary_note_added")
     warnings.append("messages_compacted")
     return reduced, warnings
 
@@ -2470,6 +2961,55 @@ def _truncate_message_content(message: dict[str, Any], maximum: int) -> dict[str
     if len(text) > maximum:
         copied["content"] = text[:maximum].rstrip() + "\n[Context reduced for provider compatibility]"
     return copied
+
+
+def _with_compaction_summary(
+    original: list[dict[str, Any]],
+    reduced: list[dict[str, Any]],
+    budget: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    if len(reduced) >= len(original):
+        return reduced, False
+    kept_signatures = {
+        json.dumps(message, sort_keys=True, ensure_ascii=False, default=str)
+        for message in reduced
+    }
+    dropped = [
+        message
+        for message in original
+        if json.dumps(message, sort_keys=True, ensure_ascii=False, default=str) not in kept_signatures
+    ]
+    if not dropped:
+        return reduced, False
+    dropped_tokens = estimate_message_tokens(dropped)
+    note = {
+        "role": "system",
+        "content": (
+            "Agent Hub context compaction note: older low-signal messages were compressed "
+            f"to fit the selected provider. Dropped approximately {dropped_tokens} tokens. "
+            "Preserved system/developer instructions, latest user request, protected tool state, "
+            "task progress, TODOs, active files, and recent code context when present."
+        ),
+        "agent_hub_context_summary": True,
+    }
+    insert_at = 0
+    while insert_at < len(reduced) and str(reduced[insert_at].get("role") or "").lower() in {"system", "developer"}:
+        insert_at += 1
+    with_note = [*reduced[:insert_at], note, *reduced[insert_at:]]
+    while len(with_note) > 1 and estimate_message_tokens(with_note) > budget:
+        removed = False
+        for index, message in enumerate(with_note):
+            if message is note:
+                continue
+            if not is_protected_context_message(message, recent=index >= max(0, len(with_note) - 8)):
+                with_note.pop(index)
+                removed = True
+                break
+        if not removed:
+            break
+    if estimate_message_tokens(with_note) <= budget:
+        return with_note, True
+    return reduced, False
 
 
 def _dedupe_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2535,6 +3075,8 @@ def _agent_limit_metadata(agent: AgentConfig, health: dict[str, Any]) -> dict[st
         "provider_name": agent.provider,
         "provider_type": agent.provider_type or normalize_provider(agent.provider),
         "model": agent.model,
+        "context_window": agent.context_window,
+        "max_output_tokens": agent.max_tokens or health.get("max_output_tokens"),
         "requests_remaining": health.get("requests_remaining"),
         "tokens_remaining": health.get("tokens_remaining"),
         "credits_remaining": health.get("credits_remaining"),
@@ -2555,8 +3097,36 @@ def _provider_metadata_from_raw(raw: dict[str, Any]) -> dict[str, Any]:
     provider_metadata = raw.get("agent_hub_provider")
     if not isinstance(provider_metadata, dict):
         return {}
+    metadata: dict[str, Any] = {}
     quota = provider_metadata.get("quota")
-    return dict(quota) if isinstance(quota, dict) else {}
+    if isinstance(quota, dict):
+        metadata.update(quota)
+    limits = provider_metadata.get("limits")
+    if isinstance(limits, dict):
+        metadata.update(
+            {
+                key: limits[key]
+                for key in ("context_window", "max_output_tokens")
+                if key in limits
+            }
+        )
+    return metadata
+
+
+def _provider_stream_metadata(raw: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    metadata = raw.get("agent_hub_stream")
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _apply_agent_capabilities(health: ProviderHealth, agent: AgentConfig) -> None:
+    health.context_window = agent.context_window
+    health.max_output_tokens = agent.max_tokens
+    health.supports_streaming = bool(agent.supports_streaming)
+    health.supports_tools = bool(agent.supports_tools or agent.supports_function_calling)
+    health.supports_json = bool(agent.supports_json)
+    health.supports_function_calling = bool(agent.supports_function_calling)
 
 
 def _apply_provider_metadata(
@@ -2565,6 +3135,7 @@ def _apply_provider_metadata(
     *,
     agent: AgentConfig,
 ) -> None:
+    _apply_agent_capabilities(health, agent)
     if not metadata:
         return
     _assign_float(health, "quota_remaining", metadata.get("quota_remaining"))
@@ -2572,6 +3143,20 @@ def _apply_provider_metadata(
     _assign_int(health, "tokens_remaining", metadata.get("tokens_remaining"))
     _assign_float(health, "credits_remaining", metadata.get("credits_remaining"))
     _assign_float(health, "rate_limit_reset_at", metadata.get("rate_limit_reset_at"))
+    _assign_int(health, "context_window", metadata.get("context_window"))
+    _assign_int(health, "max_output_tokens", metadata.get("max_output_tokens"))
+    if health.quota_remaining is not None:
+        health.quota_exhausted = health.quota_remaining <= 0
+    if health.credits_remaining is not None and health.credits_remaining > 0:
+        health.quota_exhausted = False
+    if health.credits_remaining is not None and health.credits_remaining <= 0:
+        health.quota_exhausted = True
+    if health.requests_remaining is not None and health.requests_remaining <= 0:
+        health.rate_limited = True
+    elif health.requests_remaining is not None and health.requests_remaining > 0:
+        health.rate_limited = False
+    if health.rate_limit_reset_at is not None and health.rate_limit_reset_at <= time.time():
+        health.rate_limited = False
     cooldown_until = _optional_timestamp(metadata.get("cooldown_until"))
     if cooldown_until is None:
         cooldown_seconds = _optional_float(metadata.get("cooldown_seconds"))
@@ -2592,6 +3177,48 @@ def _apply_provider_metadata(
             health.cooldown_until,
             time.time() + max(0.0, agent.cooldown_seconds),
         )
+    health.quota_state = _health_quota_state(health)
+
+
+def _health_quota_state(health: ProviderHealth) -> str:
+    now = time.time()
+    if health.quota_exhausted:
+        return "exhausted"
+    if health.rate_limited and (health.cooldown_deadline() > now or health.rate_limit_reset_at):
+        return "rate_limited"
+    if health.requests_remaining is not None and health.requests_remaining <= 0:
+        return "rate_limited"
+    if health.quota_remaining is not None and health.quota_remaining <= 0:
+        return "exhausted"
+    if health.credits_remaining is not None and health.credits_remaining <= 0:
+        return "exhausted"
+    if any(
+        value is not None
+        for value in (
+            health.quota_remaining,
+            health.requests_remaining,
+            health.tokens_remaining,
+            health.credits_remaining,
+        )
+    ):
+        return "available"
+    return "unknown"
+
+
+def _remaining_quota_value(health: ProviderHealth) -> int | float | str:
+    values = [
+        value
+        for value in (
+            health.quota_remaining,
+            health.requests_remaining,
+            health.tokens_remaining,
+            health.credits_remaining,
+        )
+        if value is not None
+    ]
+    if not values:
+        return "unknown"
+    return min(values)
 
 
 def _quota_skip_reason(health: ProviderHealth | None, *, required_tokens: int) -> str | None:
@@ -2600,6 +3227,10 @@ def _quota_skip_reason(health: ProviderHealth | None, *, required_tokens: int) -
     now = time.time()
     if health.rate_limit_reset_at is not None and health.rate_limit_reset_at <= now:
         return None
+    if health.quota_exhausted:
+        return _availability_reason("Provider appears to be out of quota or credits", health)
+    if health.rate_limited and health.cooldown_deadline() > now:
+        return _availability_reason("Provider is temporarily rate-limited", health)
     if health.requests_remaining is not None and health.requests_remaining <= 0:
         return _availability_reason("Provider has no remaining requests from last observed quota metadata", health)
     if health.quota_remaining is not None and health.quota_remaining <= 0:
@@ -2670,6 +3301,97 @@ def _context_usage(request: HubRequest) -> dict[str, Any]:
     return dict(usage) if isinstance(usage, dict) else {}
 
 
+def _request_source(request: HubRequest) -> str:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    for value in (
+        metadata.get("source"),
+        metadata.get("client"),
+        raw.get("source"),
+        raw.get("client"),
+        hub.get("source"),
+        hub.get("client"),
+        request.api_shape,
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:120]
+    return "unknown"
+
+
+def _continuation_request(request: HubRequest, partial_text: str, reason: str) -> HubRequest:
+    partial = str(partial_text or "").strip()
+    if not partial:
+        return request
+    raw = dict(request.raw or {})
+    hub = dict(raw.get("agent_hub") or {})
+    hub["continuation_after_output_limit"] = True
+    hub["continuation_reason"] = reason
+    raw["agent_hub"] = hub
+    messages = [
+        *[dict(message) for message in request.messages],
+        {
+            "role": "assistant",
+            "content": partial,
+            "agent_hub_partial_response": True,
+        },
+        {
+            "role": "user",
+            "content": (
+                "Continue from the exact point where the previous response stopped. "
+                "Do not repeat completed text. Preserve the requested format, JSON/schema "
+                "constraints, tool-call state, and task context."
+            ),
+            "agent_hub_continuation_instruction": True,
+        },
+    ]
+    return replace(request, messages=messages, raw=raw, record_session=False)
+
+
+def _merge_continuation_result(
+    prefix: str,
+    result: ProviderResult,
+    *,
+    model: str,
+    raw_reason: str,
+) -> ProviderResult:
+    suffix = _trim_text_overlap(str(prefix or ""), result.text or "")
+    raw = dict(result.raw or {})
+    metadata = dict(raw.get("agent_hub") or {})
+    metadata["continued_from_partial"] = True
+    metadata["continuation_reason"] = raw_reason
+    metadata["deduplicated_prefix_chars"] = max(0, len(result.text or "") - len(suffix))
+    raw["agent_hub"] = metadata
+    usage = dict(result.usage or {})
+    usage.setdefault("continuation_output_tokens", max(1, len(suffix) // 4) if suffix else 0)
+    return ProviderResult(
+        text=f"{prefix}{suffix}",
+        model=model,
+        raw=raw,
+        usage=usage,
+        finish_reason=result.finish_reason,
+        citations=result.citations,
+        search_results=result.search_results,
+        images=result.images,
+        related_questions=result.related_questions,
+    )
+
+
+def _trim_text_overlap(prefix: str, suffix: str) -> str:
+    if not prefix or not suffix:
+        return suffix
+    max_overlap = min(len(prefix), len(suffix), 4000)
+    for size in range(max_overlap, 0, -1):
+        if prefix[-size:] == suffix[:size]:
+            return suffix[size:]
+    stripped_prefix = prefix.rstrip()
+    stripped_suffix = suffix.lstrip()
+    if stripped_prefix and stripped_suffix and stripped_suffix.startswith(stripped_prefix[-min(len(stripped_prefix), 400):]):
+        marker = stripped_prefix[-min(len(stripped_prefix), 400):]
+        return stripped_suffix[len(marker):]
+    return suffix
+
+
 def _next_candidate_name(candidates: list[AgentConfig], current: AgentConfig) -> str | None:
     try:
         index = next(
@@ -2689,10 +3411,10 @@ def estimate_input_tokens(request: HubRequest) -> int:
 
 def expected_output_tokens(request: HubRequest, agent: AgentConfig) -> int:
     if request.max_tokens is not None:
-        return _non_negative_int(request.max_tokens, default=4096)
+        return _non_negative_int(request.max_tokens, default=0)
     if agent.max_tokens is not None:
-        return _non_negative_int(agent.max_tokens, default=4096)
-    return 4096
+        return _non_negative_int(agent.max_tokens, default=0)
+    return 0
 
 
 def _non_negative_int(value: object, default: int) -> int:
@@ -2725,6 +3447,13 @@ def _usage_int(usage: dict[str, object], *keys: str) -> int:
         except (TypeError, ValueError):
             continue
     return 0
+
+
+def _result_output_tokens(result: ProviderResult) -> int:
+    tokens = _usage_int(result.usage, "completion_tokens", "output_tokens")
+    if tokens > 0:
+        return tokens
+    return max(0, len(result.text or "") // 4)
 
 
 def _requires_missing_api_key(agent: AgentConfig) -> bool:
@@ -2799,7 +3528,7 @@ def _no_fallback_reason(failover: list[FailoverEvent]) -> str:
     quota_events = [
         event
         for event in failover
-        if event.error_type in {"quota_exhausted", "rate_limited"}
+        if _canonical_error_type(event.error_type) in {"quota_exhausted", "temporary_rate_limit"}
     ]
     if quota_events and len(quota_events) == len([event for event in failover if event.retryable]):
         latest = quota_events[-1]
@@ -2836,20 +3565,30 @@ def _route_error_type(failover: list[FailoverEvent]) -> str | None:
     invalid_events = [event for event in failover if event.error_type == "invalid_provider_response"]
     if invalid_events and len(invalid_events) == len(failover):
         return "invalid_provider_response"
+    retryable_events = [event for event in failover if event.retryable and event.error_type]
+    if retryable_events and len(retryable_events) == len(failover):
+        return _canonical_error_type(retryable_events[-1].error_type)
     return None
 
 
 def _router_error_category(error_type: str | None) -> str:
+    error_type = _canonical_error_type(error_type)
     if error_type in {CONFIGURATION_ERROR, ECHO_DISABLED, NO_TOOL_CAPABLE_MODEL}:
         return ErrorCategory.CONFIGURATION
     if error_type in {"permission_required", "permission_denied"}:
         return ErrorCategory.PERMISSION
     if error_type == "invalid_provider_response":
         return ErrorCategory.VALIDATION
-    if error_type == "context_limit":
+    if error_type == "context_too_large":
         return ErrorCategory.CONTEXT_LIMIT
-    if error_type in {"rate_limited", "quota_exhausted"}:
-        return ErrorCategory.RATE_LIMIT if error_type == "rate_limited" else ErrorCategory.QUOTA
+    if error_type == "output_too_large":
+        return ErrorCategory.CONTEXT_LIMIT
+    if error_type in {"temporary_rate_limit", "quota_exhausted"}:
+        return ErrorCategory.RATE_LIMIT if error_type == "temporary_rate_limit" else ErrorCategory.QUOTA
+    if error_type in {"provider_unavailable", "provider_overloaded"}:
+        return ErrorCategory.NETWORK
+    if error_type == "authentication_error":
+        return ErrorCategory.CONFIGURATION
     return ErrorCategory.PROVIDER if error_type else ErrorCategory.UNKNOWN
 
 

@@ -47,7 +47,7 @@ Recommended stability settings:
   "compatibility_mode": {
     "minimal_tool_schema": true,
     "reduced_repo_context": true,
-    "max_context_tokens": 12000
+    "max_context_tokens": null
   }
 }
 ```
@@ -69,6 +69,6 @@ truncated, but still show raw provider JSON, malformed stream chunks, finish
 reasons, tool calls, request IDs, provider request IDs, stream IDs, routing mode,
 and token estimates.
 
-If the failure happens only on long or multi-file tasks, lower
+If the failure happens only on long or multi-file tasks, set an explicit
 `compatibility_mode.max_context_tokens`, reduce `repo_context_max_files`, or use
 a provider with a larger reliable context window.

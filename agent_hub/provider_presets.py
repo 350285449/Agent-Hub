@@ -695,7 +695,6 @@ def agent_dict_from_preset(preset: ProviderPreset, *, enabled: bool | None = Non
         "headers": dict(metadata.default_headers) if metadata else {},
         "chat_completions_path": metadata.chat_completions_path if metadata else None,
         "timeout_seconds": 120,
-        "max_tokens": 4096,
         "cooldown_seconds": 120,
         "context_window": preset.context_window,
         "coding_score": preset.coding_score,

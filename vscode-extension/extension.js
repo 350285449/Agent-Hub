@@ -712,7 +712,9 @@ function sidebarTokenUsage(usage, limits) {
   const totalTokens = Number(usage && usage.total_tokens || inputTokens + outputTokens);
   const tokenRows = Array.isArray(limits) ? limits : [];
   const remaining = tokenRows
-    .map((row) => Number(row && row.tokens_remaining))
+    .map((row) => row && row.tokens_remaining)
+    .filter((value) => value !== null && value !== undefined && value !== "")
+    .map((value) => Number(value))
     .filter((value) => Number.isFinite(value) && value >= 0);
   const minRemaining = remaining.length ? Math.min(...remaining) : null;
   return {
@@ -1300,6 +1302,9 @@ function sidebarHtml(webview, logoPath) {
       pushRemaining(parts, "tokens", row.tokens_remaining);
       pushRemaining(parts, "credits", row.credits_remaining);
       pushRemaining(parts, "quota", row.quota_remaining);
+      if (!parts.length && row.remaining === "unknown") {
+        parts.push("remaining unknown");
+      }
       const reset = timeText(row.rate_limit_reset_at || row.reset_at);
       const cooldown = timeText(row.cooldown_until);
       if (reset) {
@@ -1452,7 +1457,6 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
     task,
     context,
     use_session_history: true,
-    max_tokens: config.maxTokens,
     approval_mode: config.approvalMode,
     provider_approval_granted: true,
     metadata: {
@@ -1461,6 +1465,7 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
       agent_mode: selectedAgentMode
     }
   };
+  applyOptionalMaxTokens(body, config);
 
   if (agentMode) {
     body.allow_shell_tools = config.allowShellTools;
@@ -1893,7 +1898,7 @@ function normalizeChatSettingsInput(value) {
       groupPlanCandidates: cleanSettingInteger(input.groupPlanCandidates, current.groupPlanCandidates, 1, 5),
       agentMaxSteps: cleanSettingInteger(input.agentMaxSteps, current.agentMaxSteps, 1, 100),
       allowShellTools: !!input.allowShellTools,
-      maxTokens: cleanSettingInteger(input.maxTokens, current.maxTokens, 1, 200000),
+      maxTokens: cleanOptionalSettingInteger(input.maxTokens, current.maxTokens, 1, 200000),
       autoStart: !!input.autoStart
     },
     cloudSettings: {
@@ -1930,6 +1935,21 @@ function cleanSettingInteger(value, fallback, min, max) {
     return fallback;
   }
   return Math.max(min, Math.min(max, number));
+}
+
+function cleanOptionalSettingInteger(value, fallback, min, max) {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return null;
+  }
+  return cleanSettingInteger(value, fallback === undefined ? null : fallback, min, max);
+}
+
+function applyOptionalMaxTokens(body, config) {
+  const value = config && Number(config.maxTokens);
+  if (Number.isFinite(value) && value > 0) {
+    body.max_tokens = Math.floor(value);
+  }
+  return body;
 }
 
 function normalizeServerUrl(value, fallback) {
@@ -2357,7 +2377,6 @@ async function sendChatTurn(panel, message) {
     task: codexChatTask(text),
     context,
     use_session_history: true,
-    max_tokens: config.maxTokens,
     approval_mode: config.approvalMode,
     provider_approval_granted: true,
     allow_shell_tools: config.allowShellTools,
@@ -2377,6 +2396,7 @@ async function sendChatTurn(panel, message) {
       agent_mode: agentMode
     }
   };
+  applyOptionalMaxTokens(body, config);
 
   output.appendLine("");
   output.appendLine(`[Agent Hub Chat] ${text}`);
@@ -5047,7 +5067,6 @@ function ollamaCloudModelAgentConfig(source) {
     model: source.model,
     base_url: source.baseUrl,
     free: true,
-    max_tokens: 4096,
     context_window: source.contextWindow || 128000,
     timeout_seconds: source.timeoutSeconds || 180,
     cooldown_seconds: source.cooldownSeconds || 10
@@ -5063,7 +5082,6 @@ function cloudModelAgentConfig(source) {
     enabled: !!source.enabled,
     free: true,
     api_key_env: source.apiKeyEnv,
-    max_tokens: 4096,
     context_window: source.contextWindow,
     timeout_seconds: 60,
     cooldown_seconds: source.cooldownSeconds || 30,
@@ -5097,7 +5115,6 @@ function localModelAgentConfig(source) {
     model: source.model,
     base_url: source.baseUrl,
     free: true,
-    max_tokens: 4096,
     context_window: source.contextWindow || 32768,
     timeout_seconds: source.timeoutSeconds || 300,
     cooldown_seconds: source.cooldownSeconds || 10
@@ -5855,7 +5872,6 @@ async function sendAgentRequest({ task, context, route, agentMode = true, extra 
     route: route || config.route,
     task,
     context,
-    max_tokens: config.maxTokens,
     approval_mode: config.approvalMode,
     provider_approval_granted: true,
     agent_context_budget_tokens: config.agentContextBudgetTokens,
@@ -5870,6 +5886,7 @@ async function sendAgentRequest({ task, context, route, agentMode = true, extra 
       agent_mode: selectedAgentMode
     }
   };
+  applyOptionalMaxTokens(body, config);
 
   output.show(true);
   output.appendLine("");
@@ -6278,9 +6295,17 @@ function settings() {
     contextMode: normalizeContextMode(config.get("contextMode", "balanced")),
     clineCompatibilityMode: config.get("clineCompatibilityMode", true),
     allowShellTools: config.get("allowShellTools", true),
-    maxTokens: config.get("maxTokens", 1200),
+    maxTokens: normalizeOptionalPositiveInteger(config.get("maxTokens", null)),
     autoStart: config.get("autoStart", true)
   };
+}
+
+function normalizeOptionalPositiveInteger(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function normalizeAgentProviderMode(value) {

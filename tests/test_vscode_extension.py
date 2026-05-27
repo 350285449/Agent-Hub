@@ -86,6 +86,16 @@ class VscodeExtensionContributionTests(unittest.TestCase):
 
         self.assertTrue(setting["default"])
 
+    def test_max_tokens_setting_is_unset_by_default(self) -> None:
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        setting = package["contributes"]["configuration"]["properties"]["agentHub.maxTokens"]
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertIsNone(setting["default"])
+        self.assertIn("null", setting["type"])
+        self.assertIn("applyOptionalMaxTokens", source)
+        self.assertNotIn("max_tokens: config.maxTokens", source)
+
     def test_extension_version_metadata_uses_package_json_source(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
         lock = json.loads((EXTENSION_DIR / "package-lock.json").read_text(encoding="utf-8"))

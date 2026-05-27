@@ -2443,9 +2443,9 @@ def _agent_context_compaction_enabled(request: HubRequest, config: HubConfig) ->
 def _agent_output_budget(request: HubRequest, agent: Any) -> int:
     value = request.max_tokens if request.max_tokens is not None else getattr(agent, "max_tokens", None)
     try:
-        return max(0, int(value if value is not None else 4096))
+        return max(0, int(value if value is not None else 0))
     except (TypeError, ValueError):
-        return 4096
+        return 0
 
 
 def _compact_agent_message_history(

@@ -292,9 +292,12 @@
           "description": "Allow the coding agent command to run shell commands in the workspace."
         },
         "agentHub.maxTokens": {
-          "type": "number",
-          "default": 1200,
-          "description": "Maximum output tokens for VS Code agent requests."
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "description": "Optional maximum output tokens for VS Code agent requests. Null lets Agent Hub choose automatically."
         },
         "agentHub.autoStart": {
           "type": "boolean",

@@ -33,7 +33,7 @@ from ..response_normalization import (
 from .base import BaseProviderAdapter, ProviderAdapter, StreamChunk
 
 
-FAILOVER_STATUSES = {401, 402, 403, 404, 408, 409, 429, 500, 502, 503}
+FAILOVER_STATUSES = {401, 402, 403, 404, 408, 409, 413, 429, 500, 502, 503, 504, 529}
 QUOTA_TEXT_MARKERS = (
     "account limit",
     "billing",
@@ -71,6 +71,17 @@ RATE_LIMIT_TEXT_MARKERS = (
     "tokens per minute",
     "tpm",
 )
+OUTPUT_LIMIT_TEXT_MARKERS = (
+    "completion token",
+    "completion tokens",
+    "max completion",
+    "max_completion_tokens",
+    "max output",
+    "max_output_tokens",
+    "output token",
+    "output tokens",
+    "requested output",
+)
 CONTEXT_LIMIT_TEXT_MARKERS = (
     "context length",
     "context_length",
@@ -90,6 +101,12 @@ TEMPORARY_TEXT_MARKERS = (
     "server error",
     "service unavailable",
 )
+UNSUPPORTED_TEXT_MARKERS = (
+    "does not support",
+    "not supported",
+    "unsupported",
+    "unsupported_feature",
+)
 AUTH_TEXT_MARKERS = (
     "api key",
     "authentication",
@@ -101,12 +118,21 @@ AUTH_TEXT_MARKERS = (
 FAILOVER_TEXT_MARKERS = (
     *QUOTA_TEXT_MARKERS,
     *RATE_LIMIT_TEXT_MARKERS,
+    *OUTPUT_LIMIT_TEXT_MARKERS,
     *CONTEXT_LIMIT_TEXT_MARKERS,
     *TEMPORARY_TEXT_MARKERS,
+    *UNSUPPORTED_TEXT_MARKERS,
     *AUTH_TEXT_MARKERS,
 )
 RETRYABLE_ERROR_TYPES = {
     "quota_exhausted",
+    "temporary_rate_limit",
+    "context_too_large",
+    "output_too_large",
+    "provider_overloaded",
+    "provider_unavailable",
+    "authentication_error",
+    "unsupported_feature",
     "rate_limited",
     "context_limit",
     "temporary_unavailable",
@@ -114,6 +140,29 @@ RETRYABLE_ERROR_TYPES = {
     "model_unavailable",
     "network",
     "timeout",
+}
+ERROR_TYPE_ALIASES = {
+    "rate_limited": "temporary_rate_limit",
+    "context_limit": "context_too_large",
+    "temporary_unavailable": "provider_overloaded",
+    "authentication": "authentication_error",
+    "model_unavailable": "provider_unavailable",
+    "network": "provider_unavailable",
+    "timeout": "provider_unavailable",
+    "provider_error": "unknown_error",
+}
+PASS_THROUGH_ERROR_TYPES = {
+    "configuration",
+    "invalid_provider_response",
+    "quota_exhausted",
+    "temporary_rate_limit",
+    "context_too_large",
+    "output_too_large",
+    "provider_overloaded",
+    "provider_unavailable",
+    "authentication_error",
+    "unsupported_feature",
+    "unknown_error",
 }
 
 
@@ -129,6 +178,10 @@ class ProviderError(Exception):
     def __post_init__(self) -> None:
         if self.error_type == "provider_error":
             self.error_type = _classify_provider_error(self.message, status_code=self.status_code)
+        elif self.error_type in ERROR_TYPE_ALIASES:
+            self.error_type = ERROR_TYPE_ALIASES[self.error_type]
+        elif self.error_type not in PASS_THROUGH_ERROR_TYPES:
+            self.error_type = self.error_type or "unknown_error"
 
     def __str__(self) -> str:
         return self.message
@@ -191,12 +244,14 @@ class OpenAIChatProvider(BaseProviderAdapter):
         payload = self._payload(request)
         headers = provider_headers(self.agent, api_key)
 
-        raw = _post_json(
+        raw = _post_json_with_output_retry(
             url=_chat_completions_url(self.agent),
             headers=headers,
             payload=payload,
             timeout=self.agent.timeout_seconds,
             debug=_provider_debug(request, self.agent),
+            request=request,
+            agent=self.agent,
         )
         return _normalize_chat_result_for_agent(raw, self.agent)
 
@@ -394,7 +449,7 @@ class AnthropicMessagesProvider(BaseProviderAdapter):
                 error_type="configuration",
             )
 
-        raw = _post_json(
+        raw = _post_json_with_output_retry(
             url=_join_url(self.agent.base_url or "https://api.anthropic.com", "/v1/messages"),
             headers={
                 "Content-Type": "application/json",
@@ -411,6 +466,8 @@ class AnthropicMessagesProvider(BaseProviderAdapter):
             payload=self._payload(request),
             timeout=self.agent.timeout_seconds,
             debug=_provider_debug(request, self.agent),
+            request=request,
+            agent=self.agent,
         )
         return normalize_anthropic_result(raw, default_model=self.agent.model)
 
@@ -479,7 +536,7 @@ class AnthropicMessagesProvider(BaseProviderAdapter):
             messages.append({"role": "user", "content": ""})
         payload["model"] = self.agent.model
         payload["messages"] = messages
-        payload["max_tokens"] = request.max_tokens or self.agent.max_tokens or 4096
+        payload["max_tokens"] = _required_provider_max_tokens(request, self.agent)
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if system_parts:
@@ -502,7 +559,7 @@ class GeminiProvider(BaseProviderAdapter):
                 error_type="configuration",
             )
 
-        raw = _post_json(
+        raw = _post_json_with_output_retry(
             url=self._url(),
             headers={
                 "Content-Type": "application/json",
@@ -512,6 +569,8 @@ class GeminiProvider(BaseProviderAdapter):
             payload=self._payload(request),
             timeout=self.agent.timeout_seconds,
             debug=_provider_debug(request, self.agent),
+            request=request,
+            agent=self.agent,
         )
         return normalize_gemini_result(raw, default_model=self.agent.model)
 
@@ -1082,6 +1141,53 @@ def _normalize_chat_result_for_agent(raw: dict[str, Any], agent: AgentConfig) ->
     )
 
 
+def _post_json_with_output_retry(
+    *,
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    timeout: float,
+    debug: dict[str, Any] | None,
+    request: HubRequest,
+    agent: AgentConfig,
+) -> dict[str, Any]:
+    """Retry once with a safer output budget when a provider rejects max tokens."""
+
+    try:
+        return _post_json(
+            url=url,
+            headers=headers,
+            payload=payload,
+            timeout=timeout,
+            debug=debug,
+        )
+    except ProviderError as exc:
+        if exc.error_type != "output_too_large" or not _request_auto_retry_enabled(request):
+            raise
+        retry_limit = _retry_output_token_limit(request, agent, exc)
+        if retry_limit is None:
+            raise
+        retry_payload = _payload_with_output_token_limit(payload, retry_limit)
+        raw = _post_json(
+            url=url,
+            headers=headers,
+            payload=retry_payload,
+            timeout=timeout,
+            debug=debug,
+        )
+        if isinstance(raw, dict):
+            provider_metadata = raw.setdefault("agent_hub_provider", {})
+            if isinstance(provider_metadata, dict):
+                limits = provider_metadata.setdefault("limits", {})
+                if isinstance(limits, dict):
+                    limits["max_output_tokens"] = retry_limit
+                provider_metadata["output_token_retry"] = {
+                    "original_error": str(exc)[:500],
+                    "retry_max_tokens": retry_limit,
+                }
+        return raw
+
+
 def _post_json(
     url: str,
     headers: dict[str, str],
@@ -1145,11 +1251,15 @@ def _post_json(
             headers=dict(exc.headers.items()) if exc.headers else None,
         ) from exc
     except (TimeoutError, socket.timeout) as exc:
-        raise ProviderError(f"Provider request timed out: {exc}", retryable=True, error_type="timeout") from exc
+        raise ProviderError(
+            f"Provider request timed out: {exc}",
+            retryable=True,
+            error_type="provider_unavailable",
+        ) from exc
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)
-        error_type = "timeout" if _looks_like_timeout(reason) else "network"
-        prefix = "Provider request timed out" if error_type == "timeout" else "Network error"
+        error_type = "provider_unavailable"
+        prefix = "Provider request timed out" if _looks_like_timeout(reason) else "Network error"
         raise ProviderError(f"{prefix}: {reason}", retryable=True, error_type=error_type) from exc
     except json.JSONDecodeError as exc:
         log_provider_debug_event(
@@ -1270,11 +1380,15 @@ def _post_stream_json(
             headers=dict(exc.headers.items()) if exc.headers else None,
         ) from exc
     except (TimeoutError, socket.timeout) as exc:
-        raise ProviderError(f"Provider stream timed out: {exc}", retryable=True, error_type="timeout") from exc
+        raise ProviderError(
+            f"Provider stream timed out: {exc}",
+            retryable=True,
+            error_type="provider_unavailable",
+        ) from exc
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)
-        error_type = "timeout" if _looks_like_timeout(reason) else "network"
-        prefix = "Provider stream timed out" if error_type == "timeout" else "Network error"
+        error_type = "provider_unavailable"
+        prefix = "Provider stream timed out" if _looks_like_timeout(reason) else "Network error"
         raise ProviderError(f"{prefix}: {reason}", retryable=True, error_type=error_type) from exc
 
 
@@ -1372,34 +1486,45 @@ def _classify_provider_error(message: str, status_code: int | None = None) -> st
     marker_text = message.lower().replace("-", " ")
     if any(marker in marker_text for marker in QUOTA_TEXT_MARKERS):
         return "quota_exhausted"
+    if (
+        any(marker in marker_text for marker in OUTPUT_LIMIT_TEXT_MARKERS)
+        or "max_tokens" in message.lower()
+        or ("max tokens" in marker_text and "context" not in marker_text)
+    ):
+        return "output_too_large"
     if status_code == 429 or any(marker in marker_text for marker in RATE_LIMIT_TEXT_MARKERS):
-        return "rate_limited"
+        return "temporary_rate_limit"
+    if any(marker in marker_text for marker in UNSUPPORTED_TEXT_MARKERS):
+        return "unsupported_feature"
     if any(marker in marker_text for marker in CONTEXT_LIMIT_TEXT_MARKERS):
-        return "context_limit"
+        return "context_too_large"
     if status_code in {401, 403} or any(marker in marker_text for marker in AUTH_TEXT_MARKERS):
-        return "authentication"
-    if status_code in {408, 409, 500, 502, 503} or any(
+        return "authentication_error"
+    if status_code in {408, 409, 503, 504, 529} or any(
         marker in marker_text for marker in TEMPORARY_TEXT_MARKERS
     ):
-        return "temporary_unavailable"
-    if status_code == 404:
-        return "model_unavailable"
-    return "provider_error"
+        return "provider_overloaded"
+    if status_code in {404, 500, 502}:
+        return "provider_unavailable"
+    if status_code == 413:
+        return "context_too_large"
+    return "unknown_error"
 
 
 def _provider_error_category(error_type: str) -> str:
+    error_type = ERROR_TYPE_ALIASES.get(error_type, error_type)
     if error_type == "quota_exhausted":
         return ErrorCategory.QUOTA
-    if error_type == "rate_limited":
+    if error_type == "temporary_rate_limit":
         return ErrorCategory.RATE_LIMIT
-    if error_type == "context_limit":
+    if error_type == "context_too_large":
         return ErrorCategory.CONTEXT_LIMIT
-    if error_type in {"configuration", "authentication"}:
+    if error_type in {"configuration", "authentication_error"}:
         return ErrorCategory.CONFIGURATION
-    if error_type in {"network", "model_unavailable", "temporary_unavailable"}:
+    if error_type in {"provider_unavailable", "provider_overloaded"}:
         return ErrorCategory.NETWORK
-    if error_type == "timeout":
-        return ErrorCategory.TIMEOUT
+    if error_type == "output_too_large":
+        return ErrorCategory.CONTEXT_LIMIT
     if error_type == "invalid_provider_response":
         return ErrorCategory.VALIDATION
     return ErrorCategory.PROVIDER
@@ -1408,14 +1533,20 @@ def _provider_error_category(error_type: str) -> str:
 def _provider_user_message(error: ProviderError) -> str:
     if error.error_type == "quota_exhausted":
         return "The selected provider is out of quota or free-tier credits. Agent Hub will try a fallback model when one is available."
-    if error.error_type == "rate_limited":
+    if error.error_type == "temporary_rate_limit":
         return "The selected provider is rate-limited. Agent Hub will retry or fail over when possible."
-    if error.error_type == "context_limit":
+    if error.error_type == "context_too_large":
         return "The prompt exceeded this provider's context limit. Agent Hub can reduce context or try a larger-context model."
-    if error.error_type == "authentication":
+    if error.error_type == "output_too_large":
+        return "The requested output budget exceeded this provider's limit. Agent Hub will retry with a smaller supported value when possible."
+    if error.error_type == "authentication_error":
         return "The provider rejected authentication. Check the configured API key or provider settings."
     if error.error_type == "configuration":
         return "The provider is not fully configured. Check Agent Hub settings and API key environment variables."
+    if error.error_type == "unsupported_feature":
+        return "The provider does not support a requested feature. Agent Hub will try a compatible model when one is available."
+    if error.error_type in {"provider_overloaded", "provider_unavailable"}:
+        return "The provider is unavailable or overloaded. Agent Hub will try a fallback model when one is available."
     if error.error_type == "invalid_provider_response":
         return "The provider returned a malformed response. Agent Hub will retry, fail over, or synthesize a safe response."
     return error.message
@@ -1674,7 +1805,11 @@ def _get_url_text(url: str, timeout: float, max_bytes: int) -> tuple[str, str]:
             exc.read().decode("utf-8", errors="replace"),
         ) from exc
     except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
-        raise ProviderError(f"Network error: {exc}", retryable=True, error_type="network") from exc
+        raise ProviderError(
+            f"Network error: {exc}",
+            retryable=True,
+            error_type="provider_unavailable",
+        ) from exc
 
     charset = _charset_from_content_type(content_type) or "utf-8"
     return content_type.lower(), body.decode(charset, errors="replace")
@@ -1870,6 +2005,98 @@ class _TextExtractor(HTMLParser):
 
 def _copy_allowed(source: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
     return {key: value for key, value in source.items() if key in allowed}
+
+
+def _required_provider_max_tokens(request: HubRequest, agent: AgentConfig) -> int:
+    explicit = _positive_int_or_none(request.max_tokens)
+    if explicit is not None:
+        return explicit
+    configured = _positive_int_or_none(agent.max_tokens)
+    if configured is not None:
+        return configured
+    if agent.context_window:
+        return max(1, int(agent.context_window) - _rough_tokens(request))
+    return 4096
+
+
+def _request_auto_retry_enabled(request: HubRequest) -> bool:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    value = hub.get("auto_retry", raw.get("auto_retry", True))
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _retry_output_token_limit(
+    request: HubRequest,
+    agent: AgentConfig,
+    error: ProviderError,
+) -> int | None:
+    current = _payload_requested_output_tokens(request)
+    parsed = _limit_from_error_message(str(error))
+    configured = _positive_int_or_none(agent.max_tokens)
+    remaining = None
+    if agent.context_window:
+        remaining = max(1, int(agent.context_window) - _rough_tokens(request))
+    for value in (parsed, configured, remaining, 4096):
+        if not isinstance(value, int) or value <= 0:
+            continue
+        if current is not None and value >= current:
+            continue
+        return value
+    return None
+
+
+def _payload_requested_output_tokens(request: HubRequest) -> int | None:
+    for value in (
+        request.max_tokens,
+        request.raw.get("max_completion_tokens") if isinstance(request.raw, dict) else None,
+        request.raw.get("max_output_tokens") if isinstance(request.raw, dict) else None,
+        request.raw.get("max_tokens") if isinstance(request.raw, dict) else None,
+    ):
+        parsed = _positive_int_or_none(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _payload_with_output_token_limit(payload: dict[str, Any], limit: int) -> dict[str, Any]:
+    copied = dict(payload)
+    if "generationConfig" in copied and isinstance(copied["generationConfig"], dict):
+        generation_config = dict(copied["generationConfig"])
+        generation_config["maxOutputTokens"] = limit
+        copied["generationConfig"] = generation_config
+        return copied
+    if "max_completion_tokens" in copied:
+        copied["max_completion_tokens"] = limit
+        return copied
+    copied["max_tokens"] = limit
+    return copied
+
+
+def _limit_from_error_message(message: str) -> int | None:
+    lowered = message.lower()
+    patterns = (
+        r"(?:maximum|max|limit|up to|at most)[^\d]{0,40}(\d{2,7})",
+        r"(\d{2,7})[^\d]{0,40}(?:maximum|max|limit|tokens)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, lowered):
+            value = _positive_int_or_none(match.group(1))
+            if value is not None and value >= 16:
+                return value
+    return None
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _join_url(base_url: str, path: str) -> str:

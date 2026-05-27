@@ -22,6 +22,8 @@ class ProviderHealth:
     tool_call_success_count: int = 0
     tool_call_failure_count: int = 0
     total_latency_seconds: float = 0.0
+    total_tokens_per_second: float = 0.0
+    tokens_per_second_sample_count: int = 0
     total_streaming_tokens_per_second: float = 0.0
     streaming_sample_count: int = 0
     last_success_at: float = 0.0
@@ -38,6 +40,26 @@ class ProviderHealth:
     tokens_remaining: int | None = None
     credits_remaining: float | None = None
     rate_limit_reset_at: float | None = None
+    rate_limited: bool = False
+    quota_exhausted: bool = False
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    supports_streaming: bool | None = None
+    supports_tools: bool | None = None
+    supports_json: bool | None = None
+    supports_function_calling: bool | None = None
+    last_request_source: str = ""
+    last_route: str = ""
+    last_request_started_at: float = 0.0
+    last_first_token_latency_seconds: float = 0.0
+    last_total_latency_seconds: float = 0.0
+    last_input_tokens: int = 0
+    last_output_tokens: int = 0
+    last_tokens_per_second: float = 0.0
+    last_finish_reason: str = ""
+    last_failover_attempts: int = 0
+    last_context_compaction_usage: dict[str, Any] = field(default_factory=dict)
+    quota_state: str = "unknown"
     failover_events: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -66,6 +88,12 @@ class ProviderHealth:
             return 0.0
         return self.total_streaming_tokens_per_second / self.streaming_sample_count
 
+    @property
+    def average_tokens_per_second(self) -> float:
+        if self.tokens_per_second_sample_count <= 0:
+            return 0.0
+        return self.total_tokens_per_second / self.tokens_per_second_sample_count
+
     def cooldown_deadline(self) -> float:
         return max(self.cooldown_until, self.unavailable_until)
 
@@ -84,6 +112,15 @@ class ProviderScore:
     cost_efficiency: float
     token_efficiency: float
     cooldown: float
+    capability_score: float = 0.0
+    health_score: float = 0.0
+    speed_score: float = 0.0
+    quota_score: float = 0.0
+    context_score: float = 0.0
+    user_preference_score: float = 0.0
+    cost_penalty: float = 0.0
+    recent_failure_penalty: float = 0.0
+    cooldown_penalty: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
         return {item.name: round(float(getattr(self, item.name)), 4) for item in fields(self)}
@@ -142,6 +179,10 @@ class ProviderHealthManager:
         return calculate_provider_score(agent, health, request=request, now=now)
 
 
+class ProviderHealthTracker(ProviderHealthManager):
+    """Canonical provider-health facade shared by diagnostics and routing code."""
+
+
 def calculate_provider_score(
     agent: AgentConfig,
     health: Any = None,
@@ -166,6 +207,8 @@ def calculate_provider_score(
     token_efficiency = 0.0
     cooldown = 0.0
 
+    if bool(getattr(health, "quota_exhausted", False)):
+        quota -= 80.0
     if _number_attr(health, "quota_remaining") is not None and _number_attr(health, "quota_remaining") <= 0:
         quota -= 80.0
     if _number_attr(health, "requests_remaining") is not None and _number_attr(health, "requests_remaining") <= 0:
@@ -186,6 +229,9 @@ def calculate_provider_score(
     tokens_out = _number_attr(health, "tokens_out")
     if tokens_in is not None and tokens_in > 0 and tokens_out is not None:
         token_efficiency = min(3.0, max(0.0, tokens_out / tokens_in))
+    average_tps = _float_attr(health, "average_tokens_per_second", 0.0)
+    if average_tps:
+        token_efficiency += min(3.0, average_tps / 25.0)
 
     deadline = max(
         _float_attr(health, "cooldown_until", 0.0),
@@ -223,6 +269,15 @@ def calculate_provider_score(
         cost_efficiency=cost_efficiency,
         token_efficiency=token_efficiency,
         cooldown=cooldown,
+        capability_score=coding + tool_support + streaming,
+        health_score=reliability,
+        speed_score=latency + token_efficiency,
+        quota_score=quota,
+        context_score=context,
+        user_preference_score=free_local,
+        cost_penalty=min(0.0, cost_efficiency),
+        recent_failure_penalty=0.0,
+        cooldown_penalty=cooldown,
     )
 
 
@@ -277,11 +332,11 @@ def health_state_label(row: dict[str, Any]) -> str:
 
 def _estimated_required_tokens(request: HubRequest, agent: AgentConfig) -> int:
     input_tokens = max(1, len(request_text(request)) // 4)
-    output_tokens = request.max_tokens or agent.max_tokens or 4096
+    output_tokens = request.max_tokens or agent.max_tokens or 0
     try:
         return input_tokens + max(0, int(output_tokens))
     except (TypeError, ValueError):
-        return input_tokens + 4096
+        return input_tokens
 
 
 def _is_local_or_private_agent(agent: AgentConfig) -> bool:
@@ -323,6 +378,7 @@ def _clamp(value: float) -> float:
 __all__ = [
     "AdapterHealth",
     "ProviderHealth",
+    "ProviderHealthTracker",
     "ProviderHealthManager",
     "ProviderScore",
     "calculate_provider_score",

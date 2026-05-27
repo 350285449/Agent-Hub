@@ -117,6 +117,12 @@ BACKEND_FEATURES = {
 }
 DIAGNOSTIC_ENDPOINTS = {
     "/v1/provider-health",
+    "/v1/routing/status",
+    "/v1/routing/last-decision",
+    "/v1/routing/test-failover",
+    "/v1/limits",
+    "/v1/usage",
+    "/v1/client-sources",
     "/v1/events",
     "/v1/tools",
     "/v1/workflows/status",
@@ -149,6 +155,29 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return
         if path == "/v1/status":
             self._send_json(_status_body(self.server.config, self.server.router))
+            return
+        if path == "/v1/routing/status":
+            self._send_diagnostics_json(_routing_status_body(self.server.config, self.server.router))
+            return
+        if path == "/v1/routing/last-decision":
+            self._send_diagnostics_json(_routing_last_decision_body(self.server.config))
+            return
+        if path == "/v1/routing/test-failover":
+            self._send_diagnostics_json(_routing_test_failover_body(self.server.config, self.server.router))
+            return
+        if path == "/v1/limits":
+            self._send_diagnostics_json(_limits_body(self.server.config, self.server.router))
+            return
+        if path == "/v1/usage":
+            self._send_diagnostics_json(
+                usage_snapshot(
+                    self.server.config.state_dir,
+                    self.server.router.health_snapshot(include_history=True),
+                )
+            )
+            return
+        if path == "/v1/client-sources":
+            self._send_diagnostics_json(_client_sources_body(self.server.config, self.server.router))
             return
         if path == "/v1/routing-history":
             self._send_json(_routing_history_body(self.server.config))
@@ -518,6 +547,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     ) -> None:
         payload = _payload_with_header_metadata(payload, self.headers)
         request = request_from_payload(payload, api_shape=api_shape)
+        request = _attach_internal_client_metadata(request, api_shape=api_shape)
         record_event(
             self.server.config.state_dir,
             "requests",
@@ -529,6 +559,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 "session_id": request.session_id,
                 "route": request.route,
                 "stream": request.stream,
+                "source": request.metadata.get("source"),
+                "client_compatibility": request.metadata.get("client_compatibility"),
+                "health_tracking_enabled": request.metadata.get("health_tracking_enabled"),
             },
         )
         _apply_model_routing(self.server.config, request)
@@ -1010,7 +1043,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         chunk_id = f"chatcmpl-{stream.request_id}"
         model = stream.public_model or stream.model
         saw_finish = False
+        emitted_content = False
         client_connected = True
+        emitted_text_parts: list[str] = []
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -1042,16 +1077,21 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             }
         )
 
-        def write_chunk(source_chunk: Any) -> None:
-            nonlocal saw_finish
+        def write_chunk(source_chunk: Any, *, dedupe_against_emitted: bool = False) -> None:
+            nonlocal saw_finish, emitted_content
             delta = dict(source_chunk.delta or {})
             if source_chunk.text and "content" not in delta:
                 delta["content"] = source_chunk.text
             finish_reason = source_chunk.finish_reason
             if finish_reason:
                 saw_finish = True
+            if dedupe_against_emitted and isinstance(delta.get("content"), str):
+                delta["content"] = _trim_stream_overlap("".join(emitted_text_parts), delta["content"])
             if not delta and not finish_reason:
                 return
+            if delta.get("content"):
+                emitted_content = True
+                emitted_text_parts.append(str(delta["content"]))
             write_data(
                 {
                     "id": chunk_id,
@@ -1084,28 +1124,18 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     }
                 )
         except Exception as exc:
-            recovered = _recover_native_stream(self.server, stream)
+            recovered = _recover_native_stream(
+                self.server,
+                stream,
+                replay_required=emitted_content,
+                emitted_text="".join(emitted_text_parts),
+            )
             if recovered is not None:
-                write_data(
-                    {
-                        "id": chunk_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": "[Agent Hub stream recovery started]"},
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
-                )
                 try:
                     for chunk in recovered.chunks:
                         if not client_connected:
                             break
-                        write_chunk(chunk)
+                        write_chunk(chunk, dedupe_against_emitted=emitted_content)
                     if client_connected and not saw_finish:
                         write_data(
                             {
@@ -1341,16 +1371,35 @@ def _stream_response_headers(stream: Any, router: AgentRouter) -> dict[str, str]
     }
 
 
-def _recover_native_stream(server: AgentHubHTTPServer, stream: Any) -> Any | None:
-    policy = str(getattr(server.config, "native_stream_failure_policy", "terminate") or "terminate")
-    if policy == "terminate" or not _stream_replay_safe(getattr(stream, "request", None)):
+def _recover_native_stream(
+    server: AgentHubHTTPServer,
+    stream: Any,
+    *,
+    replay_required: bool = True,
+    emitted_text: str = "",
+) -> Any | None:
+    policy = str(getattr(server.config, "native_stream_failure_policy", "recover") or "recover")
+    routing = getattr(server.config, "routing", {}) or {}
+    if policy == "recover":
+        policy = "fallback_provider"
+    if policy == "terminate":
+        return None
+    if replay_required and not str(emitted_text or "").strip() and not _stream_replay_safe(getattr(stream, "request", None)):
         return None
     if policy == "retry_same_provider":
-        request = _stream_recovery_request(stream.request, recovery="retry_same_provider")
+        request = _stream_recovery_request(
+            stream.request,
+            recovery="retry_same_provider",
+            emitted_text=emitted_text,
+        )
         return server.router.native_stream_for_agent(request, stream.agent.name)
     if policy == "fallback_provider":
         server.router.cooldown_agent(stream.agent.name, getattr(stream.agent, "cooldown_seconds", 1.0))
-        request = _stream_recovery_request(stream.request, recovery="fallback_provider")
+        request = _stream_recovery_request(
+            stream.request,
+            recovery="fallback_provider",
+            emitted_text=emitted_text,
+        )
         return server.router.native_stream(request)
     return None
 
@@ -1371,12 +1420,42 @@ def _stream_replay_safe(request: Any) -> bool:
     return False
 
 
-def _stream_recovery_request(request: Any, *, recovery: str) -> Any:
+def _stream_recovery_request(request: Any, *, recovery: str, emitted_text: str = "") -> Any:
     raw = dict(request.raw or {})
     hub = dict(raw.get("agent_hub") or {})
     hub["stream_recovery_attempt"] = recovery
     raw["agent_hub"] = hub
-    return replace(request, raw=raw, record_session=False)
+    partial = str(emitted_text or "").strip()
+    if not partial:
+        return replace(request, raw=raw, record_session=False)
+    messages = [
+        *[dict(message) for message in request.messages],
+        {
+            "role": "assistant",
+            "content": partial,
+            "agent_hub_partial_response": True,
+        },
+        {
+            "role": "user",
+            "content": (
+                "Continue from the exact point where the stream stopped. "
+                "Do not repeat completed text. Preserve the requested format, JSON/schema "
+                "requirements, tool state, and task context."
+            ),
+            "agent_hub_stream_recovery_instruction": True,
+        },
+    ]
+    return replace(request, messages=messages, raw=raw, record_session=False)
+
+
+def _trim_stream_overlap(prefix: str, suffix: str) -> str:
+    if not prefix or not suffix:
+        return suffix
+    max_overlap = min(len(prefix), len(suffix), 4000)
+    for size in range(max_overlap, 0, -1):
+        if prefix[-size:] == suffix[:size]:
+            return suffix[size:]
+    return suffix
 
 
 def _safe_header_value(value: Any) -> str:
@@ -1452,6 +1531,98 @@ def _status_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
         "workflow_stages": _recent_workflow_stages(routing),
         "tool_calls": tools[-25:],
         "routing_history_count": len(routing),
+    }
+
+
+def _routing_status_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
+    health = router.health_snapshot(include_history=True)
+    routing = recent_events(config.state_dir, "routing", limit=100)
+    latest = _latest_routing_decision(routing)
+    recommendations = router.recommend(
+        HubRequest(
+            session_id="routing-status",
+            route="cloud-agent",
+            messages=[{"role": "user", "content": "diagnose active routing"}],
+            record_session=False,
+        ),
+        limit=12,
+        needs_tools=True,
+        include_unavailable=True,
+    )
+    return {
+        "object": "agent_hub.routing.status",
+        "status": "running",
+        "running": True,
+        "active_provider": latest.get("agent") or latest.get("selected_agent"),
+        "active_model": latest.get("model") or latest.get("selected_model"),
+        "routing_candidates": recommendations,
+        "degraded_providers": [row for row in health.values() if row.get("degraded")],
+        "cooldowns": {
+            name: row.get("cooldown_until")
+            for name, row in health.items()
+            if row.get("cooldown_until")
+        },
+        "last_failover_reason": _last_failover_reason(routing),
+        "last_decision": latest,
+        "client_sources": _client_source_counts(config, health),
+        "streaming_stats": {
+            name: {
+                "streaming_tokens_per_second": row.get("streaming_tokens_per_second"),
+                "last_first_token_latency_seconds": row.get("last_first_token_latency_seconds"),
+            }
+            for name, row in health.items()
+            if row.get("supports_streaming")
+        },
+        "provider_health": health,
+    }
+
+
+def _routing_last_decision_body(config: HubConfig) -> dict[str, Any]:
+    routing = recent_events(config.state_dir, "routing", limit=100)
+    latest = _latest_routing_decision(routing)
+    return {
+        "object": "agent_hub.routing.last_decision",
+        "decision": latest,
+        "failover": latest.get("failover", []) if isinstance(latest, dict) else [],
+    }
+
+
+def _routing_test_failover_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
+    request = HubRequest(
+        session_id="routing-test-failover",
+        route="cloud-agent",
+        messages=[{"role": "user", "content": "simulate provider failover"}],
+        record_session=False,
+    )
+    candidates = router.recommend(
+        request,
+        limit=20,
+        needs_tools=True,
+        include_unavailable=True,
+    )
+    available = [row for row in candidates if row.get("available")]
+    simulated_failed = available[0] if available else (candidates[0] if candidates else None)
+    simulated_next = next(
+        (row for row in candidates if simulated_failed and row.get("agent") != simulated_failed.get("agent") and row.get("available")),
+        None,
+    )
+    return {
+        "object": "agent_hub.routing.test_failover",
+        "dry_run": True,
+        "source": "diagnostics",
+        "selected": simulated_failed,
+        "next_compatible_provider": simulated_next,
+        "candidates": candidates,
+        "message": "Dry run only; no provider request was sent and no cooldown was changed.",
+    }
+
+
+def _client_sources_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
+    health = router.health_snapshot(include_history=True)
+    return {
+        "object": "agent_hub.client_sources",
+        "sources": _client_source_counts(config, health),
+        "recent_requests": recent_events(config.state_dir, "requests", limit=100),
     }
 
 
@@ -1568,6 +1739,69 @@ def _routing_failures(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return failures[-25:]
 
 
+def _latest_routing_decision(events: list[dict[str, Any]]) -> dict[str, Any]:
+    for event in reversed(events):
+        if event.get("type") in {
+            "routing_decision",
+            "stream_request_started",
+            "request_started",
+            "native_stream_finished",
+            "routing_failure",
+        }:
+            return dict(event)
+    return dict(events[-1]) if events else {}
+
+
+def _last_failover_reason(events: list[dict[str, Any]]) -> str:
+    for event in reversed(events):
+        failover = event.get("failover")
+        if isinstance(failover, list):
+            for item in reversed(failover):
+                if isinstance(item, dict) and item.get("reason"):
+                    return str(item["reason"])
+        if event.get("type") == "routing_failure" and event.get("message"):
+            return str(event["message"])
+    return ""
+
+
+def _client_source_counts(config: HubConfig, health: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    requests = recent_events(config.state_dir, "requests", limit=100)
+    routing = recent_events(config.state_dir, "routing", limit=100)
+    for event in [*requests, *routing]:
+        source = _event_source(event)
+        counts[source] = counts.get(source, 0) + 1
+    for row in health.values():
+        source = row.get("last_request_source")
+        if isinstance(source, str) and source:
+            counts[source] = counts.get(source, 0) + 1
+    return {
+        "counts": counts,
+        "known_sources": sorted(counts),
+        "recent": [
+            {
+                "time": event.get("time"),
+                "source": _event_source(event),
+                "api_shape": event.get("api_shape"),
+                "route": event.get("route"),
+                "stream": event.get("stream"),
+            }
+            for event in requests[-25:]
+        ],
+    }
+
+
+def _event_source(event: dict[str, Any]) -> str:
+    for key in ("source", "client", "request_source", "last_request_source"):
+        value = event.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    api_shape = event.get("api_shape")
+    if isinstance(api_shape, str) and api_shape.strip():
+        return api_shape.strip()
+    return "unknown"
+
+
 def _recent_workflow_stages(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         event
@@ -1657,6 +1891,9 @@ def _provider_limit_row(
         "model": agent.model,
         "available": bool(health.get("available")),
         "degraded": bool(health.get("degraded")),
+        "remaining": health.get("remaining", "unknown"),
+        "quota_state": health.get("quota_state", "unknown"),
+        "quota_source": health.get("quota_source", "unknown"),
         "quota_remaining": health.get("quota_remaining"),
         "requests_remaining": health.get("requests_remaining"),
         "tokens_remaining": health.get("tokens_remaining"),
@@ -1666,6 +1903,12 @@ def _provider_limit_row(
         "unavailable_until": health.get("unavailable_until"),
         "last_error_type": health.get("last_error_type"),
         "last_error_message": health.get("last_error_message"),
+        "average_latency_seconds": health.get("average_latency_seconds"),
+        "tokens_per_second": health.get("average_tokens_per_second"),
+        "context_limit": health.get("context_window"),
+        "output_limit": health.get("max_output_tokens"),
+        "last_request_source": health.get("last_request_source"),
+        "last_failover_attempts": health.get("last_failover_attempts"),
         "success_count": health.get("success_count", 0),
         "failure_count": health.get("failure_count", 0),
     }
@@ -1681,11 +1924,18 @@ def _active_model_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "provider_type": row.get("provider_type"),
         "model": row.get("model"),
         "available": row.get("available"),
+        "remaining": row.get("remaining", "unknown"),
+        "quota_state": row.get("quota_state", "unknown"),
         "requests_remaining": row.get("requests_remaining"),
         "tokens_remaining": row.get("tokens_remaining"),
         "credits_remaining": row.get("credits_remaining"),
         "rate_limit_reset_at": row.get("rate_limit_reset_at"),
         "cooldown_until": row.get("cooldown_until"),
+        "average_latency_seconds": row.get("average_latency_seconds"),
+        "tokens_per_second": row.get("tokens_per_second"),
+        "context_limit": row.get("context_limit"),
+        "output_limit": row.get("output_limit"),
+        "source_client": row.get("last_request_source"),
     }
 
 
@@ -2076,6 +2326,43 @@ def _payload_with_header_metadata(payload: dict[str, Any], headers: Any) -> dict
     copied = dict(payload)
     copied["metadata"] = metadata
     return copied
+
+
+def _attach_internal_client_metadata(request: HubRequest, *, api_shape: str) -> HubRequest:
+    metadata = dict(request.metadata or {})
+    raw = dict(request.raw or {})
+    hub = dict(raw.get("agent_hub") or {})
+    user_agent = str(metadata.get("user_agent") or "")
+    detected_client = (
+        str(metadata.get("source") or metadata.get("client") or "").strip()
+        or _known_client_from_user_agent(user_agent)
+    )
+    if api_shape == "openai-chat" and detected_client == "cline":
+        metadata.setdefault("source", "cline")
+        metadata.setdefault("client", "cline")
+        metadata.setdefault("client_compatibility", "openai")
+        metadata["health_tracking_enabled"] = True
+    elif api_shape in {"openai-chat", "openai-responses", "anthropic-messages"}:
+        metadata.setdefault("source", detected_client or api_shape)
+        metadata.setdefault("client_compatibility", _compatibility_label(api_shape))
+        metadata["health_tracking_enabled"] = True
+    else:
+        metadata.setdefault("source", detected_client or "native")
+        metadata.setdefault("client_compatibility", _compatibility_label(api_shape))
+        metadata.setdefault("health_tracking_enabled", True)
+    hub.setdefault("source", metadata.get("source"))
+    hub.setdefault("client_compatibility", metadata.get("client_compatibility"))
+    hub.setdefault("health_tracking_enabled", True)
+    raw["agent_hub"] = hub
+    return replace(request, metadata=metadata, raw=raw)
+
+
+def _compatibility_label(api_shape: str) -> str:
+    if api_shape in {"openai-chat", "openai-responses"}:
+        return "openai"
+    if api_shape == "anthropic-messages":
+        return "anthropic"
+    return "native"
 
 
 def _known_client_from_user_agent(value: str) -> str:

@@ -85,6 +85,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(local_route.agents, free_local_agent_names())
         self.assertEqual(config.agents["ollama-kimi-cloud"].model, "kimi-k2.6:cloud")
         self.assertEqual(config.agents["ollama-qwen-coder"].timeout_seconds, 300.0)
+        self.assertIsNone(config.agents["ollama-qwen-coder"].max_tokens)
+        self.assertIsNone(config.agents["codex"].max_tokens)
+        self.assertEqual(config.native_stream_failure_policy, "recover")
+        self.assertIsNone(config.compatibility_mode["max_context_tokens"])
+        self.assertTrue(config.routing["unlimited_default"])
+        self.assertEqual(config.routing["max_tokens_mode"], "auto")
+        self.assertEqual(config.routing["context_budget_mode"], "auto")
+        self.assertTrue(config.routing["auto_failover"])
+        self.assertTrue(config.routing["failover_on_slow_stream"])
+        self.assertTrue(config.routing["failover_on_quota_exhaustion"])
+        self.assertTrue(config.routing["continue_after_output_limit"])
+        self.assertEqual(config.routing["max_provider_attempts"], 5)
         self.assertTrue(is_free_agent(config.agents["custom-local"]))
         self.assertTrue(is_free_agent(config.agents["ollama-qwen-coder"]))
 
@@ -115,6 +127,42 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(data["agent_context_budget_tokens"], 12345)
         self.assertFalse(data["agent_context_compaction_enabled"])
         self.assertFalse(data["prefer_multi_file_patches"])
+
+    def test_unlimited_routing_settings_round_trip(self) -> None:
+        config = config_from_dict(
+            {
+                "routing": {
+                    "unlimited_default": True,
+                    "max_tokens_mode": "auto",
+                    "context_budget_mode": "auto",
+                    "auto_failover": True,
+                    "auto_retry": True,
+                    "free_first": False,
+                    "prefer_available_quota": True,
+                    "failover_on_slow_stream": False,
+                    "failover_on_quota_exhaustion": True,
+                    "continue_after_output_limit": True,
+                    "max_provider_attempts": 7,
+                    "slow_first_token_timeout_seconds": 3,
+                    "stream_stall_timeout_seconds": 4,
+                    "min_tokens_per_second": 1.5,
+                    "cooldown_rate_limit_seconds": 9,
+                    "cooldown_overload_seconds": 8,
+                    "cooldown_quota_seconds": 99,
+                },
+                "agents": [],
+            }
+        )
+
+        self.assertEqual(config.routing["max_provider_attempts"], 7)
+        self.assertEqual(config.routing["max_tokens_mode"], "auto")
+        self.assertFalse(config.routing["free_first"])
+        self.assertFalse(config.routing["failover_on_slow_stream"])
+        self.assertEqual(config.quota_cooldown_seconds, 99)
+        self.assertEqual(config.rate_limit_cooldown_seconds, 9)
+        data = config_to_dict(config)
+        self.assertEqual(data["routing"]["stream_stall_timeout_seconds"], 4.0)
+        self.assertEqual(data["routing"]["cooldown_quota_seconds"], 99.0)
 
     def test_phase5_hardening_settings_round_trip(self) -> None:
         config = config_from_dict(

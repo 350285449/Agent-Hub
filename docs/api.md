@@ -107,9 +107,15 @@ limits, routing capabilities, context diagnostics, and enabled features.
 
 ```sh
 curl http://127.0.0.1:8787/v1/status
+curl http://127.0.0.1:8787/v1/routing/status
+curl http://127.0.0.1:8787/v1/routing/last-decision
+curl http://127.0.0.1:8787/v1/routing/test-failover
 curl http://127.0.0.1:8787/v1/routing-history
 curl http://127.0.0.1:8787/v1/provider-scores
 curl http://127.0.0.1:8787/v1/provider-health
+curl http://127.0.0.1:8787/v1/limits
+curl http://127.0.0.1:8787/v1/usage
+curl http://127.0.0.1:8787/v1/client-sources
 curl http://127.0.0.1:8787/v1/events
 curl http://127.0.0.1:8787/v1/tools
 curl http://127.0.0.1:8787/v1/workflows/status

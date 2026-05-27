@@ -50,7 +50,7 @@ Recommended config for Cline:
   "compatibility_mode": {
     "minimal_tool_schema": true,
     "reduced_repo_context": true,
-    "max_context_tokens": 12000
+    "max_context_tokens": null
   }
 }
 ```

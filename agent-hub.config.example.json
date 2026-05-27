@@ -9,7 +9,26 @@
   "approval_mode": "auto",
   "cline_compatibility_mode": true,
   "force_compatibility_streaming": true,
-  "native_stream_failure_policy": "terminate",
+  "native_stream_failure_policy": "recover",
+  "routing": {
+    "unlimited_default": true,
+    "max_tokens_mode": "auto",
+    "context_budget_mode": "auto",
+    "auto_failover": true,
+    "auto_retry": true,
+    "free_first": true,
+    "prefer_available_quota": true,
+    "failover_on_slow_stream": true,
+    "failover_on_quota_exhaustion": true,
+    "continue_after_output_limit": true,
+    "max_provider_attempts": 5,
+    "slow_first_token_timeout_seconds": 20,
+    "stream_stall_timeout_seconds": 30,
+    "min_tokens_per_second": 2,
+    "cooldown_rate_limit_seconds": 120,
+    "cooldown_overload_seconds": 60,
+    "cooldown_quota_seconds": 3600
+  },
   "debug_raw_provider_responses": true,
   "diagnostics_auth_token_env": "AGENT_HUB_DIAGNOSTICS_TOKEN",
   "free_only": true,
@@ -35,7 +54,7 @@
   "compatibility_mode": {
     "minimal_tool_schema": true,
     "reduced_repo_context": true,
-    "max_context_tokens": 12000
+    "max_context_tokens": null
   },
   "context_cache_enabled": true,
   "context_cache_max_entries": 128,

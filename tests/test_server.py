@@ -458,6 +458,24 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("agent-hub-coding", limits["available_models"])
             self.assertEqual(models["object"], "list")
 
+    def test_unknown_quota_is_reported_as_unknown_not_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                limits = _get_json(f"{base}/v1/limits")
+                provider_health = _get_json(f"{base}/v1/provider-health")
+            finally:
+                _stop(server, thread)
+
+            tooly_limits = next(row for row in limits["limits"] if row["agent"] == "tooly")
+            self.assertEqual(tooly_limits["remaining"], "unknown")
+            self.assertEqual(tooly_limits["quota_state"], "unknown")
+            self.assertIsNone(tooly_limits["tokens_remaining"])
+            self.assertEqual(provider_health["health"]["tooly"]["remaining"], "unknown")
+
     def test_openai_compatible_response_includes_limit_headers_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _compat_config(Path(tmp))
@@ -514,6 +532,35 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(permissions["object"], "agent_hub.permissions")
             self.assertEqual(metrics["object"], "agent_hub.metrics")
             self.assertIn("routing_decisions", metrics)
+
+    def test_v1_routing_diagnostics_endpoints_are_exposed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            server.router.provider_factory = _QuotaProvider
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                _post_json(
+                    f"{base}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+                status = _get_json(f"{base}/v1/routing/status")
+                last = _get_json(f"{base}/v1/routing/last-decision")
+                failover = _get_json(f"{base}/v1/routing/test-failover")
+                sources = _get_json(f"{base}/v1/client-sources")
+                usage = _get_json(f"{base}/v1/usage")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(status["object"], "agent_hub.routing.status")
+            self.assertEqual(last["object"], "agent_hub.routing.last_decision")
+            self.assertTrue(failover["dry_run"])
+            self.assertEqual(sources["object"], "agent_hub.client_sources")
+            self.assertEqual(usage["object"], "agent_hub.usage")
 
     def test_health_exposes_capability_graph_and_token_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -686,6 +733,31 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(diagnostics["preserved_todo_count"], 1)
             self.assertEqual(diagnostics["active_files_detected"], ["tests/test_cli.py"])
             self.assertEqual(context["summary"]["preserved_tool_results"], 1)
+
+    def test_cline_openai_requests_attach_internal_health_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            server.router.provider_factory = _QuotaProvider
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                _post_json(
+                    f"{base}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                    headers={"User-Agent": "Cline/3.0"},
+                )
+                health = _get_json(f"{base}/v1/provider-health")
+            finally:
+                _stop(server, thread)
+
+            row = health["health"]["tooly"]
+            self.assertEqual(row["last_request_source"], "cline")
+            self.assertEqual(row["last_route"], "coding")
+            self.assertTrue(row["last_input_tokens"] >= 1)
 
     def test_openai_responses_debug_request_keeps_content_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -32,7 +32,26 @@ DEFAULT_REPO_IGNORE_PATTERNS = [
 DEFAULT_COMPATIBILITY_MODE = {
     "minimal_tool_schema": True,
     "reduced_repo_context": True,
-    "max_context_tokens": 12000,
+    "max_context_tokens": None,
+}
+DEFAULT_ROUTING_CONFIG = {
+    "unlimited_default": True,
+    "max_tokens_mode": "auto",
+    "context_budget_mode": "auto",
+    "auto_failover": True,
+    "auto_retry": True,
+    "free_first": True,
+    "prefer_available_quota": True,
+    "failover_on_slow_stream": True,
+    "failover_on_quota_exhaustion": True,
+    "continue_after_output_limit": True,
+    "max_provider_attempts": 5,
+    "slow_first_token_timeout_seconds": 20,
+    "stream_stall_timeout_seconds": 30,
+    "min_tokens_per_second": 2,
+    "cooldown_rate_limit_seconds": 120,
+    "cooldown_overload_seconds": 60,
+    "cooldown_quota_seconds": 3600,
 }
 
 
@@ -130,7 +149,7 @@ class HubConfig:
     context_mode: str = "balanced"
     cline_compatibility_mode: bool = True
     force_compatibility_streaming: bool = False
-    native_stream_failure_policy: str = "terminate"
+    native_stream_failure_policy: str = "recover"
     debug_raw_provider_responses: bool = False
     diagnostics_auth_token: str | None = None
     diagnostics_auth_token_env: str | None = None
@@ -164,8 +183,9 @@ class HubConfig:
     auto_enable_available_providers: bool = True
     auto_detect_local_models: bool = True
     local_model_probe_timeout_seconds: float = 0.35
-    quota_cooldown_seconds: float = 1800.0
-    rate_limit_cooldown_seconds: float = 300.0
+    quota_cooldown_seconds: float = 3600.0
+    rate_limit_cooldown_seconds: float = 120.0
+    routing: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_ROUTING_CONFIG))
     approval_mode: str = "auto"
     enterprise_mode_enabled: bool = False
     enterprise_default_workspace_id: str = "default"
@@ -262,7 +282,7 @@ def _ollama_cloud_agent(name: str, model: str) -> AgentConfig:
         base_url=os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
         free=True,
         timeout_seconds=180.0,
-        max_tokens=4096,
+        max_tokens=None,
         cooldown_seconds=10.0,
         context_window=128_000,
         supports_json=True,
@@ -275,7 +295,7 @@ def free_local_config() -> HubConfig:
 
     local_model = os.environ.get("AGENT_HUB_LOCAL_MODEL", "local-model")
     local_base_url = os.environ.get("AGENT_HUB_LOCAL_BASE_URL", "http://127.0.0.1:8000")
-    local_max_tokens = _env_int("AGENT_HUB_LOCAL_MAX_TOKENS", 4096)
+    local_max_tokens = _env_optional_int("AGENT_HUB_LOCAL_MAX_TOKENS")
     local_context_window = _env_int("AGENT_HUB_LOCAL_CONTEXT_WINDOW", 8192)
     local_timeout = _env_float("AGENT_HUB_LOCAL_TIMEOUT_SECONDS", 15.0)
 
@@ -322,7 +342,7 @@ def free_local_config() -> HubConfig:
             base_url=os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
             free=True,
             timeout_seconds=300.0,
-            max_tokens=4096,
+            max_tokens=None,
             cooldown_seconds=10.0,
             context_window=32_768,
             coding_score=0.75,
@@ -341,7 +361,7 @@ def free_local_config() -> HubConfig:
             base_url=os.environ.get("AGENT_HUB_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
             free=True,
             timeout_seconds=300.0,
-            max_tokens=4096,
+            max_tokens=None,
             cooldown_seconds=10.0,
             context_window=32_768,
             coding_score=0.6,
@@ -359,7 +379,7 @@ def free_local_config() -> HubConfig:
             base_url=os.environ.get("AGENT_HUB_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234"),
             free=True,
             timeout_seconds=30.0,
-            max_tokens=4096,
+            max_tokens=None,
             cooldown_seconds=10.0,
             context_window=32_768,
             coding_score=0.55,
@@ -376,7 +396,7 @@ def free_local_config() -> HubConfig:
             base_url=os.environ.get("AGENT_HUB_LOCALAI_BASE_URL", "http://127.0.0.1:8080"),
             free=True,
             timeout_seconds=30.0,
-            max_tokens=4096,
+            max_tokens=None,
             cooldown_seconds=10.0,
             context_window=8192,
             coding_score=0.45,
@@ -392,7 +412,7 @@ def free_local_config() -> HubConfig:
             base_url=os.environ.get("AGENT_HUB_VLLM_BASE_URL", "http://127.0.0.1:8000"),
             free=True,
             timeout_seconds=30.0,
-            max_tokens=4096,
+            max_tokens=None,
             cooldown_seconds=10.0,
             context_window=local_context_window,
             coding_score=0.65,
@@ -414,7 +434,7 @@ def free_local_config() -> HubConfig:
             free=True,
             api_key_env=os.environ.get("AGENT_HUB_CODEX_API_KEY_ENV", "OPENAI_API_KEY"),
             timeout_seconds=60.0,
-            max_tokens=4096,
+            max_tokens=None,
             cooldown_seconds=30.0,
             context_window=128_000,
             coding_score=0.75,
@@ -435,7 +455,7 @@ def free_local_config() -> HubConfig:
             free=True,
             api_key_env=os.environ.get("AGENT_HUB_CLAUDE_API_KEY_ENV", "ANTHROPIC_API_KEY"),
             timeout_seconds=60.0,
-            max_tokens=4096,
+            max_tokens=None,
             cooldown_seconds=30.0,
             context_window=200_000,
             coding_score=0.75,
@@ -456,7 +476,7 @@ def free_local_config() -> HubConfig:
             free=True,
             api_key_env=os.environ.get("AGENT_HUB_GEMINI_API_KEY_ENV", "GEMINI_API_KEY"),
             timeout_seconds=60.0,
-            max_tokens=4096,
+            max_tokens=None,
             cooldown_seconds=30.0,
             context_window=1_000_000,
             coding_score=0.75,
@@ -480,7 +500,7 @@ def free_local_config() -> HubConfig:
             free=True,
             api_key_env=os.environ.get("AGENT_HUB_CHATGPT_API_KEY_ENV", "OPENAI_API_KEY"),
             timeout_seconds=60.0,
-            max_tokens=4096,
+            max_tokens=None,
             cooldown_seconds=30.0,
             context_window=128_000,
             coding_score=0.75,
@@ -511,7 +531,7 @@ def free_local_config() -> HubConfig:
         context_mode="balanced",
         cline_compatibility_mode=True,
         force_compatibility_streaming=False,
-        native_stream_failure_policy="terminate",
+        native_stream_failure_policy="recover",
         debug_raw_provider_responses=False,
         allow_shell_tools=True,
         shell_command_policy="ask",
@@ -528,6 +548,7 @@ def free_local_config() -> HubConfig:
         free_only=True,
         auto_enable_available_providers=True,
         auto_detect_local_models=True,
+        routing=dict(DEFAULT_ROUTING_CONFIG),
         approval_mode="ask",
         debug_echo_enabled=False,
         fast_write_finalize=False,
@@ -611,6 +632,7 @@ def default_agent_names() -> list[str]:
 def config_from_dict(raw: dict[str, Any]) -> HubConfig:
     """Convert the JSON-compatible config shape into dataclass instances."""
 
+    routing = _normalize_routing_config(raw.get("routing"))
     agents = {
         item["name"]: AgentConfig(
             name=item["name"],
@@ -687,7 +709,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             False,
         ),
         native_stream_failure_policy=_normalize_native_stream_failure_policy(
-            raw.get("native_stream_failure_policy", "terminate")
+            raw.get("native_stream_failure_policy", "recover")
         ),
         debug_raw_provider_responses=_bool_with_default(
             raw.get("debug_raw_provider_responses"),
@@ -772,8 +794,13 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         local_model_probe_timeout_seconds=float(
             raw.get("local_model_probe_timeout_seconds", 0.35)
         ),
-        quota_cooldown_seconds=float(raw.get("quota_cooldown_seconds", 1800.0)),
-        rate_limit_cooldown_seconds=float(raw.get("rate_limit_cooldown_seconds", 300.0)),
+        quota_cooldown_seconds=float(
+            raw.get("quota_cooldown_seconds", routing["cooldown_quota_seconds"])
+        ),
+        rate_limit_cooldown_seconds=float(
+            raw.get("rate_limit_cooldown_seconds", routing["cooldown_rate_limit_seconds"])
+        ),
+        routing=routing,
         approval_mode=_normalize_approval_mode(raw.get("approval_mode", "ask")),
         enterprise_mode_enabled=_bool_with_default(raw.get("enterprise_mode_enabled"), False),
         enterprise_default_workspace_id=str(raw.get("enterprise_default_workspace_id") or "default"),
@@ -913,6 +940,7 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "local_model_probe_timeout_seconds": config.local_model_probe_timeout_seconds,
         "quota_cooldown_seconds": config.quota_cooldown_seconds,
         "rate_limit_cooldown_seconds": config.rate_limit_cooldown_seconds,
+        "routing": config.routing,
         "approval_mode": config.approval_mode,
         "enterprise_mode_enabled": config.enterprise_mode_enabled,
         "enterprise_default_workspace_id": config.enterprise_default_workspace_id,
@@ -1059,6 +1087,18 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_optional_int(name: str) -> int | None:
+    """Read an optional integer env var."""
+
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _env_float(name: str, default: float) -> float:
     """Read a float env var, falling back when unset or invalid."""
 
@@ -1128,10 +1168,14 @@ def _normalize_validation_mode(value: Any) -> str:
 
 
 def _normalize_native_stream_failure_policy(value: Any) -> str:
-    text = str(value or "terminate").strip().lower().replace("-", "_")
-    if text in {"terminate", "retry_same_provider", "fallback_provider"}:
+    text = str(value or "recover").strip().lower().replace("-", "_")
+    if text in {"terminate", "retry_same_provider", "fallback_provider", "recover"}:
         return text
-    return "terminate"
+    if text in {"retry", "retry_provider"}:
+        return "retry_same_provider"
+    if text in {"fallback", "failover", "failover_provider"}:
+        return "fallback_provider"
+    return "recover"
 
 
 def _normalize_context_change_bar_mode(value: Any) -> str:
@@ -1214,6 +1258,134 @@ def _normalize_context_cache_max_entries(value: Any) -> int:
     return max(0, min(number, 10_000))
 
 
+def _normalize_routing_config(value: Any) -> dict[str, Any]:
+    source = dict(value) if isinstance(value, dict) else {}
+    defaults = dict(DEFAULT_ROUTING_CONFIG)
+    return {
+        "unlimited_default": _bool_with_default(
+            source.get("unlimited_default"),
+            bool(defaults["unlimited_default"]),
+        ),
+        "max_tokens_mode": _normalize_auto_mode(
+            source.get("max_tokens_mode"),
+            str(defaults["max_tokens_mode"]),
+        ),
+        "context_budget_mode": _normalize_auto_mode(
+            source.get("context_budget_mode"),
+            str(defaults["context_budget_mode"]),
+        ),
+        "auto_failover": _bool_with_default(
+            source.get("auto_failover"),
+            bool(defaults["auto_failover"]),
+        ),
+        "auto_retry": _bool_with_default(
+            source.get("auto_retry"),
+            bool(defaults["auto_retry"]),
+        ),
+        "free_first": _bool_with_default(
+            source.get("free_first"),
+            bool(defaults["free_first"]),
+        ),
+        "prefer_available_quota": _bool_with_default(
+            source.get("prefer_available_quota"),
+            bool(defaults["prefer_available_quota"]),
+        ),
+        "failover_on_slow_stream": _bool_with_default(
+            source.get("failover_on_slow_stream"),
+            bool(defaults["failover_on_slow_stream"]),
+        ),
+        "failover_on_quota_exhaustion": _bool_with_default(
+            source.get("failover_on_quota_exhaustion"),
+            bool(defaults["failover_on_quota_exhaustion"]),
+        ),
+        "continue_after_output_limit": _bool_with_default(
+            source.get("continue_after_output_limit"),
+            bool(defaults["continue_after_output_limit"]),
+        ),
+        "max_provider_attempts": _normalize_positive_int(
+            source.get("max_provider_attempts"),
+            int(defaults["max_provider_attempts"]),
+            minimum=1,
+            maximum=50,
+        ),
+        "slow_first_token_timeout_seconds": _normalize_positive_float(
+            source.get("slow_first_token_timeout_seconds"),
+            float(defaults["slow_first_token_timeout_seconds"]),
+            minimum=0.1,
+            maximum=3600.0,
+        ),
+        "stream_stall_timeout_seconds": _normalize_positive_float(
+            source.get("stream_stall_timeout_seconds"),
+            float(defaults["stream_stall_timeout_seconds"]),
+            minimum=0.1,
+            maximum=3600.0,
+        ),
+        "min_tokens_per_second": _normalize_positive_float(
+            source.get("min_tokens_per_second"),
+            float(defaults["min_tokens_per_second"]),
+            minimum=0.0,
+            maximum=1000.0,
+        ),
+        "cooldown_rate_limit_seconds": _normalize_positive_float(
+            source.get("cooldown_rate_limit_seconds"),
+            float(defaults["cooldown_rate_limit_seconds"]),
+            minimum=0.0,
+            maximum=86400.0,
+        ),
+        "cooldown_overload_seconds": _normalize_positive_float(
+            source.get("cooldown_overload_seconds"),
+            float(defaults["cooldown_overload_seconds"]),
+            minimum=0.0,
+            maximum=86400.0,
+        ),
+        "cooldown_quota_seconds": _normalize_positive_float(
+            source.get("cooldown_quota_seconds"),
+            float(defaults["cooldown_quota_seconds"]),
+            minimum=0.0,
+            maximum=604800.0,
+        ),
+    }
+
+
+def _normalize_positive_int(
+    value: Any,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(number, maximum))
+
+
+def _normalize_auto_mode(value: Any, default: str = "auto") -> str:
+    text = str(value or default).strip().lower().replace("-", "_")
+    if text in {"auto", "automatic", "adaptive", "provider"}:
+        return "auto"
+    if text in {"explicit", "manual", "user"}:
+        return "explicit"
+    if text in {"fixed", "configured"}:
+        return "fixed"
+    return default
+
+
+def _normalize_positive_float(
+    value: Any,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(number, maximum))
+
+
 def _normalize_compatibility_mode(value: Any) -> dict[str, Any]:
     source = dict(value) if isinstance(value, dict) else {}
     defaults = dict(DEFAULT_COMPATIBILITY_MODE)
@@ -1229,7 +1401,7 @@ def _normalize_compatibility_mode(value: Any) -> dict[str, Any]:
             source.get("reduced_repo_context"),
             bool(defaults["reduced_repo_context"]),
         ),
-        "max_context_tokens": max_context or defaults["max_context_tokens"],
+        "max_context_tokens": max_context,
     }
 
 

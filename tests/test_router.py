@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -91,6 +92,70 @@ class RouterTests(unittest.TestCase):
             health = router.health_snapshot()
             self.assertEqual(health["claude"]["last_error_type"], "quota_exhausted")
             self.assertGreater(health["claude"]["unavailable_until"], 0)
+
+    def test_slow_provider_fails_over_and_records_health_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                enable_load_balancing=False,
+                routing={
+                    "unlimited_default": True,
+                    "auto_failover": True,
+                    "auto_retry": True,
+                    "free_first": True,
+                    "prefer_available_quota": True,
+                    "max_provider_attempts": 5,
+                    "slow_first_token_timeout_seconds": 0.01,
+                    "stream_stall_timeout_seconds": 30,
+                    "min_tokens_per_second": 0,
+                    "cooldown_rate_limit_seconds": 1,
+                    "cooldown_overload_seconds": 1,
+                    "cooldown_quota_seconds": 1,
+                },
+                default_route=["slow", "fast"],
+                agents={
+                    "slow": AgentConfig(
+                        name="slow",
+                        provider="openai-compatible",
+                        model="slow-test",
+                        base_url="http://127.0.0.1:9999",
+                        supports_streaming=True,
+                        supports_json=True,
+                    ),
+                    "fast": AgentConfig(
+                        name="fast",
+                        provider="openai-compatible",
+                        model="fast-test",
+                        base_url="http://127.0.0.1:9999",
+                        supports_tools=True,
+                    ),
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    if self.agent.name == "slow":
+                        time.sleep(0.02)
+                        return ProviderResult(text="slow", model=self.agent.model)
+                    return ProviderResult(text="fast", model=self.agent.model)
+
+            response = AgentRouter(config, provider_factory=Provider).route(
+                HubRequest(session_id="abc", messages=[{"role": "user", "content": "hello"}])
+            )
+
+            self.assertEqual(response.agent, "fast")
+            self.assertEqual(calls, ["slow", "fast"])
+            self.assertEqual(response.failover[0].error_type, "provider_overloaded")
+            health = AgentRouter(config, provider_factory=Provider).health_snapshot()
+            self.assertEqual(health["slow"]["last_error_type"], "provider_overloaded")
+            self.assertIn("average_tokens_per_second", health["fast"])
+            self.assertIn("max_output_tokens", health["fast"])
+            self.assertTrue(health["slow"]["supports_streaming"])
 
     def test_provider_health_persists_across_router_restarts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -751,7 +816,7 @@ class RouterTests(unittest.TestCase):
                             finish_reason="length",
                         )
                     return ProviderResult(
-                        text="complete",
+                        text=" complete",
                         model=self.agent.model,
                         finish_reason="stop",
                     )
@@ -764,13 +829,47 @@ class RouterTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(calls, ["small", "large"])
-            self.assertEqual(response.text, "complete")
+            self.assertEqual(calls, ["small", "small", "large"])
+            self.assertEqual(response.text, "partial complete")
             self.assertEqual(response.failover[0].agent, "small")
             self.assertIn("token limit", response.failover[0].reason)
             public = response.to_native_dict()
             self.assertEqual(public["model"], "local-agent")
             self.assertNotIn("failover", public)
+
+    def test_output_limit_continues_on_same_provider_when_recovered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                default_route=["writer"],
+                agents={
+                    "writer": AgentConfig(
+                        name="writer",
+                        provider="openai-compatible",
+                        model="writer-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                },
+            )
+
+            class ContinuingProvider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    if len(calls) == 1:
+                        return ProviderResult(text="alpha ", model=self.agent.model, finish_reason="length")
+                    return ProviderResult(text="beta", model=self.agent.model, finish_reason="stop")
+
+            response = AgentRouter(config, provider_factory=ContinuingProvider).route(
+                HubRequest(session_id="abc", messages=[{"role": "user", "content": "write"}])
+            )
+
+            self.assertEqual(calls, ["writer", "writer"])
+            self.assertEqual(response.text, "alpha beta")
+            self.assertEqual(response.failover, [])
 
     def test_route_errors_when_no_agent_has_enough_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

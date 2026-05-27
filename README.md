@@ -190,7 +190,7 @@ Recommended IDE config:
   "compatibility_mode": {
     "minimal_tool_schema": true,
     "reduced_repo_context": true,
-    "max_context_tokens": 12000
+    "max_context_tokens": null
   }
 }
 ```
@@ -485,6 +485,12 @@ signals.
 Additional visibility endpoints:
 
 - `GET /v1/provider-health`
+- `GET /v1/routing/status`
+- `GET /v1/routing/last-decision`
+- `GET /v1/routing/test-failover`
+- `GET /v1/limits`
+- `GET /v1/usage`
+- `GET /v1/client-sources`
 - `GET /v1/events`
 - `GET /v1/tools`
 - `GET /v1/workflows/status`
@@ -914,9 +920,9 @@ step runs. The `echo` provider remains diagnostic only and cannot edit files.
 
 Each agent can set `context_window`. Before routing, Agent-Hub estimates input
 tokens from the messages, adds the requested output budget (`max_tokens` from the
-request, then the agent, then `4096`), and skips agents whose context window is
-too small. The estimate is intentionally rough, but it keeps obvious over-limit
-requests away from smaller local models.
+request, then an agent-configured value when present), and skips agents whose
+context window is too small. When no output budget is configured, routing stays
+in auto mode instead of applying a hidden default output cap.
 
 Provider/model failover is silent by default. If a request does not fit the
 primary control model, or a provider reports context/token pressure, Agent-Hub
