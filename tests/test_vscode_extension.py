@@ -86,6 +86,26 @@ class VscodeExtensionContributionTests(unittest.TestCase):
 
         self.assertTrue(setting["default"])
 
+    def test_extension_version_metadata_uses_package_json_source(self) -> None:
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        lock = json.loads((EXTENSION_DIR / "package-lock.json").read_text(encoding="utf-8"))
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertEqual(lock["version"], package["version"])
+        self.assertEqual(lock["packages"][""]["version"], package["version"])
+        self.assertNotRegex(source, r"EXTENSION_VERSION\s*=\s*['\"][0-9]")
+        self.assertIn("readExtensionPackageVersion", source)
+        self.assertIn("package.json", source)
+
+    def test_python_backend_version_is_separate_but_internally_consistent(self) -> None:
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        backend_version = (ROOT / "agent_hub" / "version.py").read_text(encoding="utf-8")
+
+        pyproject_version = pyproject.split('version = "', 1)[1].split('"', 1)[0]
+        base_version = backend_version.split('BASE_VERSION = "', 1)[1].split('"', 1)[0]
+
+        self.assertEqual(base_version, pyproject_version)
+
     def test_setup_helpers_are_registered_in_extension_source(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
 

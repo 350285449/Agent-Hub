@@ -138,6 +138,7 @@ class ConfigTests(unittest.TestCase):
                         "permission": "workspace_cloud",
                     }
                 ],
+                "enterprise_audit_retention_days": 30,
                 "agents": [],
             }
         )
@@ -154,6 +155,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(data["plugin_capability_grants"], {"provider.demo": ["provider.read"]})
         self.assertTrue(data["enterprise_mode_enabled"])
         self.assertEqual(data["enterprise_users"][0]["id"], "alice")
+        self.assertEqual(data["enterprise_audit_retention_days"], 30)
 
     def test_generated_config_reference_is_current(self) -> None:
         reference = Path("docs/config-reference.md").read_text(encoding="utf-8")

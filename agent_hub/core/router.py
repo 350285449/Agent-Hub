@@ -42,7 +42,6 @@ from ..permissions import (
     provider_trust_level,
 )
 from ..providers import Provider, ProviderError, create_provider
-from ..providers.base import StreamChunk
 from ..response_normalization import (
     safe_empty_provider_result,
     validate_provider_result,
@@ -50,6 +49,7 @@ from ..response_normalization import (
 from ..repository import repo_context_for_request
 from ..security.audit import record_provider_audit
 from ..session_store import SessionStore
+from ..streaming import normalize_stream_chunk
 from ..token_optimizer import ContextCache, TokenOptimizer
 from ..tools import ToolExecutionContext, ToolExecutionPipeline, create_builtin_registry
 from ..tools.loop import (
@@ -810,8 +810,9 @@ class AgentRouter:
         )
         try:
             for chunk in self.provider_manager.stream(agent, stream_request):
-                if not isinstance(chunk, StreamChunk):
-                    chunk = StreamChunk(text=str(chunk), delta={"content": str(chunk)}, model=agent.model)
+                chunk = normalize_stream_chunk(chunk, default_model=agent.model)
+                if chunk is None:
+                    continue
                 if chunk.text:
                     text_parts.append(chunk.text)
                     usage_tokens += max(1, len(chunk.text) // 4)

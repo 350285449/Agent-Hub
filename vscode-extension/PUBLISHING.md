@@ -1,14 +1,15 @@
 # Agent Hub VS Code Extension Publishing
 
 Use this checklist to package, smoke-test, and publish the VS Code extension in
-`vscode-extension/`.
+`vscode-extension/`. The canonical release flow is documented in
+`docs/PUBLISHING.md`, and release metadata comes from `release.json`.
 
 ## Current Release
 
 - Extension ID: `agent-hub.agent-hub-vscode`
 - Package name: `agent-hub-vscode`
-- Current version: `0.6.5`
-- Expected VSIX: `vscode-extension/agent-hub-vscode-0.6.5.vsix`
+- Current version: read from `vscode-extension/package.json`
+- Expected VSIX: `vscode-extension/agent-hub-vscode-<version>.vsix`
 
 ## Prerequisites
 
@@ -34,9 +35,14 @@ From the repository root:
 ```powershell
 git status --short
 node --version
+python scripts/generate_backend_snapshot.py
+python scripts/validate_backend_drift.py
+python scripts/validate_release.py
+python scripts/package_clean.py
 cd vscode-extension
 npm.cmd ci
 npm.cmd run check
+npm.cmd run check:version
 ```
 
 The worktree should contain only intentional release changes before publishing.
@@ -58,15 +64,37 @@ sh ./install-extension.sh --package-only
 This runs the backend staging step and creates:
 
 ```text
-vscode-extension/agent-hub-vscode-0.6.5.vsix
+vscode-extension/agent-hub-vscode-<version>.vsix
 ```
+
+Validate the packaged archive before installing or publishing:
+
+```powershell
+python .\scripts\validate_vsix_cleanliness.py
+```
+
+To remove stale local VSIX files and force a fresh package:
+
+```powershell
+python .\scripts\package_clean.py --apply --include-current-vsix
+cd vscode-extension
+npm.cmd run package
+```
+
+## Manual CI Release
+
+The GitHub Actions workflow `Manual VSIX Release` can be started with
+`workflow_dispatch`. It stamps CI build metadata into `release.json`,
+regenerates the backend snapshot, validates release metadata, runs tests,
+packages the VSIX, validates the archive, and uploads the VSIX as a workflow
+artifact. It does not publish to the Marketplace.
 
 ## Smoke-Test Locally
 
 Install the built VSIX into VS Code:
 
 ```powershell
-.\install-extension.ps1 --vsix .\vscode-extension\agent-hub-vscode-0.6.5.vsix
+.\install-extension.ps1 --vsix .\vscode-extension\agent-hub-vscode-<version>.vsix
 ```
 
 Reload VS Code, open a workspace, and run:
@@ -90,7 +118,7 @@ To publish the already-built VSIX instead:
 ```powershell
 cd vscode-extension
 $env:VSCE_PAT = "<marketplace-personal-access-token>"
-npx.cmd vsce publish --packagePath agent-hub-vscode-0.6.5.vsix --allow-missing-repository
+npx.cmd vsce publish --packagePath agent-hub-vscode-<version>.vsix --allow-missing-repository
 ```
 
 If the Marketplace reports that the current version already exists, choose a new version,
@@ -141,5 +169,5 @@ or publish with the token in the current shell:
 ```powershell
 cd vscode-extension
 $env:VSCE_PAT = "<marketplace-personal-access-token>"
-npx.cmd vsce publish --packagePath agent-hub-vscode-0.6.5.vsix --allow-missing-repository
+npx.cmd vsce publish --packagePath agent-hub-vscode-<version>.vsix --allow-missing-repository
 ```

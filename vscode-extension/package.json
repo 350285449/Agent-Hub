@@ -62,13 +62,21 @@
   "main": "./extension.js",
   "scripts": {
     "check": "node --check extension.js",
+    "check:version": "node scripts/check-version.js",
+    "check:vsix": "python ../scripts/validate_vsix_cleanliness.py",
+    "generate-backend-snapshot": "python ../scripts/generate_backend_snapshot.py",
+    "validate-backend-drift": "python ../scripts/validate_backend_drift.py",
+    "validate-release": "python ../scripts/validate_release.py",
+    "update-release-metadata": "python ../scripts/update_release_metadata.py",
+    "package-clean": "python ../scripts/package_clean.py",
+    "release-summary": "python ../scripts/release_summary.py",
     "compile": "npm run check",
     "test": "npm run check",
     "install-extension": "node scripts/install-extension.js",
     "mount": "node scripts/install-extension.js",
     "prepare-backend": "node scripts/prepare-backend.js",
-    "package": "npm run prepare-backend && npx @vscode/vsce package --allow-missing-repository",
-    "publish": "npm run prepare-backend && npx @vscode/vsce publish --allow-missing-repository"
+    "package": "npm run prepare-backend && npm run validate-backend-drift && npx @vscode/vsce package --allow-missing-repository && npm run check:vsix",
+    "publish": "npm run prepare-backend && npm run validate-release && npx @vscode/vsce publish --allow-missing-repository"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.9.1"

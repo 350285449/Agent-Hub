@@ -21,7 +21,8 @@ signatures, but does not execute plugin code.
 
 When the HTTP server is bound to a public host, diagnostic endpoints such as
 `/v1/provider-health`, `/v1/events`, `/v1/tools`, `/v1/workflows/status`, and
-`/v1/plugins` require a diagnostics token. Set `diagnostics_auth_token_env` for
+`/v1/plugins`, and `/v1/enterprise/audit` require a diagnostics token. Set
+`diagnostics_auth_token_env` for
 deployments. Enterprise permissions are optional; when
 `enterprise_mode_enabled` is true, sensitive provider and tool actions are
 checked against configured users, roles, and grants.
@@ -29,4 +30,7 @@ checked against configured users, roles, and grants.
 When enterprise mode is enabled, every sensitive permission decision is written
 to `.agent-hub/state/enterprise_audit.jsonl` with user, workspace, action,
 resource, allow/deny, reason, and timestamp. Audit rows are redacted before
-storage and before the diagnostics endpoint returns them.
+storage and before the diagnostics endpoint returns them. Audit exports can be
+filtered by user, workspace, action, allow/deny, and date range; set
+`enterprise_audit_retention_days` to limit exported diagnostics to recent
+events.

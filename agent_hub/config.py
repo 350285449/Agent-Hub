@@ -173,6 +173,7 @@ class HubConfig:
     enterprise_workspaces: list[dict[str, Any]] = field(default_factory=list)
     enterprise_roles: list[dict[str, Any]] = field(default_factory=list)
     enterprise_permission_grants: list[dict[str, Any]] = field(default_factory=list)
+    enterprise_audit_retention_days: int = 90
     debug_echo_enabled: bool = False
     fast_write_finalize: bool = False
     validation_mode: str = "basic"
@@ -780,6 +781,9 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         enterprise_workspaces=_dict_list(raw.get("enterprise_workspaces")),
         enterprise_roles=_dict_list(raw.get("enterprise_roles")),
         enterprise_permission_grants=_dict_list(raw.get("enterprise_permission_grants")),
+        enterprise_audit_retention_days=_normalize_retention_days(
+            raw.get("enterprise_audit_retention_days", 90)
+        ),
         debug_echo_enabled=_bool_with_default(raw.get("debug_echo_enabled"), False),
         fast_write_finalize=_bool_with_default(raw.get("fast_write_finalize"), False),
         validation_mode=_normalize_validation_mode(raw.get("validation_mode", "basic")),
@@ -916,6 +920,7 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "enterprise_workspaces": config.enterprise_workspaces,
         "enterprise_roles": config.enterprise_roles,
         "enterprise_permission_grants": config.enterprise_permission_grants,
+        "enterprise_audit_retention_days": config.enterprise_audit_retention_days,
         "debug_echo_enabled": config.debug_echo_enabled,
         "fast_write_finalize": config.fast_write_finalize,
         "validation_mode": config.validation_mode,
@@ -1158,6 +1163,14 @@ def _normalize_max_tool_iterations(value: Any) -> int:
     except (TypeError, ValueError):
         number = 4
     return max(0, min(number, 20))
+
+
+def _normalize_retention_days(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 90
+    return max(0, min(number, 3650))
 
 
 def _normalize_repo_context_max_files(value: Any) -> int:

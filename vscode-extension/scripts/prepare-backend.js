@@ -1,42 +1,39 @@
 "use strict";
 
-const fs = require("fs");
+const cp = require("child_process");
 const path = require("path");
 
 const extensionRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(extensionRoot, "..");
-const backendRoot = path.join(extensionRoot, "backend");
-const sourcePackage = path.join(repoRoot, "agent_hub");
+const scriptPath = path.join(repoRoot, "scripts", "generate_backend_snapshot.py");
 
-if (!fs.existsSync(path.join(sourcePackage, "__main__.py"))) {
-  throw new Error(`Could not find Agent Hub Python package at ${sourcePackage}`);
+const candidates = [];
+if (process.env.PYTHON) {
+  candidates.push({ command: process.env.PYTHON, args: [] });
 }
+candidates.push(
+  { command: "python", args: [] },
+  { command: "python3", args: [] },
+  { command: "py", args: ["-3"] }
+);
 
-fs.rmSync(backendRoot, { recursive: true, force: true });
-fs.mkdirSync(backendRoot, { recursive: true });
-copyDirectory(sourcePackage, path.join(backendRoot, "agent_hub"));
-
-for (const file of ["pyproject.toml", "README.md"]) {
-  const source = path.join(repoRoot, file);
-  if (fs.existsSync(source)) {
-    fs.copyFileSync(source, path.join(backendRoot, file));
-  }
-}
-
-console.log(`Prepared bundled Agent Hub backend at ${backendRoot}`);
-
-function copyDirectory(source, destination) {
-  fs.mkdirSync(destination, { recursive: true });
-  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
-    if (entry.name === "__pycache__" || entry.name.endsWith(".pyc")) {
-      continue;
+let lastError = "";
+for (const candidate of candidates) {
+  const result = cp.spawnSync(
+    candidate.command,
+    [...candidate.args, scriptPath],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: "pipe"
     }
-    const sourcePath = path.join(source, entry.name);
-    const destinationPath = path.join(destination, entry.name);
-    if (entry.isDirectory()) {
-      copyDirectory(sourcePath, destinationPath);
-    } else if (entry.isFile()) {
-      fs.copyFileSync(sourcePath, destinationPath);
-    }
+  );
+  if (result.status === 0) {
+    process.stdout.write(result.stdout || "");
+    process.stderr.write(result.stderr || "");
+    process.exit(0);
   }
+  lastError = `${candidate.command} ${candidate.args.join(" ")}: ${result.stderr || result.stdout || result.error || "failed"}`;
 }
+
+throw new Error(`Could not generate Agent Hub backend snapshot. Last error: ${lastError}`);

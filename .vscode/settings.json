@@ -10,7 +10,7 @@
     "agentHub.groupPlanCandidates": 1,
     "agentHub.agentMaxSteps": 50,
     "agentHub.allowShellTools": true,
-    "agentHub.maxTokens": 64000,
+    "agentHub.maxTokens": 1000000,
     "agentHub.autoStart": true,
     "python.testing.unittestArgs": [
         "-v",

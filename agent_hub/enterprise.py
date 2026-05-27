@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .observability import recent_events, record_event
+from .observability import record_event
 from .security.secrets import redact_secrets
 
 
@@ -241,8 +243,81 @@ class EnterprisePolicy:
         return allowed, "" if allowed else reason
 
 
-def enterprise_audit_events(state_dir: str | Path, *, limit: int = 100) -> list[dict[str, Any]]:
-    return redact_secrets(recent_events(state_dir, "enterprise_audit", limit=limit))
+def enterprise_audit_events(
+    state_dir: str | Path,
+    *,
+    limit: int = 100,
+    user: str | None = None,
+    workspace: str | None = None,
+    action: str | None = None,
+    allowed: bool | None = None,
+    start_at: Any = None,
+    end_at: Any = None,
+    retention_days: int | None = None,
+    now: float | None = None,
+) -> list[dict[str, Any]]:
+    return export_enterprise_audit(
+        state_dir,
+        limit=limit,
+        user=user,
+        workspace=workspace,
+        action=action,
+        allowed=allowed,
+        start_at=start_at,
+        end_at=end_at,
+        retention_days=retention_days,
+        now=now,
+    )["events"]
+
+
+def export_enterprise_audit(
+    state_dir: str | Path,
+    *,
+    limit: int = 100,
+    user: str | None = None,
+    workspace: str | None = None,
+    action: str | None = None,
+    allowed: bool | None = None,
+    start_at: Any = None,
+    end_at: Any = None,
+    retention_days: int | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    events = _enterprise_audit_jsonl_events(state_dir)
+    events = _filter_enterprise_audit_events(
+        events,
+        user=user,
+        workspace=workspace,
+        action=action,
+        allowed=allowed,
+        start_at=start_at,
+        end_at=end_at,
+        retention_days=retention_days,
+        now=now,
+    )
+    try:
+        limit = int(limit or 100)
+    except (TypeError, ValueError):
+        limit = 100
+    limit = max(1, min(limit, 1000))
+    events = events[-limit:]
+    return redact_secrets(
+        {
+            "object": "agent_hub.enterprise_audit_export",
+            "count": len(events),
+            "events": events,
+            "filters": {
+                "user": user or "",
+                "workspace": workspace or "",
+                "action": action or "",
+                "allowed": allowed,
+                "start_at": start_at,
+                "end_at": end_at,
+                "retention_days": retention_days,
+                "limit": limit,
+            },
+        }
+    )
 
 
 def enterprise_subject_from_request(request: Any) -> str:
@@ -267,6 +342,102 @@ def enterprise_workspace_from_request(config: Any, request: Any) -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return str(getattr(config, "enterprise_default_workspace_id", "default") or "default")
+
+
+def _enterprise_audit_jsonl_events(state_dir: str | Path) -> list[dict[str, Any]]:
+    path = Path(state_dir) / "enterprise_audit.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            events.append(value)
+    return events
+
+
+def _filter_enterprise_audit_events(
+    events: list[dict[str, Any]],
+    *,
+    user: str | None,
+    workspace: str | None,
+    action: str | None,
+    allowed: bool | None,
+    start_at: Any,
+    end_at: Any,
+    retention_days: int | None,
+    now: float | None,
+) -> list[dict[str, Any]]:
+    start = _parse_audit_timestamp(start_at)
+    end = _parse_audit_timestamp(end_at)
+    cutoff = _retention_cutoff(retention_days, now=now)
+    filtered: list[dict[str, Any]] = []
+    for event in events:
+        timestamp = _event_timestamp(event)
+        if cutoff is not None and (timestamp is None or timestamp < cutoff):
+            continue
+        if start is not None and (timestamp is None or timestamp < start):
+            continue
+        if end is not None and (timestamp is None or timestamp > end):
+            continue
+        if user and str(event.get("user") or event.get("actor_id") or "") != user:
+            continue
+        if workspace and str(event.get("workspace") or event.get("workspace_id") or "") != workspace:
+            continue
+        if action and str(event.get("action") or "") != action:
+            continue
+        if allowed is not None and bool(event.get("allowed")) is not allowed:
+            continue
+        filtered.append(event)
+    return filtered
+
+
+def _retention_cutoff(retention_days: int | None, *, now: float | None) -> float | None:
+    if retention_days is None:
+        return None
+    try:
+        days = int(retention_days)
+    except (TypeError, ValueError):
+        return None
+    if days <= 0:
+        return None
+    return (now if now is not None else time.time()) - (days * 24 * 60 * 60)
+
+
+def _event_timestamp(event: dict[str, Any]) -> float | None:
+    for key in ("created_at", "timestamp", "time"):
+        parsed = _parse_audit_timestamp(event.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_audit_timestamp(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _permission_names(*, action: str, category: str) -> set[str]:
@@ -332,5 +503,6 @@ __all__ = [
     "WorkspaceRef",
     "enterprise_subject_from_request",
     "enterprise_audit_events",
+    "export_enterprise_audit",
     "enterprise_workspace_from_request",
 ]

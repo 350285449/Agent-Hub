@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: vscode-extension/package-lock.json
+
+      - name: Install extension dependencies and verify package-lock
+        working-directory: vscode-extension
+        run: npm ci
+
+      - name: Compile Python sources
+        run: python -m compileall -q agent_hub scripts
+
+      - name: Validate config reference
+        run: python scripts/check_config_reference.py
+
+      - name: Validate config migration coverage
+        run: python scripts/check_config_migration_coverage.py
+
+      - name: Generate backend snapshot
+        run: python scripts/generate_backend_snapshot.py
+
+      - name: Validate backend snapshot drift
+        run: python scripts/validate_backend_drift.py
+
+      - name: Validate release manifest and version metadata
+        run: python scripts/validate_release.py
+
+      - name: Run Python unittest discovery
+        run: python -m unittest discover -s tests
+
+      - name: Check VS Code extension syntax
+        working-directory: vscode-extension
+        run: npm run check
+
+      - name: Check extension version consistency
+        working-directory: vscode-extension
+        run: npm run check:version
+
+      - name: Report stale package artifacts
+        working-directory: vscode-extension
+        run: npm run package-clean
+
+      - name: Package VSIX
+        working-directory: vscode-extension
+        run: npm run package
+
+      - name: Validate VSIX cleanliness and source package artifacts
+        run: python scripts/validate_vsix_cleanliness.py --check-source

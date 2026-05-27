@@ -310,6 +310,48 @@ class ResponseResilienceTests(unittest.TestCase):
             self.assertIn("Agent Hub stream recovery started", text)
             self.assertIn("retried", text)
 
+    def test_native_stream_retry_does_not_replay_unsafe_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            attempts = {"count": 0}
+            config = _routing_config(Path(tmp), ["native"])
+            config.native_stream_failure_policy = "retry_same_provider"
+            config.routes = [RouteRule(name="coding", agents=["native"])]
+            config.agents["native"].supports_streaming = True
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def supports_streaming(self) -> bool:
+                    return True
+
+                def stream(self, request: HubRequest):
+                    attempts["count"] += 1
+                    yield StreamChunk(text="partial", delta={"content": "partial"}, model=self.agent.model)
+                    raise ProviderError("interrupted", error_type="network")
+
+            server.router.provider_factory = Provider
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                text = _post_text(
+                    f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "stream": True,
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(attempts["count"], 1)
+            self.assertNotIn("Agent Hub stream recovery started", text)
+            self.assertIn("Provider stream interrupted", text)
+
     def test_native_stream_fallback_uses_second_provider_only_when_replay_safe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             attempts: list[str] = []
@@ -439,6 +481,7 @@ class ResponseResilienceTests(unittest.TestCase):
 
             self.assertIn("rescued", text)
             self.assertIn("done", text)
+            self.assertNotIn("malformed", text)
             self.assertIn("data: [DONE]", text)
 
     def test_context_safety_cap_reduces_large_requests(self) -> None:

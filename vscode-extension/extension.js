@@ -17,7 +17,7 @@ let statusBarItem = null;
 let lastActiveTextEditor = null;
 let serverLifecycleState = "Stopped";
 let lastServerMessage = "";
-const EXTENSION_VERSION = "0.7.4";
+const EXTENSION_VERSION = readExtensionPackageVersion();
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const SIDEBAR_VIEW_ID = "agentHub.sidebar";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
@@ -286,6 +286,18 @@ const SENSITIVE_PERMISSION_CATEGORIES = new Set([
   "shell_command",
   "workspace_cloud"
 ]);
+
+function readExtensionPackageVersion() {
+  try {
+    const manifestPath = path.join(__dirname, "package.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    return typeof manifest.version === "string" && manifest.version.trim()
+      ? manifest.version.trim()
+      : "0.0.0";
+  } catch (_error) {
+    return "0.0.0";
+  }
+}
 
 class PermissionManager {
   constructor(config = settings()) {

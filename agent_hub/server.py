@@ -7,16 +7,18 @@ import time
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs
 
 from .agent_runner import AgentRunner
 from .config import HubConfig, normalize_provider
 from .context import request_context_diagnostics
-from .enterprise import enterprise_audit_events
+from .enterprise import export_enterprise_audit
 from .evaluation import ProviderScoreStore
 from .models import HubRequest
 from .observability import metrics_snapshot, permission_snapshot, recent_events, record_event, usage_snapshot
 from .permissions import UNTRUSTED_EXTERNAL
 from .security.secrets import redact_secrets
+from .streaming import safe_stream_failure_chunk
 from .plugins import discover_plugins
 from .payloads import (
     anthropic_message_response,
@@ -170,7 +172,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_diagnostics_json(_plugins_body(self.server.config))
             return
         if path == "/v1/enterprise/audit":
-            self._send_diagnostics_json(_enterprise_audit_body(self.server.config))
+            self._send_diagnostics_json(_enterprise_audit_body(self.server.config, _request_query(self.path)))
             return
         if path == "/health":
             self._send_json(
@@ -1117,22 +1119,11 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     return
                 except Exception:
                     pass
-            write_data(
-                {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "content": "[Provider stream interrupted; switched to safe termination]"
-                            },
-                            "finish_reason": None,
-                        }
-                    ],
-                }
+            write_chunk(
+                safe_stream_failure_chunk(
+                    model=model,
+                    message="[Provider stream interrupted; switched to safe termination]",
+                )
             )
             write_data(
                 {
@@ -1531,12 +1522,25 @@ def _plugins_body(config: HubConfig) -> dict[str, Any]:
     return discover_plugins(config).to_dict()
 
 
-def _enterprise_audit_body(config: HubConfig) -> dict[str, Any]:
-    events = enterprise_audit_events(config.state_dir, limit=100)
+def _enterprise_audit_body(config: HubConfig, query: dict[str, str] | None = None) -> dict[str, Any]:
+    query = query or {}
+    export = export_enterprise_audit(
+        config.state_dir,
+        limit=_positive_int(query.get("limit"), default=100, maximum=1000),
+        user=query.get("user") or query.get("actor_id"),
+        workspace=query.get("workspace") or query.get("workspace_id"),
+        action=query.get("action"),
+        allowed=_allowed_query(query),
+        start_at=query.get("start_at") or query.get("from"),
+        end_at=query.get("end_at") or query.get("to"),
+        retention_days=getattr(config, "enterprise_audit_retention_days", None),
+    )
+    events = export["events"]
     return {
         "object": "agent_hub.enterprise_audit",
         "count": len(events),
         "recent": events,
+        "export": export,
     }
 
 
@@ -1935,6 +1939,37 @@ def _positive_int(value: Any, *, default: int, maximum: int) -> int:
 
 def _request_path(path: str) -> str:
     return path.split("?", 1)[0]
+
+
+def _request_query(path: str) -> dict[str, str]:
+    if "?" not in path:
+        return {}
+    parsed = parse_qs(path.split("?", 1)[1], keep_blank_values=False)
+    return {
+        key: values[-1]
+        for key, values in parsed.items()
+        if values
+    }
+
+
+def _allowed_query(query: dict[str, str]) -> bool | None:
+    if "allowed" in query:
+        return _query_bool(query["allowed"])
+    if "allow" in query and _query_bool(query["allow"]) is True:
+        return True
+    for key in ("deny", "denied"):
+        if key in query and _query_bool(query[key]) is True:
+            return False
+    return None
+
+
+def _query_bool(value: str) -> bool | None:
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "allow", "allowed"}:
+        return True
+    if text in {"0", "false", "no", "off", "deny", "denied"}:
+        return False
+    return None
 
 
 def _diagnostics_auth_error(config: HubConfig, headers: Any) -> tuple[dict[str, Any], int] | None:

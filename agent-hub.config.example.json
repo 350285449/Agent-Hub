@@ -58,6 +58,7 @@
   "enterprise_workspaces": [],
   "enterprise_roles": [],
   "enterprise_permission_grants": [],
+  "enterprise_audit_retention_days": 90,
   "include_raw_responses": false,
   "expose_routing_details": false,
   "default_route": [

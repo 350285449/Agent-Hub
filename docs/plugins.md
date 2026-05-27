@@ -54,8 +54,11 @@ register manifest metadata for provider, tool, workflow, router strategy, or
 memory/context capabilities. Inspect loaded manifests and registered metadata
 with `GET /v1/plugins`.
 
-Phase 6 also supports a trust registry. A registry entry can pin `id`,
-`version`, and `manifest_hash`, and can grant capability scopes such as
+Phase 7 also supports a trust registry lifecycle. A registry entry can set
+`status` to `trusted`, `disabled`, `revoked`, or `expired`; can pin `id`,
+`version`, `manifest_hash`, `issued_at`, and `expires_at`; can include optional
+publisher fields `publisher_id`, `publisher_name`, and `verified_publisher`;
+and can grant capability scopes such as
 `provider.read`, `provider.call`, `tool.register`, `workflow.register`,
 `memory.read`, `memory.write`, `filesystem.read`, `filesystem.write`, and
 `network.call`. Unsigned entries without a hash are rejected unless
@@ -63,5 +66,6 @@ Phase 6 also supports a trust registry. A registry entry can pin `id`,
 
 Plugin execution remains disabled by default. The sandbox interface checks
 requested scopes against configured grants and then denies execution unless
-`plugin_execution_enabled` is enabled; unrestricted third-party imports are not
-run by Agent Hub.
+`plugin_execution_enabled` is enabled. Future sandbox backends are named
+`disabled`, `local_process`, `docker`, and `wasm`, but unrestricted third-party
+imports are not run by Agent Hub.
