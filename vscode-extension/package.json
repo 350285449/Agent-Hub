@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub Workspace",
   "description": "Universal AI router, Cline/Claude Code gateway, and permissioned workspace-agent platform for VS Code.",
-  "version": "0.7.7",
+  "version": "0.7.9",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",

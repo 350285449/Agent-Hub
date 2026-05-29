@@ -4,6 +4,16 @@
 
 No changes yet.
 
+## 0.7.9
+
+- Packages the redesigned Agent Hub sidebar with control-center quick actions, setup progress, health score, and runtime statistics.
+
+## 0.7.8
+
+- Adds a clearer Agent Hub sidebar control center with a state-aware primary server action.
+- Adds runtime statistics cards, a health score, setup progress, quick actions, and health insights for providers, tokens, tools, routing, permissions, requests, and context.
+- Bumps the VS Code extension package metadata for Marketplace publishing.
+
 ## 0.7.5
 
 - Adds backend tool-call execution for Agent-Hub-owned built-in tools with max-iteration protection.

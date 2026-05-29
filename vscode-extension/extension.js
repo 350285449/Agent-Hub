@@ -449,6 +449,22 @@ class AgentHubSidebarProvider {
       await this.refresh();
       return;
     }
+    if (message.type === "openChat") {
+      openChat(this.context);
+      return;
+    }
+    if (message.type === "askAgent") {
+      await askAgent();
+      return;
+    }
+    if (message.type === "codeAgent") {
+      await runCodingAgent();
+      return;
+    }
+    if (message.type === "explainFile") {
+      await explainFile();
+      return;
+    }
     if (message.type === "openSettings") {
       await openAgentHubSettings();
       return;
@@ -542,6 +558,7 @@ async function sidebarDashboardState() {
     agentMode: config.agentMode,
     approvalMode: config.approvalMode,
     autoStart: config.autoStart,
+    extensionVersion: EXTENSION_VERSION,
     activeModel: null,
     providers: [],
     limits: [],
@@ -559,6 +576,8 @@ async function sidebarDashboardState() {
     },
     onboarding: await sidebarOnboardingState(config, null),
     contextDiagnostics: {},
+    statistics: sidebarStatistics(null, null, null, null, [], [], null),
+    insights: [],
     activity: [],
     routingChain: [],
     logs: lastServerMessage || "",
@@ -606,6 +625,8 @@ async function sidebarDashboardState() {
     dashboard.permissions = sidebarPermissionState(health, permissions, config);
     dashboard.tokenUsage = sidebarTokenUsage(usage, dashboard.limits);
     dashboard.contextDiagnostics = sidebarContextDiagnostics(debugContext);
+    dashboard.statistics = sidebarStatistics(health, usage, metrics, permissions, dashboard.providers, dashboard.limits, debugContext);
+    dashboard.insights = sidebarInsightRows(dashboard, metrics);
     dashboard.onboarding = await sidebarOnboardingState(config, health);
     dashboard.activity = sidebarActivityRows(usage, metrics, dashboard.failedModels);
     dashboard.routingChain = sidebarRoutingChain(health, limits);
@@ -724,6 +745,147 @@ function sidebarTokenUsage(usage, limits) {
     remainingTokens: minRemaining,
     remainingText: minRemaining === null ? "" : `${minRemaining} tok left`
   };
+}
+
+function sidebarStatistics(health, usage, metrics, permissions, providers, limits, debugContext) {
+  const providerRows = Array.isArray(providers) && providers.length ? providers : sidebarProviderRows(health, limits);
+  const counters = metrics && metrics.counters && typeof metrics.counters === "object" ? metrics.counters : {};
+  const metricUsage = metrics && metrics.usage && typeof metrics.usage === "object" ? metrics.usage : {};
+  const successfulCalls = Number(usage && usage.successful_provider_calls || counters.provider_successes || 0);
+  const failedCalls = Number(usage && usage.failed_provider_calls || counters.provider_failures || 0);
+  const totalCalls = successfulCalls + failedCalls;
+  const availableProviders = Number(metrics && metrics.providers_available || providerRows.filter((row) => row.available).length || 0);
+  const totalProviders = Number(metrics && metrics.providers_total || providerRows.length || 0);
+  const degradedProviders = Number(metrics && metrics.providers_degraded || providerRows.filter((row) => row.degraded).length || 0);
+  const unavailableProviders = Math.max(0, totalProviders - availableProviders);
+  const usageTotal = Number(usage && usage.total_tokens || metricUsage.total_tokens || 0);
+  const usageInput = Number(usage && usage.input_tokens || metricUsage.input_tokens || 0);
+  const usageOutput = Number(usage && usage.output_tokens || metricUsage.output_tokens || 0);
+  const toolExecutions = Number(usage && usage.tool_executions || metricUsage.tool_executions || counters.tool_executions || 0);
+  const permissionEvents = Number(usage && usage.permission_events || metricUsage.permission_events || 0);
+  const permissionCounts = permissions && permissions.counts && typeof permissions.counts === "object" ? permissions.counts : {};
+  const permissionAllowed = Number(permissionCounts.allowed || 0);
+  const permissionDenied = Number(permissionCounts.denied || 0);
+  const approvalRequired = Number(permissionCounts.approval_required || 0);
+  const routingFallbacks = Number(counters.routing_fallbacks || 0);
+  const streamFailures = Number(counters.stream_failures || 0);
+  const contextTruncations = Number(counters.context_truncations || 0);
+  const workflows = metrics && Array.isArray(metrics.workflow_events) ? metrics.workflow_events.length : 0;
+  const requests = metrics && Array.isArray(metrics.request_traces) ? metrics.request_traces.length : 0;
+  const recentFailures = metrics && Array.isArray(metrics.recent_failures) ? metrics.recent_failures.length : 0;
+  const debugSummary = debugContext && debugContext.summary && typeof debugContext.summary === "object" ? debugContext.summary : {};
+  const contextIncoming = Number(debugSummary.incoming_context_size || debugSummary.incoming_token_count || 0);
+  const contextProtected = Number(debugSummary.protected_token_count || 0);
+  const successRate = percent(successfulCalls, totalCalls);
+  const providerAvailabilityPercent = percent(availableProviders, totalProviders);
+  const healthScore = dashboardHealthScore({
+    providerAvailabilityPercent,
+    degradedProviders,
+    failedCalls,
+    totalCalls,
+    routingFallbacks,
+    permissionDenied,
+    contextTruncations,
+    streamFailures
+  });
+
+  return {
+    providersTotal: totalProviders,
+    providersAvailable: availableProviders,
+    providersDegraded: degradedProviders,
+    providersUnavailable: unavailableProviders,
+    providerAvailabilityPercent,
+    successfulCalls,
+    failedCalls,
+    totalCalls,
+    successRate,
+    failureRate: percent(failedCalls, totalCalls),
+    totalTokens: usageTotal,
+    inputTokens: usageInput,
+    outputTokens: usageOutput,
+    averageTokensPerCall: totalCalls > 0 ? Math.round(usageTotal / totalCalls) : 0,
+    toolExecutions,
+    permissionEvents,
+    permissionAllowed,
+    permissionDenied,
+    approvalRequired,
+    routingFallbacks,
+    streamFailures,
+    contextTruncations,
+    workflows,
+    requests,
+    recentFailures,
+    contextIncoming,
+    contextProtected,
+    healthScore
+  };
+}
+
+function sidebarInsightRows(dashboard, metrics) {
+  const stats = dashboard.statistics || {};
+  const insights = [];
+  if (dashboard.status !== "Running") {
+    insights.push({ tone: "warn", main: "Server is offline", meta: "Start Agent Hub to enable provider, token, and workflow statistics." });
+  }
+  if (stats.providersTotal > 0 && stats.providersAvailable === 0) {
+    insights.push({ tone: "error", main: "No providers are available", meta: "Check API keys, local model servers, or provider cooldowns." });
+  } else if (stats.providersDegraded > 0) {
+    insights.push({ tone: "warn", main: `${stats.providersDegraded} provider(s) degraded`, meta: "Agent Hub will prefer healthier fallbacks when possible." });
+  } else if (dashboard.status === "Running" && stats.providersAvailable > 0) {
+    insights.push({ tone: "ok", main: `${stats.providersAvailable} provider(s) ready`, meta: "Routing has at least one usable model candidate." });
+  }
+  if (stats.totalCalls > 0 && stats.successRate < 80) {
+    insights.push({ tone: "warn", main: `Provider success rate is ${stats.successRate}%`, meta: "Review recent failures and routing fallbacks before a long task." });
+  } else if (stats.totalCalls > 0) {
+    insights.push({ tone: "ok", main: `${stats.successRate}% provider success rate`, meta: `${stats.successfulCalls} successful call(s), ${stats.failedCalls} failed.` });
+  }
+  if (stats.routingFallbacks > 0) {
+    insights.push({ tone: "info", main: `${stats.routingFallbacks} routing fallback(s) recorded`, meta: "Fallbacks are normal when quotas, context, or health checks rule out a model." });
+  }
+  if (stats.permissionDenied > 0) {
+    insights.push({ tone: "warn", main: `${stats.permissionDenied} permission denial(s)`, meta: "Adjust approval mode only if the blocked actions were expected." });
+  }
+  if (stats.contextTruncations > 0) {
+    insights.push({ tone: "warn", main: `${stats.contextTruncations} context truncation(s)`, meta: "Use a larger context route or reduce repository context for huge prompts." });
+  }
+  const failures = metrics && Array.isArray(metrics.recent_failures) ? metrics.recent_failures : [];
+  for (const failure of failures.slice(-2).reverse()) {
+    insights.push({
+      tone: "error",
+      main: failure.provider || failure.agent || failure.name || "Recent provider failure",
+      meta: failure.message || failure.error || failure.reason || "Open logs for details."
+    });
+  }
+  if (!insights.length) {
+    insights.push({ tone: "ok", main: "Everything looks healthy", meta: "No immediate provider, permission, or context issues detected." });
+  }
+  return insights.slice(0, 5);
+}
+
+function percent(part, total) {
+  const numerator = Number(part || 0);
+  const denominator = Number(total || 0);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, Math.round((numerator / denominator) * 100)));
+}
+
+function dashboardHealthScore(stats) {
+  const availability = stats.providerAvailabilityPercent || 0;
+  let score = availability || (stats.totalCalls > 0 ? 100 : 0);
+  if (stats.totalCalls > 0) {
+    score = Math.round((score * 0.55) + (percent(stats.totalCalls - stats.failedCalls, stats.totalCalls) * 0.45));
+  }
+  score -= Math.min(20, Number(stats.degradedProviders || 0) * 5);
+  score -= Math.min(12, Number(stats.routingFallbacks || 0) * 2);
+  score -= Math.min(10, Number(stats.permissionDenied || 0) * 2);
+  score -= Math.min(10, Number(stats.contextTruncations || 0) * 3);
+  score -= Math.min(10, Number(stats.streamFailures || 0) * 4);
+  if (!stats.providerAvailabilityPercent && !stats.totalCalls) {
+    score = 0;
+  }
+  return Math.max(0, Math.min(100, Math.round(score)));
 }
 
 function sidebarActivityRows(usage, metrics, failedModels) {
@@ -879,6 +1041,7 @@ function sidebarHtml(webview, logoPath) {
     :root {
       color-scheme: light dark;
       --border: var(--vscode-sideBarSectionHeader-border);
+      --panel: var(--vscode-editorWidget-background);
       --muted: var(--vscode-descriptionForeground);
       --button: var(--vscode-button-background);
       --button-fg: var(--vscode-button-foreground);
@@ -917,6 +1080,216 @@ function sidebarHtml(webview, logoPath) {
       display: flex;
       align-items: center;
       gap: 9px;
+    }
+
+    .brand {
+      min-width: 0;
+      display: grid;
+      gap: 1px;
+    }
+
+    .hero {
+      display: grid;
+      gap: 11px;
+      padding-top: 10px;
+      background: var(--panel);
+    }
+
+    .hero-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 82px;
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .hero-copy {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      margin-top: 4px;
+      overflow-wrap: anywhere;
+    }
+
+    .health-card {
+      display: grid;
+      place-items: center;
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px;
+      background: var(--vscode-sideBar-background);
+    }
+
+    .health-label {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.2;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .health-value {
+      font-size: 22px;
+      font-weight: 700;
+      line-height: 1.1;
+    }
+
+    .hero-state-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 7px;
+    }
+
+    .state-pill {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 7px;
+      background: var(--vscode-sideBar-background);
+    }
+
+    .state-pill span {
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.2;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .state-pill strong {
+      display: block;
+      margin-top: 2px;
+      font-size: 12px;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+
+    .hero-card {
+      display: grid;
+      gap: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      background: var(--vscode-sideBar-background);
+    }
+
+    .hero-card-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-weight: 600;
+    }
+
+    .progress-track {
+      height: 7px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: var(--vscode-progressBar-background);
+      opacity: 0.9;
+    }
+
+    .progress-fill {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--button);
+      transition: width 160ms ease-out;
+    }
+
+    .next-step {
+      display: grid;
+      gap: 2px;
+      border-left: 3px solid var(--button);
+      padding-left: 8px;
+    }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .stat-grid + .list {
+      margin-top: 10px;
+    }
+
+    .stat-card {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px;
+      background: var(--panel);
+    }
+
+    .stat-card.featured {
+      grid-column: 1 / -1;
+      padding: 11px;
+      background: var(--vscode-sideBar-background);
+    }
+
+    .stat-value {
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.15;
+      overflow-wrap: anywhere;
+    }
+
+    .stat-label {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.3;
+    }
+
+    .stat-caption {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .mini-meter {
+      height: 5px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: var(--vscode-progressBar-background);
+    }
+
+    .mini-meter-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: inherit;
+      background: var(--ok);
+      transition: width 160ms ease-out;
+    }
+
+    .mini-meter-fill[data-tone="warn"] {
+      background: var(--warn);
+    }
+
+    .mini-meter-fill[data-tone="error"] {
+      background: var(--error);
+    }
+
+    .insight-row {
+      border-left: 3px solid var(--button);
+      padding-left: 8px;
+    }
+
+    .insight-row[data-tone="ok"] {
+      border-left-color: var(--ok);
+    }
+
+    .insight-row[data-tone="warn"] {
+      border-left-color: var(--warn);
+    }
+
+    .insight-row[data-tone="error"] {
+      border-left-color: var(--error);
     }
 
     img {
@@ -976,6 +1349,14 @@ function sidebarHtml(webview, logoPath) {
       margin-top: 10px;
     }
 
+    .quick-actions {
+      margin-top: 0;
+    }
+
+    .quick-actions button {
+      min-height: 40px;
+    }
+
     button {
       width: 100%;
       min-height: 28px;
@@ -989,8 +1370,58 @@ function sidebarHtml(webview, logoPath) {
       text-align: center;
     }
 
+    .command-button {
+      display: grid;
+      gap: 1px;
+      align-content: center;
+      text-align: left;
+    }
+
+    .button-main,
+    .button-meta {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .button-main {
+      font-weight: 600;
+    }
+
+    .button-meta {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.25;
+    }
+
     button:hover {
       background: var(--secondary-hover);
+    }
+
+    button:disabled {
+      opacity: 0.72;
+      cursor: default;
+    }
+
+    button:disabled:hover {
+      background: var(--secondary);
+    }
+
+    button.primary:disabled:hover {
+      background: var(--button);
+    }
+
+    .hero-server-action {
+      min-height: 34px;
+    }
+
+    button[data-state="Running"]::before {
+      content: "OK ";
+    }
+
+    button[data-state="Starting"]::before {
+      content: "... ";
     }
 
     button.primary {
@@ -1039,8 +1470,75 @@ function sidebarHtml(webview, logoPath) {
   <div class="shell">
     <header>
       <img src="${logoSrc}" alt="">
-      <h1>Agent Hub</h1>
+      <div class="brand">
+        <h1>Agent Hub</h1>
+        <div class="meta" id="extensionVersion">VS Code extension</div>
+      </div>
     </header>
+    <section class="hero">
+      <div class="hero-head">
+        <div>
+          <h2>Control center</h2>
+          <div class="hero-copy" id="heroSummary">Checking workspace status...</div>
+        </div>
+        <div class="health-card" title="Health score combines provider availability, success rate, fallbacks, permissions, and context pressure.">
+          <span class="health-label">Health</span>
+          <strong class="health-value" id="heroHealthScore">--</strong>
+        </div>
+      </div>
+      <div class="hero-state-strip">
+        <div class="state-pill">
+          <span>Mode</span>
+          <strong id="heroMode">cloud</strong>
+        </div>
+        <div class="state-pill">
+          <span>Approval</span>
+          <strong id="heroApproval">ask</strong>
+        </div>
+        <div class="state-pill">
+          <span>Providers</span>
+          <strong id="heroProviders">0/0</strong>
+        </div>
+      </div>
+      <div class="hero-card">
+        <div class="hero-card-title">
+          <span>Setup progress</span>
+          <span class="status" id="setupProgressText">0%</span>
+        </div>
+        <div class="progress-track" aria-hidden="true"><div class="progress-fill" id="setupProgressFill"></div></div>
+        <div class="next-step">
+          <div class="main" id="nextStepTitle">Checking setup...</div>
+          <div class="meta" id="nextStepDetail">Agent Hub is collecting local status.</div>
+        </div>
+      </div>
+      <button class="primary hero-server-action" id="heroServerAction" type="button" data-state="Stopped">Start Agent Hub</button>
+      <div class="actions quick-actions">
+        <button class="command-button" id="openChat" type="button" title="Open Agent Hub chat">
+          <span class="button-main">Chat</span>
+          <span class="button-meta">Workspace</span>
+        </button>
+        <button class="command-button" id="askAgent" type="button" title="Ask the default route">
+          <span class="button-main">Ask</span>
+          <span class="button-meta">Default route</span>
+        </button>
+        <button class="command-button" id="codeAgent" type="button" title="Run the coding agent">
+          <span class="button-main">Code</span>
+          <span class="button-meta">Agent loop</span>
+        </button>
+        <button class="command-button" id="explainFile" type="button" title="Explain the current file">
+          <span class="button-main">Explain</span>
+          <span class="button-meta">Current file</span>
+        </button>
+      </div>
+    </section>
+    <section>
+      <div class="section-head">
+        <h2>Statistics</h2>
+        <span class="status" id="statsHealth">Waiting</span>
+      </div>
+      <div class="stat-grid" id="statsGrid"></div>
+      <ul class="list" id="insightList"></ul>
+    </section>
     <section>
       <div class="section-head">
         <h2>Server</h2>
@@ -1116,6 +1614,20 @@ function sidebarHtml(webview, logoPath) {
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const extensionVersion = document.getElementById("extensionVersion");
+    const heroSummary = document.getElementById("heroSummary");
+    const heroHealthScore = document.getElementById("heroHealthScore");
+    const heroMode = document.getElementById("heroMode");
+    const heroApproval = document.getElementById("heroApproval");
+    const heroProviders = document.getElementById("heroProviders");
+    const setupProgressText = document.getElementById("setupProgressText");
+    const setupProgressFill = document.getElementById("setupProgressFill");
+    const nextStepTitle = document.getElementById("nextStepTitle");
+    const nextStepDetail = document.getElementById("nextStepDetail");
+    const statsHealth = document.getElementById("statsHealth");
+    const statsGrid = document.getElementById("statsGrid");
+    const insightList = document.getElementById("insightList");
+    const heroServerAction = document.getElementById("heroServerAction");
     const serverStatus = document.getElementById("serverStatus");
     const serverDetail = document.getElementById("serverDetail");
     const onboardingList = document.getElementById("onboardingList");
@@ -1144,7 +1656,13 @@ function sidebarHtml(webview, logoPath) {
       const status = dashboard.status || "Stopped";
       serverStatus.textContent = status;
       serverStatus.dataset.state = status;
-      setText(serverDetail, dashboard.statusText || dashboard.serverUrl || "");
+      setText(extensionVersion, dashboard.extensionVersion ? "v" + dashboard.extensionVersion : "VS Code extension");
+      setText(heroMode, compactModeText(dashboard.agentProviderMode || "cloud", dashboard.agentMode || "agent"));
+      setText(heroApproval, dashboard.approvalMode || "ask");
+      setText(heroProviders, providerCountText(dashboard.statistics || {}));
+      renderServerControls(status, dashboard);
+      renderSetupSummary(dashboard);
+      renderStatistics(dashboard.statistics || {}, dashboard.insights || [], status);
       renderOnboarding(dashboard.onboarding || []);
       setText(activeModel, activeModelText(dashboard.activeModel));
       renderRoutingChain(dashboard.routingChain || []);
@@ -1156,6 +1674,250 @@ function sidebarHtml(webview, logoPath) {
       renderActivityRows(dashboard.activity || []);
       setText(logDetail, dashboard.logs || "Open the output channel for live logs.");
       setText(settingsDetail, "Mode: " + (dashboard.agentProviderMode || "cloud") + " / " + (dashboard.agentMode || "agent") + ". Approval: " + (dashboard.approvalMode || "ask") + ". Auto-start: " + (dashboard.autoStart ? "on" : "off") + ".");
+    }
+
+    function compactModeText(providerMode, agentMode) {
+      const mode = String(providerMode || "cloud");
+      const agent = String(agentMode || "agent").replace("-agent", "");
+      return mode + " / " + agent;
+    }
+
+    function providerCountText(stats) {
+      return Number(stats.providersAvailable || 0) + "/" + Number(stats.providersTotal || 0);
+    }
+
+    function renderServerControls(status, dashboard) {
+      const serverUrl = dashboard.serverUrl || "Agent Hub";
+      const isRunning = status === "Running";
+      const isStarting = status === "Starting";
+      const isError = status === "Error";
+
+      if (isRunning) {
+        heroServerAction.textContent = "Server running - Open Chat";
+        heroServerAction.disabled = false;
+        heroServerAction.dataset.action = "openChat";
+        setText(heroSummary, "Online at " + serverUrl + ".");
+        setText(serverDetail, "Online and ready for requests.");
+      } else if (isStarting) {
+        heroServerAction.textContent = "Starting Agent Hub...";
+        heroServerAction.disabled = true;
+        heroServerAction.dataset.action = "";
+        setText(heroSummary, "Starting local backend.");
+        setText(serverDetail, "Starting local backend. Logs will show progress if this takes a moment.");
+      } else if (isError) {
+        heroServerAction.textContent = "Restart Agent Hub";
+        heroServerAction.disabled = false;
+        heroServerAction.dataset.action = "restartServer";
+        setText(heroSummary, dashboard.statusText || "Agent Hub needs attention.");
+        setText(serverDetail, dashboard.statusText || "Agent Hub needs attention. Open logs or restart the server.");
+      } else {
+        heroServerAction.textContent = "Start Agent Hub";
+        heroServerAction.disabled = false;
+        heroServerAction.dataset.action = "startServer";
+        setText(heroSummary, "Offline. Ready to start at " + serverUrl + ".");
+        setText(serverDetail, "Offline. Start the local server for " + serverUrl + ".");
+      }
+      heroServerAction.dataset.state = status;
+
+      const startButton = document.getElementById("startServer");
+      const stopButton = document.getElementById("stopServer");
+      const restartButton = document.getElementById("restartServer");
+      startButton.textContent = isRunning ? "Server Running" : isStarting ? "Starting..." : isError ? "Try Start Again" : "Start Server";
+      startButton.disabled = isRunning || isStarting;
+      startButton.dataset.state = status;
+      stopButton.disabled = !isRunning && !isStarting;
+      restartButton.textContent = isRunning ? "Restart / Reload" : "Restart Server";
+      restartButton.disabled = isStarting;
+    }
+
+    function renderSetupSummary(dashboard) {
+      const rows = Array.isArray(dashboard.onboarding) ? dashboard.onboarding : [];
+      const complete = rows.filter((row) => row && row.ok).length;
+      const total = rows.length || 1;
+      const percent = Math.round((complete / total) * 100);
+      setupProgressText.textContent = percent + "%";
+      setupProgressText.dataset.state = percent === 100 ? "Running" : percent >= 50 ? "Starting" : "Stopped";
+      setupProgressFill.style.width = percent + "%";
+
+      const next = rows.find((row) => row && !row.ok);
+      if (dashboard.status === "Running" && percent === 100) {
+        nextStepTitle.textContent = "Ready to work";
+        nextStepDetail.textContent = "Use the main server button or any quick action to start a task.";
+        return;
+      }
+      if (dashboard.status === "Running") {
+        nextStepTitle.textContent = next ? "Next: " + next.label : "Ready to work";
+        nextStepDetail.textContent = next ? next.detail : "Use the main server button or any quick action to start a task.";
+        return;
+      }
+      nextStepTitle.textContent = next ? "Next: " + next.label : "Start Agent Hub";
+      nextStepDetail.textContent = next ? next.detail : "Click Start Server after setup checks pass.";
+    }
+
+    function renderStatistics(stats, insights, status) {
+      statsGrid.textContent = "";
+      const score = status === "Running" ? Number(stats.healthScore || 0) : 0;
+      heroHealthScore.textContent = status === "Running" ? String(score) : "--";
+      statsHealth.textContent = status === "Running" ? healthLabel(stats) : "Offline";
+      statsHealth.dataset.state = statisticsStatusState(stats, status);
+
+      const cards = [
+        {
+          value: status === "Running" ? String(score) : "--",
+          label: "health score",
+          caption: healthCaption(stats, status),
+          percent: score,
+          featured: true
+        },
+        {
+          value: Number(stats.providersAvailable || 0) + "/" + Number(stats.providersTotal || 0),
+          label: "providers available",
+          caption: compactNumber(stats.providersUnavailable || 0) + " unavailable, " + compactNumber(stats.providersDegraded || 0) + " degraded",
+          percent: Number(stats.providerAvailabilityPercent || 0)
+        },
+        {
+          value: Number(stats.totalCalls || 0) ? Number(stats.successRate || 0) + "%" : "--",
+          label: "provider success rate",
+          caption: compactNumber(stats.successfulCalls || 0) + " ok / " + compactNumber(stats.failedCalls || 0) + " failed",
+          percent: Number(stats.successRate || 0)
+        },
+        {
+          value: compactNumber(stats.totalTokens || 0),
+          label: "tokens used",
+          caption: compactNumber(stats.inputTokens || 0) + " input / " + compactNumber(stats.outputTokens || 0) + " output"
+        },
+        {
+          value: compactNumber(stats.averageTokensPerCall || 0),
+          label: "avg tokens per call",
+          caption: compactNumber(stats.totalCalls || 0) + " provider call(s)"
+        },
+        {
+          value: compactNumber(stats.toolExecutions || 0),
+          label: "workspace tool runs",
+          caption: compactNumber(stats.workflows || 0) + " workflow event(s)"
+        },
+        {
+          value: compactNumber(stats.routingFallbacks || 0),
+          label: "routing fallbacks",
+          caption: compactNumber(stats.streamFailures || 0) + " stream failure(s)"
+        },
+        {
+          value: compactNumber(stats.permissionEvents || 0),
+          label: "permission events",
+          caption: compactNumber(stats.permissionAllowed || 0) + " allowed / " + compactNumber(stats.permissionDenied || 0) + " denied"
+        },
+        {
+          value: compactNumber(stats.requests || 0),
+          label: "recent request traces",
+          caption: compactNumber(stats.recentFailures || 0) + " recent failure(s)"
+        },
+        {
+          value: compactNumber(stats.contextIncoming || 0),
+          label: "latest context tokens",
+          caption: compactNumber(stats.contextProtected || 0) + " protected"
+        }
+      ];
+      for (const card of cards) {
+        statsGrid.append(statCard(card));
+      }
+
+      insightList.textContent = "";
+      const rows = Array.isArray(insights) ? insights : [];
+      for (const row of rows.slice(0, 5)) {
+        insightList.append(insightElement(row));
+      }
+      if (!rows.length) {
+        insightList.append(emptyRow("No statistics yet"));
+      }
+    }
+
+    function healthCaption(stats, status) {
+      if (status !== "Running") {
+        return "Start the server to collect live statistics.";
+      }
+      if (Number(stats.providersTotal || 0) && !Number(stats.providersAvailable || 0)) {
+        return "No available provider candidates.";
+      }
+      if (Number(stats.recentFailures || 0) || Number(stats.providersDegraded || 0)) {
+        return "Check insights before a long request.";
+      }
+      return "Provider, routing, permission, and context signals look stable.";
+    }
+
+    function healthLabel(stats) {
+      if (Number(stats.providersTotal || 0) && !Number(stats.providersAvailable || 0)) {
+        return "Needs attention";
+      }
+      if (Number(stats.providersDegraded || 0) || Number(stats.recentFailures || 0)) {
+        return "Degraded";
+      }
+      return "Healthy";
+    }
+
+    function statisticsStatusState(stats, status) {
+      if (status !== "Running") {
+        return status;
+      }
+      if (Number(stats.providersTotal || 0) && !Number(stats.providersAvailable || 0)) {
+        return "Error";
+      }
+      if (Number(stats.providersDegraded || 0) || Number(stats.recentFailures || 0)) {
+        return "Starting";
+      }
+      return "Running";
+    }
+
+    function statCard(card) {
+      const item = document.createElement("div");
+      item.className = "stat-card";
+      if (card.featured) {
+        item.classList.add("featured");
+      }
+      const value = document.createElement("div");
+      value.className = "stat-value";
+      value.textContent = card.value;
+      const label = document.createElement("div");
+      label.className = "stat-label";
+      label.textContent = card.label;
+      item.append(value, label);
+      if (card.caption) {
+        const caption = document.createElement("div");
+        caption.className = "stat-caption";
+        caption.textContent = card.caption;
+        item.append(caption);
+      }
+      if (typeof card.percent === "number") {
+        const meter = document.createElement("div");
+        meter.className = "mini-meter";
+        const fill = document.createElement("div");
+        fill.className = "mini-meter-fill";
+        fill.style.width = Math.max(0, Math.min(100, card.percent)) + "%";
+        fill.dataset.tone = card.percent >= 80 ? "ok" : card.percent >= 50 ? "warn" : "error";
+        meter.append(fill);
+        item.append(meter);
+      }
+      return item;
+    }
+
+    function insightElement(row) {
+      const item = rowElement(row.main, row.meta);
+      item.classList.add("insight-row");
+      item.dataset.tone = row.tone || "info";
+      return item;
+    }
+
+    function compactNumber(value) {
+      const number = Number(value || 0);
+      if (!Number.isFinite(number)) {
+        return "0";
+      }
+      if (Math.abs(number) >= 1000000) {
+        return (number / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
+      }
+      if (Math.abs(number) >= 1000) {
+        return (number / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+      }
+      return String(number);
     }
 
     function activeModelText(row) {
@@ -1364,6 +2126,16 @@ function sidebarHtml(webview, logoPath) {
       return item;
     }
 
+    heroServerAction.addEventListener("click", () => {
+      const action = heroServerAction.dataset.action || "startServer";
+      if (action) {
+        post(action);
+      }
+    });
+    document.getElementById("openChat").addEventListener("click", () => post("openChat"));
+    document.getElementById("askAgent").addEventListener("click", () => post("askAgent"));
+    document.getElementById("codeAgent").addEventListener("click", () => post("codeAgent"));
+    document.getElementById("explainFile").addEventListener("click", () => post("explainFile"));
     document.getElementById("startServer").addEventListener("click", () => post("startServer"));
     document.getElementById("stopServer").addEventListener("click", () => post("stopServer"));
     document.getElementById("restartServer").addEventListener("click", () => post("restartServer"));
@@ -1384,6 +2156,7 @@ function sidebarHtml(webview, logoPath) {
       }
     });
 
+    window.setInterval(() => post("refresh"), 10000);
     vscode.postMessage({ type: "ready" });
   </script>
 </body>

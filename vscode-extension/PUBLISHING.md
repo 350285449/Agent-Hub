@@ -86,8 +86,10 @@ npm.cmd run package
 The GitHub Actions workflow `Manual VSIX Release` can be started with
 `workflow_dispatch`. It stamps CI build metadata into `release.json`,
 regenerates the backend snapshot, validates release metadata, runs tests,
-packages the VSIX, validates the archive, and uploads the VSIX as a workflow
-artifact. It does not publish to the Marketplace.
+packages the VSIX, validates the archive, uploads the VSIX as a workflow
+artifact, and can create or update a GitHub Release tagged as
+`v<extension-version>` with the VSIX attached. It does not publish to the
+Marketplace.
 
 ## Smoke-Test Locally
 

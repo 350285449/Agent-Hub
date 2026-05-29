@@ -54,14 +54,16 @@ checks.
 
 ## Manual Release Workflow
 
-`.github/workflows/release.yml` is intentionally manual. It does not publish to
-the Marketplace. The workflow stamps CI build metadata, validates the release,
-runs tests, regenerates the backend snapshot, packages a VSIX, validates the
-artifact, and uploads the VSIX as a workflow artifact.
+`.github/workflows/release.yml` is intentionally manual. It stamps CI build
+metadata, validates the release, runs tests, regenerates the backend snapshot,
+packages a VSIX, validates the artifact, uploads the VSIX as a workflow
+artifact, and can create or update a GitHub Release for the extension version.
+The GitHub Release step tags the selected commit as `v<extension-version>` and
+attaches the generated VSIX. It does not publish to the Marketplace.
 
-After downloading the artifact and inspecting it locally, publish manually from
-`vscode-extension` with the Marketplace tooling and the expected publisher
-credentials.
+After downloading the artifact or release asset and inspecting it locally,
+publish manually from `vscode-extension` with the Marketplace tooling and the
+expected publisher credentials.
 
 ## Packaging Guarantees
 

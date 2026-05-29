@@ -64,6 +64,8 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
 
         headings = [
+            "<h2>Control center</h2>",
+            "<h2>Statistics</h2>",
             "<h2>Server</h2>",
             "<h2>Permissions</h2>",
             "<h2>Models / Providers</h2>",
@@ -79,6 +81,11 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('id="routingChain"', source)
         self.assertIn('id="onboardingList"', source)
         self.assertIn('id="contextDiagnostics"', source)
+        self.assertIn('id="heroHealthScore"', source)
+        self.assertIn('id="statsGrid"', source)
+        self.assertIn("function dashboardHealthScore", source)
+        self.assertIn("averageTokensPerCall", source)
+        self.assertIn("health score", source)
 
     def test_cline_compatibility_setting_is_enabled_by_default(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
