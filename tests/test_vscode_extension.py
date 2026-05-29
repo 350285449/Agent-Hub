@@ -87,6 +87,14 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("averageTokensPerCall", source)
         self.assertIn("health score", source)
 
+    def test_webview_theme_tokens_have_dark_mode_fallbacks(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertIn("--app-fg: var(--vscode-sideBar-foreground, var(--vscode-foreground, #d4d4d4))", source)
+        self.assertIn("--app-bg: var(--vscode-editor-background, var(--vscode-sideBar-background, #1f2328))", source)
+        self.assertIn("color: var(--app-fg);", source)
+        self.assertIn("--input-fg: var(--vscode-input-foreground, var(--app-fg))", source)
+
     def test_cline_compatibility_setting_is_enabled_by_default(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
         setting = package["contributes"]["configuration"]["properties"]["agentHub.clineCompatibilityMode"]

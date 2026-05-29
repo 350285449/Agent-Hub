@@ -4,6 +4,12 @@
 
 No changes yet.
 
+## 0.7.10
+
+- Fixes dark-theme sidebar and chat contrast by adding safe VS Code theme fallbacks.
+- Simplifies the Marketplace README and adds an Ollama Cloud model setup example.
+- Updates Marketplace metadata to describe the extension in user-facing language.
+
 ## 0.7.9
 
 - Packages the redesigned Agent Hub sidebar with control-center quick actions, setup progress, health score, and runtime statistics.

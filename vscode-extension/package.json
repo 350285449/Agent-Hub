@@ -1,8 +1,8 @@
 {
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub Workspace",
-  "description": "Universal AI router, Cline/Claude Code gateway, and permissioned workspace-agent platform for VS Code.",
-  "version": "0.7.9",
+  "description": "Run permissioned VS Code workspace agents through Ollama Cloud, hosted providers, or local models.",
+  "version": "0.7.10",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",

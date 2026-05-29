@@ -1,46 +1,66 @@
-# Agent Hub
+# Agent Hub Workspace
 
-Run Agent-Hub from VS Code and send coding, research, and explanation requests
-through Ollama cloud models by default, with hosted API-key models and explicit
-local control as configurable options.
+Run Agent Hub from VS Code. Use the sidebar or `@agenthub` chat to ask
+questions, explain code, research, or let a permissioned workspace agent edit
+files.
+
+Agent Hub uses the `cloud-agent` route by default. Fresh configs prefer Ollama
+Cloud model routes, with hosted API-key providers and local LM Studio/Ollama
+models available when you enable them.
 
 ## Quick Start
 
-1. Install Node.js 20 or newer and Python 3.11 or newer.
-2. Install/start Ollama for Ollama cloud routing, or set a hosted provider API key.
-3. Package and install the extension from the repository root:
-
-   ```powershell
-   .\install-extension.ps1
-   ```
-
-   On macOS or Linux:
+1. Install the extension from the Marketplace or from a `.vsix`.
+2. Install Python 3.11 or newer.
+3. For Ollama Cloud, install Ollama and sign in:
 
    ```sh
-   sh ./install-extension.sh
+   ollama signin
    ```
 
-4. Reload VS Code.
-5. Open any workspace and run an Agent Hub command from the Command Palette.
+4. Reload VS Code and open a workspace folder.
+5. Open the Agent Hub activity bar view.
+6. Click `Start Agent Hub`, then use `Chat`, `Ask`, `Code`, or `Explain`.
 
-Packaged builds include the Agent Hub Python backend. A source checkout can
-still use `.\install.ps1` if you want a local editable `.venv`.
+The packaged extension includes the Agent Hub Python backend. Node.js is only
+needed when building the extension from source.
 
-For a single setup command from a source checkout:
+## Ollama Cloud Example
 
-```powershell
-.\install.ps1 -WithExtension
-```
-
-On macOS or Linux:
+Ollama Cloud models run through Ollama instead of downloading large local model
+weights. To try one before using Agent Hub:
 
 ```sh
-sh ./install.sh --with-extension
+ollama signin
+ollama run gpt-oss:120b-cloud
 ```
 
-## Commands
+In VS Code:
 
-- `@agenthub` in the VS Code Chat view
+1. Open `Agent Hub: Open Chat`.
+2. Open `Settings`.
+3. Set `Control agent` to `Cloud`.
+4. Set `Cloud route` to `Ollama cloud models first`.
+5. Save settings and restart the Agent Hub server.
+
+By default Agent Hub talks to your local Ollama server at
+`http://127.0.0.1:11434`, and Ollama handles cloud authentication after
+`ollama signin`. If you edit `agent-hub.config.json` to connect directly to
+Ollama's hosted API, set `api_key_env` to `OLLAMA_API_KEY` and save that key as
+the `Ollama Cloud` key in Agent Hub settings.
+
+If a model name fails, test it with `ollama run <model-name>` first, then update
+the matching model in `agent-hub.config.json`. Ollama's supported cloud models
+change over time, so use a model available to your Ollama account.
+
+Official docs:
+
+- [Ollama Cloud](https://docs.ollama.com/cloud)
+- [Ollama authentication](https://docs.ollama.com/api/authentication)
+
+## Common Commands
+
+- `@agenthub` in VS Code Chat
 - `Agent Hub: Open Chat`
 - `Agent Hub: Start Server`
 - `Agent Hub: Show Status`
@@ -49,105 +69,28 @@ sh ./install.sh --with-extension
 - `Agent Hub: Research Web`
 - `Agent Hub: Explain Selection`
 - `Agent Hub: Explain Current File`
-- `Agent Hub: Copy Cline Config`
-- `Agent Hub: Test Cline Connection`
-- `Agent Hub: Copy Claude Code Config`
-- `Agent Hub: Test Anthropic Endpoint`
 
-When `agentHub.autoStart` is enabled, the extension starts the local server for
-you before sending a request.
+The sidebar shows server status, setup progress, provider health, token usage,
+permissions, logs, and shortcuts for common actions. When `agentHub.autoStart`
+is enabled, Agent Hub starts the local server before sending a request.
 
-The sidebar includes first-run checks for the Python backend, Python version,
-config file, providers/API keys, Ollama, LM Studio, and server status. It also
-shows context diagnostics from `/debug/context`, including incoming tokens,
-preserved tokens, compacted tokens, protected tokens, TODO/task progress, and
-active files.
+## Provider Modes
 
-Workspace-agent turns can modify files while the live run is in progress. Agent
-Hub exposes file tools to compatible models, applies `write_file` and
-`replace_in_file` directly to the workspace, and streams a progress event when a
-file edit lands on disk.
+- `cloud`: use the configured `cloud-agent` route. This is the default.
+- `hybrid`: try cloud providers first, then local fallbacks.
+- `local`: use local LM Studio/Ollama routes.
 
-The chat header includes a `Settings` menu for provider mode, standard versus
-group-agent mode, planner candidate count, API-key and free-cloud model
-enablement, Cloud route priority, model names, router flags, server settings,
-local model selection, API keys, and server actions.
+Hosted API-key models are off by default. Enable `API-key models` in the chat
+settings menu when you want OpenAI/Codex, Claude, Gemini, Groq, OpenRouter,
+Cerebras, Mistral, GitHub Models, Hugging Face, NVIDIA NIM, Cloudflare, or other
+configured providers.
 
-## Common Settings
+To use local models, choose `Local` in settings, then click `Choose Local Model`
+to scan LM Studio and Ollama or pull a recommended Ollama model.
 
-- `agentHub.serverUrl`: local Agent-Hub server URL. Default:
-  `http://127.0.0.1:8787`
-- `agentHub.pythonPath`: Python executable or launcher. Default: `auto`
-- `agentHub.configPath`: config file path. Default: `agent-hub.config.json`
-- `agentHub.agentProviderMode`: `local`, `hybrid`, or `cloud`. Default: `cloud`
-- `agentHub.agentMode`: `agent` or `group-agent`. Default: `agent`
-- `agentHub.groupPlanCandidates`: planner candidates for group-agent mode.
-  Default: `1`
-- `agentHub.autoStart`: automatically start the server when needed. Default:
-  `true`
+## External Agent Setup
 
-## Control Agent Mode
-
-Agent Hub uses cloud control by default. The generated `cloud-agent` route now
-tries Ollama cloud model IDs first, so it does not download or run large local
-weights:
-
-- `kimi-k2.6:cloud`
-- `glm-5.1:cloud`
-- `qwen3.5:cloud`
-- `nemotron-3-super:cloud`
-- `gemma4:31b-cloud`
-
-Hosted API-key providers are disabled by default. Open the chat `Settings` menu
-and enable `API-key models` when you want these providers available; set `Cloud
-route` to `API-key models first` when you also want them to lead the route:
-
-- `codex` and `chatgpt` -> OpenAI via `OPENAI_API_KEY`
-- `claude` -> Anthropic via `ANTHROPIC_API_KEY`
-- `gemini` -> Google Gemini via `GEMINI_API_KEY`
-
-Use the model-name fields in `Settings` to change the hosted model IDs, then
-save API keys in VS Code secret storage. Restart Agent Hub from that menu after
-saving settings or keys so the Python server receives the updated config and
-environment variables.
-
-The same menu can enable the newer free-cloud preset agents for Groq,
-OpenRouter, Cerebras, Mistral, GitHub Models, Hugging Face, NVIDIA NIM, and
-Cloudflare Workers AI. Additional provider keys, including Together, Fireworks,
-DeepInfra, SambaNova, Hyperbolic, Featherless, Novita, Parasail, and Anyscale,
-can be saved in the API Keys panel for configs that use those providers.
-
-Choose Local in the chat panel, or set `agentHub.agentProviderMode` to `local`,
-to use direct local model routes. Use the chat panel's `Choose Local Model`
-button to scan LM Studio and Ollama, pick an installed local model, or pull a
-recommended Ollama model. When no local models are found, the install menu shows
-each model's approximate storage size before pulling it. `hybrid` follows the
-same Cloud route priority and then falls back through the remaining providers.
-
-Ollama's Launch page shows integrations such as Claude Code, Codex App, Hermes
-Agent, and OpenClaw. They are not model IDs; Agent Hub uses the models reported
-by `ollama list`, then those integrations can be launched separately with
-`ollama launch <integration> --model <model>`.
-
-To see available local model servers, run:
-
-```powershell
-python -m agent_hub local-models
-```
-
-After changing provider settings, restart the Agent-Hub server.
-
-## External Coding Agents
-
-Claude Code / Anthropic-compatible clients:
-
-```text
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-ANTHROPIC_AUTH_TOKEN=agent-hub-local
-ANTHROPIC_MODEL=agent-hub-coding
-```
-
-Cline / RooCode / OpenCode:
+Cline, RooCode, OpenCode, and similar OpenAI-compatible clients:
 
 ```text
 Provider: OpenAI Compatible
@@ -156,9 +99,47 @@ API Key: agent-hub-local
 Model: agent-hub-coding
 ```
 
-`clineCompatibilityMode` is enabled by default. It preserves structured
-content arrays, `task_progress`, TODO state, tool chains, active files, and MCP
-state during request normalization and token compaction.
+Claude Code or Anthropic-compatible clients:
+
+```text
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+ANTHROPIC_AUTH_TOKEN=agent-hub-local
+ANTHROPIC_MODEL=agent-hub-coding
+```
+
+Use the Agent Hub commands `Copy Cline Config`, `Test Cline Connection`, `Copy
+Claude Code Config`, and `Test Anthropic Endpoint` to verify the gateway.
+
+## Useful Settings
+
+- `agentHub.serverUrl`: local Agent Hub server URL.
+- `agentHub.pythonPath`: Python executable. Use `auto` for normal setups.
+- `agentHub.configPath`: workspace config file.
+- `agentHub.agentProviderMode`: `cloud`, `hybrid`, or `local`.
+- `agentHub.agentMode`: `agent` or `group-agent`.
+- `agentHub.approvalMode`: permission mode for file, shell, process, and cloud
+  actions.
+- `agentHub.autoStart`: start the server automatically when needed.
+
+## Build From Source
+
+From the repository root:
+
+```powershell
+.\install-extension.ps1
+```
+
+On macOS or Linux:
+
+```sh
+sh ./install-extension.sh
+```
+
+For a full source setup:
+
+```powershell
+.\install.ps1 -WithExtension
+```
 
 More docs:
 
@@ -166,21 +147,4 @@ More docs:
 - [Claude Code setup](https://github.com/350285449/Agent-Hub/blob/main/docs/CLAUDE_CODE.md)
 - [Permissions](https://github.com/350285449/Agent-Hub/blob/main/docs/PERMISSIONS.md)
 - [Troubleshooting](https://github.com/350285449/Agent-Hub/blob/main/docs/TROUBLESHOOTING.md)
-
-## Development
-
-To test the extension from source:
-
-1. Open `vscode-extension` in VS Code.
-2. Press `F5` to launch an Extension Development Host.
-3. In the new VS Code window, open the Agent-Hub repository folder.
-
-To package and install from inside `vscode-extension`:
-
-```powershell
-cd vscode-extension
-npm run install-extension
-```
-
-For the Marketplace release checklist, see
-[PUBLISHING.md](https://github.com/350285449/Agent-Hub/blob/main/vscode-extension/PUBLISHING.md).
+- [Publishing](https://github.com/350285449/Agent-Hub/blob/main/vscode-extension/PUBLISHING.md)

@@ -1040,18 +1040,22 @@ function sidebarHtml(webview, logoPath) {
   <style nonce="${nonce}">
     :root {
       color-scheme: light dark;
-      --border: var(--vscode-sideBarSectionHeader-border);
-      --panel: var(--vscode-editorWidget-background);
-      --muted: var(--vscode-descriptionForeground);
-      --button: var(--vscode-button-background);
-      --button-fg: var(--vscode-button-foreground);
-      --button-hover: var(--vscode-button-hoverBackground);
-      --secondary: var(--vscode-button-secondaryBackground);
-      --secondary-fg: var(--vscode-button-secondaryForeground);
-      --secondary-hover: var(--vscode-button-secondaryHoverBackground);
-      --error: var(--vscode-errorForeground);
-      --ok: var(--vscode-testing-iconPassed);
-      --warn: var(--vscode-testing-iconQueued);
+      --app-bg: var(--vscode-sideBar-background, var(--vscode-editor-background, #1f2328));
+      --app-fg: var(--vscode-sideBar-foreground, var(--vscode-foreground, #d4d4d4));
+      --border: var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border, rgba(127, 127, 127, 0.35)));
+      --panel: var(--vscode-editorWidget-background, var(--vscode-sideBarSectionHeader-background, var(--app-bg)));
+      --card: var(--vscode-input-background, var(--app-bg));
+      --muted: var(--vscode-descriptionForeground, var(--vscode-disabledForeground, #8b949e));
+      --button: var(--vscode-button-background, #0e639c);
+      --button-fg: var(--vscode-button-foreground, #ffffff);
+      --button-hover: var(--vscode-button-hoverBackground, #1177bb);
+      --secondary: var(--vscode-button-secondaryBackground, var(--vscode-input-background, rgba(127, 127, 127, 0.14)));
+      --secondary-fg: var(--vscode-button-secondaryForeground, var(--app-fg));
+      --secondary-hover: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.22)));
+      --progress-bg: var(--vscode-progressBar-background, rgba(127, 127, 127, 0.28));
+      --error: var(--vscode-errorForeground, #f85149);
+      --ok: var(--vscode-testing-iconPassed, #3fb950);
+      --warn: var(--vscode-testing-iconQueued, #d29922);
     }
 
     * {
@@ -1060,8 +1064,8 @@ function sidebarHtml(webview, logoPath) {
 
     body {
       margin: 0;
-      color: var(--vscode-sideBar-foreground);
-      background: var(--vscode-sideBar-background);
+      color: var(--app-fg);
+      background: var(--app-bg);
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
     }
@@ -1117,7 +1121,8 @@ function sidebarHtml(webview, logoPath) {
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 7px;
-      background: var(--vscode-sideBar-background);
+      color: var(--app-fg);
+      background: var(--card);
     }
 
     .health-label {
@@ -1145,7 +1150,8 @@ function sidebarHtml(webview, logoPath) {
       border: 1px solid var(--border);
       border-radius: 7px;
       padding: 7px;
-      background: var(--vscode-sideBar-background);
+      color: var(--app-fg);
+      background: var(--card);
     }
 
     .state-pill span {
@@ -1171,7 +1177,8 @@ function sidebarHtml(webview, logoPath) {
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 10px;
-      background: var(--vscode-sideBar-background);
+      color: var(--app-fg);
+      background: var(--card);
     }
 
     .hero-card-title {
@@ -1186,7 +1193,7 @@ function sidebarHtml(webview, logoPath) {
       height: 7px;
       overflow: hidden;
       border-radius: 999px;
-      background: var(--vscode-progressBar-background);
+      background: var(--progress-bg);
       opacity: 0.9;
     }
 
@@ -1223,13 +1230,14 @@ function sidebarHtml(webview, logoPath) {
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 9px;
+      color: var(--app-fg);
       background: var(--panel);
     }
 
     .stat-card.featured {
       grid-column: 1 / -1;
       padding: 11px;
-      background: var(--vscode-sideBar-background);
+      background: var(--card);
     }
 
     .stat-value {
@@ -1256,7 +1264,7 @@ function sidebarHtml(webview, logoPath) {
       height: 5px;
       overflow: hidden;
       border-radius: 999px;
-      background: var(--vscode-progressBar-background);
+      background: var(--progress-bg);
     }
 
     .mini-meter-fill {
@@ -1302,6 +1310,7 @@ function sidebarHtml(webview, logoPath) {
     h1,
     h2 {
       margin: 0;
+      color: var(--app-fg);
       font-size: 13px;
       font-weight: 600;
     }
@@ -1328,6 +1337,7 @@ function sidebarHtml(webview, logoPath) {
       padding: 3px 7px;
       font-size: 11px;
       color: var(--muted);
+      background: var(--card);
     }
 
     .status[data-state="Running"] {
@@ -1360,7 +1370,7 @@ function sidebarHtml(webview, logoPath) {
     button {
       width: 100%;
       min-height: 28px;
-      border: 0;
+      border: 1px solid var(--border);
       border-radius: 5px;
       padding: 5px 8px;
       color: var(--secondary-fg);
@@ -1386,6 +1396,7 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .button-main {
+      color: inherit;
       font-weight: 600;
     }
 
@@ -1397,6 +1408,11 @@ function sidebarHtml(webview, logoPath) {
 
     button:hover {
       background: var(--secondary-hover);
+    }
+
+    button:focus-visible {
+      outline: 1px solid var(--button);
+      outline-offset: 2px;
     }
 
     button:disabled {
@@ -1426,6 +1442,7 @@ function sidebarHtml(webview, logoPath) {
 
     button.primary {
       grid-column: 1 / -1;
+      border-color: transparent;
       color: var(--button-fg);
       background: var(--button);
       font-weight: 600;
@@ -1454,9 +1471,14 @@ function sidebarHtml(webview, logoPath) {
     .row {
       display: grid;
       gap: 2px;
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--card);
     }
 
     .main {
+      color: var(--app-fg);
       overflow-wrap: anywhere;
     }
 
@@ -3317,15 +3339,21 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
   <style nonce="${nonce}">
     :root {
       color-scheme: light dark;
-      --border: var(--vscode-panel-border);
-      --muted: var(--vscode-descriptionForeground);
-      --input: var(--vscode-input-background);
-      --input-border: var(--vscode-input-border);
-      --button: var(--vscode-button-background);
-      --button-fg: var(--vscode-button-foreground);
-      --button-hover: var(--vscode-button-hoverBackground);
-      --bubble: var(--vscode-editor-inactiveSelectionBackground);
-      --error: var(--vscode-errorForeground);
+      --app-bg: var(--vscode-editor-background, var(--vscode-sideBar-background, #1f2328));
+      --app-fg: var(--vscode-foreground, var(--vscode-sideBar-foreground, #d4d4d4));
+      --border: var(--vscode-panel-border, var(--vscode-sideBarSectionHeader-border, rgba(127, 127, 127, 0.35)));
+      --muted: var(--vscode-descriptionForeground, var(--vscode-disabledForeground, #8b949e));
+      --input: var(--vscode-input-background, var(--app-bg));
+      --input-fg: var(--vscode-input-foreground, var(--app-fg));
+      --input-border: var(--vscode-input-border, var(--border));
+      --button: var(--vscode-button-background, #0e639c);
+      --button-fg: var(--vscode-button-foreground, #ffffff);
+      --button-hover: var(--vscode-button-hoverBackground, #1177bb);
+      --secondary: var(--vscode-button-secondaryBackground, var(--input));
+      --secondary-fg: var(--vscode-button-secondaryForeground, var(--app-fg));
+      --secondary-hover: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.22)));
+      --bubble: var(--vscode-editor-inactiveSelectionBackground, rgba(127, 127, 127, 0.16));
+      --error: var(--vscode-errorForeground, #f85149);
     }
 
     * {
@@ -3334,8 +3362,8 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
 
     body {
       margin: 0;
-      color: var(--vscode-foreground);
-      background: var(--vscode-editor-background);
+      color: var(--app-fg);
+      background: var(--app-bg);
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
     }
@@ -3373,6 +3401,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
 
     h1 {
       margin: 0;
+      color: var(--app-fg);
       font-size: 15px;
       font-weight: 600;
     }
@@ -3420,8 +3449,8 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 12px;
-      color: var(--vscode-foreground);
-      background: var(--vscode-editor-background);
+      color: var(--app-fg);
+      background: var(--app-bg);
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
     }
 
@@ -3468,7 +3497,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     }
 
     .model-main {
-      color: var(--vscode-foreground);
+      color: var(--app-fg);
       overflow-wrap: anywhere;
     }
 
@@ -3489,8 +3518,8 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 12px;
-      color: var(--vscode-foreground);
-      background: var(--vscode-editor-background);
+      color: var(--app-fg);
+      background: var(--app-bg);
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
     }
 
@@ -3514,7 +3543,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
 
     .settings-title,
     .settings-section-title {
-      color: var(--vscode-foreground);
+      color: var(--app-fg);
       font-weight: 600;
     }
 
@@ -3536,12 +3565,12 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       display: grid;
       align-items: stretch;
       gap: 5px;
-      color: var(--vscode-foreground);
+      color: var(--app-fg);
       font-size: 12px;
     }
 
     .settings-check {
-      color: var(--vscode-foreground);
+      color: var(--app-fg);
     }
 
     .settings-message {
@@ -3579,6 +3608,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       line-height: 1.5;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+      color: var(--app-fg);
       background: transparent;
     }
 
@@ -3615,7 +3645,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       gap: 8px;
       padding: 12px 14px 14px;
       border-top: 1px solid var(--border);
-      background: var(--vscode-editor-background);
+      background: var(--app-bg);
     }
 
     textarea {
@@ -3626,7 +3656,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       border: 1px solid var(--input-border);
       border-radius: 6px;
       padding: 9px 10px;
-      color: var(--vscode-input-foreground);
+      color: var(--input-fg);
       background: var(--input);
       font: inherit;
       line-height: 1.45;
@@ -3652,7 +3682,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       border: 1px solid var(--input-border);
       border-radius: 6px;
       padding: 5px 8px;
-      color: var(--vscode-input-foreground);
+      color: var(--input-fg);
       background: var(--input);
       font: inherit;
     }
@@ -3665,7 +3695,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       border: 1px solid var(--input-border);
       border-radius: 6px;
       padding: 6px 8px;
-      color: var(--vscode-input-foreground);
+      color: var(--input-fg);
       background: var(--input);
       font: inherit;
     }
@@ -3685,12 +3715,12 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     }
 
     button.secondary {
-      color: var(--vscode-button-secondaryForeground);
-      background: var(--vscode-button-secondaryBackground);
+      color: var(--secondary-fg);
+      background: var(--secondary);
     }
 
     button.secondary:hover {
-      background: var(--vscode-button-secondaryHoverBackground);
+      background: var(--secondary-hover);
     }
 
     button:disabled,
@@ -3718,7 +3748,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
 
     .key-panel summary {
       cursor: pointer;
-      color: var(--vscode-foreground);
+      color: var(--app-fg);
       font-weight: 600;
     }
 
@@ -3733,7 +3763,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       display: grid;
       align-items: stretch;
       gap: 5px;
-      color: var(--vscode-foreground);
+      color: var(--app-fg);
       font-size: 12px;
     }
 
