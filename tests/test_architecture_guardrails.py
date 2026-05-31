@@ -121,6 +121,7 @@ PUBLIC_IMPORTS = {
         "ToolExecutionContext",
         "ToolExecutionPipeline",
         "ToolLoopMetadata",
+        "ToolLoopRunner",
         "ToolRegistry",
         "ToolResult",
         "create_builtin_registry",
@@ -162,6 +163,9 @@ PUBLIC_IMPORTS = {
     "agent_hub.core.router_diagnostics": [
         "build_capability_graph",
         "build_provider_status",
+    ],
+    "agent_hub.security.provider_permissions": [
+        "ProviderPermissionPolicy",
     ],
 }
 
@@ -236,6 +240,18 @@ class ArchitectureGuardrailTests(unittest.TestCase):
                 violations[module] = forbidden
 
         self.assertEqual(violations, {})
+
+    def test_router_provider_permissions_flow_through_security_boundary(self) -> None:
+        graph = _internal_import_graph()
+        router_deps = graph.get("agent_hub.core.router", set())
+        forbidden = {
+            "agent_hub.enterprise",
+            "agent_hub.permissions",
+            "agent_hub.security.audit",
+        }
+
+        self.assertIn("agent_hub.security.provider_permissions", router_deps)
+        self.assertEqual(router_deps & forbidden, set())
 
     def test_api_compatibility_fixture_shapes_match_payload_helpers(self) -> None:
         fixture = _fixture()

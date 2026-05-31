@@ -12,11 +12,6 @@ from ..capabilities import agent_capabilities
 from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from ..context import estimate_message_tokens, is_protected_context_message
 from ..debug import debug_dir_for_state, provider_debug_context
-from ..enterprise import (
-    EnterprisePolicy,
-    enterprise_subject_from_request,
-    enterprise_workspace_from_request,
-)
 from ..events import (
     CONTEXT_TRUNCATED,
     PROVIDER_FAILED,
@@ -31,37 +26,20 @@ from ..mcp import MCPServerRegistry
 from ..models import ErrorCategory, FailoverEvent, HubRequest, HubResponse, ProviderResult, StructuredError
 from ..observability import record_event
 from ..payloads import content_to_text, request_text
-from ..permissions import (
-    TRUSTED_CLOUD,
-    UNTRUSTED_EXTERNAL,
-    PermissionManager,
-    PermissionDecision,
-    approval_mode_from_request,
-    client_compatibility_mode_enabled,
-    provider_approval_granted_from_request,
-    provider_permission_request,
-    provider_trust_level,
-)
 from ..providers import Provider, ProviderError, create_provider
 from ..response_normalization import (
     safe_empty_provider_result,
     validate_provider_result,
 )
 from ..repository import repo_context_for_request
-from ..security.audit import record_provider_audit
+from ..security.provider_permissions import ProviderPermissionPolicy
 from ..session_store import SessionStore
 from ..streaming import normalize_stream_chunk
 from ..token_optimizer import ContextCache, TokenOptimizer
-from ..tools import ToolExecutionContext, ToolExecutionPipeline, create_builtin_registry
+from ..tools import ToolExecutionPipeline, ToolLoopRunner, create_builtin_registry
 from ..tools.loop import (
     ToolLoopMetadata,
-    assistant_message_from_result,
-    compact_tool_result_for_loop,
-    extract_tool_calls,
-    max_loop_result,
     merge_tool_loop_metadata,
-    tool_call_signature,
-    valid_tool_calls,
 )
 from .health import (
     ProviderHealth,
@@ -212,6 +190,7 @@ class AgentRouter:
         self.health_tracker = ProviderHealthTracker(self._health_path)
         self._health: dict[str, ProviderHealth] = self._load_provider_health()
         self.preflight_policy = RouterPreflightPolicy(config, self._health)
+        self.provider_permission_policy = ProviderPermissionPolicy(config)
         self._cooldowns: dict[str, float] = {
             name: health.cooldown_deadline()
             for name, health in self._health.items()
@@ -228,6 +207,14 @@ class AgentRouter:
         except Exception:
             pass
         self.tool_pipeline = ToolExecutionPipeline(self.tool_registry)
+        self.tool_loop_runner = ToolLoopRunner(
+            config=config,
+            registry=self.tool_registry,
+            pipeline=self.tool_pipeline,
+            chat_provider=self.provider_manager.chat,
+            record_tool_result=self.record_tool_result,
+            record_event=self._record_route_event,
+        )
         self.provider_scores = ProviderScoreStore(config.state_dir).load()
         self.context_cache = ContextCache(
             config.state_dir / "context_cache.json",
@@ -335,7 +322,7 @@ class AgentRouter:
                         error_type="permission_required" if permission.requires_approval else "permission_denied",
                         metadata={
                             "permission": permission.request.to_dict() if permission.request else None,
-                            "trust_level": provider_trust_level(agent),
+                            "trust_level": self.provider_permission_policy.trust_level(agent),
                         },
                     )
                 )
@@ -721,7 +708,7 @@ class AgentRouter:
                         error_type="permission_required" if permission.requires_approval else "permission_denied",
                         metadata={
                             "permission": permission.request.to_dict() if permission.request else None,
-                            "trust_level": provider_trust_level(agent),
+                            "trust_level": self.provider_permission_policy.trust_level(agent),
                         },
                     )
                 )
@@ -1055,128 +1042,19 @@ class AgentRouter:
             raise
 
     def _provider_permission_decision(self, agent: AgentConfig, request: HubRequest):
-        permission_request = provider_permission_request(agent, request)
-        trust_level = provider_trust_level(agent)
-        approval_mode = approval_mode_from_request(request, self.config.approval_mode)
-        if permission_request is None:
-            record_provider_audit(
-                self.config.state_dir,
-                request=request,
-                agent=agent,
-                trust_level=trust_level,
-                allowed=True,
-                reason="Provider is local or does not require interactive approval.",
-                approval_mode=approval_mode,
-                interactive_approval_required=False,
-            )
-            return None
-        explicit_approval = provider_approval_granted_from_request(request)
-        compatibility = client_compatibility_mode_enabled(request, self.config)
-        security = (
-            permission_request.details.get("security")
-            if isinstance(permission_request.details, dict)
-            else None
-        )
-        explicit_security_approval = bool(
-            isinstance(security, dict)
-            and (security.get("blocked") or security.get("explicit_approval_required"))
-        )
-        if (
-            trust_level == TRUSTED_CLOUD
-            and not explicit_approval
-            and not explicit_security_approval
-            and (approval_mode == "auto" or compatibility)
-        ):
-            enterprise_decision = self._enterprise_permission_decision(
-                permission_request,
-                request,
-                approval_mode,
-            )
-            if enterprise_decision is not None:
-                decision = enterprise_decision
-            else:
-                reason = (
-                    "Allowed trusted cloud provider without interactive approval "
-                    "because approval_mode=auto or IDE compatibility mode is enabled."
-                )
-                decision = PermissionDecision(
-                    True,
-                    requires_approval=False,
-                    denied=False,
-                    reason=reason,
-                    mode=approval_mode,
-                    request=permission_request,
-                )
-        elif trust_level == UNTRUSTED_EXTERNAL and not explicit_approval:
-            reason = (
-                "Provider requires approval. Set approval_mode=auto or enable "
-                "cline_compatibility_mode for trusted providers; unknown external "
-                "endpoints require explicit approval."
-            )
-            decision = PermissionDecision(
-                False,
-                requires_approval=True,
-                denied=False,
-                reason=reason,
-                mode=approval_mode,
-                request=permission_request,
-            )
-        else:
-            decision = PermissionManager(
-                approval_mode,
-                approval_granted=explicit_approval,
-                enterprise_policy=EnterprisePolicy.from_config(self.config),
-                enterprise_user_id=enterprise_subject_from_request(request),
-                enterprise_workspace_id=enterprise_workspace_from_request(self.config, request),
-            ).check(permission_request)
-        record_event(
-            self.config.state_dir,
-            "permissions",
-            {
-                "type": "provider_permission",
-                "session_id": request.session_id,
-                "agent": agent.name,
-                "provider": agent.provider,
-                "model": agent.model,
-                "allowed": decision.allowed,
-                "requires_approval": decision.requires_approval,
-                "denied": decision.denied,
-                "reason": decision.reason,
-                "mode": decision.mode,
-                "trust_level": trust_level,
-                "compatibility_bypass": bool(
-                    decision.allowed and trust_level == TRUSTED_CLOUD and (approval_mode == "auto" or compatibility)
-                ),
-                "category": permission_request.category,
-                "risk_level": permission_request.risk_level,
-                "resource": permission_request.resource,
-            },
-        )
-        record_provider_audit(
-            self.config.state_dir,
-            request=request,
-            agent=agent,
-            trust_level=trust_level,
-            allowed=decision.allowed,
-            reason=decision.reason,
-            approval_mode=approval_mode,
-            interactive_approval_required=not decision.allowed and decision.requires_approval,
-            permission=decision.to_dict(),
-        )
-        return decision
+        return self.provider_permission_policy.check(agent, request)
 
     def _enterprise_permission_decision(
         self,
         permission_request: Any,
         request: HubRequest,
         approval_mode: str,
-    ) -> PermissionDecision | None:
-        return PermissionManager(
+    ):
+        return self.provider_permission_policy.check_enterprise(
+            permission_request,
+            request,
             approval_mode,
-            enterprise_policy=EnterprisePolicy.from_config(self.config),
-            enterprise_user_id=enterprise_subject_from_request(request),
-            enterprise_workspace_id=enterprise_workspace_from_request(self.config, request),
-        ).check_enterprise(permission_request)
+        )
 
     def _request_for_agent(
         self,
@@ -1491,121 +1369,15 @@ class AgentRouter:
         request: HubRequest,
         initial_result: ProviderResult,
     ) -> dict[str, Any]:
-        max_iterations = _max_tool_iterations(request, self.config.max_tool_iterations)
-        metadata = ToolLoopMetadata(max_tool_iterations=max_iterations)
-        if (
-            max_iterations <= 0
-            or not getattr(self.config, "tool_loop_enabled", True)
-            or (
-                _request_is_cline(request)
-                and not getattr(self.config, "tool_loop_enabled_for_cline", False)
-            )
-        ):
-            return {"result": initial_result, "metadata": metadata, "latency_seconds": 0.0}
-        current = initial_result
-        messages = [dict(message) for message in request.messages]
-        latency_seconds = 0.0
-        seen_signatures: set[str] = set()
-        while True:
-            calls = valid_tool_calls(extract_tool_calls(current), metadata)
-            if not calls:
-                if metadata.tool_calls or metadata.tool_results:
-                    current = replace_provider_result_raw(
-                        current,
-                        merge_tool_loop_metadata(current.raw if isinstance(current.raw, dict) else {}, metadata),
-                    )
-                return {"result": current, "metadata": metadata, "latency_seconds": latency_seconds}
-            if not self._should_execute_tool_calls(request, calls):
-                return {"result": current, "metadata": metadata, "latency_seconds": latency_seconds}
-            if metadata.tool_iteration_count >= max_iterations:
-                metadata.max_tool_iterations_reached = True
-                stopped = max_loop_result(current, metadata)
-                self._record_route_event(
-                    "tool_loop_max_reached",
-                    request_id=request_id,
-                    request=request,
-                    agent=agent.name,
-                    provider=agent.provider,
-                    model=agent.model,
-                    tool_iteration_count=metadata.tool_iteration_count,
-                )
-                return {"result": stopped, "metadata": metadata, "latency_seconds": latency_seconds}
-            signatures = [tool_call_signature(call) for call in calls]
-            duplicate = next((signature for signature in signatures if signature in seen_signatures), None)
-            if duplicate is not None:
-                metadata.duplicate_tool_call_detected = True
-                stopped = max_loop_result(current, metadata)
-                self._record_route_event(
-                    "tool_loop_duplicate_stopped",
-                    request_id=request_id,
-                    request=request,
-                    agent=agent.name,
-                    provider=agent.provider,
-                    model=agent.model,
-                    duplicate_signature=duplicate,
-                    tool_iteration_count=metadata.tool_iteration_count,
-                )
-                return {"result": stopped, "metadata": metadata, "latency_seconds": latency_seconds}
-            seen_signatures.update(signatures)
-
-            metadata.tool_iteration_count += 1
-            messages.append(assistant_message_from_result(current, calls))
-            context = ToolExecutionContext(config=self.config, request=request)
-            results = []
-            for call in calls:
-                result = self.tool_pipeline.execute(call, context)
-                result = compact_tool_result_for_loop(result)
-                results.append(result)
-                self.record_tool_result(agent.name, result.ok)
-                metadata.tool_calls.append(
-                    {
-                        "id": call.id,
-                        "name": call.name,
-                        "arguments": dict(call.arguments),
-                        "iteration": metadata.tool_iteration_count,
-                    }
-                )
-                metadata.tool_results.append(result.to_dict())
-                messages.append(result.to_openai_message())
-            self._record_route_event(
-                "tool_loop_iteration",
-                request_id=request_id,
-                request=request,
-                agent=agent.name,
-                provider=agent.provider,
-                model=agent.model,
-                tool_calls=[call.name for call in calls],
-                tool_results=[result.ok for result in results],
-                tool_result_sizes=[
-                    len(json.dumps(result.to_dict(), ensure_ascii=False, default=str))
-                    for result in results
-                ],
-                tool_execution_ms=[
-                    result.to_dict().get("duration_ms")
-                    for result in results
-                ],
-                tool_iteration_count=metadata.tool_iteration_count,
-            )
-            next_raw = _tool_loop_raw(request, metadata)
-            next_request = replace(
-                request,
-                messages=messages,
-                raw=next_raw,
-                stream=False,
-                record_session=False,
-            )
-            started = time.perf_counter()
-            current = self.provider_manager.chat(agent, next_request)
-            latency_seconds += time.perf_counter() - started
+        return self.tool_loop_runner.run(
+            request_id=request_id,
+            agent=agent,
+            request=request,
+            initial_result=initial_result,
+        ).to_router_dict()
 
     def _should_execute_tool_calls(self, request: HubRequest, calls: list[Any]) -> bool:
-        if _agent_runner_managed_request(request):
-            return False
-        if _request_option(request, "auto_execute_tools", "execute_tools") is True:
-            return True
-        if _request_has_client_tool_specs(request) and not isinstance(request.raw.get("agent_hub_tools"), list):
-            return False
-        return all(self.tool_registry.get(call.name) is not None for call in calls)
+        return self.tool_loop_runner.should_execute_tool_calls(request, calls)
 
     def decide(self, request: HubRequest) -> RoutingDecision:
         """Choose a ranked fallback chain before execution."""
@@ -3436,38 +3208,6 @@ def _repo_context_useful(request: HubRequest) -> bool:
 def _agent_runner_managed_request(request: HubRequest) -> bool:
     raw = request.raw if isinstance(request.raw, dict) else {}
     return isinstance(raw.get("agent_hub_runtime"), dict)
-
-
-def _max_tool_iterations(request: HubRequest, default: int) -> int:
-    value = _request_option(request, "max_tool_iterations", "tool_loop_max_iterations")
-    try:
-        number = int(value if value is not None else default)
-    except (TypeError, ValueError):
-        number = default
-    return max(0, min(number, 20))
-
-
-def _tool_loop_raw(request: HubRequest, metadata: ToolLoopMetadata) -> dict[str, Any]:
-    raw = dict(request.raw or {})
-    hub = dict(raw.get("agent_hub") or {})
-    hub["tool_loop"] = metadata.to_dict()
-    hub["auto_execute_tools"] = True
-    raw["agent_hub"] = hub
-    return raw
-
-
-def replace_provider_result_raw(result: ProviderResult, raw: dict[str, Any]) -> ProviderResult:
-    return ProviderResult(
-        text=result.text,
-        model=result.model,
-        raw=raw,
-        usage=dict(result.usage),
-        finish_reason=result.finish_reason,
-        citations=list(result.citations),
-        search_results=list(result.search_results),
-        images=list(result.images),
-        related_questions=list(result.related_questions),
-    )
 
 
 def _recommendation_reason(

@@ -4,6 +4,16 @@
 
 No changes yet.
 
+## 0.7.14
+
+- Adds Phase 4 security consolidation for provider permission routing.
+- Packages the extracted provider permission policy with a refreshed backend snapshot.
+
+## 0.7.13
+
+- Adds Phase 3 tool runtime unification for provider tool-loop orchestration.
+- Packages the extracted tool-loop runner with a refreshed backend snapshot.
+
 ## 0.7.12
 
 - Adds Phase 2 router decomposition for preflight policy and diagnostics builders.
