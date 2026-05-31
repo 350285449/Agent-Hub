@@ -130,7 +130,10 @@ PUBLIC_IMPORTS = {
     ],
     "agent_hub.workflows": [
         "WorkflowEngine",
+        "WorkflowEventRecorder",
+        "WorkflowEventSink",
         "WorkflowMemory",
+        "WorkflowPlanner",
         "WorkflowResult",
         "WorkflowStage",
         "WorkflowStageResult",
@@ -150,6 +153,15 @@ PUBLIC_IMPORTS = {
         "AgentHubHandler",
         "serve",
     ],
+    "agent_hub.api.compatibility": [
+        "CompatibilityEndpoint",
+        "apply_model_routing",
+        "compatibility_endpoint",
+        "debug_api_shape",
+        "model_lookup_error",
+        "request_from_compat_payload",
+        "response_for_shape",
+    ],
     "agent_hub.capabilities": [
         "AgentCapabilities",
         "agent_capabilities",
@@ -164,8 +176,22 @@ PUBLIC_IMPORTS = {
         "build_capability_graph",
         "build_provider_status",
     ],
+    "agent_hub.events": [
+        "RouterEventRecorder",
+        "record_internal_event",
+        "request_event_context",
+        "request_source",
+    ],
     "agent_hub.security.provider_permissions": [
         "ProviderPermissionPolicy",
+    ],
+    "agent_hub.workflows.events": [
+        "WorkflowEventRecorder",
+        "WorkflowEventSink",
+    ],
+    "agent_hub.workflows.planning": [
+        "WorkflowPlanner",
+        "WorkflowStage",
     ],
 }
 
@@ -252,6 +278,28 @@ class ArchitectureGuardrailTests(unittest.TestCase):
 
         self.assertIn("agent_hub.security.provider_permissions", router_deps)
         self.assertEqual(router_deps & forbidden, set())
+
+    def test_router_observability_flows_through_event_recorder(self) -> None:
+        graph = _internal_import_graph()
+        router_deps = graph.get("agent_hub.core.router", set())
+
+        self.assertIn("agent_hub.events", router_deps)
+        self.assertNotIn("agent_hub.observability", router_deps)
+
+    def test_workflow_execution_uses_planning_and_event_boundaries(self) -> None:
+        graph = _internal_import_graph()
+        workflow_deps = graph.get("agent_hub.workflows.engine", set())
+
+        self.assertIn("agent_hub.workflows.planning", workflow_deps)
+        self.assertIn("agent_hub.workflows.events", workflow_deps)
+        self.assertNotIn("agent_hub.observability", workflow_deps)
+
+    def test_server_api_compatibility_flows_through_compatibility_layer(self) -> None:
+        graph = _internal_import_graph()
+        server_deps = graph.get("agent_hub.server", set())
+
+        self.assertIn("agent_hub.api.compatibility", server_deps)
+        self.assertNotIn("agent_hub.payloads", server_deps)
 
     def test_api_compatibility_fixture_shapes_match_payload_helpers(self) -> None:
         fixture = _fixture()

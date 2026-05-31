@@ -4,10 +4,10 @@ from .engine import (
     WorkflowEngine,
     WorkflowMemory,
     WorkflowResult,
-    WorkflowStage,
     WorkflowStageResult,
     WorkflowState,
 )
+from .events import WorkflowEventRecorder, WorkflowEventSink
 from .extensions import (
     ConsensusStrategy,
     MergeStrategy,
@@ -18,6 +18,7 @@ from .extensions import (
     WORKER_ROLE,
     WorkflowExtensionPoints,
 )
+from .planning import WorkflowPlanner, WorkflowStage
 
 __all__ = [
     "ConsensusStrategy",
@@ -28,8 +29,11 @@ __all__ = [
     "RoleStrategy",
     "WORKER_ROLE",
     "WorkflowEngine",
+    "WorkflowEventRecorder",
+    "WorkflowEventSink",
     "WorkflowExtensionPoints",
     "WorkflowMemory",
+    "WorkflowPlanner",
     "WorkflowResult",
     "WorkflowStage",
     "WorkflowStageResult",

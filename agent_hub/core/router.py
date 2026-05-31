@@ -17,14 +17,14 @@ from ..events import (
     PROVIDER_FAILED,
     PROVIDER_SELECTED,
     ROUTER_FALLBACK,
+    RouterEventRecorder,
     STREAM_FAILED,
     STREAM_STARTED,
-    record_internal_event,
+    request_source,
 )
 from ..evaluation import ProviderScoreStore
 from ..mcp import MCPServerRegistry
 from ..models import ErrorCategory, FailoverEvent, HubRequest, HubResponse, ProviderResult, StructuredError
-from ..observability import record_event
 from ..payloads import content_to_text, request_text
 from ..providers import Provider, ProviderError, create_provider
 from ..response_normalization import (
@@ -191,6 +191,7 @@ class AgentRouter:
         self._health: dict[str, ProviderHealth] = self._load_provider_health()
         self.preflight_policy = RouterPreflightPolicy(config, self._health)
         self.provider_permission_policy = ProviderPermissionPolicy(config)
+        self.event_recorder = RouterEventRecorder(config.state_dir)
         self._cooldowns: dict[str, float] = {
             name: health.cooldown_deadline()
             for name, health in self._health.items()
@@ -2063,23 +2064,7 @@ class AgentRouter:
         return None
 
     def _record_route_event(self, event_type: str, *, request_id: str, request: HubRequest, **data: Any) -> None:
-        try:
-            record_event(
-                self.config.state_dir,
-                "routing",
-                {
-                    "type": event_type,
-                    "request_id": request_id,
-                    "session_id": request.session_id,
-                    "route": request.route,
-                    "preferred_agent": request.preferred_agent,
-                    "api_shape": request.api_shape,
-                    "source": _request_source(request),
-                    **data,
-                },
-            )
-        except Exception:
-            return
+        self.event_recorder.route(event_type, request_id=request_id, request=request, **data)
 
     def _record_internal_event(
         self,
@@ -2089,17 +2074,7 @@ class AgentRouter:
         request: HubRequest,
         **data: Any,
     ) -> None:
-        record_internal_event(
-            self.config.state_dir,
-            name,
-            request_id=request_id,
-            session_id=request.session_id,
-            route=request.route,
-            preferred_agent=request.preferred_agent,
-            api_shape=request.api_shape,
-            source=_request_source(request),
-            **data,
-        )
+        self.event_recorder.internal(name, request_id=request_id, request=request, **data)
 
     def _record_success(
         self,
@@ -2117,7 +2092,7 @@ class AgentRouter:
         health.total_latency_seconds += max(0.0, latency_seconds)
         health.last_success_at = now
         health.last_checked_at = now
-        health.last_request_source = _request_source(request)
+        health.last_request_source = request_source(request)
         health.last_route = request.route or ""
         health.last_request_started_at = max(0.0, now - max(0.0, latency_seconds))
         health.last_first_token_latency_seconds = max(
@@ -2177,7 +2152,7 @@ class AgentRouter:
         health.last_checked_at = now
         if request is not None:
             usage = _context_usage(request)
-            health.last_request_source = _request_source(request)
+            health.last_request_source = request_source(request)
             health.last_route = request.route or ""
             health.last_request_started_at = now
             health.last_input_tokens = int(usage.get("estimated_input_tokens") or estimate_input_tokens(request))
@@ -2794,24 +2769,6 @@ def _context_usage(request: HubRequest) -> dict[str, Any]:
     hub = raw.get("agent_hub") if isinstance(raw, dict) else None
     usage = hub.get("context_usage") if isinstance(hub, dict) else None
     return dict(usage) if isinstance(usage, dict) else {}
-
-
-def _request_source(request: HubRequest) -> str:
-    raw = request.raw if isinstance(request.raw, dict) else {}
-    metadata = request.metadata if isinstance(request.metadata, dict) else {}
-    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
-    for value in (
-        metadata.get("source"),
-        metadata.get("client"),
-        raw.get("source"),
-        raw.get("client"),
-        hub.get("source"),
-        hub.get("client"),
-        request.api_shape,
-    ):
-        if isinstance(value, str) and value.strip():
-            return value.strip()[:120]
-    return "unknown"
 
 
 def _continuation_request(request: HubRequest, partial_text: str, reason: str) -> HubRequest:

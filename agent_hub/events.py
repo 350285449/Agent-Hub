@@ -18,6 +18,81 @@ CONTEXT_TRUNCATED = "context.truncated"
 MAX_INTERNAL_EVENT_VALUE = 4000
 
 
+class RouterEventRecorder:
+    """Records router observability events with stable request context fields."""
+
+    def __init__(self, state_dir: str | Path) -> None:
+        self.state_dir = state_dir
+
+    def route(
+        self,
+        event_type: str,
+        *,
+        request_id: str,
+        request: Any,
+        **data: Any,
+    ) -> None:
+        try:
+            record_event(
+                self.state_dir,
+                "routing",
+                {
+                    "type": event_type,
+                    "request_id": request_id,
+                    **request_event_context(request),
+                    **data,
+                },
+            )
+        except Exception:
+            return
+
+    def internal(
+        self,
+        name: str,
+        *,
+        request_id: str,
+        request: Any,
+        **data: Any,
+    ) -> None:
+        record_internal_event(
+            self.state_dir,
+            name,
+            request_id=request_id,
+            **request_event_context(request),
+            **data,
+        )
+
+
+def request_event_context(request: Any) -> dict[str, Any]:
+    return {
+        "session_id": getattr(request, "session_id", ""),
+        "route": getattr(request, "route", ""),
+        "preferred_agent": getattr(request, "preferred_agent", None),
+        "api_shape": getattr(request, "api_shape", ""),
+        "source": request_source(request),
+    }
+
+
+def request_source(request: Any) -> str:
+    raw = getattr(request, "raw", {})
+    raw = raw if isinstance(raw, dict) else {}
+    metadata = getattr(request, "metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    for value in (
+        metadata.get("source"),
+        metadata.get("client"),
+        raw.get("source"),
+        raw.get("client"),
+        hub.get("source"),
+        hub.get("client"),
+        getattr(request, "api_shape", ""),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:120]
+    return "unknown"
+
+
 def record_internal_event(state_dir: str | Path, name: str, **data: Any) -> None:
     """Append a compact internal event without letting observability break requests."""
 
@@ -65,8 +140,11 @@ __all__ = [
     "PROVIDER_FAILED",
     "PROVIDER_SELECTED",
     "ROUTER_FALLBACK",
+    "RouterEventRecorder",
     "STREAM_FAILED",
     "STREAM_STARTED",
     "TOOL_EXECUTED",
     "record_internal_event",
+    "request_event_context",
+    "request_source",
 ]

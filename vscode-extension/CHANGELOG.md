@@ -4,6 +4,21 @@
 
 No changes yet.
 
+## 0.7.17
+
+- Adds Phase 7 API compatibility extraction for endpoint dispatch, request metadata, model alias routing, and response shaping.
+- Packages the API compatibility layer with a refreshed backend snapshot.
+
+## 0.7.16
+
+- Adds Phase 6 workflow modernization for workflow planning and event recording.
+- Exports workflow planner and event recorder boundaries.
+
+## 0.7.15
+
+- Adds Phase 5 observability modernization for router event recording.
+- Packages the extracted router event recorder with a refreshed backend snapshot.
+
 ## 0.7.14
 
 - Adds Phase 4 security consolidation for provider permission routing.

@@ -3,24 +3,15 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable
+from typing import Any
 
 from ..config import HubConfig
 from ..models import FailoverEvent, HubRequest, HubResponse
-from ..observability import record_event
 from ..payloads import request_text
 from ..core.router import AgentRouter
 from ..tools import ToolCall, ToolExecutionContext, ToolExecutionPipeline, create_builtin_registry
-
-
-WorkflowEventSink = Callable[[dict[str, Any]], None]
-
-
-@dataclass(frozen=True, slots=True)
-class WorkflowStage:
-    name: str
-    role: str
-    preference: str
+from .events import WorkflowEventRecorder, WorkflowEventSink
+from .planning import WorkflowPlanner, WorkflowStage, compact_text
 
 
 @dataclass(slots=True)
@@ -42,7 +33,7 @@ class WorkflowStageResult:
             "agent": self.agent,
             "provider": self.provider,
             "model": self.model,
-            "text": _compact(self.text),
+            "text": compact_text(self.text),
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "duration_ms": round((self.finished_at - self.started_at) * 1000, 2),
@@ -67,7 +58,7 @@ class WorkflowMemory:
             return ""
         lines = ["Prior workflow stages:"]
         for result in self.stage_results:
-            lines.append(f"{result.role}: {_compact(result.text, maximum=1800)}")
+            lines.append(f"{result.role}: {compact_text(result.text, maximum=1800)}")
         return "\n\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
@@ -113,11 +104,13 @@ class WorkflowResult:
 class WorkflowEngine:
     """Deterministic, non-recursive planner/worker/reviewer orchestration."""
 
-    WORKFLOWS = {"code", "review", "debug", "explain", "refactor"}
+    WORKFLOWS = WorkflowPlanner.WORKFLOWS
 
     def __init__(self, config: HubConfig, router: AgentRouter | None = None) -> None:
         self.config = config
         self.router = router or AgentRouter(config)
+        self.planner = WorkflowPlanner(config)
+        self.event_recorder = WorkflowEventRecorder(config.state_dir)
 
     def execute(
         self,
@@ -126,19 +119,16 @@ class WorkflowEngine:
         *,
         event_sink: WorkflowEventSink | None = None,
     ) -> WorkflowResult:
-        normalized = kind.strip().lower()
-        if normalized not in self.WORKFLOWS:
-            raise ValueError(f"Unknown workflow {kind!r}")
-
+        normalized = self.planner.normalize(kind)
         workflow_id = f"wf_{uuid.uuid4().hex}"
         task = request_text(request)
         state = WorkflowState()
         memory = WorkflowMemory(workflow_id=workflow_id, kind=normalized, task=task, state=state)
-        stages = _workflow_stages(normalized)
+        stages = self.planner.stages(normalized)
         failover: list[FailoverEvent] = []
         final_response: HubResponse | None = None
 
-        _emit(event_sink, "workflow_started", workflow_id=workflow_id, workflow=normalized)
+        self.event_recorder.emit(event_sink, "workflow_started", workflow_id=workflow_id, workflow=normalized)
         self._record_workflow_event("workflow_started", workflow_id=workflow_id, workflow=normalized)
         for index, stage in enumerate(stages, start=1):
             final_response = self._run_model_stage(
@@ -153,7 +143,7 @@ class WorkflowEngine:
                 failover,
             )
 
-        if _review_blocks(memory) and _retry_enabled(request):
+        if self.planner.review_blocks(memory) and self.planner.retry_enabled(request):
             state.retries += 1
             retry_stage = WorkflowStage("work_retry", "coder", "coding")
             final_response = self._run_model_stage(
@@ -182,7 +172,7 @@ class WorkflowEngine:
         if self.config.allow_shell_tools and self.config.validation_commands:
             self._run_validation_commands(memory, workflow_id)
 
-        if _validation_requested(request, self.config):
+        if self.planner.validation_requested(request):
             final_response = self._run_model_stage(
                 normalized,
                 WorkflowStage("validate", "validator", "reliable"),
@@ -195,14 +185,14 @@ class WorkflowEngine:
                 failover,
             )
 
-        if _patch_summary_requested(request):
+        if self.planner.patch_summary_requested(request):
             self._add_patch_summary(memory)
 
         assert final_response is not None
-        state.files_touched = _files_touched(memory)
+        state.files_touched = self.planner.files_touched(memory)
         if not state.validation_result:
-            state.validation_result = {"ok": not _review_blocks(memory), "source": "review"}
-        state.final_status = "blocked" if _review_blocks(memory) else "completed"
+            state.validation_result = {"ok": not self.planner.review_blocks(memory), "source": "review"}
+        state.final_status = "blocked" if self.planner.review_blocks(memory) else "completed"
         raw = dict(final_response.raw)
         metadata = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
         raw["agent_hub"] = {
@@ -229,7 +219,7 @@ class WorkflowEngine:
         )
         if request.record_session:
             self.router.session_store.record_turn(request, response)
-        _emit(event_sink, "workflow_finished", workflow_id=workflow_id, workflow=normalized)
+        self.event_recorder.emit(event_sink, "workflow_finished", workflow_id=workflow_id, workflow=normalized)
         self._record_workflow_event(
             "workflow_finished",
             workflow_id=workflow_id,
@@ -254,7 +244,7 @@ class WorkflowEngine:
         state = memory.state or WorkflowState()
         started = time.time()
         state.stages.append(stage.name)
-        _emit(
+        self.event_recorder.emit(
             event_sink,
             "workflow_stage_started",
             workflow_id=workflow_id,
@@ -275,13 +265,13 @@ class WorkflowEngine:
         response = self.router.route(
             replace(
                 request,
-                messages=[{"role": "user", "content": _stage_prompt(normalized, stage, request, memory)}],
+                messages=[{"role": "user", "content": self.planner.stage_prompt(normalized, stage, request, memory)}],
                 route="coding" if stage.role in {"coder", "reviewer", "validator"} else request.route,
-                preferred_agent=_role_agent(self.config, stage.role),
+                preferred_agent=self.planner.role_agent(stage.role),
                 stream=False,
                 use_session_history=False,
                 record_session=False,
-                raw=_stage_raw(request, workflow_id, normalized, stage),
+                raw=self.planner.stage_raw(request, workflow_id, normalized, stage),
             )
         )
         finished = time.time()
@@ -299,7 +289,7 @@ class WorkflowEngine:
                 failover=list(response.failover),
             )
         )
-        _emit(
+        self.event_recorder.emit(
             event_sink,
             "workflow_stage_finished",
             workflow_id=workflow_id,
@@ -322,10 +312,7 @@ class WorkflowEngine:
         return response
 
     def _record_workflow_event(self, event_type: str, **data: Any) -> None:
-        try:
-            record_event(self.config.state_dir, "workflows", {"type": event_type, **data})
-        except Exception:
-            return
+        self.event_recorder.record(event_type, **data)
 
     def _run_validation_commands(self, memory: WorkflowMemory, workflow_id: str) -> None:
         state = memory.state or WorkflowState()
@@ -350,7 +337,7 @@ class WorkflowEngine:
                 agent="local-tool",
                 provider="agent-hub",
                 model="shell_execute",
-                text=_compact(str(state.validation_result), maximum=2400),
+                text=compact_text(str(state.validation_result), maximum=2400),
                 started_at=started,
                 finished_at=finished,
             )
@@ -359,7 +346,7 @@ class WorkflowEngine:
     def _add_patch_summary(self, memory: WorkflowMemory) -> None:
         state = memory.state or WorkflowState()
         started = time.time()
-        files = _files_touched(memory)
+        files = self.planner.files_touched(memory)
         state.files_touched = files
         summary = "Patch summary:\n" + ("\n".join(f"- {path}" for path in files) if files else "No concrete files were reported.")
         memory.add(
@@ -374,177 +361,3 @@ class WorkflowEngine:
                 finished_at=time.time(),
             )
         )
-
-
-def _workflow_stages(kind: str) -> list[WorkflowStage]:
-    worker_role = {
-        "code": "coder",
-        "review": "reviewer",
-        "debug": "coder",
-        "explain": "explainer",
-        "refactor": "coder",
-    }[kind]
-    return [
-        WorkflowStage("plan", "planner", "reasoning"),
-        WorkflowStage("work", worker_role, "coding" if worker_role == "coder" else "reliable"),
-        WorkflowStage("review", "reviewer", "reliable"),
-    ]
-
-
-def _stage_prompt(
-    kind: str,
-    stage: WorkflowStage,
-    request: HubRequest,
-    memory: WorkflowMemory,
-) -> str:
-    task = request_text(request)
-    prior = memory.prompt_context()
-    if stage.role == "planner":
-        instruction = (
-            f"Plan the {kind} workflow. Identify files, risks, validation, and the next concrete action. "
-            "Do not edit; produce a concise plan."
-        )
-    elif stage.role == "coder":
-        retry = " Address the blocking review feedback exactly once." if "retry" in stage.name else ""
-        instruction = (
-            f"Execute the {kind} workflow from the plan. Keep changes scoped, preserve compatibility, "
-            f"and report validation steps.{retry}"
-        )
-    elif stage.role == "explainer":
-        instruction = "Explain the relevant code or behavior clearly and cite the reasoning path."
-    elif stage.role == "validator":
-        instruction = (
-            f"Validate the {kind} workflow result. Check tests, changed files, risks, and whether the "
-            "review feedback was resolved. Return pass/fail with evidence."
-        )
-    else:
-        instruction = (
-            f"Review the {kind} workflow output for correctness, regressions, missing tests, and safety. "
-            "Return blocking issues first, or say no blocking issues."
-        )
-    return "\n\n".join(part for part in [instruction, "Task:\n" + task, prior] if part)
-
-
-def _stage_raw(
-    request: HubRequest,
-    workflow_id: str,
-    kind: str,
-    stage: WorkflowStage,
-) -> dict[str, Any]:
-    raw = dict(request.raw or {})
-    raw["workflow_id"] = workflow_id
-    raw["workflow"] = kind
-    raw["workflow_stage"] = stage.name
-    raw["workflow_role"] = stage.role
-    raw["prefer"] = stage.preference
-    raw.setdefault("agent_hub", {})
-    if isinstance(raw["agent_hub"], dict):
-        raw["agent_hub"].update(
-            {
-                "workflow_id": workflow_id,
-                "workflow": kind,
-                "workflow_stage": stage.name,
-                "workflow_role": stage.role,
-                "prefer": stage.preference,
-            }
-        )
-    return raw
-
-
-def _role_agent(config: HubConfig, role: str) -> str | None:
-    for key in (role, "coder" if role == "explainer" else role):
-        configured = config.group_roles.get(key)
-        if configured in config.agents and config.agents[configured].enabled:
-            return configured
-    return None
-
-
-def _emit(event_sink: WorkflowEventSink | None, event_type: str, **data: Any) -> None:
-    if event_sink is None:
-        return
-    try:
-        event_sink({"type": event_type, **data})
-    except Exception:
-        return
-
-
-def _validation_requested(request: HubRequest, config: HubConfig) -> bool:
-    raw = request.raw if isinstance(request.raw, dict) else {}
-    value = raw.get("validate") or raw.get("validation")
-    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
-    if value is None:
-        value = hub.get("validate") or hub.get("validation")
-    if value is None:
-        return bool(config.validation_commands)
-    return _truthy(value)
-
-
-def _retry_enabled(request: HubRequest) -> bool:
-    raw = request.raw if isinstance(request.raw, dict) else {}
-    value = raw.get("retry_on_review_failure")
-    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
-    if value is None:
-        value = hub.get("retry_on_review_failure", True)
-    return _truthy(value)
-
-
-def _patch_summary_requested(request: HubRequest) -> bool:
-    raw = request.raw if isinstance(request.raw, dict) else {}
-    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
-    value = raw.get("patch_summary")
-    if value is None:
-        value = hub.get("patch_summary", False)
-    return _truthy(value)
-
-
-def _review_blocks(memory: WorkflowMemory) -> bool:
-    if not memory.stage_results:
-        return False
-    review_texts = [
-        result.text.lower()
-        for result in memory.stage_results
-        if result.role == "reviewer"
-    ]
-    if not review_texts:
-        return False
-    latest = review_texts[-1]
-    if "no blocking" in latest or "no blockers" in latest:
-        return False
-    return any(marker in latest for marker in ("blocking", "blocker", "must fix", "regression", "fail"))
-
-
-def _files_touched(memory: WorkflowMemory) -> list[str]:
-    seen: set[str] = set()
-    files: list[str] = []
-    for result in memory.stage_results:
-        for match in re_find_paths(result.text):
-            if match not in seen:
-                seen.add(match)
-                files.append(match)
-    return files[:80]
-
-
-def re_find_paths(text: str) -> list[str]:
-    import re
-
-    return [
-        match.group(0).strip("./").replace("\\", "/")
-        for match in re.finditer(r"\b[\w./-]+\.(?:py|js|ts|tsx|jsx|json|md|toml|yml|yaml|css|html)\b", text)
-    ]
-
-
-def _truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return value.strip().lower() not in {"", "0", "false", "no", "off", "disabled"}
-    return bool(value)
-
-
-def _compact(text: str, *, maximum: int = 2400) -> str:
-    clean = str(text or "").strip()
-    if len(clean) <= maximum:
-        return clean
-    return clean[: maximum - 16].rstrip() + " [truncated]"
