@@ -1,0 +1,131 @@
+from __future__ import annotations
+
+import unittest
+from dataclasses import dataclass
+from typing import Any
+
+from agent_hub.api.compatibility import (
+    available_model_ids,
+    model_rows,
+    openai_model_rows,
+    response_headers,
+    safe_header_value,
+    stream_response_headers,
+)
+from agent_hub.config import AgentConfig, HubConfig, RouteRule
+from agent_hub.core.router import AgentRouter
+from agent_hub.models import FailoverEvent, HubResponse
+
+
+class ApiCompatibilityPhaseEightTests(unittest.TestCase):
+    def test_model_catalog_rows_are_owned_by_api_compatibility_layer(self) -> None:
+        config = HubConfig(
+            default_route=["tooly"],
+            routes=[RouteRule(name="coding", agents=["tooly"])],
+            agents={
+                "tooly": AgentConfig(
+                    name="tooly",
+                    provider="openai-compatible",
+                    model="tool-model",
+                    base_url="http://127.0.0.1:9999",
+                    free=True,
+                    enabled=True,
+                    supports_tools=True,
+                )
+            },
+        )
+        router = AgentRouter(config)
+
+        rows = model_rows(config, router)
+        ids = {row["id"] for row in rows}
+        openai_rows = openai_model_rows(config, router)
+
+        self.assertIn("agent-hub-coding", ids)
+        self.assertIn("coding", ids)
+        self.assertIn("agent:tooly", ids)
+        self.assertIn("tooly", ids)
+        self.assertIn("tool-model", ids)
+        self.assertIn("agent-hub-coding", available_model_ids(config, router))
+        self.assertTrue(all(row["object"] == "model" for row in openai_rows))
+        self.assertTrue(all("agent_hub" not in row for row in openai_rows))
+
+    def test_response_headers_preserve_compatibility_and_context_metadata(self) -> None:
+        response = HubResponse(
+            request_id="hub-1",
+            session_id="s",
+            agent="tooly",
+            provider="openai-compatible",
+            model="tool-model",
+            public_model="agent-hub-coding",
+            text="ok",
+            raw={"agent_hub": {"context_usage": {"estimated_tokens_saved": 12, "suspiciously_empty": True}}},
+            failover=[
+                FailoverEvent(
+                    agent="fallback",
+                    provider="echo",
+                    model="fallback-model",
+                    reason="permission",
+                    error_type="permission_required",
+                )
+            ],
+        )
+
+        headers = response_headers(response, _FakeRouter())
+
+        self.assertEqual(headers["X-Agent-Hub-Agent"], "tooly")
+        self.assertEqual(headers["X-AgentHub-Permission-Status"], "required")
+        self.assertEqual(headers["X-AgentHub-Safe-Mode"], "on")
+        self.assertEqual(headers["X-AgentHub-Tokens-Saved"], "12")
+        self.assertEqual(headers["X-AgentHub-Context-Warning"], "suspiciously_empty")
+        self.assertEqual(headers["X-Agent-Hub-Fallback-Models"], "fallback-model")
+        self.assertEqual(headers["X-Agent-Hub-Requests-Remaining"], "7")
+
+    def test_stream_headers_and_safe_header_values_are_compatibility_helpers(self) -> None:
+        stream = _Stream(
+            agent=_Agent(name="tooly", provider="openai-compatible"),
+            model="tool-model",
+            failover=[
+                FailoverEvent(
+                    agent="fallback",
+                    provider="echo",
+                    model="fallback-model",
+                    reason="fallback",
+                )
+            ],
+        )
+
+        headers = stream_response_headers(stream, _FakeRouter())
+
+        self.assertEqual(headers["X-Agent-Hub-Agent"], "tooly")
+        self.assertEqual(headers["X-Agent-Hub-Provider-Score"], "0.91")
+        self.assertEqual(headers["X-AgentHub-Fallback"], "fallback-model")
+        self.assertEqual(safe_header_value("hello\r\nworld"), "hello  world")
+
+
+class _FakeRouter:
+    config = HubConfig(approval_mode="safe")
+
+    def health_snapshot(self) -> dict[str, dict[str, Any]]:
+        return {
+            "tooly": {
+                "requests_remaining": 7,
+                "score": 0.91,
+            }
+        }
+
+
+@dataclass(slots=True)
+class _Agent:
+    name: str
+    provider: str
+
+
+@dataclass(slots=True)
+class _Stream:
+    agent: _Agent
+    model: str
+    failover: list[FailoverEvent]
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from typing import Any
 
-from ..config import HubConfig
+from ..config import HubConfig, normalize_provider
 from ..models import HubRequest, HubResponse
 from ..payloads import (
     anthropic_message_response,
@@ -101,6 +102,300 @@ def response_for_shape(
         include_raw=include_raw,
         include_routing_details=include_routing_details,
     )
+
+
+def openai_chat_sse_frames(
+    response: HubResponse,
+    *,
+    include_routing_details: bool = False,
+) -> list[str]:
+    return [
+        sse_data_frame(event)
+        for event in openai_stream_events(
+            response,
+            include_routing_details=include_routing_details,
+        )
+    ]
+
+
+def anthropic_sse_frames(
+    response: HubResponse,
+    *,
+    include_routing_details: bool = False,
+) -> list[str]:
+    frames: list[str] = []
+    for name, event in anthropic_stream_events(
+        response,
+        include_routing_details=include_routing_details,
+    ):
+        frames.append(sse_named_event_frame(name, event))
+    return frames
+
+
+def openai_response_sse_frames(
+    response: HubResponse,
+    *,
+    include_routing_details: bool = False,
+) -> list[str]:
+    return [
+        sse_data_frame(event)
+        for event in openai_response_stream_events(
+            response,
+            include_routing_details=include_routing_details,
+        )
+    ]
+
+
+def sse_data_frame(data: dict[str, Any] | str) -> str:
+    payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+    return f"data: {payload}\n\n"
+
+
+def sse_named_event_frame(name: str, data: dict[str, Any]) -> str:
+    return f"event: {name}\n" f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def response_headers(response: Any, router: Any) -> dict[str, str]:
+    health = router.health_snapshot().get(response.agent, {})
+    fallback_models = [
+        event.model
+        for event in response.failover
+        if event and event.model
+    ]
+    fallback_chain = ",".join(fallback_models)
+    token_metadata = response_token_metadata(response)
+    permission_status = response_permission_status(response)
+    safe_mode = "on" if router.config.approval_mode == "safe" else "off"
+    context_warning = (
+        "suspiciously_empty"
+        if token_metadata.get("suspiciously_empty")
+        else ""
+    )
+    values = {
+        "X-Agent-Hub-Agent": response.agent,
+        "X-Agent-Hub-Provider": response.provider,
+        "X-Agent-Hub-Model": response.model,
+        "X-Agent-Hub-Active-Model": response.model,
+        "X-Agent-Hub-Requests-Remaining": health.get("requests_remaining"),
+        "X-Agent-Hub-Tokens-Remaining": health.get("tokens_remaining"),
+        "X-Agent-Hub-Credits-Remaining": health.get("credits_remaining"),
+        "X-Agent-Hub-Quota-Remaining": health.get("quota_remaining"),
+        "X-Agent-Hub-Reset-At": health.get("rate_limit_reset_at"),
+        "X-Agent-Hub-Cooldown-Until": health.get("cooldown_until"),
+        "X-Agent-Hub-Fallback-Models": fallback_chain,
+        "X-AgentHub-Provider": response.provider,
+        "X-AgentHub-Model": response.model,
+        "X-AgentHub-Fallback": fallback_chain,
+        "X-AgentHub-Tokens-Saved": token_metadata.get("estimated_tokens_saved"),
+        "X-AgentHub-Requests-Remaining": health.get("requests_remaining"),
+        "X-AgentHub-Permission-Status": permission_status,
+        "X-AgentHub-Safe-Mode": safe_mode,
+        "X-AgentHub-Context-Warning": context_warning,
+    }
+    return {
+        name: safe_header_value(value)
+        for name, value in values.items()
+        if safe_header_value(value)
+    }
+
+
+def stream_response_headers(stream: Any, router: Any) -> dict[str, str]:
+    health = router.health_snapshot().get(stream.agent.name, {})
+    fallback_models = [
+        event.model
+        for event in stream.failover
+        if event and event.model
+    ]
+    values = {
+        "X-Agent-Hub-Agent": stream.agent.name,
+        "X-Agent-Hub-Provider": stream.agent.provider,
+        "X-Agent-Hub-Model": stream.model,
+        "X-Agent-Hub-Active-Model": stream.model,
+        "X-Agent-Hub-Provider-Score": health.get("score"),
+        "X-Agent-Hub-Fallback-Models": ",".join(fallback_models),
+        "X-AgentHub-Provider": stream.agent.provider,
+        "X-AgentHub-Model": stream.model,
+        "X-AgentHub-Fallback": ",".join(fallback_models),
+    }
+    return {
+        name: safe_header_value(value)
+        for name, value in values.items()
+        if safe_header_value(value)
+    }
+
+
+def safe_header_value(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    return text[:1000]
+
+
+def response_token_metadata(response: Any) -> dict[str, Any]:
+    raw = response.raw if isinstance(getattr(response, "raw", None), dict) else {}
+    metadata = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    context_usage = metadata.get("context_usage") if isinstance(metadata, dict) else None
+    if isinstance(context_usage, dict):
+        return context_usage
+    token_budget = metadata.get("token_budget") if isinstance(metadata, dict) else None
+    return token_budget if isinstance(token_budget, dict) else {}
+
+
+def response_permission_status(response: Any) -> str:
+    if any(event.error_type == "permission_denied" for event in getattr(response, "failover", [])):
+        return "denied"
+    if any(event.error_type == "permission_required" for event in getattr(response, "failover", [])):
+        return "required"
+    raw = response.raw if isinstance(getattr(response, "raw", None), dict) else {}
+    metadata = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    steps = metadata.get("steps") if isinstance(metadata, dict) else []
+    if isinstance(steps, list):
+        for step in steps:
+            result = step.get("result") if isinstance(step, dict) and isinstance(step.get("result"), dict) else {}
+            if result.get("approval_required"):
+                return "required"
+            if result.get("permission_denied"):
+                return "denied"
+    return "allowed"
+
+
+def available_model_ids(config: HubConfig, router: Any) -> list[str]:
+    ids: list[str] = []
+    for row in model_rows(config, router):
+        metadata = row.get("agent_hub") if isinstance(row, dict) else None
+        if isinstance(metadata, dict) and metadata.get("available") is False:
+            continue
+        model_id = row.get("id") if isinstance(row, dict) else None
+        if isinstance(model_id, str) and model_id not in ids:
+            ids.append(model_id)
+    return ids
+
+
+def openai_model_rows(
+    config: HubConfig,
+    router: Any,
+    *,
+    include_routing_details: bool = False,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in model_rows(config, router):
+        metadata = row.get("agent_hub") if isinstance(row, dict) else None
+        if isinstance(metadata, dict) and metadata.get("available") is False:
+            continue
+        public_row = {
+            "id": row["id"],
+            "object": "model",
+            "created": row.get("created", 0),
+            "owned_by": row.get("owned_by", "agent-hub"),
+        }
+        if include_routing_details and isinstance(metadata, dict):
+            public_row["agent_hub"] = metadata
+        rows.append(public_row)
+    return rows
+
+
+def model_rows(config: HubConfig, router: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    health = router.health_snapshot()
+    for model_id, route_name in ROUTE_MODEL_ALIASES.items():
+        if route_name not in {route.name for route in config.routes}:
+            continue
+        recommendation = router.recommend(
+            HubRequest(
+                session_id="models",
+                route=route_name,
+                messages=[{"role": "user", "content": "select an agent model"}],
+                record_session=False,
+            ),
+            limit=1,
+            needs_tools=route_name in {"coding", "local-agent"},
+        )
+        row = {
+            "id": model_id,
+            "object": "model",
+            "created": 0,
+            "owned_by": "agent-hub",
+            "agent_hub": {
+                "type": "route",
+                "route": route_name,
+                "recommended_agent": recommendation[0]["agent"] if recommendation else None,
+                "recommended_model": recommendation[0]["model"] if recommendation else None,
+                "available": bool(recommendation)
+                and route_has_visible_agent(config, route_name),
+                "recommended_health": (
+                    health.get(recommendation[0]["agent"], {}) if recommendation else {}
+                ),
+            },
+        }
+        rows.append(row)
+        seen.add(model_id)
+
+    for route in config.routes:
+        if route.name in seen:
+            continue
+        rows.append(
+            {
+                "id": route.name,
+                "object": "model",
+                "created": 0,
+                "owned_by": "agent-hub",
+                "agent_hub": {
+                    "type": "route",
+                    "route": route.name,
+                    "available": route_has_visible_agent(config, route.name),
+                },
+            }
+        )
+        seen.add(route.name)
+
+    for agent in config.agents.values():
+        if not agent_visible_in_models(config, agent):
+            continue
+        for model_id in (f"agent:{agent.name}", agent.name, agent.model):
+            if model_id in seen:
+                continue
+            rows.append(
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "agent-hub" if model_id.startswith("agent:") else agent.provider,
+                    "agent_hub": {
+                        "type": "agent_alias" if model_id.startswith("agent:") else "agent",
+                        "agent": agent.name,
+                        "provider_type": agent.provider_type,
+                        "free": agent.free,
+                        "context_window": agent.context_window,
+                        "coding_score": agent.coding_score,
+                        "reasoning_score": agent.reasoning_score,
+                        "speed_score": agent.speed_score,
+                        "supports_tools": bool(agent.supports_tools or agent.supports_function_calling),
+                        "health": health.get(agent.name, {}),
+                    },
+                }
+            )
+            seen.add(model_id)
+    return rows
+
+
+def route_has_visible_agent(config: HubConfig, route_name: str) -> bool:
+    route = next((item for item in config.routes if item.name == route_name), None)
+    if route is None:
+        return False
+    return any(
+        agent_visible_in_models(config, config.agents[name])
+        for name in route.agents
+        if name in config.agents
+    )
+
+
+def agent_visible_in_models(config: HubConfig, agent: Any) -> bool:
+    if not getattr(agent, "enabled", False):
+        return False
+    if normalize_provider(getattr(agent, "provider", "")) == "echo":
+        return bool(config.debug_echo_enabled)
+    return True
 
 
 def apply_model_routing(config: HubConfig, request: HubRequest) -> None:
@@ -265,18 +560,33 @@ def has_session_key(data: dict[str, Any]) -> bool:
 __all__ = [
     "CompatibilityEndpoint",
     "ROUTE_MODEL_ALIASES",
+    "agent_visible_in_models",
+    "anthropic_sse_frames",
     "apply_model_routing",
     "attach_internal_client_metadata",
+    "available_model_ids",
     "compatibility_endpoint",
     "compatibility_label",
     "debug_api_shape",
     "has_session_key",
     "known_client_from_user_agent",
     "model_lookup_error",
+    "model_rows",
+    "openai_chat_sse_frames",
+    "openai_model_rows",
+    "openai_response_sse_frames",
     "payload_with_header_metadata",
     "request_from_compat_payload",
     "request_from_header_payload",
+    "response_headers",
+    "response_permission_status",
+    "response_token_metadata",
     "response_for_shape",
+    "route_has_visible_agent",
+    "safe_header_value",
+    "sse_data_frame",
+    "sse_named_event_frame",
+    "stream_response_headers",
     "anthropic_stream_events",
     "openai_response_stream_events",
     "openai_stream_events",

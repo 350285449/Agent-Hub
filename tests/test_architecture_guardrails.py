@@ -156,11 +156,21 @@ PUBLIC_IMPORTS = {
     "agent_hub.api.compatibility": [
         "CompatibilityEndpoint",
         "apply_model_routing",
+        "anthropic_sse_frames",
+        "available_model_ids",
         "compatibility_endpoint",
         "debug_api_shape",
+        "model_rows",
         "model_lookup_error",
+        "openai_chat_sse_frames",
+        "openai_model_rows",
+        "openai_response_sse_frames",
         "request_from_compat_payload",
+        "response_headers",
         "response_for_shape",
+        "sse_data_frame",
+        "sse_named_event_frame",
+        "stream_response_headers",
     ],
     "agent_hub.capabilities": [
         "AgentCapabilities",
@@ -297,9 +307,16 @@ class ArchitectureGuardrailTests(unittest.TestCase):
     def test_server_api_compatibility_flows_through_compatibility_layer(self) -> None:
         graph = _internal_import_graph()
         server_deps = graph.get("agent_hub.server", set())
+        server_text = (PACKAGE_ROOT / "server.py").read_text(encoding="utf-8")
 
         self.assertIn("agent_hub.api.compatibility", server_deps)
         self.assertNotIn("agent_hub.payloads", server_deps)
+        self.assertIn("openai_chat_sse_frames", server_text)
+        self.assertIn("anthropic_sse_frames", server_text)
+        self.assertIn("openai_response_sse_frames", server_text)
+        self.assertNotIn("openai_stream_events(", server_text)
+        self.assertNotIn("anthropic_stream_events(", server_text)
+        self.assertNotIn("openai_response_stream_events(", server_text)
 
     def test_api_compatibility_fixture_shapes_match_payload_helpers(self) -> None:
         fixture = _fixture()

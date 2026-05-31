@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub Workspace",
   "description": "Run permissioned VS Code workspace agents through Ollama Cloud, hosted providers, or local models.",
-  "version": "0.7.17",
+  "version": "0.7.19",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",

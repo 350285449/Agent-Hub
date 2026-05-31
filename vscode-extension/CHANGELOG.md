@@ -4,6 +4,16 @@
 
 No changes yet.
 
+## 0.7.19
+
+- Adds Phase 9 API streaming compatibility frame builders for OpenAI and Anthropic SSE output.
+- Keeps HTTP transport handling in the server while packaging the refreshed backend snapshot.
+
+## 0.7.18
+
+- Adds Phase 8 API compatibility cleanup for model catalogs and response headers.
+- Keeps server compatibility helper imports stable while packaging the refreshed backend snapshot.
+
 ## 0.7.17
 
 - Adds Phase 7 API compatibility extraction for endpoint dispatch, request metadata, model alias routing, and response shaping.
