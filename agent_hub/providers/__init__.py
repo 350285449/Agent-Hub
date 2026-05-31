@@ -4,18 +4,14 @@ import html
 import json
 import re
 import socket
-import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
-from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 from typing import Any, Iterator, Protocol
 
 from ..config import AgentConfig, normalize_provider
-from ..debug import log_provider_debug_event
-from ..models import ErrorCategory, HubRequest, ProviderResult, StructuredError
+from ..models import HubRequest, ProviderResult
 from ..payloads import content_to_text
 from ..provider_presets import (
     chat_completions_path_for_agent,
@@ -31,171 +27,49 @@ from ..response_normalization import (
     normalize_openai_stream_data,
 )
 from .base import BaseProviderAdapter, ProviderAdapter, StreamChunk
+from .errors import (
+    AUTH_TEXT_MARKERS,
+    CONTEXT_LIMIT_TEXT_MARKERS,
+    ERROR_TYPE_ALIASES,
+    FAILOVER_STATUSES,
+    FAILOVER_TEXT_MARKERS,
+    OUTPUT_LIMIT_TEXT_MARKERS,
+    PASS_THROUGH_ERROR_TYPES,
+    ProviderError,
+    QUOTA_TEXT_MARKERS,
+    RATE_LIMIT_TEXT_MARKERS,
+    RETRYABLE_ERROR_TYPES,
+    TEMPORARY_TEXT_MARKERS,
+    UNSUPPORTED_TEXT_MARKERS,
+    classify_provider_error,
+    extract_error_message,
+    provider_error_category,
+    provider_error_from_http,
+    provider_error_from_payload,
+    provider_user_message,
+)
+from .quota import metadata_cooldown_seconds, quota_metadata_from_headers
+from .registry import ProviderRegistry, provider_registry_key
+from .transport import (
+    looks_like_timeout,
+    post_json,
+    post_stream_json,
+    provider_request_id_from_headers,
+)
 
 
-FAILOVER_STATUSES = {401, 402, 403, 404, 408, 409, 413, 429, 500, 502, 503, 504, 529}
-QUOTA_TEXT_MARKERS = (
-    "account limit",
-    "billing",
-    "credit",
-    "credits exhausted",
-    "daily limit",
-    "exceeded your quota",
-    "free quota",
-    "free tier",
-    "free-tier",
-    "free usage",
-    "insufficient balance",
-    "insufficient_quota",
-    "monthly limit",
-    "payment required",
-    "quota",
-    "quota exceeded",
-    "quotaexceeded",
-    "resource exhausted",
-    "resource_exhausted",
-    "tokens exhausted",
-    "usage limit",
-)
-RATE_LIMIT_TEXT_MARKERS = (
-    "rate limit",
-    "rate_limit",
-    "rate-limit",
-    "rate limited",
-    "rate_limit_error",
-    "rate_limit_exceeded",
-    "requests per day",
-    "requests per minute",
-    "rpm",
-    "too_many_requests",
-    "tokens per minute",
-    "tpm",
-)
-OUTPUT_LIMIT_TEXT_MARKERS = (
-    "completion token",
-    "completion tokens",
-    "max completion",
-    "max_completion_tokens",
-    "max output",
-    "max_output_tokens",
-    "output token",
-    "output tokens",
-    "requested output",
-)
-CONTEXT_LIMIT_TEXT_MARKERS = (
-    "context length",
-    "context_length",
-    "context window",
-    "input is too long",
-    "maximum context",
-    "max tokens",
-    "too many tokens",
-    "token limit",
-)
-TEMPORARY_TEXT_MARKERS = (
-    "capacity",
-    "overloaded",
-    "temporarily overloaded",
-    "temporarily unavailable",
-    "try again later",
-    "server error",
-    "service unavailable",
-)
-UNSUPPORTED_TEXT_MARKERS = (
-    "does not support",
-    "not supported",
-    "unsupported",
-    "unsupported_feature",
-)
-AUTH_TEXT_MARKERS = (
-    "api key",
-    "authentication",
-    "authorization",
-    "invalid api key",
-    "permission denied",
-    "unauthorized",
-)
-FAILOVER_TEXT_MARKERS = (
-    *QUOTA_TEXT_MARKERS,
-    *RATE_LIMIT_TEXT_MARKERS,
-    *OUTPUT_LIMIT_TEXT_MARKERS,
-    *CONTEXT_LIMIT_TEXT_MARKERS,
-    *TEMPORARY_TEXT_MARKERS,
-    *UNSUPPORTED_TEXT_MARKERS,
-    *AUTH_TEXT_MARKERS,
-)
-RETRYABLE_ERROR_TYPES = {
-    "quota_exhausted",
-    "temporary_rate_limit",
-    "context_too_large",
-    "output_too_large",
-    "provider_overloaded",
-    "provider_unavailable",
-    "authentication_error",
-    "unsupported_feature",
-    "rate_limited",
-    "context_limit",
-    "temporary_unavailable",
-    "authentication",
-    "model_unavailable",
-    "network",
-    "timeout",
-}
-ERROR_TYPE_ALIASES = {
-    "rate_limited": "temporary_rate_limit",
-    "context_limit": "context_too_large",
-    "temporary_unavailable": "provider_overloaded",
-    "authentication": "authentication_error",
-    "model_unavailable": "provider_unavailable",
-    "network": "provider_unavailable",
-    "timeout": "provider_unavailable",
-    "provider_error": "unknown_error",
-}
-PASS_THROUGH_ERROR_TYPES = {
-    "configuration",
-    "invalid_provider_response",
-    "quota_exhausted",
-    "temporary_rate_limit",
-    "context_too_large",
-    "output_too_large",
-    "provider_overloaded",
-    "provider_unavailable",
-    "authentication_error",
-    "unsupported_feature",
-    "unknown_error",
-}
-
-
-@dataclass(slots=True)
-class ProviderError(Exception):
-    message: str
-    status_code: int | None = None
-    retryable: bool = True
-    error_type: str = "provider_error"
-    cooldown_seconds: float | None = None
-    metadata: dict[str, Any] | None = None
-
-    def __post_init__(self) -> None:
-        if self.error_type == "provider_error":
-            self.error_type = _classify_provider_error(self.message, status_code=self.status_code)
-        elif self.error_type in ERROR_TYPE_ALIASES:
-            self.error_type = ERROR_TYPE_ALIASES[self.error_type]
-        elif self.error_type not in PASS_THROUGH_ERROR_TYPES:
-            self.error_type = self.error_type or "unknown_error"
-
-    def __str__(self) -> str:
-        return self.message
-
-    def to_structured_error(self) -> StructuredError:
-        return StructuredError(
-            category=_provider_error_category(self.error_type),
-            code=self.error_type or "provider_error",
-            message=self.message,
-            retryable=self.retryable,
-            user_message=_provider_user_message(self),
-            status_code=self.status_code,
-            details=dict(self.metadata or {}),
-        )
+_classify_provider_error = classify_provider_error
+_extract_error_message = extract_error_message
+_metadata_cooldown_seconds = metadata_cooldown_seconds
+_post_json = post_json
+_post_stream_json = post_stream_json
+_provider_error_category = provider_error_category
+_provider_error_from_http = provider_error_from_http
+_provider_error_from_payload = provider_error_from_payload
+_provider_request_id = provider_request_id_from_headers
+_provider_user_message = provider_user_message
+_quota_metadata_from_headers = quota_metadata_from_headers
+_looks_like_timeout = looks_like_timeout
 
 
 class Provider(ProviderAdapter, Protocol):
@@ -1055,35 +929,46 @@ def _gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def create_provider(agent: AgentConfig) -> Provider:
-    provider = normalize_provider(agent.provider)
-    provider_type = (agent.provider_type or agent.provider).lower()
-    if provider_type in {"ollama", "ollama-local"}:
-        from .ollama import OllamaProvider
+    registry = _provider_registry()
+    try:
+        return registry.create(agent)
+    except KeyError as exc:
+        raise ProviderError(
+            f"Unsupported provider {agent.provider!r}",
+            retryable=False,
+            error_type="configuration",
+        ) from exc
 
-        return OllamaProvider(agent)
-    if provider_type == "groq":
-        from .groq import GroqProvider
 
-        return GroqProvider(agent)
-    if provider_type == "openrouter":
-        from .openrouter import OpenRouterProvider
+def _provider_registry() -> ProviderRegistry[Provider]:
+    registry = ProviderRegistry[Provider]()
+    registry.register("ollama", _create_ollama_provider)
+    registry.register("groq", _create_groq_provider)
+    registry.register("openrouter", _create_openrouter_provider)
+    registry.register("openai-chat", OpenAIChatProvider)
+    registry.register("local-research", LocalResearchProvider)
+    registry.register("anthropic", AnthropicMessagesProvider)
+    registry.register("gemini", GeminiProvider)
+    registry.register("echo", EchoProvider)
+    return registry
 
-        return OpenRouterProvider(agent)
-    if provider in {"openai", "openai-compatible"}:
-        return OpenAIChatProvider(agent)
-    if provider == "local-research":
-        return LocalResearchProvider(agent)
-    if provider == "anthropic":
-        return AnthropicMessagesProvider(agent)
-    if provider == "gemini":
-        return GeminiProvider(agent)
-    if provider == "echo":
-        return EchoProvider(agent)
-    raise ProviderError(
-        f"Unsupported provider {agent.provider!r}",
-        retryable=False,
-        error_type="configuration",
-    )
+
+def _create_ollama_provider(agent: AgentConfig) -> Provider:
+    from .ollama import OllamaProvider
+
+    return OllamaProvider(agent)
+
+
+def _create_groq_provider(agent: AgentConfig) -> Provider:
+    from .groq import GroqProvider
+
+    return GroqProvider(agent)
+
+
+def _create_openrouter_provider(agent: AgentConfig) -> Provider:
+    from .openrouter import OpenRouterProvider
+
+    return OpenRouterProvider(agent)
 
 
 def provider_headers(agent: AgentConfig, api_key: str | None = None) -> dict[str, str]:
@@ -1188,210 +1073,6 @@ def _post_json_with_output_retry(
         return raw
 
 
-def _post_json(
-    url: str,
-    headers: dict[str, str],
-    payload: dict[str, Any],
-    timeout: float,
-    debug: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    log_provider_debug_event(
-        debug,
-        {
-            "type": "provider_request",
-            "url": url,
-            "payload": payload,
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response_headers = dict(response.headers.items())
-            provider_request_id = _provider_request_id(response_headers)
-            text = response.read().decode("utf-8")
-            log_provider_debug_event(
-                debug,
-                {
-                    "type": "raw_provider_response",
-                    "provider_request_id": provider_request_id,
-                    "status": response.status,
-                    "headers": response_headers,
-                    "raw_json": text,
-                    "empty_response": not bool(text.strip()),
-                },
-            )
-            data = json.loads(text) if text else {}
-            metadata = _quota_metadata_from_headers(dict(response.headers.items()))
-            if isinstance(data, dict) and data.get("error"):
-                raise _provider_error_from_payload(
-                    data,
-                    status_code=response.status,
-                    metadata=metadata,
-                )
-            if isinstance(data, dict) and metadata:
-                provider_metadata = data.setdefault("agent_hub_provider", {})
-                if isinstance(provider_metadata, dict):
-                    provider_metadata["quota"] = metadata
-            return data
-    except urllib.error.HTTPError as exc:
-        text = exc.read().decode("utf-8", errors="replace")
-        log_provider_debug_event(
-            debug,
-            {
-                "type": "provider_http_error",
-                "status": exc.code,
-                "headers": dict(exc.headers.items()) if exc.headers else {},
-                "raw_json": text,
-            },
-        )
-        raise _provider_error_from_http(
-            exc.code,
-            text,
-            headers=dict(exc.headers.items()) if exc.headers else None,
-        ) from exc
-    except (TimeoutError, socket.timeout) as exc:
-        raise ProviderError(
-            f"Provider request timed out: {exc}",
-            retryable=True,
-            error_type="provider_unavailable",
-        ) from exc
-    except urllib.error.URLError as exc:
-        reason = getattr(exc, "reason", exc)
-        error_type = "provider_unavailable"
-        prefix = "Provider request timed out" if _looks_like_timeout(reason) else "Network error"
-        raise ProviderError(f"{prefix}: {reason}", retryable=True, error_type=error_type) from exc
-    except json.JSONDecodeError as exc:
-        log_provider_debug_event(
-            debug,
-            {
-                "type": "malformed_provider_json",
-                "message": str(exc),
-            },
-        )
-        raise ProviderError(
-            f"Provider returned invalid JSON: {exc}",
-            retryable=True,
-            error_type="invalid_provider_response",
-        ) from exc
-
-
-def _post_stream_json(
-    url: str,
-    headers: dict[str, str],
-    payload: dict[str, Any],
-    timeout: float,
-    debug: dict[str, Any] | None = None,
-) -> Iterator[dict[str, Any]]:
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    log_provider_debug_event(
-        debug,
-        {
-            "type": "provider_stream_request",
-            "url": url,
-            "payload": payload,
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response_headers = dict(response.headers.items())
-            provider_request_id = _provider_request_id(response_headers)
-            metadata = _quota_metadata_from_headers(response_headers)
-            saw_done = False
-            yielded = 0
-            for raw_line in response:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                log_provider_debug_event(
-                    debug,
-                    {
-                        "type": "raw_stream_chunk",
-                        "provider_request_id": provider_request_id,
-                        "chunk": line,
-                        "empty_chunk": not bool(line),
-                    },
-                )
-                if not line or line.startswith(":") or line.startswith("event:"):
-                    continue
-                if line.startswith("data:"):
-                    line = line[5:].strip()
-                if line == "[DONE]":
-                    saw_done = True
-                    break
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    log_provider_debug_event(
-                        debug,
-                        {
-                            "type": "malformed_stream_chunk",
-                            "provider_request_id": provider_request_id,
-                            "message": str(exc),
-                            "chunk": line,
-                        },
-                    )
-                    continue
-                if not isinstance(data, dict):
-                    log_provider_debug_event(
-                        debug,
-                        {
-                            "type": "malformed_stream_chunk",
-                            "provider_request_id": provider_request_id,
-                            "message": "Provider returned a non-object stream chunk",
-                            "chunk": data,
-                        },
-                    )
-                    continue
-                if isinstance(data, dict) and data.get("error"):
-                    raise _provider_error_from_payload(
-                        data,
-                        status_code=response.status,
-                        metadata=metadata,
-                    )
-                if metadata:
-                    provider_metadata = data.setdefault("agent_hub_provider", {})
-                    if isinstance(provider_metadata, dict):
-                        provider_metadata["quota"] = metadata
-                yielded += 1
-                yield data
-            if not saw_done:
-                log_provider_debug_event(
-                    debug,
-                    {
-                        "type": "stream_missing_done",
-                        "provider_request_id": provider_request_id,
-                        "yielded_chunks": yielded,
-                    },
-                )
-    except urllib.error.HTTPError as exc:
-        text = exc.read().decode("utf-8", errors="replace")
-        log_provider_debug_event(
-            debug,
-            {
-                "type": "provider_stream_http_error",
-                "status": exc.code,
-                "headers": dict(exc.headers.items()) if exc.headers else {},
-                "raw_json": text,
-            },
-        )
-        raise _provider_error_from_http(
-            exc.code,
-            text,
-            headers=dict(exc.headers.items()) if exc.headers else None,
-        ) from exc
-    except (TimeoutError, socket.timeout) as exc:
-        raise ProviderError(
-            f"Provider stream timed out: {exc}",
-            retryable=True,
-            error_type="provider_unavailable",
-        ) from exc
-    except urllib.error.URLError as exc:
-        reason = getattr(exc, "reason", exc)
-        error_type = "provider_unavailable"
-        prefix = "Provider stream timed out" if _looks_like_timeout(reason) else "Network error"
-        raise ProviderError(f"{prefix}: {reason}", retryable=True, error_type=error_type) from exc
-
-
 def _stream_chunk_from_openai_data(
     data: dict[str, Any],
     *,
@@ -1420,317 +1101,6 @@ def _stream_delta_text(delta: dict[str, Any]) -> str:
     if isinstance(content, list):
         return content_to_text(content)
     return ""
-
-
-def _provider_error_from_http(
-    status_code: int,
-    text: str,
-    headers: dict[str, str] | None = None,
-) -> ProviderError:
-    message = _extract_error_message(text)
-    error_type = _classify_provider_error(message, status_code=status_code)
-    retryable = (
-        status_code in FAILOVER_STATUSES
-        or status_code >= 500
-        or error_type in RETRYABLE_ERROR_TYPES
-    )
-    metadata = _quota_metadata_from_headers(headers or {})
-    return ProviderError(
-        message,
-        status_code=status_code,
-        retryable=retryable,
-        error_type=error_type,
-        cooldown_seconds=_metadata_cooldown_seconds(metadata),
-        metadata=metadata,
-    )
-
-
-def _provider_request_id(headers: dict[str, str]) -> str | None:
-    lower = {str(key).lower(): str(value) for key, value in headers.items() if value is not None}
-    for name in (
-        "x-request-id",
-        "request-id",
-        "x-amzn-requestid",
-        "x-goog-request-id",
-        "cf-ray",
-    ):
-        value = lower.get(name)
-        if value:
-            return value
-    return None
-
-
-def _provider_error_from_payload(
-    data: dict[str, Any],
-    status_code: int | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> ProviderError:
-    message = _extract_error_message(json.dumps(data))
-    error_type = _classify_provider_error(message, status_code=status_code)
-    retryable = (
-        status_code in FAILOVER_STATUSES
-        or (status_code is not None and status_code >= 500)
-        or error_type in RETRYABLE_ERROR_TYPES
-    )
-    return ProviderError(
-        message,
-        status_code=status_code,
-        retryable=retryable,
-        error_type=error_type,
-        cooldown_seconds=_metadata_cooldown_seconds(metadata or {}),
-        metadata=metadata or {},
-    )
-
-
-def _classify_provider_error(message: str, status_code: int | None = None) -> str:
-    marker_text = message.lower().replace("-", " ")
-    if any(marker in marker_text for marker in QUOTA_TEXT_MARKERS):
-        return "quota_exhausted"
-    if (
-        any(marker in marker_text for marker in OUTPUT_LIMIT_TEXT_MARKERS)
-        or "max_tokens" in message.lower()
-        or ("max tokens" in marker_text and "context" not in marker_text)
-    ):
-        return "output_too_large"
-    if status_code == 429 or any(marker in marker_text for marker in RATE_LIMIT_TEXT_MARKERS):
-        return "temporary_rate_limit"
-    if any(marker in marker_text for marker in UNSUPPORTED_TEXT_MARKERS):
-        return "unsupported_feature"
-    if any(marker in marker_text for marker in CONTEXT_LIMIT_TEXT_MARKERS):
-        return "context_too_large"
-    if status_code in {401, 403} or any(marker in marker_text for marker in AUTH_TEXT_MARKERS):
-        return "authentication_error"
-    if status_code in {408, 409, 503, 504, 529} or any(
-        marker in marker_text for marker in TEMPORARY_TEXT_MARKERS
-    ):
-        return "provider_overloaded"
-    if status_code in {404, 500, 502}:
-        return "provider_unavailable"
-    if status_code == 413:
-        return "context_too_large"
-    return "unknown_error"
-
-
-def _provider_error_category(error_type: str) -> str:
-    error_type = ERROR_TYPE_ALIASES.get(error_type, error_type)
-    if error_type == "quota_exhausted":
-        return ErrorCategory.QUOTA
-    if error_type == "temporary_rate_limit":
-        return ErrorCategory.RATE_LIMIT
-    if error_type == "context_too_large":
-        return ErrorCategory.CONTEXT_LIMIT
-    if error_type in {"configuration", "authentication_error"}:
-        return ErrorCategory.CONFIGURATION
-    if error_type in {"provider_unavailable", "provider_overloaded"}:
-        return ErrorCategory.NETWORK
-    if error_type == "output_too_large":
-        return ErrorCategory.CONTEXT_LIMIT
-    if error_type == "invalid_provider_response":
-        return ErrorCategory.VALIDATION
-    return ErrorCategory.PROVIDER
-
-
-def _provider_user_message(error: ProviderError) -> str:
-    if error.error_type == "quota_exhausted":
-        return "The selected provider is out of quota or free-tier credits. Agent Hub will try a fallback model when one is available."
-    if error.error_type == "temporary_rate_limit":
-        return "The selected provider is rate-limited. Agent Hub will retry or fail over when possible."
-    if error.error_type == "context_too_large":
-        return "The prompt exceeded this provider's context limit. Agent Hub can reduce context or try a larger-context model."
-    if error.error_type == "output_too_large":
-        return "The requested output budget exceeded this provider's limit. Agent Hub will retry with a smaller supported value when possible."
-    if error.error_type == "authentication_error":
-        return "The provider rejected authentication. Check the configured API key or provider settings."
-    if error.error_type == "configuration":
-        return "The provider is not fully configured. Check Agent Hub settings and API key environment variables."
-    if error.error_type == "unsupported_feature":
-        return "The provider does not support a requested feature. Agent Hub will try a compatible model when one is available."
-    if error.error_type in {"provider_overloaded", "provider_unavailable"}:
-        return "The provider is unavailable or overloaded. Agent Hub will try a fallback model when one is available."
-    if error.error_type == "invalid_provider_response":
-        return "The provider returned a malformed response. Agent Hub will retry, fail over, or synthesize a safe response."
-    return error.message
-
-
-def _extract_error_message(text: str) -> str:
-    if not text:
-        return "Provider request failed"
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return text[:500]
-    error = data.get("error")
-    if isinstance(error, dict):
-        for key in ("message", "type", "code"):
-            if error.get(key):
-                return str(error[key])
-    if isinstance(error, str):
-        return error
-    return text[:500]
-
-
-def _quota_metadata_from_headers(headers: dict[str, str]) -> dict[str, Any]:
-    """Normalize common provider quota/rate-limit headers into router metadata."""
-
-    if not headers:
-        return {}
-    lower = {str(key).lower(): str(value) for key, value in headers.items() if value is not None}
-    metadata: dict[str, Any] = {}
-
-    requests_remaining = _first_number(
-        lower,
-        (
-            "x-ratelimit-remaining-requests",
-            "x-rate-limit-remaining-requests",
-            "anthropic-ratelimit-requests-remaining",
-            "x-request-limit-remaining",
-            "ratelimit-remaining",
-            "x-ratelimit-remaining",
-        ),
-        integer=True,
-    )
-    if requests_remaining is not None:
-        metadata["requests_remaining"] = int(requests_remaining)
-        metadata["quota_remaining"] = int(requests_remaining)
-
-    tokens_remaining = _first_number(
-        lower,
-        (
-            "x-ratelimit-remaining-tokens",
-            "x-rate-limit-remaining-tokens",
-            "anthropic-ratelimit-tokens-remaining",
-            "x-token-limit-remaining",
-        ),
-        integer=True,
-    )
-    if tokens_remaining is not None:
-        metadata["tokens_remaining"] = int(tokens_remaining)
-
-    credits_remaining = _first_number(
-        lower,
-        (
-            "x-ratelimit-remaining-credits",
-            "x-credits-remaining",
-            "x-credit-balance",
-            "x-openrouter-credits-remaining",
-        ),
-    )
-    if credits_remaining is not None:
-        metadata["credits_remaining"] = credits_remaining
-        metadata["quota_remaining"] = credits_remaining
-
-    reset_at = _first_reset_timestamp(
-        lower,
-        (
-            "x-ratelimit-reset",
-            "x-ratelimit-reset-requests",
-            "x-rate-limit-reset",
-            "anthropic-ratelimit-requests-reset",
-            "ratelimit-reset",
-        ),
-    )
-    if reset_at is not None:
-        metadata["rate_limit_reset_at"] = reset_at
-
-    retry_after = _parse_retry_after(lower.get("retry-after"))
-    if retry_after is not None:
-        metadata["cooldown_seconds"] = retry_after
-        metadata["cooldown_until"] = time.time() + retry_after
-
-    return metadata
-
-
-def _metadata_cooldown_seconds(metadata: dict[str, Any]) -> float | None:
-    value = metadata.get("cooldown_seconds")
-    if value is not None:
-        try:
-            return max(0.0, float(value))
-        except (TypeError, ValueError):
-            return None
-    cooldown_until = metadata.get("cooldown_until")
-    if cooldown_until is not None:
-        try:
-            return max(0.0, float(cooldown_until) - time.time())
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _first_number(
-    headers: dict[str, str],
-    names: tuple[str, ...],
-    *,
-    integer: bool = False,
-) -> float | int | None:
-    for name in names:
-        if name not in headers:
-            continue
-        match = re.search(r"-?\d+(?:\.\d+)?", headers[name])
-        if not match:
-            continue
-        try:
-            value = float(match.group(0))
-        except ValueError:
-            continue
-        return int(value) if integer else value
-    return None
-
-
-def _first_reset_timestamp(headers: dict[str, str], names: tuple[str, ...]) -> float | None:
-    for name in names:
-        value = headers.get(name)
-        parsed = _parse_reset_timestamp(value)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _parse_reset_timestamp(value: str | None) -> float | None:
-    if not value:
-        return None
-    stripped = value.strip()
-    number_match = re.fullmatch(r"\d+(?:\.\d+)?", stripped)
-    if number_match:
-        try:
-            number = float(number_match.group(0))
-        except ValueError:
-            number = 0.0
-        if number > 1_000_000_000:
-            return number / 1000.0 if number > 10_000_000_000 else number
-        if number >= 0:
-            return time.time() + number
-    try:
-        parsed = parsedate_to_datetime(stripped)
-    except (TypeError, ValueError, IndexError, OverflowError):
-        loose_match = re.search(r"\d+(?:\.\d+)?", stripped)
-        if not loose_match:
-            return None
-        try:
-            return time.time() + max(0.0, float(loose_match.group(0)))
-        except ValueError:
-            return None
-    if parsed.tzinfo is None:
-        return parsed.timestamp()
-    return parsed.timestamp()
-
-
-def _parse_retry_after(value: str | None) -> float | None:
-    if not value:
-        return None
-    stripped = value.strip()
-    try:
-        return max(0.0, float(stripped))
-    except ValueError:
-        timestamp = _parse_reset_timestamp(stripped)
-        if timestamp is None:
-            return None
-        return max(0.0, timestamp - time.time())
-
-
-def _looks_like_timeout(reason: object) -> bool:
-    if isinstance(reason, (TimeoutError, socket.timeout)):
-        return True
-    return "timed out" in str(reason).lower() or "timeout" in str(reason).lower()
 
 
 def _research_query(request: HubRequest) -> str:

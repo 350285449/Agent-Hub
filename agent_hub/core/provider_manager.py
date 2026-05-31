@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ..capabilities import agent_capabilities
 from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from ..models import HubRequest, ProviderResult
 from ..providers import Provider, ProviderError, create_provider
@@ -118,6 +119,7 @@ class ProviderManager:
             available = self._agent_available(agent, row_health)
             if not available and not include_unavailable:
                 continue
+            capabilities = agent_capabilities(agent)
             rows.append(
                 ProviderModelInfo(
                     agent=agent.name,
@@ -126,10 +128,7 @@ class ProviderManager:
                     model=agent.model,
                     available=available,
                     free=is_free_agent(agent),
-                    context_window=agent.context_window,
-                    supports_streaming=bool(agent.supports_streaming),
-                    supports_tools=bool(agent.supports_tools or agent.supports_function_calling),
-                    supports_vision=bool(agent.supports_vision),
+                    **capabilities.to_model_info_dict(),
                 )
             )
         return rows

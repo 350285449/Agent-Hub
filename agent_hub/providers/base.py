@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from collections.abc import Iterable
 from typing import Any, Protocol, runtime_checkable
 
+from ..capabilities import agent_capabilities
 from ..config import AgentConfig, is_free_agent
 from ..models import HubRequest, ProviderResult
 
@@ -264,18 +265,18 @@ class BaseProviderAdapter:
         )
 
     def supports_streaming(self) -> bool:
-        return bool(self.agent.supports_streaming)
+        return agent_capabilities(self.agent).supports_streaming
 
     def supports_tools(self) -> bool:
-        return bool(self.agent.supports_tools or self.agent.supports_function_calling)
+        return agent_capabilities(self.agent).tool_capable
 
     def supports_vision(self) -> bool:
-        return bool(self.agent.supports_vision)
+        return agent_capabilities(self.agent).supports_vision
 
     def context_limit(self, model: str | None = None) -> int | None:
         if model is not None and model != self.agent.model:
             return None
-        return self.agent.context_window
+        return agent_capabilities(self.agent).context_window
 
     def cost_estimate(self, input_tokens: int, output_tokens: int, model: str | None = None) -> float | None:
         if model is not None and model != self.agent.model:

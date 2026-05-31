@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+from ..capabilities import agent_capabilities
 from ..config import AgentConfig, is_free_agent, normalize_provider
 from ..models import HubRequest
 from ..payloads import request_text
@@ -226,13 +227,14 @@ def calculate_provider_score(
     now: float | None = None,
 ) -> ProviderScore:
     now = now or time.time()
+    capabilities = agent_capabilities(agent)
     reliability = _float_attr(health, "reliability_score", 0.7) * 30.0
     latency_seconds = _float_attr(health, "average_latency_seconds", 0.0)
     latency = 12.0 if latency_seconds <= 0 else max(0.0, 12.0 - min(12.0, latency_seconds / 2.5))
-    context = min(14.0, float(agent.context_window or 0) / 16_000)
+    context = min(14.0, float(capabilities.context_window or 0) / 16_000)
     coding = float(agent.coding_score or 0.0) * 12.0
-    tool_support = 8.0 if agent.supports_tools or agent.supports_function_calling else 0.0
-    streaming = 6.0 if agent.supports_streaming else 0.0
+    tool_support = 8.0 if capabilities.tool_capable else 0.0
+    streaming = 6.0 if capabilities.supports_streaming else 0.0
     streaming_speed = _float_attr(health, "streaming_tokens_per_second", 0.0)
     if streaming_speed:
         streaming += min(4.0, streaming_speed / 25.0)
@@ -262,7 +264,7 @@ def calculate_provider_score(
         text = request_text(request).lower()
         if any(word in text for word in ("bug", "code", "debug", "edit", "fix", "refactor", "test")):
             coding *= 1.35
-        if request.stream and agent.supports_streaming:
+        if request.stream and capabilities.supports_streaming:
             streaming += 4.0
     tokens_in = _number_attr(health, "tokens_in")
     tokens_out = _number_attr(health, "tokens_out")

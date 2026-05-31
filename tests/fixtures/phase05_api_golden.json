@@ -1,0 +1,449 @@
+{
+  "chat_failure": {
+    "body": {
+      "error": {
+        "message": "Model 'agent:missing' was not found in Agent Hub routes or agents.",
+        "suggested_fix": "Use /v1/models, agent-hub-coding, a configured route name, or agent:<agent-name>.",
+        "type": "model_not_found"
+      }
+    },
+    "status": 404
+  },
+  "chat_stream": {
+    "events": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "golden hello",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 0,
+          "id": "chatcmpl-<request-id>",
+          "model": "agent-hub-coding",
+          "object": "chat.completion.chunk"
+        },
+        "event": "message"
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "stop",
+              "index": 0
+            }
+          ],
+          "created": 0,
+          "id": "chatcmpl-<request-id>",
+          "model": "agent-hub-coding",
+          "object": "chat.completion.chunk"
+        },
+        "event": "message"
+      },
+      {
+        "data": "[DONE]",
+        "event": "message"
+      }
+    ],
+    "headers": {
+      "X-Agent-Hub-Stream-Mode": "compatibility"
+    }
+  },
+  "chat_success": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "content": "golden hello",
+          "role": "assistant"
+        }
+      }
+    ],
+    "created": 0,
+    "id": "chatcmpl-<request-id>",
+    "model": "agent-hub-coding",
+    "object": "chat.completion",
+    "usage": {
+      "completion_tokens": 2,
+      "prompt_tokens": 3,
+      "total_tokens": 5
+    }
+  },
+  "chat_tool": {
+    "choices": [
+      {
+        "finish_reason": "tool_calls",
+        "index": 0,
+        "message": {
+          "content": null,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{\"path\":\"README.md\"}",
+                "name": "read_file"
+              },
+              "id": "call_1",
+              "type": "function"
+            }
+          ]
+        }
+      }
+    ],
+    "created": 0,
+    "id": "chatcmpl-<request-id>",
+    "model": "agent-hub-coding",
+    "object": "chat.completion",
+    "usage": {
+      "completion_tokens": 1,
+      "prompt_tokens": 3,
+      "total_tokens": 4
+    }
+  },
+  "messages_failure": {
+    "body": {
+      "error": {
+        "message": "Model 'agent:missing' was not found in Agent Hub routes or agents.",
+        "suggested_fix": "Use /v1/models, agent-hub-coding, a configured route name, or agent:<agent-name>.",
+        "type": "model_not_found"
+      }
+    },
+    "status": 404
+  },
+  "messages_stream": {
+    "events": [
+      {
+        "data": {
+          "message": {
+            "content": [],
+            "id": "msg_<request-id>",
+            "model": "agent-hub-coding",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "completion_tokens": 2,
+              "prompt_tokens": 3,
+              "total_tokens": 5
+            }
+          },
+          "type": "message_start"
+        },
+        "event": "message_start"
+      },
+      {
+        "data": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": "golden hello",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "delta": {
+            "stop_reason": "end_turn"
+          },
+          "type": "message_delta",
+          "usage": {
+            "completion_tokens": 2,
+            "prompt_tokens": 3,
+            "total_tokens": 5
+          }
+        },
+        "event": "message_delta"
+      },
+      {
+        "data": {
+          "type": "message_stop"
+        },
+        "event": "message_stop"
+      }
+    ],
+    "headers": {
+      "X-Agent-Hub-Stream-Mode": null
+    }
+  },
+  "messages_success": {
+    "content": [
+      {
+        "text": "golden hello",
+        "type": "text"
+      }
+    ],
+    "id": "msg_<request-id>",
+    "model": "agent-hub-coding",
+    "role": "assistant",
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "type": "message",
+    "usage": {
+      "completion_tokens": 2,
+      "prompt_tokens": 3,
+      "total_tokens": 5
+    }
+  },
+  "messages_tool": {
+    "content": [
+      {
+        "id": "call_1",
+        "input": {
+          "path": "README.md"
+        },
+        "name": "read_file",
+        "type": "tool_use"
+      }
+    ],
+    "id": "msg_<request-id>",
+    "model": "agent-hub-coding",
+    "role": "assistant",
+    "stop_reason": "tool_use",
+    "stop_sequence": null,
+    "type": "message",
+    "usage": {
+      "completion_tokens": 1,
+      "prompt_tokens": 3,
+      "total_tokens": 4
+    }
+  },
+  "models_success": {
+    "data": [
+      {
+        "created": 0,
+        "id": "agent-hub",
+        "object": "model",
+        "owned_by": "agent-hub"
+      },
+      {
+        "created": 0,
+        "id": "agent-hub-cloud",
+        "object": "model",
+        "owned_by": "agent-hub"
+      },
+      {
+        "created": 0,
+        "id": "agent-hub-coding",
+        "object": "model",
+        "owned_by": "agent-hub"
+      },
+      {
+        "created": 0,
+        "id": "agent-hub-tools",
+        "object": "model",
+        "owned_by": "agent-hub"
+      },
+      {
+        "created": 0,
+        "id": "agent-hub-agent",
+        "object": "model",
+        "owned_by": "agent-hub"
+      },
+      {
+        "created": 0,
+        "id": "agent-hub-local",
+        "object": "model",
+        "owned_by": "agent-hub"
+      },
+      {
+        "created": 0,
+        "id": "coding",
+        "object": "model",
+        "owned_by": "agent-hub"
+      },
+      {
+        "created": 0,
+        "id": "cloud-agent",
+        "object": "model",
+        "owned_by": "agent-hub"
+      },
+      {
+        "created": 0,
+        "id": "local-agent",
+        "object": "model",
+        "owned_by": "agent-hub"
+      },
+      {
+        "created": 0,
+        "id": "agent:tooly",
+        "object": "model",
+        "owned_by": "agent-hub"
+      },
+      {
+        "created": 0,
+        "id": "tooly",
+        "object": "model",
+        "owned_by": "openai-compatible"
+      },
+      {
+        "created": 0,
+        "id": "tool-model",
+        "object": "model",
+        "owned_by": "openai-compatible"
+      }
+    ],
+    "object": "list"
+  },
+  "responses_failure": {
+    "body": {
+      "error": {
+        "message": "Model 'agent:missing' was not found in Agent Hub routes or agents.",
+        "suggested_fix": "Use /v1/models, agent-hub-coding, a configured route name, or agent:<agent-name>.",
+        "type": "model_not_found"
+      }
+    },
+    "status": 404
+  },
+  "responses_stream": {
+    "events": [
+      {
+        "data": {
+          "response": {
+            "created_at": 0,
+            "id": "resp_<request-id>",
+            "model": "agent-hub-coding",
+            "object": "response",
+            "output": [],
+            "output_text": "golden hello",
+            "status": "completed",
+            "usage": {
+              "completion_tokens": 2,
+              "prompt_tokens": 3,
+              "total_tokens": 5
+            }
+          },
+          "type": "response.created"
+        },
+        "event": "message"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "delta": "golden hello",
+          "item_id": "msg_<request-id>",
+          "output_index": 0,
+          "type": "response.output_text.delta"
+        },
+        "event": "message"
+      },
+      {
+        "data": {
+          "response": {
+            "created_at": 0,
+            "id": "resp_<request-id>",
+            "model": "agent-hub-coding",
+            "object": "response",
+            "output": [
+              {
+                "content": [
+                  {
+                    "text": "golden hello",
+                    "type": "output_text"
+                  }
+                ],
+                "id": "msg_<request-id>",
+                "role": "assistant",
+                "status": "completed",
+                "type": "message"
+              }
+            ],
+            "output_text": "golden hello",
+            "status": "completed",
+            "usage": {
+              "completion_tokens": 2,
+              "prompt_tokens": 3,
+              "total_tokens": 5
+            }
+          },
+          "type": "response.completed"
+        },
+        "event": "message"
+      },
+      {
+        "data": "[DONE]",
+        "event": "message"
+      }
+    ],
+    "headers": {
+      "X-Agent-Hub-Stream-Mode": "compatibility"
+    }
+  },
+  "responses_success": {
+    "created_at": 0,
+    "id": "resp_<request-id>",
+    "model": "agent-hub-coding",
+    "object": "response",
+    "output": [
+      {
+        "content": [
+          {
+            "text": "golden hello",
+            "type": "output_text"
+          }
+        ],
+        "id": "msg_<request-id>",
+        "role": "assistant",
+        "status": "completed",
+        "type": "message"
+      }
+    ],
+    "output_text": "golden hello",
+    "status": "completed",
+    "usage": {
+      "completion_tokens": 2,
+      "prompt_tokens": 3,
+      "total_tokens": 5
+    }
+  },
+  "responses_tool": {
+    "created_at": 0,
+    "id": "resp_<request-id>",
+    "model": "agent-hub-coding",
+    "object": "response",
+    "output": [
+      {
+        "arguments": "{\"path\":\"README.md\"}",
+        "call_id": "call_1",
+        "id": "call_1",
+        "name": "read_file",
+        "status": "completed",
+        "type": "function_call"
+      }
+    ],
+    "output_text": "",
+    "status": "completed",
+    "usage": {
+      "completion_tokens": 1,
+      "prompt_tokens": 3,
+      "total_tokens": 4
+    }
+  }
+}

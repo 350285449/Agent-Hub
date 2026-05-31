@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import agent_hub.providers as provider_facade
 from agent_hub.config import AgentConfig
 from agent_hub.models import HubRequest
 from agent_hub.providers import (
@@ -18,9 +19,60 @@ from agent_hub.providers import (
     _provider_error_from_http,
     _quota_metadata_from_headers,
 )
+from agent_hub.providers.errors import (
+    ProviderError as ExtractedProviderError,
+    provider_error_from_http,
+)
+from agent_hub.providers.quota import quota_metadata_from_headers
+from agent_hub.providers.registry import ProviderRegistry, provider_registry_key
+from agent_hub.providers.transport import post_stream_json
 
 
 class ProviderTests(unittest.TestCase):
+    def test_provider_facade_keeps_extracted_compatibility_shims(self) -> None:
+        self.assertIs(ProviderError, ExtractedProviderError)
+        self.assertIs(provider_facade.ProviderError, ExtractedProviderError)
+        self.assertIs(provider_facade._provider_error_from_http, provider_error_from_http)
+        self.assertIs(provider_facade._quota_metadata_from_headers, quota_metadata_from_headers)
+        self.assertIs(provider_facade._post_stream_json, post_stream_json)
+
+    def test_provider_registry_key_normalizes_provider_aliases(self) -> None:
+        self.assertEqual(
+            provider_registry_key(AgentConfig(name="openai", provider="chatgpt", model="m")),
+            "openai-chat",
+        )
+        self.assertEqual(
+            provider_registry_key(
+                AgentConfig(
+                    name="openrouter",
+                    provider="openai-compatible",
+                    provider_type="openrouter",
+                    model="m",
+                )
+            ),
+            "openrouter",
+        )
+        self.assertEqual(
+            provider_registry_key(AgentConfig(name="local", provider="local-research", model="m")),
+            "local-research",
+        )
+        self.assertEqual(
+            provider_registry_key(AgentConfig(name="claude", provider="claude", model="m")),
+            "anthropic",
+        )
+        self.assertEqual(
+            provider_registry_key(AgentConfig(name="gemini", provider="gemini", model="m")),
+            "gemini",
+        )
+
+    def test_provider_registry_dispatches_to_registered_factory(self) -> None:
+        registry: ProviderRegistry[str] = ProviderRegistry()
+        registry.register("openai-chat", lambda agent: f"chat:{agent.name}")
+
+        provider = registry.create(AgentConfig(name="chatgpt", provider="chatgpt", model="m"))
+
+        self.assertEqual(provider, "chat:chatgpt")
+
     def test_model_not_found_can_fail_over_to_next_agent(self) -> None:
         error = _provider_error_from_http(
             404,

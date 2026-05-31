@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ..capabilities import agent_capabilities, agent_supports_tools
 from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from ..context import estimate_message_tokens, is_protected_context_message
 from ..debug import debug_dir_for_state, provider_debug_context
@@ -2096,6 +2097,7 @@ class AgentRouter:
                 )
         for agent in self.config.agents.values():
             row = health.get(agent.name, {})
+            capabilities = agent_capabilities(agent)
             nodes.append(
                 {
                     "agent": agent.name,
@@ -2104,13 +2106,7 @@ class AgentRouter:
                     "model": agent.model,
                     "enabled": agent.enabled,
                     "available": bool(row.get("available")),
-                    "capabilities": {
-                        "tools": bool(agent.supports_tools or agent.supports_function_calling),
-                        "json": bool(agent.supports_json),
-                        "streaming": bool(agent.supports_streaming),
-                        "vision": bool(agent.supports_vision),
-                        "context_window": agent.context_window,
-                    },
+                    "capabilities": capabilities.to_graph_dict(),
                     "benchmark_memory": {
                         "reliability_score": row.get("reliability_score"),
                         "average_latency_ms": row.get("average_latency_ms"),
@@ -2991,12 +2987,8 @@ def _provider_stream_metadata(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_agent_capabilities(health: ProviderHealth, agent: AgentConfig) -> None:
-    health.context_window = agent.context_window
-    health.max_output_tokens = agent.max_tokens
-    health.supports_streaming = bool(agent.supports_streaming)
-    health.supports_tools = bool(agent.supports_tools or agent.supports_function_calling)
-    health.supports_json = bool(agent.supports_json)
-    health.supports_function_calling = bool(agent.supports_function_calling)
+    for name, value in agent_capabilities(agent).to_health_fields().items():
+        setattr(health, name, value)
 
 
 def _apply_provider_metadata(
@@ -3354,7 +3346,7 @@ def _is_echo_agent(agent: AgentConfig) -> bool:
 
 
 def _agent_supports_tools(agent: AgentConfig) -> bool:
-    return bool(agent.supports_tools or agent.supports_function_calling)
+    return agent_supports_tools(agent)
 
 
 def _requires_tool_capable_model(request: HubRequest) -> bool:

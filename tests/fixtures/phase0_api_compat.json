@@ -1,0 +1,100 @@
+{
+  "compatibility_endpoints": [
+    "/agent",
+    "/api/v1/chat/completions",
+    "/api/v1/models",
+    "/health",
+    "/models",
+    "/openrouter/v1/chat/completions",
+    "/v1/agent",
+    "/v1/chat/completions",
+    "/v1/messages",
+    "/v1/models",
+    "/v1/responses",
+    "/v1/route"
+  ],
+  "diagnostic_endpoints": [
+    "/debug/context",
+    "/debug/request",
+    "/limits",
+    "/metrics",
+    "/permissions",
+    "/usage",
+    "/v1/client-sources",
+    "/v1/enterprise/audit",
+    "/v1/events",
+    "/v1/limits",
+    "/v1/plugins",
+    "/v1/provider-health",
+    "/v1/provider-scores",
+    "/v1/routing-history",
+    "/v1/routing/last-decision",
+    "/v1/routing/status",
+    "/v1/routing/test-failover",
+    "/v1/status",
+    "/v1/tools",
+    "/v1/usage",
+    "/v1/workflows/status"
+  ],
+  "openai_chat_success_keys": [
+    "choices",
+    "created",
+    "id",
+    "model",
+    "object",
+    "usage"
+  ],
+  "openai_chat_choice_keys": [
+    "finish_reason",
+    "index",
+    "message"
+  ],
+  "openai_chat_stream_objects": [
+    "chat.completion.chunk",
+    "[DONE]"
+  ],
+  "openai_responses_success_keys": [
+    "created_at",
+    "id",
+    "model",
+    "object",
+    "output",
+    "output_text",
+    "status",
+    "usage"
+  ],
+  "openai_responses_stream_events": [
+    "response.created",
+    "response.output_text.delta",
+    "response.completed",
+    "[DONE]"
+  ],
+  "anthropic_message_success_keys": [
+    "content",
+    "id",
+    "model",
+    "role",
+    "stop_reason",
+    "stop_sequence",
+    "type",
+    "usage"
+  ],
+  "anthropic_stream_events": [
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "message_delta",
+    "message_stop"
+  ],
+  "model_list_keys": [
+    "data",
+    "object"
+  ],
+  "model_row_keys": [
+    "created",
+    "id",
+    "object",
+    "owned_by"
+  ]
+}
