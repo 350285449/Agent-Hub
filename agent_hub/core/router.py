@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ..capabilities import agent_capabilities, agent_supports_tools
+from ..capabilities import agent_capabilities
 from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from ..context import estimate_message_tokens, is_protected_context_message
 from ..debug import debug_dir_for_state, provider_debug_context
@@ -63,7 +63,6 @@ from ..tools.loop import (
     tool_call_signature,
     valid_tool_calls,
 )
-from .context import estimate_context_tokens
 from .health import (
     ProviderHealth,
     ProviderHealthTracker,
@@ -72,6 +71,22 @@ from .health import (
     provider_cost_efficiency_score,
 )
 from .provider_manager import ProviderManager
+from .router_diagnostics import build_capability_graph, build_provider_status
+from .routing_policy import (
+    CONFIGURATION_ERROR,
+    ECHO_DISABLED,
+    NO_TOOL_CAPABLE_MODEL,
+    RouterPreflightPolicy,
+    estimate_input_tokens,
+    expected_output_tokens,
+    _agent_supports_tools,
+    _is_echo_agent,
+    _is_local_or_private_agent,
+    _request_has_client_tool_specs,
+    _request_has_tools,
+    _requires_missing_api_key,
+    _requires_tool_capable_model,
+)
 
 
 ProviderFactory = Callable[[AgentConfig], Provider]
@@ -79,10 +94,6 @@ HEALTH_STATE_VERSION = 1
 HEALTH_STATE_FILE = "provider_health.json"
 HEALTH_STALE_SECONDS = 7 * 24 * 60 * 60
 MAX_FAILOVER_HISTORY = 50
-TRANSPARENT_API_SHAPES = {"openai-chat", "openai-responses", "anthropic-messages"}
-NO_TOOL_CAPABLE_MODEL = "no_tool_capable_model"
-ECHO_DISABLED = "echo_disabled"
-CONFIGURATION_ERROR = "configuration_error"
 ERROR_TYPE_ALIASES = {
     "rate_limited": "temporary_rate_limit",
     "context_limit": "context_too_large",
@@ -200,6 +211,7 @@ class AgentRouter:
         self._health_path = config.state_dir / HEALTH_STATE_FILE
         self.health_tracker = ProviderHealthTracker(self._health_path)
         self._health: dict[str, ProviderHealth] = self._load_provider_health()
+        self.preflight_policy = RouterPreflightPolicy(config, self._health)
         self._cooldowns: dict[str, float] = {
             name: health.cooldown_deadline()
             for name, health in self._health.items()
@@ -1943,6 +1955,7 @@ class AgentRouter:
         for name in names:
             health = self._health.get(name, ProviderHealth())
             agent = self.config.agents.get(name)
+            capabilities = agent_capabilities(agent) if agent else None
             cooldown_until = max(self._cooldowns.get(name, 0.0), health.cooldown_deadline())
             available = bool(agent.enabled) if agent else False
             if agent and self.config.free_only and not is_free_agent(agent):
@@ -1966,15 +1979,19 @@ class AgentRouter:
                 "model": agent.model if agent else "",
                 "available": available,
                 "degraded": health.is_degraded(now),
-                "streaming": bool(agent.supports_streaming) if agent else False,
-                "supports_streaming": bool(agent.supports_streaming) if agent else False,
-                "tool_support": bool(agent.supports_tools or agent.supports_function_calling) if agent else False,
-                "supports_tools": bool(agent.supports_tools or agent.supports_function_calling) if agent else False,
-                "function_support": bool(agent.supports_function_calling) if agent else False,
-                "json_mode_support": bool(agent.supports_json) if agent else False,
-                "supports_json": bool(agent.supports_json) if agent else False,
-                "context_window": agent.context_window if agent else health.context_window,
-                "max_output_tokens": agent.max_tokens if agent and agent.max_tokens is not None else health.max_output_tokens,
+                "streaming": capabilities.supports_streaming if capabilities else False,
+                "supports_streaming": capabilities.supports_streaming if capabilities else False,
+                "tool_support": capabilities.tool_capable if capabilities else False,
+                "supports_tools": capabilities.tool_capable if capabilities else False,
+                "function_support": capabilities.supports_function_calling if capabilities else False,
+                "json_mode_support": capabilities.supports_json if capabilities else False,
+                "supports_json": capabilities.supports_json if capabilities else False,
+                "context_window": capabilities.context_window if capabilities else health.context_window,
+                "max_output_tokens": (
+                    capabilities.max_output_tokens
+                    if capabilities and capabilities.max_output_tokens is not None
+                    else health.max_output_tokens
+                ),
                 "quota_remaining": health.quota_remaining,
                 "requests_remaining": health.requests_remaining,
                 "tokens_remaining": health.tokens_remaining,
@@ -2043,80 +2060,18 @@ class AgentRouter:
     def provider_status(self) -> list[dict[str, Any]]:
         """Return health-centered provider rows for the /health endpoint."""
 
-        snapshot = self.health_snapshot(include_history=False)
-        rows: list[dict[str, Any]] = []
-        for name, agent in sorted(self.config.agents.items()):
-            row = snapshot.get(name, {})
-            rows.append(
-                {
-                    "name": name,
-                    "agent": name,
-                    "provider": agent.provider,
-                    "provider_type": agent.provider_type or normalize_provider(agent.provider),
-                    "model": agent.model,
-                    "available": bool(row.get("available")),
-                    "health": row.get("health", "unknown"),
-                    "latency_ms": row.get("latency_ms", 0.0),
-                    "score": row.get("score", 0.0),
-                    "streaming": bool(agent.supports_streaming),
-                    "supports_tools": bool(agent.supports_tools or agent.supports_function_calling),
-                    "cooldown_until": row.get("cooldown_until"),
-                    "unavailable_until": row.get("unavailable_until"),
-                    "recent_failures": row.get("failure_count", 0),
-                    "average_latency_seconds": row.get("average_latency_seconds", 0.0),
-                    "tokens_per_second": row.get("average_tokens_per_second", 0.0),
-                    "quota_state": row.get("quota_state", "unknown"),
-                    "remaining": row.get("remaining", "unknown"),
-                    "context_limit": row.get("context_window"),
-                    "output_limit": row.get("max_output_tokens"),
-                    "last_request_source": row.get("last_request_source"),
-                    "last_failover_attempts": row.get("last_failover_attempts", 0),
-                    "stream_interruption_count": row.get("stream_interruption_count", 0),
-                }
-            )
-        return rows
+        return build_provider_status(
+            self.config,
+            self.health_snapshot(include_history=False),
+        )
 
     def capability_graph(self) -> dict[str, Any]:
         """Expose provider/model capabilities for transparent routing decisions."""
 
-        health = self.health_snapshot(include_history=False)
-        nodes: list[dict[str, Any]] = []
-        edges: list[dict[str, Any]] = []
-        for route in self.config.routes:
-            for index, agent_name in enumerate(route.agents):
-                agent = self.config.agents.get(agent_name)
-                if not agent:
-                    continue
-                edges.append(
-                    {
-                        "route": route.name,
-                        "agent": agent.name,
-                        "order": index,
-                        "available": bool(health.get(agent.name, {}).get("available")),
-                    }
-                )
-        for agent in self.config.agents.values():
-            row = health.get(agent.name, {})
-            capabilities = agent_capabilities(agent)
-            nodes.append(
-                {
-                    "agent": agent.name,
-                    "provider": agent.provider,
-                    "provider_type": agent.provider_type or normalize_provider(agent.provider),
-                    "model": agent.model,
-                    "enabled": agent.enabled,
-                    "available": bool(row.get("available")),
-                    "capabilities": capabilities.to_graph_dict(),
-                    "benchmark_memory": {
-                        "reliability_score": row.get("reliability_score"),
-                        "average_latency_ms": row.get("average_latency_ms"),
-                        "streaming_tokens_per_second": row.get("streaming_tokens_per_second"),
-                        "success_count": row.get("success_count"),
-                        "failure_count": row.get("failure_count"),
-                    },
-                }
-            )
-        return {"object": "agent_hub.capability_graph", "nodes": nodes, "edges": edges}
+        return build_capability_graph(
+            self.config,
+            self.health_snapshot(include_history=False),
+        )
 
     def recommend(
         self,
@@ -2208,51 +2163,7 @@ class AgentRouter:
         return rows[: max(1, limit)]
 
     def _preflight_skip_reason(self, agent: AgentConfig, request: HubRequest) -> str | None:
-        if _requires_tool_capable_model(request) and not _agent_supports_tools(agent):
-            if _is_echo_agent(agent):
-                return (
-                    "Echo is a diagnostic provider and cannot satisfy Cline, Claude Code, "
-                    "or OpenAI-compatible tool calls."
-                )
-            return (
-                "This request includes tools, but the configured agent does not advertise "
-                "tool/function-call support."
-            )
-
-        if _is_echo_agent(agent) and not self.config.debug_echo_enabled:
-            return (
-                "Echo is disabled by default because it only repeats the task and is not a real model. "
-                "Configure a real provider or set debug_echo_enabled=true for diagnostics."
-            )
-
-        if self.config.free_only and not is_free_agent(agent):
-            return (
-                "Agent provider is disabled because free_only is enabled; "
-                "only agents marked free, echo, and local/private openai-compatible agents are allowed"
-            )
-
-        if _requires_missing_api_key(agent):
-            return f"Agent is missing API key env {agent.api_key_env}"
-
-        input_tokens = estimate_input_tokens(request)
-        output_tokens = expected_output_tokens(request, agent)
-        required_tokens = input_tokens + output_tokens
-        health = self._health.get(agent.name)
-        quota_reason = _quota_skip_reason(health, required_tokens=required_tokens)
-        if quota_reason:
-            return quota_reason
-
-        if agent.context_window is None:
-            return None
-
-        if required_tokens > agent.context_window:
-            return (
-                "Agent context window is too small: "
-                f"needs about {required_tokens} tokens "
-                f"({input_tokens} input + {output_tokens} output), "
-                f"has {agent.context_window}"
-            )
-        return None
+        return self.preflight_policy.skip_reason(agent, request)
 
     def _preflight_error_type(
         self,
@@ -2260,27 +2171,7 @@ class AgentRouter:
         request: HubRequest,
         reason: str,
     ) -> str | None:
-        if _requires_tool_capable_model(request):
-            if (
-                not _agent_supports_tools(agent)
-                or _requires_missing_api_key(agent)
-                or "free_only" in reason
-            ):
-                return NO_TOOL_CAPABLE_MODEL
-        if _is_echo_agent(agent) and not self.config.debug_echo_enabled:
-            return ECHO_DISABLED
-        if "missing API key" in reason:
-            return CONFIGURATION_ERROR
-        lowered = reason.lower()
-        if "context window" in lowered or "too small" in lowered:
-            return "context_too_large"
-        if "rate-limited" in lowered or "remaining requests" in lowered:
-            return "temporary_rate_limit"
-        if "quota" in lowered or "credits" in lowered:
-            return "quota_exhausted"
-        if "remaining tokens" in lowered:
-            return "context_too_large"
-        return None
+        return self.preflight_policy.error_type(agent, request, reason)
 
     def _balanced_agents(self, agents: list[AgentConfig], request: HubRequest | None = None) -> list[AgentConfig]:
         if not self.config.enable_load_balancing or len(agents) <= 1:
@@ -2295,14 +2186,15 @@ class AgentRouter:
 
     def _routing_score(self, agent: AgentConfig, request: HubRequest | None = None) -> float:
         score = float(agent.priority or 0.0)
+        capabilities = agent_capabilities(agent)
         has_tools = _request_has_tools(request) if request is not None else False
         if normalize_provider(agent.provider) == "echo":
             score -= 5000.0
         if request is not None:
             text = request_text(request).lower()
-            if has_tools and (agent.supports_tools or agent.supports_function_calling):
+            if has_tools and capabilities.tool_capable:
                 score += 18
-            if request.stream and agent.supports_streaming:
+            if request.stream and capabilities.supports_streaming:
                 score += 6
             if _looks_like_coding_task(text):
                 score += float(agent.coding_score or 0.0) * 12
@@ -2339,7 +2231,7 @@ class AgentRouter:
                     score -= 18.0
             if has_tools and health.tool_call_failure_count:
                 score -= min(12.0, health.tool_call_failure_count * 2.0)
-            if request is not None and request.stream and agent.supports_streaming and health.streaming_tokens_per_second:
+            if request is not None and request.stream and capabilities.supports_streaming and health.streaming_tokens_per_second:
                 score += min(4.0, health.streaming_tokens_per_second / 25.0)
             if health.tokens_in > 0:
                 token_efficiency = health.tokens_out / max(1, health.tokens_in)
@@ -3083,37 +2975,6 @@ def _remaining_quota_value(health: ProviderHealth) -> int | float | str:
     return min(values)
 
 
-def _quota_skip_reason(health: ProviderHealth | None, *, required_tokens: int) -> str | None:
-    if health is None:
-        return None
-    now = time.time()
-    if health.rate_limit_reset_at is not None and health.rate_limit_reset_at <= now:
-        return None
-    if health.quota_exhausted and health.cooldown_deadline() > now:
-        return _availability_reason("Provider appears to be out of quota or credits", health)
-    if health.rate_limited and health.cooldown_deadline() > now:
-        return _availability_reason("Provider is temporarily rate-limited", health)
-    if health.requests_remaining is not None and health.requests_remaining <= 0:
-        return _availability_reason("Provider has no remaining requests from last observed quota metadata", health)
-    if health.quota_remaining is not None and health.quota_remaining <= 0:
-        return _availability_reason("Provider appears to be out of free-tier quota or credits", health)
-    if health.credits_remaining is not None and health.credits_remaining <= 0:
-        return _availability_reason("Provider appears to be out of free-tier credits", health)
-    if health.tokens_remaining is not None and health.tokens_remaining < required_tokens:
-        return (
-            "Provider has too few observed remaining tokens: "
-            f"needs about {required_tokens}, has {health.tokens_remaining}"
-        )
-    return None
-
-
-def _availability_reason(prefix: str, health: ProviderHealth) -> str:
-    deadline = max(health.cooldown_deadline(), health.rate_limit_reset_at or 0.0)
-    if deadline > time.time():
-        return f"{prefix}; retry after {int(deadline - time.time())}s"
-    return prefix
-
-
 def _assign_int(health: ProviderHealth, field_name: str, value: Any) -> None:
     parsed = _optional_int(value)
     if parsed is not None:
@@ -3267,25 +3128,6 @@ def _next_candidate_name(candidates: list[AgentConfig], current: AgentConfig) ->
     return None
 
 
-def estimate_input_tokens(request: HubRequest) -> int:
-    return estimate_context_tokens(request)
-
-
-def expected_output_tokens(request: HubRequest, agent: AgentConfig) -> int:
-    if request.max_tokens is not None:
-        return _non_negative_int(request.max_tokens, default=0)
-    if agent.max_tokens is not None:
-        return _non_negative_int(agent.max_tokens, default=0)
-    return 0
-
-
-def _non_negative_int(value: object, default: int) -> int:
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return default
-
-
 def _public_model_name(request: HubRequest) -> str:
     raw_model = request.raw.get("model") if isinstance(request.raw, dict) else None
     if isinstance(raw_model, str) and raw_model.strip():
@@ -3316,41 +3158,6 @@ def _result_output_tokens(result: ProviderResult) -> int:
     if tokens > 0:
         return tokens
     return max(0, len(result.text or "") // 4)
-
-
-def _requires_missing_api_key(agent: AgentConfig) -> bool:
-    if not agent.api_key_env or agent.resolved_api_key:
-        return False
-    provider = normalize_provider(agent.provider)
-    if provider in {"openai", "anthropic", "gemini"}:
-        return True
-    if provider == "openai-compatible" and agent.base_url:
-        return not _is_local_or_private_agent(agent)
-    return False
-
-
-def _is_local_or_private_agent(agent: AgentConfig) -> bool:
-    from ..config import _is_local_or_private_url
-
-    provider = normalize_provider(agent.provider)
-    provider_type = (agent.provider_type or agent.provider).lower()
-    if provider in {"echo", "local-research"}:
-        return True
-    if provider_type == "ollama-cloud":
-        return False
-    return _is_local_or_private_url(agent.base_url)
-
-
-def _is_echo_agent(agent: AgentConfig) -> bool:
-    return normalize_provider(agent.provider) == "echo"
-
-
-def _agent_supports_tools(agent: AgentConfig) -> bool:
-    return agent_supports_tools(agent)
-
-
-def _requires_tool_capable_model(request: HubRequest) -> bool:
-    return request.api_shape in TRANSPARENT_API_SHAPES and _request_has_tools(request)
 
 
 def _no_fallback_reason(failover: list[FailoverEvent]) -> str:
@@ -3579,30 +3386,6 @@ def _looks_like_reasoning_task(text: str) -> bool:
             "tradeoff",
             "why",
         )
-    )
-
-
-def _request_has_tools(request: HubRequest) -> bool:
-    raw = request.raw if isinstance(request.raw, dict) else {}
-    if isinstance(raw.get("tools"), list) and raw["tools"]:
-        return True
-    if isinstance(raw.get("functions"), list) and raw["functions"]:
-        return True
-    if isinstance(raw.get("agent_hub_tools"), list) and raw["agent_hub_tools"]:
-        return True
-    if isinstance(raw.get("tool_choice"), (str, dict)):
-        return True
-    if isinstance(raw.get("function_call"), (str, dict)):
-        return True
-    hub_options = raw.get("agent_hub")
-    return isinstance(hub_options, dict) and bool(hub_options.get("agent_mode"))
-
-
-def _request_has_client_tool_specs(request: HubRequest) -> bool:
-    raw = request.raw if isinstance(request.raw, dict) else {}
-    return bool(
-        (isinstance(raw.get("tools"), list) and raw["tools"])
-        or (isinstance(raw.get("functions"), list) and raw["functions"])
     )
 
 

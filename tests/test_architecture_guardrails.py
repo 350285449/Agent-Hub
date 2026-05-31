@@ -48,6 +48,8 @@ FAN_OUT_BASELINE = {
 FAN_OUT_EXEMPT_EDGES = {
     "agent_hub.core.router": {
         "agent_hub.capabilities",
+        "agent_hub.core.router_diagnostics",
+        "agent_hub.core.routing_policy",
     },
     "agent_hub.providers.__init__": {
         "agent_hub.providers.errors",
@@ -151,6 +153,15 @@ PUBLIC_IMPORTS = {
         "AgentCapabilities",
         "agent_capabilities",
         "agent_supports_tools",
+    ],
+    "agent_hub.core.routing_policy": [
+        "RouterPreflightPolicy",
+        "estimate_input_tokens",
+        "expected_output_tokens",
+    ],
+    "agent_hub.core.router_diagnostics": [
+        "build_capability_graph",
+        "build_provider_status",
     ],
 }
 

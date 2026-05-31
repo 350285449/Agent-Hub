@@ -4,6 +4,16 @@
 
 No changes yet.
 
+## 0.7.12
+
+- Adds Phase 2 router decomposition for preflight policy and diagnostics builders.
+- Keeps router compatibility imports stable while packaging the new backend snapshot.
+
+## 0.7.11
+
+- Adds the Phase 1.5 provider capability model and refreshed backend snapshot.
+- Packages the architecture modernization changes in a new VSIX build.
+
 ## 0.7.10
 
 - Fixes dark-theme sidebar and chat contrast by adding safe VS Code theme fallbacks.
