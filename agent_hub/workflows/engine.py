@@ -123,13 +123,31 @@ class WorkflowEngine:
         workflow_id = f"wf_{uuid.uuid4().hex}"
         task = request_text(request)
         state = WorkflowState()
-        memory = WorkflowMemory(workflow_id=workflow_id, kind=normalized, task=task, state=state)
-        stages = self.planner.stages(normalized)
+        workflow_pattern = _workflow_pattern(request)
+        memory = WorkflowMemory(
+            workflow_id=workflow_id,
+            kind=normalized,
+            task=task,
+            context={"workflow_pattern": workflow_pattern} if workflow_pattern else {},
+            state=state,
+        )
+        stages = self.planner.stages_for_pattern(normalized, workflow_pattern)
         failover: list[FailoverEvent] = []
         final_response: HubResponse | None = None
 
-        self.event_recorder.emit(event_sink, "workflow_started", workflow_id=workflow_id, workflow=normalized)
-        self._record_workflow_event("workflow_started", workflow_id=workflow_id, workflow=normalized)
+        self.event_recorder.emit(
+            event_sink,
+            "workflow_started",
+            workflow_id=workflow_id,
+            workflow=normalized,
+            workflow_pattern=workflow_pattern,
+        )
+        self._record_workflow_event(
+            "workflow_started",
+            workflow_id=workflow_id,
+            workflow=normalized,
+            workflow_pattern=workflow_pattern,
+        )
         for index, stage in enumerate(stages, start=1):
             final_response = self._run_model_stage(
                 normalized,
@@ -198,6 +216,7 @@ class WorkflowEngine:
         raw["agent_hub"] = {
             **metadata,
             "workflow": memory.to_dict(),
+            "workflow_pattern": workflow_pattern,
             "workflow_stages": [stage.to_dict() for stage in memory.stage_results],
         }
         response = HubResponse(
@@ -224,6 +243,7 @@ class WorkflowEngine:
             "workflow_finished",
             workflow_id=workflow_id,
             workflow=normalized,
+            workflow_pattern=workflow_pattern,
             final_status=state.final_status,
             stage_count=len(memory.stage_results),
         )
@@ -361,3 +381,12 @@ class WorkflowEngine:
                 finished_at=time.time(),
             )
         )
+
+
+def _workflow_pattern(request: HubRequest) -> str:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    for value in (hub.get("workflow_pattern"), raw.get("workflow_pattern")):
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return ""

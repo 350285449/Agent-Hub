@@ -44,7 +44,7 @@ from .plugins import discover_plugins
 from .core.router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
 from .team_agent_runner import TeamAgentRunner
 from .version import backend_version, build_metadata, config_runtime_hash
-from .workflows import WorkflowEngine
+from .workflows import WorkflowEngine, WorkflowSelector, with_workflow_selection_raw
 
 
 BACKEND_VERSION = backend_version()
@@ -107,6 +107,9 @@ BACKEND_FEATURES = {
     "context_debug_endpoints": True,
     "context_engine_v2": True,
     "deterministic_workflows": True,
+    "adaptive_learning_router": True,
+    "auto_workflow_selection": True,
+    "optimization_analytics": True,
     "mcp_tool_compatibility_layer": True,
     "tool_execution_loop": True,
     "external_mcp_bridge": True,
@@ -136,6 +139,7 @@ DIAGNOSTIC_ENDPOINTS = {
     "/v1/usage",
     "/v1/client-sources",
     "/v1/events",
+    "/v1/optimization",
     "/v1/tools",
     "/v1/workflows/status",
     "/v1/plugins",
@@ -146,6 +150,8 @@ COMPATIBILITY_ENDPOINT_REGISTRATION_MARKERS = (
     "/api/v1/chat/completions",
     "/openrouter/v1/chat/completions",
     "/v1/agent",
+    "/v1/auto",
+    "/v1/feedback",
     "/v1/chat/completions",
     "/v1/messages",
     "/v1/responses",
@@ -212,6 +218,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return
         if path == "/v1/events":
             self._send_diagnostics_json(_events_body(self.server.config))
+            return
+        if path == "/v1/optimization":
+            self._send_diagnostics_json(_optimization_body(self.server.router))
             return
         if path == "/v1/tools":
             self._send_diagnostics_json(_tools_body(self.server.router))
@@ -362,12 +371,14 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/metrics":
+            metrics = metrics_snapshot(
+                self.server.config.state_dir,
+                self.server.router.health_snapshot(include_history=True),
+            )
+            metrics["optimization"] = _optimization_body(self.server.router)
             self._send_json(
                 redact_secrets(
-                    metrics_snapshot(
-                        self.server.config.state_dir,
-                        self.server.router.health_snapshot(include_history=True),
-                    )
+                    metrics
                 )
             )
             return
@@ -466,6 +477,12 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             workflow = path.rsplit("/", 1)[-1]
             self._handle_workflow(payload, workflow)
             return
+        if path == "/v1/auto":
+            self._handle_auto_payload(payload)
+            return
+        if path == "/v1/feedback":
+            self._handle_feedback(payload)
+            return
         if path in {"/v1/recommend-model", "/api/v1/recommend-model"}:
             self._handle_recommendation(payload)
             return
@@ -523,6 +540,97 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             headers=_response_headers(result.response, self.server.router),
         )
 
+    def _handle_auto_payload(self, payload: dict[str, Any]) -> None:
+        request = request_from_header_payload(payload, self.headers, api_shape="native")
+        apply_model_routing(self.server.config, request)
+        try:
+            response = self._execute_auto(request)
+        except RouterError as exc:
+            self._send_json(
+                {
+                    "error": {"message": str(exc), "type": getattr(exc, "error_type", None) or "auto_workflow_route_error"},
+                    "failover": [event.to_dict() for event in exc.failover],
+                },
+                status=getattr(exc, "status_code", None) or 503,
+            )
+            return
+        self._send_response_for_shape(response, "native", request.stream)
+
+    def _handle_feedback(self, payload: dict[str, Any]) -> None:
+        request_id = str(payload.get("request_id") or payload.get("id") or "").strip()
+        rating = str(payload.get("rating") or "").strip().lower()
+        workflow_success = payload.get("workflow_success")
+        if not request_id:
+            self._send_json({"error": {"message": "request_id is required", "type": "invalid_feedback"}}, status=400)
+            return
+        if workflow_success is not None and not isinstance(workflow_success, bool):
+            self._send_json({"error": {"message": "workflow_success must be boolean when provided", "type": "invalid_feedback"}}, status=400)
+            return
+        try:
+            result = self.server.router.adaptive_learning.record_feedback(
+                request_id=request_id,
+                rating=rating,
+                workflow_success=workflow_success,
+            )
+        except ValueError as exc:
+            self._send_json({"error": {"message": str(exc), "type": "invalid_feedback"}}, status=400)
+            return
+        self._send_json({"object": "agent_hub.feedback", **result}, status=200 if result.get("matched") else 404)
+
+    def _execute_auto(self, request: HubRequest) -> Any:
+        selection = WorkflowSelector(self.server.config).select(request)
+        auto_request = replace(
+            request,
+            raw=with_workflow_selection_raw(request, selection),
+            stream=False,
+        )
+        started = time.perf_counter()
+        if selection.pattern == "direct_route":
+            response = self.server.router.route(auto_request)
+        elif selection.pattern == "single_worker":
+            response = self.server.agent_runner.run(auto_request)
+        elif selection.pattern == "team_reviewed":
+            response = self.server.team_agent_runner.run(auto_request)
+        else:
+            response = self.server.workflow_engine.execute(
+                selection.workflow_kind,
+                auto_request,
+            ).response
+        response = _with_workflow_selection_metadata(response, selection.to_dict())
+        self.server.router.adaptive_learning.record_workflow_result(
+            request_id=response.request_id,
+            pattern=selection.pattern,
+            task_type=selection.task_type,
+            success=_auto_response_success(response),
+            latency_seconds=time.perf_counter() - started,
+            recovered_by_failover=bool(response.failover),
+            final_status=_auto_final_status(response),
+            agent=response.agent,
+            provider=response.provider,
+            model=response.model,
+        )
+        return response
+
+    def _send_response_for_shape(self, response: Any, response_shape: str, stream: bool = False) -> None:
+        if stream and response_shape == "openai-chat":
+            self._send_openai_stream(response)
+            return
+        if stream and response_shape == "anthropic-messages":
+            self._send_anthropic_stream(response)
+            return
+        if stream and response_shape == "openai-responses":
+            self._send_openai_response_stream(response)
+            return
+        self._send_json(
+            response_for_shape(
+                response,
+                response_shape,
+                include_raw=self.server.config.include_raw_responses,
+                include_routing_details=self.server.config.expose_routing_details,
+            ),
+            headers=_response_headers(response, self.server.router),
+        )
+
     def log_message(self, format: str, *args: Any) -> None:
         if self.server.config.include_raw_responses:
             super().log_message(format, *args)
@@ -571,13 +679,17 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 "diagnostics": diagnostics,
             },
         )
+        mode = _payload_mode(request.raw if isinstance(request.raw, dict) else payload, default_agent=agent_mode_default)
+        if mode == "auto":
+            response = self._execute_auto(request)
+            self._send_response_for_shape(response, response_shape, request.stream)
+            return
         if response_shape == "native" and request.stream:
             self._send_native_stream(
                 request,
                 agent_mode=_wants_agent_mode(payload, default=agent_mode_default),
             )
             return
-        mode = _payload_mode(payload, default_agent=agent_mode_default)
         if request.stream and response_shape == "openai-chat" and mode == "route":
             native_stream = self.server.router.native_stream(request)
             if native_stream is not None:
@@ -882,6 +994,23 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         ]
         agents = ", ".join(enabled_agents) or "none"
         active = ", ".join(status["active_providers"]) or "none"
+        optimization = _optimization_body(self.server.router)
+        workflow_rate = optimization.get("workflow_success_rate", {})
+        workflow_label = (
+            f"{float(workflow_rate.get('rate', 0.0)) * 100:.0f}%"
+            if workflow_rate.get("attempts")
+            else "no samples"
+        )
+        best_models = optimization.get("model_win_rates") if isinstance(optimization.get("model_win_rates"), list) else []
+        best_model = best_models[0] if best_models else {}
+        best_model_label = " / ".join(
+            str(best_model.get(key) or "")
+            for key in ("provider", "model")
+            if best_model.get(key)
+        ) or "learning pending"
+        avg_cost = optimization.get("average_known_cost_usd")
+        avg_cost_label = f"${float(avg_cost):.4f}" if avg_cost is not None else "unknown"
+        avg_latency_label = f"{float(optimization.get('average_latency_ms') or 0):.0f} ms"
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -945,6 +1074,26 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       border-radius: 4px;
       background: #252525;
     }}
+    .cards {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin: 18px 0;
+    }}
+    .card {{
+      border: 1px solid #303030;
+      border-radius: 8px;
+      padding: 12px;
+      background: #1d1d1d;
+    }}
+    .card strong {{
+      display: block;
+      font-size: 22px;
+    }}
+    .card span {{
+      color: #aaa;
+      font-size: 13px;
+    }}
   </style>
 </head>
 <body>
@@ -964,6 +1113,15 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       <dt>Agents</dt><dd>{agents}</dd>
       <dt>Active</dt><dd>{active}</dd>
     </dl>
+    <section>
+      <h2>Optimization</h2>
+      <div class="cards">
+        <div class="card"><strong>{_html(workflow_label)}</strong><span>workflow success</span></div>
+        <div class="card"><strong>{_html(best_model_label)}</strong><span>best learned model</span></div>
+        <div class="card"><strong>{_html(avg_latency_label)}</strong><span>average latency</span></div>
+        <div class="card"><strong>{_html(avg_cost_label)}</strong><span>average known cost</span></div>
+      </div>
+    </section>
     <table>
       <thead><tr><th>Provider</th><th>Model</th><th>Health</th><th>Score</th><th>Latency</th><th>Tools</th></tr></thead>
       <tbody>
@@ -973,7 +1131,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     <p>
       <a href="/v1/status">Status JSON</a> |
       <a href="/v1/routing-history">Routing History</a> |
-      <a href="/v1/provider-scores">Provider Scores</a>
+      <a href="/v1/provider-scores">Provider Scores</a> |
+      <a href="/v1/optimization">Optimization</a>
     </p>
     <p>
       <a href="/health">Health JSON</a> ·
@@ -1518,7 +1677,12 @@ def _events_body(config: HubConfig) -> dict[str, Any]:
         "events": recent_events(config.state_dir, "events", limit=100),
         "routing": recent_events(config.state_dir, "routing", limit=50),
         "workflows": recent_events(config.state_dir, "workflows", limit=50),
+        "adaptive": recent_events(config.state_dir, "adaptive", limit=50),
     }
+
+
+def _optimization_body(router: AgentRouter) -> dict[str, Any]:
+    return router.adaptive_learning.optimization_summary()
 
 
 def _tools_body(router: AgentRouter) -> dict[str, Any]:
@@ -1528,6 +1692,36 @@ def _tools_body(router: AgentRouter) -> dict[str, Any]:
         "count": len(tools),
         "tools": tools,
     }
+
+
+def _with_workflow_selection_metadata(response: Any, selection: dict[str, Any]) -> Any:
+    raw = dict(response.raw) if isinstance(getattr(response, "raw", None), dict) else {}
+    hub = dict(raw.get("agent_hub") or {})
+    hub["workflow_selection"] = selection
+    hub["workflow_pattern"] = selection.get("pattern")
+    raw["agent_hub"] = hub
+    return replace(response, raw=raw)
+
+
+def _auto_final_status(response: Any) -> str:
+    hub = response.raw.get("agent_hub") if isinstance(getattr(response, "raw", None), dict) else {}
+    workflow = hub.get("workflow") if isinstance(hub, dict) else None
+    state = workflow.get("state") if isinstance(workflow, dict) else None
+    if isinstance(state, dict) and isinstance(state.get("final_status"), str):
+        return state["final_status"]
+    return "completed" if str(getattr(response, "text", "") or "").strip() else "empty"
+
+
+def _auto_response_success(response: Any) -> bool:
+    if _auto_final_status(response) == "blocked":
+        return False
+    hub = response.raw.get("agent_hub") if isinstance(getattr(response, "raw", None), dict) else {}
+    workflow = hub.get("workflow") if isinstance(hub, dict) else None
+    state = workflow.get("state") if isinstance(workflow, dict) else None
+    validation = state.get("validation_result") if isinstance(state, dict) else None
+    if isinstance(validation, dict) and validation.get("ok") is False:
+        return False
+    return bool(str(getattr(response, "text", "") or "").strip())
 
 
 def _workflow_status_body(config: HubConfig) -> dict[str, Any]:
@@ -1845,12 +2039,12 @@ def _payload_mode(payload: dict[str, Any], default_agent: bool = False) -> str:
     hub_options = payload.get("agent_hub")
     if isinstance(hub_options, dict):
         mode = hub_options.get("mode")
-        if isinstance(mode, str) and mode.lower() in {"agent", "group-agent", "team-agent"}:
+        if isinstance(mode, str) and mode.lower() in {"agent", "group-agent", "team-agent", "auto"}:
             return "group-agent" if mode.lower() == "team-agent" else mode.lower()
         if bool(hub_options.get("agent_mode")):
             return "agent"
     mode = payload.get("mode")
-    if isinstance(mode, str) and mode.lower() in {"agent", "group-agent", "team-agent"}:
+    if isinstance(mode, str) and mode.lower() in {"agent", "group-agent", "team-agent", "auto"}:
         return "group-agent" if mode.lower() == "team-agent" else mode.lower()
     if bool(payload.get("agent_mode")):
         return "agent"

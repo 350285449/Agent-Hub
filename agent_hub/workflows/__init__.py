@@ -19,6 +19,7 @@ from .extensions import (
     WorkflowExtensionPoints,
 )
 from .planning import WorkflowPlanner, WorkflowStage
+from .selector import WorkflowSelection, WorkflowSelector, with_workflow_selection_raw
 
 __all__ = [
     "ConsensusStrategy",
@@ -35,7 +36,10 @@ __all__ = [
     "WorkflowMemory",
     "WorkflowPlanner",
     "WorkflowResult",
+    "WorkflowSelection",
+    "WorkflowSelector",
     "WorkflowStage",
     "WorkflowStageResult",
     "WorkflowState",
+    "with_workflow_selection_raw",
 ]

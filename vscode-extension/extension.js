@@ -577,6 +577,7 @@ async function sidebarDashboardState() {
     onboarding: await sidebarOnboardingState(config, null),
     contextDiagnostics: {},
     statistics: sidebarStatistics(null, null, null, null, [], [], null),
+    optimization: null,
     insights: [],
     activity: [],
     routingChain: [],
@@ -589,6 +590,7 @@ async function sidebarDashboardState() {
     let usage = null;
     let permissions = null;
     let metrics = null;
+    let optimization = null;
     let debugContext = null;
     try {
       limits = await requestJson("GET", "/limits");
@@ -611,6 +613,11 @@ async function sidebarDashboardState() {
       metrics = null;
     }
     try {
+      optimization = await requestJson("GET", "/v1/optimization");
+    } catch (_error) {
+      optimization = metrics && metrics.optimization ? metrics.optimization : null;
+    }
+    try {
       debugContext = await requestJson("GET", "/debug/context");
     } catch (_error) {
       debugContext = null;
@@ -625,7 +632,11 @@ async function sidebarDashboardState() {
     dashboard.permissions = sidebarPermissionState(health, permissions, config);
     dashboard.tokenUsage = sidebarTokenUsage(usage, dashboard.limits);
     dashboard.contextDiagnostics = sidebarContextDiagnostics(debugContext);
-    dashboard.statistics = sidebarStatistics(health, usage, metrics, permissions, dashboard.providers, dashboard.limits, debugContext);
+    dashboard.optimization = optimization || (metrics && metrics.optimization) || null;
+    if (metrics && dashboard.optimization) {
+      metrics.optimization = dashboard.optimization;
+    }
+    dashboard.statistics = sidebarStatistics(health, usage, metrics, permissions, dashboard.providers, dashboard.limits, debugContext, dashboard.optimization);
     dashboard.insights = sidebarInsightRows(dashboard, metrics);
     dashboard.onboarding = await sidebarOnboardingState(config, health);
     dashboard.activity = sidebarActivityRows(usage, metrics, dashboard.failedModels);
@@ -747,7 +758,7 @@ function sidebarTokenUsage(usage, limits) {
   };
 }
 
-function sidebarStatistics(health, usage, metrics, permissions, providers, limits, debugContext) {
+function sidebarStatistics(health, usage, metrics, permissions, providers, limits, debugContext, optimization) {
   const providerRows = Array.isArray(providers) && providers.length ? providers : sidebarProviderRows(health, limits);
   const counters = metrics && metrics.counters && typeof metrics.counters === "object" ? metrics.counters : {};
   const metricUsage = metrics && metrics.usage && typeof metrics.usage === "object" ? metrics.usage : {};
@@ -776,6 +787,16 @@ function sidebarStatistics(health, usage, metrics, permissions, providers, limit
   const debugSummary = debugContext && debugContext.summary && typeof debugContext.summary === "object" ? debugContext.summary : {};
   const contextIncoming = Number(debugSummary.incoming_context_size || debugSummary.incoming_token_count || 0);
   const contextProtected = Number(debugSummary.protected_token_count || 0);
+  const optimizationSummary = optimization && typeof optimization === "object"
+    ? optimization
+    : metrics && metrics.optimization && typeof metrics.optimization === "object"
+      ? metrics.optimization
+      : {};
+  const workflowRate = optimizationSummary.workflow_success_rate && typeof optimizationSummary.workflow_success_rate === "object"
+    ? optimizationSummary.workflow_success_rate
+    : {};
+  const bestModels = Array.isArray(optimizationSummary.model_win_rates) ? optimizationSummary.model_win_rates : [];
+  const bestModel = bestModels[0] || {};
   const successRate = percent(successfulCalls, totalCalls);
   const providerAvailabilityPercent = percent(availableProviders, totalProviders);
   const healthScore = dashboardHealthScore({
@@ -817,6 +838,12 @@ function sidebarStatistics(health, usage, metrics, permissions, providers, limit
     recentFailures,
     contextIncoming,
     contextProtected,
+    workflowSuccessRate: Math.round(Number(workflowRate.rate || 0) * 100),
+    workflowSuccessAttempts: Number(workflowRate.attempts || 0),
+    averageKnownCost: optimizationSummary.average_known_cost_usd,
+    adaptiveAverageLatencyMs: Number(optimizationSummary.average_latency_ms || 0),
+    failedRequestsRecovered: Number(optimizationSummary.failed_requests_recovered || 0),
+    bestLearnedModel: [bestModel.provider, bestModel.model].filter(Boolean).join(" / "),
     healthScore
   };
 }
@@ -841,6 +868,13 @@ function sidebarInsightRows(dashboard, metrics) {
   }
   if (stats.routingFallbacks > 0) {
     insights.push({ tone: "info", main: `${stats.routingFallbacks} routing fallback(s) recorded`, meta: "Fallbacks are normal when quotas, context, or health checks rule out a model." });
+  }
+  if (stats.workflowSuccessAttempts > 0) {
+    insights.push({
+      tone: stats.workflowSuccessRate >= 80 ? "ok" : "info",
+      main: `${stats.workflowSuccessRate}% workflow success`,
+      meta: stats.bestLearnedModel ? `Best learned model: ${stats.bestLearnedModel}.` : "Adaptive workflow data is accumulating."
+    });
   }
   if (stats.permissionDenied > 0) {
     insights.push({ tone: "warn", main: `${stats.permissionDenied} permission denial(s)`, meta: "Adjust approval mode only if the blocked actions were expected." });
@@ -902,6 +936,14 @@ function sidebarActivityRows(usage, metrics, failedModels) {
     rows.push({
       main: item.agent ? `Routed to ${item.agent}` : item.type || "routing",
       meta: item.message || item.model || item.route || ""
+    });
+  }
+  const optimization = metrics && metrics.optimization && typeof metrics.optimization === "object" ? metrics.optimization : {};
+  const adaptive = Array.isArray(optimization.recent_optimization_decisions) ? optimization.recent_optimization_decisions : [];
+  for (const item of adaptive.slice(-2).reverse()) {
+    rows.push({
+      main: item.success === false ? `Learning: ${item.agent || "provider"} failed` : `Learning: ${item.agent || "provider"} worked`,
+      meta: [item.task_type, item.workflow_pattern, item.model].filter(Boolean).join(" / ")
     });
   }
   for (const item of (failedModels || []).slice(0, 2)) {
@@ -1824,6 +1866,22 @@ function sidebarHtml(webview, logoPath) {
           caption: compactNumber(stats.streamFailures || 0) + " stream failure(s)"
         },
         {
+          value: Number(stats.workflowSuccessAttempts || 0) ? Number(stats.workflowSuccessRate || 0) + "%" : "--",
+          label: "workflow success",
+          caption: compactNumber(stats.failedRequestsRecovered || 0) + " recovered by failover",
+          percent: Number(stats.workflowSuccessRate || 0)
+        },
+        {
+          value: stats.bestLearnedModel || "learning",
+          label: "best learned model",
+          caption: Number(stats.adaptiveAverageLatencyMs || 0) ? Math.round(Number(stats.adaptiveAverageLatencyMs || 0)) + " ms avg" : "waiting for samples"
+        },
+        {
+          value: stats.averageKnownCost === null || stats.averageKnownCost === undefined ? "--" : "$" + Number(stats.averageKnownCost || 0).toFixed(4),
+          label: "avg known cost",
+          caption: "adaptive routing cost signal"
+        },
+        {
           value: compactNumber(stats.permissionEvents || 0),
           label: "permission events",
           caption: compactNumber(stats.permissionAllowed || 0) + " allowed / " + compactNumber(stats.permissionDenied || 0) + " denied"
@@ -2531,6 +2589,33 @@ async function handleChatMessage(panel, message) {
 
   if (message.type === "send") {
     await sendChatTurn(panel, message);
+    return;
+  }
+
+  if (message.type === "feedback") {
+    await sendAdaptiveFeedback(panel, message);
+  }
+}
+
+async function sendAdaptiveFeedback(panel, message) {
+  const requestId = typeof message.requestId === "string" ? message.requestId.trim() : "";
+  const rating = message.rating === "down" ? "down" : "up";
+  if (!requestId) {
+    return;
+  }
+  try {
+    await requestJson("POST", "/v1/feedback", {
+      request_id: requestId,
+      rating,
+      workflow_success: !!message.workflowSuccess
+    });
+    panel.webview.postMessage({
+      type: "serverStatus",
+      online: true,
+      text: rating === "up" ? "Feedback saved. Agent Hub will learn from it." : "Feedback saved. Agent Hub will avoid repeats."
+    });
+  } catch (error) {
+    output.appendLine(`Adaptive feedback failed: ${error.message}`);
   }
 }
 
@@ -3640,6 +3725,18 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       margin: 2px 0;
     }
 
+    .feedback {
+      display: flex;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    .feedback button {
+      min-height: 24px;
+      padding: 2px 8px;
+      font-size: 12px;
+    }
+
     form {
       display: grid;
       gap: 8px;
@@ -4257,7 +4354,35 @@ ${apiKeyFieldsHtml()}
       if (options.sources && options.sources.length) {
         turn.item.append(detailsBlock("Sources", options.sources));
       }
+      if (options.feedbackRequestId && !options.error) {
+        turn.item.append(feedbackControls(options.feedbackRequestId));
+      }
       transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    function feedbackControls(agentHubRequestId) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "feedback";
+      const up = document.createElement("button");
+      up.type = "button";
+      up.textContent = "Good";
+      const down = document.createElement("button");
+      down.type = "button";
+      down.textContent = "Bad";
+      const send = (rating) => {
+        up.disabled = true;
+        down.disabled = true;
+        vscode.postMessage({
+          type: "feedback",
+          requestId: agentHubRequestId,
+          rating,
+          workflowSuccess: rating === "up"
+        });
+      };
+      up.addEventListener("click", () => send("up"));
+      down.addEventListener("click", () => send("down"));
+      wrapper.append(up, down);
+      return wrapper;
     }
 
     function detailsBlock(summaryText, lines) {
@@ -4691,7 +4816,8 @@ ${apiKeyFieldsHtml()}
         updateSessionModelsFromResponse(message.response);
         finishLiveMessage(turn, message.text, {
           tools: message.tools || [],
-          sources: message.sources || []
+          sources: message.sources || [],
+          feedbackRequestId: message.response && message.response.id
         });
         setBusy(false);
         status.textContent = "Ready";

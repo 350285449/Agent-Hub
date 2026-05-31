@@ -18,6 +18,7 @@ STREAM_FILES = {
     "enterprise_audit": "enterprise_audit.jsonl",
     "tools": "tool_execution_history.jsonl",
     "workflows": "workflow_execution.jsonl",
+    "adaptive": "adaptive_learning_events.jsonl",
 }
 
 

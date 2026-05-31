@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ..adaptive import AdaptiveLearningStore, estimate_known_cost_usd
 from ..capabilities import agent_capabilities
 from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
 from ..context import estimate_message_tokens, is_protected_context_message
@@ -217,6 +218,7 @@ class AgentRouter:
             record_event=self._record_route_event,
         )
         self.provider_scores = ProviderScoreStore(config.state_dir).load()
+        self.adaptive_learning = AdaptiveLearningStore(config.state_dir)
         self.context_cache = ContextCache(
             config.state_dir / "context_cache.json",
             enabled=getattr(config, "context_cache_enabled", True),
@@ -478,6 +480,7 @@ class AgentRouter:
                     result,
                     provider_request,
                     failover_attempts=len(failover),
+                    request_id=request_id,
                 )
                 response = self._response_from_result(
                     request_id=request_id,
@@ -941,6 +944,7 @@ class AgentRouter:
                 result,
                 stream_request,
                 failover_attempts=len(failover),
+                request_id=request_id,
                 first_token_latency_seconds=float(
                     result.raw.get("agent_hub_stream", {}).get("first_token_latency_seconds") or 0.0
                 )
@@ -1495,8 +1499,10 @@ class AgentRouter:
         if _privacy_requested(request):
             return "local_private"
         task_type = self._classify_task(request)
-        if task_type in {"coding", "long_context"}:
-            return task_type
+        if task_type == "long_context":
+            return "long_context"
+        if task_type in {"coding", "debug", "review", "tool_use"}:
+            return "coding"
         return DEFAULT_ROUTING_MODE
 
     def _classify_task(self, request: HubRequest) -> str:
@@ -1504,7 +1510,16 @@ class AgentRouter:
             return "local_private"
         if estimate_input_tokens(request) >= LONG_CONTEXT_TOKEN_THRESHOLD:
             return "long_context"
-        if _looks_like_coding_task(request_text(request).lower()):
+        text = _classification_text(request).lower()
+        if _request_has_tools(request):
+            return "tool_use"
+        if _looks_like_debug_task(text):
+            return "debug"
+        if _looks_like_review_task(text):
+            return "review"
+        if _looks_like_research_task(text):
+            return "research"
+        if _looks_like_coding_task(text):
             return "coding"
         return "general"
 
@@ -1515,7 +1530,7 @@ class AgentRouter:
         mode: str,
     ) -> list[AgentConfig]:
         if mode == "manual":
-            return self._balanced_agents(agents, request)
+            return agents
         if mode == "local_private":
             private_agents = [agent for agent in agents if _is_local_or_private_agent(agent)]
             return self._rank_by_key(
@@ -2021,6 +2036,14 @@ class AgentRouter:
         if not self.config.free_only and not is_free_agent(agent):
             score -= 2.5
         score += provider_cost_efficiency_score(agent)
+        if request is not None:
+            score += self.adaptive_learning.routing_bonus(
+                agent.name,
+                route=request.route or "",
+                task_type=self._classify_task(request),
+                workflow_pattern=_request_workflow_pattern(request),
+                workflow_role=_request_workflow_role(request),
+            )
         evaluation = self.provider_scores.get(agent.name) if isinstance(self.provider_scores, dict) else None
         if isinstance(evaluation, dict):
             try:
@@ -2084,6 +2107,7 @@ class AgentRouter:
         request: HubRequest,
         *,
         failover_attempts: int = 0,
+        request_id: str | None = None,
         first_token_latency_seconds: float | None = None,
     ) -> None:
         health = self._health.setdefault(agent.name, ProviderHealth())
@@ -2130,6 +2154,23 @@ class AgentRouter:
         health.last_context_compaction_usage = _context_usage(request)
         health.quota_state = _health_quota_state(health)
         self._save_provider_health()
+        self._record_adaptive_outcome(
+            request_id=request_id,
+            request=request,
+            agent=agent,
+            model=result.model or agent.model,
+            success=True,
+            latency_seconds=latency_seconds,
+            failover_attempts=failover_attempts,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+            estimated_cost_usd=estimate_known_cost_usd(
+                agent,
+                input_tokens=tokens_in,
+                output_tokens=tokens_out,
+            ),
+            final=True,
+        )
 
     def _record_failure(
         self,
@@ -2214,6 +2255,24 @@ class AgentRouter:
                 retryable=unavailable_until is not None,
                 metadata=metadata or {},
             )
+        self._record_adaptive_outcome(
+            request_id=request_id,
+            request=request,
+            agent=agent,
+            model=agent.model,
+            success=False,
+            latency_seconds=None,
+            failover_attempts=failover_attempts,
+            input_tokens=health.last_input_tokens,
+            output_tokens=0,
+            estimated_cost_usd=estimate_known_cost_usd(
+                agent,
+                input_tokens=health.last_input_tokens,
+                output_tokens=0,
+            ),
+            error_type=normalized_error_type,
+            final=False,
+        )
 
     def record_tool_result(self, agent_name: str, ok: bool) -> None:
         """Record whether an agent-produced tool call completed successfully."""
@@ -2225,6 +2284,45 @@ class AgentRouter:
             health.tool_call_failure_count += 1
         health.last_checked_at = time.time()
         self._save_provider_health()
+
+    def _record_adaptive_outcome(
+        self,
+        *,
+        request_id: str | None,
+        request: HubRequest | None,
+        agent: AgentConfig,
+        model: str,
+        success: bool,
+        latency_seconds: float | None,
+        failover_attempts: int,
+        input_tokens: int,
+        output_tokens: int,
+        estimated_cost_usd: float | None,
+        error_type: str | None = None,
+        final: bool = False,
+    ) -> None:
+        if request is None:
+            return
+        try:
+            self.adaptive_learning.record_outcome(
+                request_id=request_id,
+                route=request.route or "",
+                task_type=self._classify_task(request),
+                workflow_pattern=_request_workflow_pattern(request),
+                workflow_role=_request_workflow_role(request),
+                agent=agent,
+                model=model,
+                success=success,
+                latency_seconds=latency_seconds,
+                failover_attempts=failover_attempts,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                estimated_cost_usd=estimated_cost_usd,
+                error_type=error_type,
+                final=final,
+            )
+        except Exception:
+            return
 
     def _load_provider_health(self) -> dict[str, ProviderHealth]:
         path = self._health_path
@@ -2771,6 +2869,34 @@ def _context_usage(request: HubRequest) -> dict[str, Any]:
     return dict(usage) if isinstance(usage, dict) else {}
 
 
+def _request_workflow_pattern(request: HubRequest) -> str:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    for value in (
+        hub.get("workflow_pattern"),
+        raw.get("workflow_pattern"),
+        raw.get("workflow_selection"),
+        raw.get("mode") if raw.get("mode") == "group-agent" else None,
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return ""
+
+
+def _request_workflow_role(request: HubRequest) -> str:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    for value in (
+        hub.get("workflow_role"),
+        hub.get("role"),
+        raw.get("workflow_role"),
+        raw.get("team_agent_role"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return ""
+
+
 def _continuation_request(request: HubRequest, partial_text: str, reason: str) -> HubRequest:
     partial = str(partial_text or "").strip()
     if not partial:
@@ -3097,6 +3223,60 @@ def _looks_like_coding_task(text: str) -> bool:
             "repo",
             "test",
             "workspace",
+        )
+    )
+
+
+def _classification_text(request: HubRequest) -> str:
+    parts = [request.task or "", request.context or ""]
+    for message in request.messages:
+        if message.get("agent_hub_repo_context"):
+            continue
+        parts.append(content_to_text(message.get("content")))
+    return "\n".join(part for part in parts if part)
+
+
+def _looks_like_debug_task(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "debug",
+            "failing",
+            "failure",
+            "traceback",
+            "exception",
+            "regression",
+            "not working",
+        )
+    )
+
+
+def _looks_like_review_task(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "review",
+            "audit",
+            "check my",
+            "critique",
+            "risk",
+            "security",
+            "correctness",
+        )
+    )
+
+
+def _looks_like_research_task(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "research",
+            "investigate",
+            "find out",
+            "compare",
+            "summarize",
+            "search",
+            "evaluate",
         )
     )
 

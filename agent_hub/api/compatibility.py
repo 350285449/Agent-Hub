@@ -24,6 +24,7 @@ ROUTE_MODEL_ALIASES = {
     "agent-hub-coding": "coding",
     "agent-hub-tools": "coding",
     "agent-hub-agent": "coding",
+    "agent-hub-auto": "cloud-agent",
     "agent-hub-local": "local-agent",
     "agent-hub-research": "research",
 }
@@ -405,6 +406,14 @@ def apply_model_routing(config: HubConfig, request: HubRequest) -> None:
     if not isinstance(model, str) or not model.strip():
         return
     normalized = model.strip().lower()
+    if normalized == "agent-hub-auto":
+        request.route = request.route or ROUTE_MODEL_ALIASES[normalized]
+        raw = request.raw if isinstance(request.raw, dict) else {}
+        hub = dict(raw.get("agent_hub") or {})
+        hub["mode"] = "auto"
+        raw["agent_hub"] = hub
+        request.raw = raw
+        return
     if request.route is None and normalized in ROUTE_MODEL_ALIASES:
         request.route = ROUTE_MODEL_ALIASES[normalized]
         return

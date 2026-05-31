@@ -269,6 +269,12 @@
       },
       {
         "created": 0,
+        "id": "agent-hub-auto",
+        "object": "model",
+        "owned_by": "agent-hub"
+      },
+      {
+        "created": 0,
         "id": "agent-hub-local",
         "object": "model",
         "owned_by": "agent-hub"

@@ -562,6 +562,45 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(sources["object"], "agent_hub.client_sources")
             self.assertEqual(usage["object"], "agent_hub.usage")
 
+    def test_auto_feedback_and_optimization_endpoints_are_exposed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            config.expose_routing_details = True
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            server.router.provider_factory = _QuotaProvider
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                auto = _post_json(
+                    f"{base}/v1/auto",
+                    {
+                        "session_id": "auto",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+                feedback = _post_json(
+                    f"{base}/v1/feedback",
+                    {"request_id": auto["id"], "rating": "up", "workflow_success": True},
+                )
+                openai_auto = _post_json(
+                    f"{base}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-auto",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+                optimization = _get_json(f"{base}/v1/optimization")
+                metrics = _get_json(f"{base}/metrics")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(auto["object"], "agent_hub.response")
+            self.assertEqual(auto["agent_hub"]["workflow_selection"]["pattern"], "direct_route")
+            self.assertTrue(feedback["matched"])
+            self.assertEqual(openai_auto["object"], "chat.completion")
+            self.assertEqual(optimization["object"], "agent_hub.optimization")
+            self.assertIn("optimization", metrics)
+
     def test_health_exposes_capability_graph_and_token_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _compat_config(Path(tmp))

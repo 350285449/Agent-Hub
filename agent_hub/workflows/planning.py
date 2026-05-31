@@ -44,6 +44,12 @@ class WorkflowPlanner:
             WorkflowStage("review", "reviewer", "reliable"),
         ]
 
+    def stages_for_pattern(self, kind: str, pattern: str) -> list[WorkflowStage]:
+        stages = self.stages(kind)
+        if pattern == "planned_worker":
+            return stages[:2]
+        return stages
+
     def stage_prompt(self, kind: str, stage: WorkflowStage, request: HubRequest, memory: Any) -> str:
         task = request_text(request)
         prior = memory.prompt_context()
