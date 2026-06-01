@@ -2,11 +2,16 @@
 
 ## Unreleased
 
+No changes yet.
+
+## 0.7.24
+
 - Counts setup progress from required setup checks instead of the Start Server action.
 - Adds sidebar help text for statistics and health signals.
 - Simplifies Marketplace install instructions and first-run usage.
 - Simplifies sidebar setup, task, status, and external-agent setup wording.
 - Turns the main sidebar Start Agent Hub button into a start/stop toggle.
+- Simplifies the sidebar first screen to Start/Stop, task input, and core actions.
 
 ## 0.7.22
 

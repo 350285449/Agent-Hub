@@ -1,55 +1,47 @@
 # Agent Hub - Multi-Provider AI Router
 
-One OpenAI-compatible API for OpenAI, Claude, Gemini, Ollama, OpenRouter, local models, Cline, Roo Code, Continue, and coding agents.
-
-## Why Agent Hub?
-
-- Start a coding agent from VS Code
-- Use Cline, Roo Code, Continue, and other tools through one local URL
-- Switch between cloud and local models without changing each tool
-- Fall back to another provider when one fails
-- Ask before file edits, shell commands, or other sensitive actions
+Use OpenAI, Claude, Gemini, Ollama, OpenRouter, local models, Cline, Roo Code,
+Continue, and coding agents through one local API.
 
 ![Agent Hub demo](media/demo.gif)
 
 ## Install
 
-1. Install the extension from the Marketplace or install the `.vsix`.
+1. Install the extension.
 2. Install Python 3.11 or newer.
-3. Open a project folder in VS Code.
+3. Open a project folder.
 
-That is it for the extension. The backend is bundled inside the VSIX. Node.js is
-only needed if you build the extension from source.
+The Agent Hub backend is bundled with the VSIX.
 
-## First Run
+## Use
 
-1. Click the Agent Hub icon in the activity bar.
-2. Click `Start Agent Hub`.
-3. Type what you want done, then click `Send`.
+1. Click the Agent Hub icon.
+2. Click `Start`.
+3. Type a task.
+4. Click `Send`.
 
-Examples:
+Click `Stop` when you are done.
 
-- `Explain the current file`
-- `Find why the tests fail`
-- `Add a settings page`
-- `Review this workspace and suggest the next fix`
+Good first tasks:
+
+- `Explain this file`
+- `Find the bug`
+- `Fix the failing test`
+- `Add a small feature`
 
 ![Agent Hub dashboard](media/dashboard.png)
 
-## Choose Models
+## Models
 
-Use whichever setup is easiest:
+Pick one path:
 
-- Cloud/API models: open `Settings`, save your provider key, then start Agent Hub.
-- Local models: start Ollama or LM Studio, then use `Choose Local Model`.
-- Cline/Roo/Continue: point the tool at Agent Hub's local API URL.
+- Open `Settings` and save an API key.
+- Start Ollama or LM Studio locally.
+- Connect Cline, Roo Code, Continue, or another OpenAI-compatible tool.
 
-Agent Hub can use OpenAI, Claude, Gemini, Ollama, Ollama Cloud, OpenRouter, LM
-Studio, and other OpenAI-compatible providers.
+## Cline
 
-## Use With Cline
-
-In Cline, choose `OpenAI Compatible` and use:
+Choose `OpenAI Compatible` in Cline:
 
 ```text
 Base URL: http://127.0.0.1:8787/v1
@@ -57,36 +49,11 @@ API Key: agent-hub-local
 Model: agent-hub-coding
 ```
 
-Helpful commands:
-
-- `Agent Hub: Copy Cline Config`
-- `Agent Hub: Test Cline Connection`
-- `Agent Hub: Show Cline Setup`
-
 ![Cline setup](media/cline-setup.png)
-
-## How Routing Works
-
-You send one request to Agent Hub. Agent Hub chooses the best configured model
-route and can try the next provider if the first one is offline, rate-limited,
-or failing.
-
-![Provider routing](media/provider-routing.png)
 
 ## Safety
 
-Agent Hub can inspect and edit your workspace only through its permission layer.
-For unfamiliar projects, keep approval mode on `ask`, `safe`, or `readonly`.
-
-## Common Commands
-
-- `Agent Hub: Open Chat`
-- `Agent Hub: Start Server`
-- `Agent Hub: Ask Agent`
-- `Agent Hub: Run Coding Agent`
-- `Agent Hub: Explain Current File`
-- `Agent Hub: Generate Commit Message`
-- `Agent Hub: Copy Cline Config`
+Agent Hub asks before sensitive file, shell, process, and provider actions.
 
 ## More Help
 

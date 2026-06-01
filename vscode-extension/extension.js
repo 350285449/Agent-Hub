@@ -899,7 +899,7 @@ function sidebarInsightRows(dashboard, metrics) {
   const stats = dashboard.statistics || {};
   const insights = [];
   if (dashboard.status !== "Running") {
-    insights.push({ tone: "warn", main: "Server is offline", meta: "Start Agent Hub to enable provider, token, and workflow statistics." });
+    insights.push({ tone: "warn", main: "Agent Hub is off", meta: "Click Start to collect health and usage numbers." });
   }
   if (stats.providersTotal > 0 && stats.providersAvailable === 0) {
     insights.push({ tone: "error", main: "No providers are available", meta: "Check API keys, local model servers, or provider cooldowns." });
@@ -1215,7 +1215,7 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .health-card {
-      display: inline-flex;
+      display: none;
       align-items: baseline;
       justify-content: flex-end;
       gap: 5px;
@@ -1239,7 +1239,7 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .hero-state-strip {
-      display: flex;
+      display: none;
       align-items: center;
       gap: 12px;
       min-width: 0;
@@ -1757,8 +1757,8 @@ function sidebarHtml(webview, logoPath) {
     <section class="hero">
       <div class="hero-head">
         <div>
-          <h2>Get started</h2>
-          <div class="hero-copy" id="heroSummary">Checking what Agent Hub needs next.</div>
+          <h2>Ask anything</h2>
+          <div class="hero-copy" id="heroSummary">Checking status</div>
         </div>
         <div class="health-card" title="Health score is a 0-100 summary of provider availability, success rate, fallbacks, permissions, context pressure, stream failures, and degraded providers. Open Statistics > Help for details.">
           <span class="health-label">Health</span>
@@ -1779,21 +1779,10 @@ function sidebarHtml(webview, logoPath) {
           <strong id="heroProviders">0/0</strong>
         </div>
       </div>
-      <button class="primary hero-server-action" id="heroServerAction" type="button" data-primary-action="start-server" data-state="Stopped">Start Agent Hub</button>
-      <div class="hero-card">
-        <div class="hero-card-title">
-          <span>Setup progress</span>
-          <span class="status" id="setupProgressText">0%</span>
-        </div>
-        <div class="progress-track" aria-hidden="true"><div class="progress-fill" id="setupProgressFill"></div></div>
-        <div class="next-step">
-          <div class="main" id="nextStepTitle">Checking setup...</div>
-          <div class="meta" id="nextStepDetail">Agent Hub is collecting local status.</div>
-        </div>
-      </div>
+      <button class="primary hero-server-action" id="heroServerAction" type="button" data-primary-action="start-server" data-state="Stopped">Start</button>
       <form class="quick-task" id="quickTaskForm">
-        <label for="quickTaskInput">Ask Agent Hub</label>
-        <textarea id="quickTaskInput" placeholder="Describe the question, fix, or feature you want help with"></textarea>
+        <label for="quickTaskInput">Task</label>
+        <textarea id="quickTaskInput" placeholder="What do you need?"></textarea>
         <div class="task-submit-row">
           <div class="task-options">
             <label><input id="quickTaskIncludeSelection" type="checkbox" checked> Include selection</label>
@@ -1806,9 +1795,9 @@ function sidebarHtml(webview, logoPath) {
           <span class="button-main">Chat</span>
           <span class="button-meta">Open chat</span>
         </button>
-        <button class="command-button" id="askAgent" type="button" title="Ask the default route">
-          <span class="button-main">Ask</span>
-          <span class="button-meta">Quick question</span>
+        <button class="command-button" id="quickSettings" type="button" title="Open Agent Hub settings">
+          <span class="button-main">Settings</span>
+          <span class="button-meta">Models</span>
         </button>
         <button class="command-button" id="codeAgent" type="button" title="Run the coding agent">
           <span class="button-main">Code</span>
@@ -1822,7 +1811,7 @@ function sidebarHtml(webview, logoPath) {
     </section>
     <details class="panel">
       <summary class="section-head">
-        <h2>Statistics</h2>
+        <h2>Health</h2>
         <span class="status" id="statsHealth">Waiting</span>
       </summary>
       <div class="stat-grid" id="statsGrid"></div>
@@ -1854,11 +1843,22 @@ function sidebarHtml(webview, logoPath) {
         </div>
       </details>
     </details>
-    <details class="panel" open>
+    <details class="panel">
       <summary class="section-head">
-        <h2>Server</h2>
+        <h2>Setup</h2>
         <span class="status" id="serverStatus">Stopped</span>
       </summary>
+      <div class="hero-card">
+        <div class="hero-card-title">
+          <span>Setup</span>
+          <span class="status" id="setupProgressText">0%</span>
+        </div>
+        <div class="progress-track" aria-hidden="true"><div class="progress-fill" id="setupProgressFill"></div></div>
+        <div class="next-step">
+          <div class="main" id="nextStepTitle">Checking setup...</div>
+          <div class="meta" id="nextStepDetail">Agent Hub is collecting local status.</div>
+        </div>
+      </div>
       <div class="detail" id="serverDetail">Checking Agent Hub...</div>
       <ul class="list" id="onboardingList"></ul>
       <div class="actions">
@@ -1876,7 +1876,7 @@ function sidebarHtml(webview, logoPath) {
     </details>
     <details class="panel">
       <summary class="section-head">
-        <h2>Models / Providers</h2>
+        <h2>Models</h2>
       </summary>
       <div class="detail" id="activeModel">No active model yet</div>
       <ul class="list" id="routingChain"></ul>
@@ -1890,14 +1890,14 @@ function sidebarHtml(webview, logoPath) {
     </details>
     <details class="panel">
       <summary class="section-head">
-        <h2>Token Usage</h2>
+        <h2>Tokens</h2>
       </summary>
       <div class="detail" id="tokenUsage">No token usage yet</div>
       <div class="detail" id="contextDiagnostics"></div>
     </details>
     <details class="panel">
       <summary class="section-head">
-        <h2>Activity</h2>
+        <h2>Recent Activity</h2>
       </summary>
       <ul class="list" id="activityList"></ul>
     </details>
@@ -2010,29 +2010,29 @@ function sidebarHtml(webview, logoPath) {
       const isError = status === "Error";
 
       if (isRunning) {
-        heroServerAction.textContent = "Stop Agent Hub";
+        heroServerAction.textContent = "Stop";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "stopServer";
-        setText(heroSummary, "Running. Send a task below, or click Stop Agent Hub when you are done.");
-        setText(serverDetail, "Agent Hub is running at " + serverUrl + ". Click Stop Agent Hub to shut it down.");
+        setText(heroSummary, "Running");
+        setText(serverDetail, "Running at " + serverUrl + ".");
       } else if (isStarting) {
-        heroServerAction.textContent = "Starting Agent Hub...";
+        heroServerAction.textContent = "Starting...";
         heroServerAction.disabled = true;
         heroServerAction.dataset.action = "";
-        setText(heroSummary, "Starting. This usually takes a moment.");
-        setText(serverDetail, "Starting Agent Hub. Logs will show progress if this takes longer.");
+        setText(heroSummary, "Starting");
+        setText(serverDetail, "Starting Agent Hub.");
       } else if (isError) {
-        heroServerAction.textContent = "Restart Agent Hub";
+        heroServerAction.textContent = "Restart";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "restartServer";
-        setText(heroSummary, dashboard.statusText || "Agent Hub needs attention.");
-        setText(serverDetail, dashboard.statusText || "Something went wrong. Open logs or restart Agent Hub.");
+        setText(heroSummary, "Needs attention");
+        setText(serverDetail, dashboard.statusText || "Open logs or restart Agent Hub.");
       } else {
-        heroServerAction.textContent = "Start Agent Hub";
+        heroServerAction.textContent = "Start";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "startServer";
-        setText(heroSummary, "Click Start Agent Hub, then send a task.");
-        setText(serverDetail, "Agent Hub is off. Start it to use the sidebar, VS Code Chat, or Cline.");
+        setText(heroSummary, "Off");
+        setText(serverDetail, "Start Agent Hub to use the sidebar, VS Code Chat, or Cline.");
       }
       heroServerAction.dataset.state = status;
 
@@ -2057,8 +2057,8 @@ function sidebarHtml(webview, logoPath) {
       const nextSetup = setupRows.find((row) => row && !row.ok);
       const nextAction = rows.find((row) => row && row.action === true && !row.ok);
       if (dashboard.status === "Running" && percent === 100) {
-        nextStepTitle.textContent = "Ready to work";
-        nextStepDetail.textContent = "Type a task below, use a quick action, or open chat.";
+        nextStepTitle.textContent = "Ready";
+        nextStepDetail.textContent = "Send a task from the main panel.";
         return;
       }
       if (nextSetup) {
@@ -2067,12 +2067,12 @@ function sidebarHtml(webview, logoPath) {
         return;
       }
       if (nextAction) {
-        nextStepTitle.textContent = "Next: Start Agent Hub";
-        nextStepDetail.textContent = "Setup is ready. Click Start Agent Hub to begin.";
+        nextStepTitle.textContent = "Ready";
+        nextStepDetail.textContent = "Click Start in the main panel.";
         return;
       }
-      nextStepTitle.textContent = "Ready to work";
-      nextStepDetail.textContent = "Setup is ready. Send a task whenever you like.";
+      nextStepTitle.textContent = "Ready";
+      nextStepDetail.textContent = "Send a task from the main panel.";
     }
 
     function setupStepDetail(row) {
@@ -2557,7 +2557,7 @@ function sidebarHtml(webview, logoPath) {
       }
     });
     document.getElementById("openChat").addEventListener("click", () => post("openChat"));
-    document.getElementById("askAgent").addEventListener("click", () => post("askAgent"));
+    document.getElementById("quickSettings").addEventListener("click", () => post("openSettings"));
     document.getElementById("codeAgent").addEventListener("click", () => post("codeAgent"));
     document.getElementById("explainFile").addEventListener("click", () => post("explainFile"));
     document.getElementById("stopServer").addEventListener("click", () => post("stopServer"));
@@ -2639,7 +2639,7 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
 
   stream.progress("Checking Agent Hub server...");
   if (!(await ensureServerReady())) {
-    stream.markdown("Agent Hub is not running. Start it with `Agent Hub: Start Server` and try again.");
+    stream.markdown("Agent Hub is not running. Click Start in Agent Hub and try again.");
     return { metadata: { command, ok: false } };
   }
   if (token && token.isCancellationRequested) {
@@ -3611,7 +3611,7 @@ async function sendChatTurn(panel, message) {
         text: [
           "Agent Hub is online, but it is an older server that is missing the current agent backend features.",
           "",
-          "Use Agent Hub: Stop Server, then Agent Hub: Start Server, or close the old terminal/process using port 8787.",
+          "Stop Agent Hub, start it again, or close the old terminal/process using port 8787.",
           "After restart, bare filenames should prefer the active file/folder and the progress wording should match this extension."
         ].join("\n")
       });
@@ -7053,7 +7053,7 @@ async function showClineSetup() {
 
 async function testClineConnection() {
   if (!(await ensureServerReady())) {
-    vscode.window.showWarningMessage("Agent Hub backend is not running. Click Start Server first.");
+    vscode.window.showWarningMessage("Agent Hub is not running. Click Start first.");
     return;
   }
   const payload = {
@@ -7116,7 +7116,7 @@ async function showClaudeCodeSetup() {
 
 async function testAnthropicEndpoint() {
   if (!(await ensureServerReady())) {
-    vscode.window.showWarningMessage("Agent Hub backend is not running. Click Start Server first.");
+    vscode.window.showWarningMessage("Agent Hub is not running. Click Start first.");
     return;
   }
   const payload = {
@@ -7279,7 +7279,7 @@ async function generateCommitMessage(...args) {
     return;
   }
   if (!(await ensureServerReady())) {
-    vscode.window.showErrorMessage("Agent Hub is not running. Use 'Agent Hub: Start Server' or check the output.");
+    vscode.window.showErrorMessage("Agent Hub is not running. Click Start or open logs.");
     return;
   }
 
@@ -7676,7 +7676,7 @@ async function sendAgentRequest({ task, context, route, agentMode = true, extra 
     return;
   }
   if (!(await ensureServerReady())) {
-    vscode.window.showErrorMessage("Agent Hub is not running. Use 'Agent Hub: Start Server' or check the output.");
+    vscode.window.showErrorMessage("Agent Hub is not running. Click Start or open logs.");
     return;
   }
 
