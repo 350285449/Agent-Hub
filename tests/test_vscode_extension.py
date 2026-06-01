@@ -113,6 +113,13 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("color: var(--app-fg);", source)
         self.assertIn("--input-fg: var(--vscode-input-foreground, var(--app-fg))", source)
 
+    def test_lm_studio_offline_polling_is_quiet(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertIn("function isLocalServerOfflineError", source)
+        self.assertIn("if (!isLocalServerOfflineError(error))", source)
+        self.assertIn('return "server is not running";', source)
+
     def test_cline_compatibility_setting_is_enabled_by_default(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
         setting = package["contributes"]["configuration"]["properties"]["agentHub.clineCompatibilityMode"]
@@ -139,6 +146,8 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertNotRegex(source, r"EXTENSION_VERSION\s*=\s*['\"][0-9]")
         self.assertIn("readExtensionPackageVersion", source)
         self.assertIn("package.json", source)
+        self.assertIn('env.PYTHONSAFEPATH = "1"', source)
+        self.assertIn('env.PYTHONDONTWRITEBYTECODE = "1"', source)
 
     def test_python_backend_version_is_separate_but_internally_consistent(self) -> None:
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

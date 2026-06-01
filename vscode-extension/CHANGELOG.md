@@ -4,6 +4,12 @@
 
 No changes yet.
 
+## 0.7.22
+
+- Fixes backend startup by restoring the valid future import in `agent_hub/server.py`.
+- Reduces noisy sidebar output and quiets expected LM Studio offline polling.
+- Keeps the bundled backend import isolated from workspace source paths.
+
 ## 0.7.21
 
 - Adds an Agent Hub Git commit message generator to the Source Control input area.

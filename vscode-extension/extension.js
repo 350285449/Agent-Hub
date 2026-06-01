@@ -1131,9 +1131,10 @@ function sidebarHtml(webview, logoPath) {
       color-scheme: light dark;
       --app-bg: var(--vscode-sideBar-background, var(--vscode-editor-background, #1f2328));
       --app-fg: var(--vscode-sideBar-foreground, var(--vscode-foreground, #d4d4d4));
-      --border: var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border, rgba(127, 127, 127, 0.35)));
-      --panel: var(--vscode-editorWidget-background, var(--vscode-sideBarSectionHeader-background, var(--app-bg)));
-      --card: var(--vscode-input-background, var(--app-bg));
+      --border: var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border, rgba(127, 127, 127, 0.22)));
+      --subtle-border: color-mix(in srgb, var(--app-fg) 18%, transparent);
+      --panel: var(--vscode-sideBarSectionHeader-background, var(--app-bg));
+      --card: var(--vscode-input-background, color-mix(in srgb, var(--app-bg) 88%, var(--app-fg) 12%));
       --muted: var(--vscode-descriptionForeground, var(--vscode-disabledForeground, #8b949e));
       --button: var(--vscode-button-background, #0e639c);
       --button-fg: var(--vscode-button-foreground, #ffffff);
@@ -1166,14 +1167,14 @@ function sidebarHtml(webview, logoPath) {
     header,
     section,
     details.panel {
-      padding: 12px;
+      padding: 10px 12px;
       border-bottom: 1px solid var(--border);
     }
 
     header {
       display: flex;
       align-items: center;
-      gap: 9px;
+      gap: 8px;
     }
 
     .brand {
@@ -1184,35 +1185,33 @@ function sidebarHtml(webview, logoPath) {
 
     .hero {
       display: grid;
-      gap: 11px;
-      padding-top: 10px;
+      gap: 10px;
       background: var(--panel);
     }
 
     .hero-head {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 82px;
+      grid-template-columns: minmax(0, 1fr) auto;
       gap: 10px;
-      align-items: stretch;
+      align-items: start;
     }
 
     .hero-copy {
       color: var(--muted);
       font-size: 12px;
-      line-height: 1.45;
-      margin-top: 4px;
+      line-height: 1.35;
+      margin-top: 3px;
       overflow-wrap: anywhere;
     }
 
     .health-card {
-      display: grid;
-      place-items: center;
+      display: inline-flex;
+      align-items: baseline;
+      justify-content: flex-end;
+      gap: 5px;
       min-width: 0;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 7px;
       color: var(--app-fg);
-      background: var(--card);
+      background: transparent;
     }
 
     .health-label {
@@ -1224,28 +1223,28 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .health-value {
-      font-size: 22px;
+      font-size: 13px;
       font-weight: 700;
       line-height: 1.1;
     }
 
     .hero-state-strip {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 7px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      flex-wrap: wrap;
     }
 
     .state-pill {
-      min-width: 0;
-      border: 1px solid var(--border);
-      border-radius: 7px;
-      padding: 7px;
+      display: inline-flex;
+      align-items: baseline;
+      gap: 4px;
       color: var(--app-fg);
-      background: var(--card);
+      min-width: 0;
     }
 
     .state-pill span {
-      display: block;
       color: var(--muted);
       font-size: 10px;
       line-height: 1.2;
@@ -1254,8 +1253,6 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .state-pill strong {
-      display: block;
-      margin-top: 2px;
       font-size: 12px;
       line-height: 1.25;
       overflow-wrap: anywhere;
@@ -1263,12 +1260,9 @@ function sidebarHtml(webview, logoPath) {
 
     .hero-card {
       display: grid;
-      gap: 8px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 10px;
+      gap: 6px;
       color: var(--app-fg);
-      background: var(--card);
+      background: transparent;
     }
 
     .hero-card-title {
@@ -1280,7 +1274,7 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .progress-track {
-      height: 7px;
+      height: 4px;
       overflow: hidden;
       border-radius: 999px;
       background: var(--progress-bg);
@@ -1298,8 +1292,7 @@ function sidebarHtml(webview, logoPath) {
     .next-step {
       display: grid;
       gap: 2px;
-      border-left: 3px solid var(--button);
-      padding-left: 8px;
+      padding-left: 0;
     }
 
     .stat-grid {
@@ -1391,8 +1384,8 @@ function sidebarHtml(webview, logoPath) {
     }
 
     img {
-      width: 24px;
-      height: 24px;
+      width: 22px;
+      height: 22px;
       border-radius: 5px;
       flex: 0 0 auto;
     }
@@ -1441,14 +1434,14 @@ function sidebarHtml(webview, logoPath) {
     .status {
       display: inline-flex;
       align-items: center;
-      min-width: 72px;
+      min-width: auto;
       justify-content: center;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 3px 7px;
+      border: 1px solid var(--subtle-border);
+      border-radius: 999px;
+      padding: 2px 7px;
       font-size: 11px;
       color: var(--muted);
-      background: var(--card);
+      background: transparent;
     }
 
     .status[data-state="Running"] {
@@ -1466,8 +1459,8 @@ function sidebarHtml(webview, logoPath) {
     .actions {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 7px;
-      margin-top: 10px;
+      gap: 6px;
+      margin-top: 8px;
     }
 
     .quick-actions {
@@ -1475,15 +1468,15 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .quick-actions button {
-      min-height: 40px;
+      min-height: 32px;
     }
 
     button {
       width: 100%;
       min-height: 28px;
-      border: 1px solid var(--border);
+      border: 1px solid var(--subtle-border);
       border-radius: 5px;
-      padding: 5px 8px;
+      padding: 5px 7px;
       color: var(--secondary-fg);
       background: var(--secondary);
       font: inherit;
@@ -1509,11 +1502,12 @@ function sidebarHtml(webview, logoPath) {
     .button-main {
       color: inherit;
       font-weight: 600;
+      font-size: 12px;
     }
 
     .button-meta {
       color: var(--muted);
-      font-size: 11px;
+      font-size: 10px;
       line-height: 1.25;
     }
 
@@ -1540,16 +1534,13 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .hero-server-action {
-      min-height: 34px;
+      min-height: 30px;
     }
 
     .quick-task {
       display: grid;
-      gap: 8px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 10px;
-      background: var(--card);
+      gap: 6px;
+      background: transparent;
     }
 
     .quick-task label,
@@ -1561,16 +1552,16 @@ function sidebarHtml(webview, logoPath) {
 
     .quick-task textarea {
       width: 100%;
-      min-height: 78px;
-      max-height: 160px;
+      min-height: 56px;
+      max-height: 120px;
       resize: vertical;
-      border: 1px solid var(--border);
+      border: 1px solid var(--subtle-border);
       border-radius: 6px;
-      padding: 8px;
+      padding: 7px;
       color: var(--app-fg);
-      background: var(--app-bg);
+      background: var(--card);
       font: inherit;
-      line-height: 1.4;
+      line-height: 1.35;
     }
 
     .quick-task textarea:focus-visible {
@@ -1585,6 +1576,18 @@ function sidebarHtml(webview, logoPath) {
       flex-wrap: wrap;
     }
 
+    .task-submit-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .task-submit-row button {
+      width: auto;
+      white-space: nowrap;
+    }
+
     button[data-state="Running"]::before {
       content: "OK ";
     }
@@ -1594,7 +1597,6 @@ function sidebarHtml(webview, logoPath) {
     }
 
     button.primary {
-      grid-column: 1 / -1;
       border-color: transparent;
       color: var(--button-fg);
       background: var(--button);
@@ -1625,7 +1627,7 @@ function sidebarHtml(webview, logoPath) {
       display: grid;
       gap: 2px;
       padding: 6px 8px;
-      border: 1px solid var(--border);
+      border: 1px solid var(--subtle-border);
       border-radius: 7px;
       background: var(--card);
     }
@@ -1689,10 +1691,12 @@ function sidebarHtml(webview, logoPath) {
       <form class="quick-task" id="quickTaskForm">
         <label for="quickTaskInput">Task</label>
         <textarea id="quickTaskInput" placeholder="Fix a bug, explain the current file, add a feature, or inspect the workspace"></textarea>
-        <div class="task-options">
-          <label><input id="quickTaskIncludeSelection" type="checkbox" checked> Include selection</label>
+        <div class="task-submit-row">
+          <div class="task-options">
+            <label><input id="quickTaskIncludeSelection" type="checkbox" checked> Include selection</label>
+          </div>
+          <button class="primary" id="quickTaskSend" type="submit">Start &amp; Send</button>
         </div>
-        <button class="primary" id="quickTaskSend" type="submit">Start &amp; Send</button>
       </form>
       <button class="primary hero-server-action" id="heroServerAction" type="button" data-state="Stopped">Start Agent Hub</button>
       <div class="actions quick-actions">
@@ -5296,6 +5300,8 @@ async function serverLaunchEnvironment(workspace) {
   const backendRoot = backendSourceRoot(workspace);
   if (backendRoot) {
     prependEnvPath(env, "PYTHONPATH", backendRoot);
+    env.PYTHONSAFEPATH = "1";
+    env.PYTHONDONTWRITEBYTECODE = "1";
   }
   return {
     env,
@@ -6463,7 +6469,9 @@ async function detectLmStudioModels() {
   try {
     return await detectOpenAiCompatibleModels(LM_STUDIO_BASE_URL);
   } catch (error) {
-    output.appendLine(`Could not detect LM Studio models: ${formatLocalServerError(error)}`);
+    if (!isLocalServerOfflineError(error)) {
+      output.appendLine(`Could not detect LM Studio models: ${formatLocalServerError(error)}`);
+    }
     return [];
   }
 }
@@ -6696,10 +6704,15 @@ function formatOllamaError(error) {
 
 function formatLocalServerError(error) {
   const raw = error && error.message ? String(error.message) : String(error || "Unknown error");
-  if (raw.includes("ECONNREFUSED") || raw.includes("connect ETIMEDOUT")) {
+  if (isLocalServerOfflineError(error)) {
     return "server is not running";
   }
   return raw;
+}
+
+function isLocalServerOfflineError(error) {
+  const raw = error && error.message ? String(error.message) : String(error || "");
+  return raw.includes("ECONNREFUSED") || raw.includes("connect ETIMEDOUT");
 }
 
 function requestExternalJson(urlString, timeoutMs) {
