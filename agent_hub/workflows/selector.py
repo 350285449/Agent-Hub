@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ..adaptive import AdaptiveLearningStore
 from ..config import HubConfig
 from ..core.routing_policy import _request_has_tools, estimate_input_tokens
 from ..models import HubRequest
@@ -27,6 +28,8 @@ class WorkflowSelection:
     task_type: str
     estimated_input_tokens: int
     file_count: int
+    adaptive_upgrade: bool = False
+    baseline_pattern: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,11 +39,13 @@ class WorkflowSelection:
             "task_type": self.task_type,
             "estimated_input_tokens": self.estimated_input_tokens,
             "file_count": self.file_count,
+            "adaptive_upgrade": self.adaptive_upgrade,
+            "baseline_pattern": self.baseline_pattern,
         }
 
 
 class WorkflowSelector:
-    """Deterministic auto-mode selector for routing/workflow execution shape."""
+    """Auto-mode selector for routing/workflow execution shape."""
 
     def __init__(self, config: HubConfig) -> None:
         self.config = config
@@ -63,62 +68,88 @@ class WorkflowSelector:
                 file_count=file_count,
             )
         if _team_reviewed(text, tokens=tokens, file_count=file_count):
-            return WorkflowSelection(
+            return self._with_adaptive_upgrade(WorkflowSelection(
                 pattern="team_reviewed",
                 workflow_kind=workflow_kind,
                 reason="Large or high-risk workspace task selected team review.",
                 task_type=task_type,
                 estimated_input_tokens=tokens,
                 file_count=file_count,
-            )
+            ))
         if not has_tools and tokens < 1000 and task_type == "general" and not _critical_markers(text):
-            return WorkflowSelection(
+            return self._with_adaptive_upgrade(WorkflowSelection(
                 pattern="direct_route",
                 workflow_kind=workflow_kind,
                 reason="Small general request can use direct routing.",
                 task_type=task_type,
                 estimated_input_tokens=tokens,
                 file_count=file_count,
-            )
+            ))
         if (
             task_type in {"coding", "debug", "tool_use"}
             and tokens < 4000
             and file_count <= 1
             and not _critical_markers(text)
         ):
-            return WorkflowSelection(
+            return self._with_adaptive_upgrade(WorkflowSelection(
                 pattern="single_worker",
                 workflow_kind=workflow_kind,
                 reason="Small coding/tool task can use one workspace worker.",
                 task_type=task_type,
                 estimated_input_tokens=tokens,
                 file_count=file_count,
-            )
+            ))
         if _critical_markers(text) or file_count > 1 or task_type == "review":
-            return WorkflowSelection(
+            return self._with_adaptive_upgrade(WorkflowSelection(
                 pattern="reviewed_worker",
                 workflow_kind=workflow_kind,
                 reason="Critical, review, or multi-file task selected planner-worker-reviewer.",
                 task_type=task_type,
                 estimated_input_tokens=tokens,
                 file_count=file_count,
-            )
+            ))
         if task_type in {"coding", "debug"}:
-            return WorkflowSelection(
+            return self._with_adaptive_upgrade(WorkflowSelection(
                 pattern="planned_worker",
                 workflow_kind=workflow_kind,
                 reason="Coding task needs a plan before worker execution.",
                 task_type=task_type,
                 estimated_input_tokens=tokens,
                 file_count=file_count,
-            )
-        return WorkflowSelection(
+            ))
+        return self._with_adaptive_upgrade(WorkflowSelection(
             pattern="direct_route",
             workflow_kind=workflow_kind,
             reason="No workflow escalation markers were detected.",
             task_type=task_type,
             estimated_input_tokens=tokens,
             file_count=file_count,
+        ))
+
+    def _with_adaptive_upgrade(self, selection: WorkflowSelection) -> WorkflowSelection:
+        upgrade = AdaptiveLearningStore(self.config.state_dir).workflow_upgrade(
+            selection.pattern,
+            task_type=selection.task_type,
+        )
+        if not upgrade:
+            return selection
+        pattern = str(upgrade.get("pattern") or "").strip()
+        if pattern not in WORKFLOW_PATTERNS:
+            return selection
+        baseline = str(upgrade.get("baseline_pattern") or selection.pattern)
+        return WorkflowSelection(
+            pattern=pattern,
+            workflow_kind=selection.workflow_kind,
+            reason=(
+                f"{selection.reason} Adaptive workflow history upgraded {baseline} "
+                f"to {pattern} ({upgrade.get('baseline_success_rate')} -> "
+                f"{upgrade.get('success_rate')} success rate)."
+            ),
+            task_type=selection.task_type,
+            estimated_input_tokens=selection.estimated_input_tokens,
+            file_count=selection.file_count,
+            adaptive_upgrade=True,
+            baseline_pattern=baseline,
         )
 
 

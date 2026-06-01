@@ -177,6 +177,52 @@ class AdaptiveLearningTests(unittest.TestCase):
             "team_reviewed",
         )
 
+    def test_workflow_selector_uses_adaptive_upgrade_after_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(state_dir=Path(tmp) / "state")
+            store = AdaptiveLearningStore(config.state_dir)
+            for index in range(5):
+                store.record_workflow_result(
+                    request_id=f"single-{index}",
+                    pattern="single_worker",
+                    task_type="coding",
+                    success=False,
+                    latency_seconds=2,
+                    recovered_by_failover=False,
+                    final_status="blocked",
+                    agent="bad",
+                    provider="openai-compatible",
+                    model="bad-test",
+                )
+                store.record_workflow_result(
+                    request_id=f"reviewed-{index}",
+                    pattern="reviewed_worker",
+                    task_type="coding",
+                    success=True,
+                    latency_seconds=3,
+                    recovered_by_failover=False,
+                    final_status="completed",
+                    agent="good",
+                    provider="openai-compatible",
+                    model="good-test",
+                )
+
+            selection = WorkflowSelector(config).select(
+                HubRequest(session_id="s", messages=[{"role": "user", "content": "fix app.py"}])
+            )
+            override = WorkflowSelector(config).select(
+                HubRequest(
+                    session_id="s",
+                    messages=[{"role": "user", "content": "fix app.py"}],
+                    raw={"agent_hub": {"workflow_pattern": "single_worker"}},
+                )
+            )
+
+            self.assertEqual(selection.pattern, "reviewed_worker")
+            self.assertTrue(selection.adaptive_upgrade)
+            self.assertEqual(selection.baseline_pattern, "single_worker")
+            self.assertEqual(override.pattern, "single_worker")
+
 
 class _Provider:
     def __init__(self, agent: AgentConfig, calls: list[str]) -> None:

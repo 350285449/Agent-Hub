@@ -16,6 +16,16 @@ MAX_RECENT_DECISIONS = 100
 EXACT_SAMPLE_THRESHOLD = 5
 TASK_SAMPLE_THRESHOLD = 10
 GLOBAL_SAMPLE_THRESHOLD = 20
+WORKFLOW_UPGRADE_SAMPLE_THRESHOLD = 5
+WORKFLOW_UPGRADE_MIN_SUCCESS_RATE = 0.70
+WORKFLOW_UPGRADE_MIN_DELTA = 0.15
+WORKFLOW_PATTERN_COMPLEXITY = {
+    "direct_route": 0,
+    "single_worker": 1,
+    "planned_worker": 2,
+    "reviewed_worker": 3,
+    "team_reviewed": 4,
+}
 
 
 class AdaptiveLearningStore:
@@ -356,6 +366,54 @@ class AdaptiveLearningStore:
             return _adaptive_bonus(global_stats)
         return 0.0
 
+    def workflow_upgrade(self, current_pattern: str, *, task_type: str) -> dict[str, Any] | None:
+        current_pattern = str(current_pattern or "").strip().lower()
+        current_rank = WORKFLOW_PATTERN_COMPLEXITY.get(current_pattern)
+        if current_rank is None:
+            return None
+        state = self.load()
+        workflows = [row for row in state.get("workflow_patterns", {}).values() if isinstance(row, dict)]
+        current = _workflow_pattern_row(workflows, current_pattern)
+        if current is None or _workflow_attempts(current) < WORKFLOW_UPGRADE_SAMPLE_THRESHOLD:
+            return None
+        current_rate = _workflow_rate(current)
+        candidates: list[dict[str, Any]] = []
+        for row in workflows:
+            pattern = _workflow_pattern_name(row)
+            rank = WORKFLOW_PATTERN_COMPLEXITY.get(pattern)
+            if rank is None or rank <= current_rank:
+                continue
+            attempts = _workflow_attempts(row)
+            if attempts < WORKFLOW_UPGRADE_SAMPLE_THRESHOLD:
+                continue
+            rate = _workflow_rate(row)
+            if rate < WORKFLOW_UPGRADE_MIN_SUCCESS_RATE:
+                continue
+            if rate < current_rate + WORKFLOW_UPGRADE_MIN_DELTA:
+                continue
+            candidates.append(
+                {
+                    "pattern": pattern,
+                    "task_type": task_type,
+                    "attempts": attempts,
+                    "success_rate": round(rate, 4),
+                    "baseline_pattern": current_pattern,
+                    "baseline_attempts": _workflow_attempts(current),
+                    "baseline_success_rate": round(current_rate, 4),
+                    "min_delta": WORKFLOW_UPGRADE_MIN_DELTA,
+                }
+            )
+        if not candidates:
+            return None
+        return sorted(
+            candidates,
+            key=lambda row: (
+                WORKFLOW_PATTERN_COMPLEXITY.get(str(row.get("pattern") or ""), 999),
+                -float(row.get("success_rate", 0.0)),
+                -int(row.get("attempts", 0)),
+            ),
+        )[0]
+
     def optimization_summary(self) -> dict[str, Any]:
         state = self.load()
         aggregates = [row for row in state.get("aggregates", {}).values() if isinstance(row, dict)]
@@ -380,6 +438,11 @@ class AdaptiveLearningStore:
                 "exact": EXACT_SAMPLE_THRESHOLD,
                 "task": TASK_SAMPLE_THRESHOLD,
                 "global": GLOBAL_SAMPLE_THRESHOLD,
+                "workflow_upgrade": WORKFLOW_UPGRADE_SAMPLE_THRESHOLD,
+            },
+            "workflow_upgrade_policy": {
+                "min_success_rate": WORKFLOW_UPGRADE_MIN_SUCCESS_RATE,
+                "min_delta": WORKFLOW_UPGRADE_MIN_DELTA,
             },
             "workflow_success_rate": _workflow_success_rate(workflows),
             "model_win_rates": _model_win_rates(aggregates),
@@ -695,6 +758,33 @@ def _workflow_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return sorted(result, key=lambda item: (-float(item["success_rate"]), -int(item["attempts"]), str(item["workflow_pattern"])))
+
+
+def _workflow_pattern_row(rows: list[dict[str, Any]], pattern: str) -> dict[str, Any] | None:
+    for row in rows:
+        if _workflow_pattern_name(row) == pattern:
+            return row
+    return None
+
+
+def _workflow_pattern_name(row: dict[str, Any]) -> str:
+    pattern = row.get("workflow_pattern")
+    if isinstance(pattern, str) and pattern.strip():
+        return pattern.strip().lower()
+    return str(row.get("key", "")).split("|")[-1].strip().lower()
+
+
+def _workflow_attempts(row: dict[str, Any]) -> int:
+    successes = int(row.get("workflow_successes", 0))
+    failures = int(row.get("workflow_failures", 0))
+    return successes + failures
+
+
+def _workflow_rate(row: dict[str, Any]) -> float:
+    attempts = _workflow_attempts(row)
+    if attempts <= 0:
+        return 0.0
+    return int(row.get("workflow_successes", 0)) / attempts
 
 
 def _trim_request_index(index: dict[str, Any]) -> dict[str, Any]:
