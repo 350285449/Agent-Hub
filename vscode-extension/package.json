@@ -1,7 +1,7 @@
 {
   "name": "agent-hub-vscode",
-  "displayName": "Agent Hub Workspace",
-  "description": "Run permissioned VS Code workspace agents through Ollama Cloud, hosted providers, or local models.",
+  "displayName": "Agent Hub - Multi-Provider AI Router",
+  "description": "Use OpenAI, Claude, Gemini, Ollama, OpenRouter and local models through one OpenAI-compatible router for VS Code, Cline and coding agents.",
   "version": "0.7.23",
   "publisher": "agent-hub",
   "license": "MIT",
@@ -13,19 +13,33 @@
   "bugs": {
     "url": "https://github.com/350285449/Agent-Hub/issues"
   },
-  "homepage": "https://github.com/350285449/Agent-Hub#readme",
+  "homepage": "https://github.com/350285449/Agent-Hub",
   "keywords": [
     "ai",
     "agent",
-    "local-ai",
-    "ollama",
-    "coding-agent",
-    "cline",
-    "claude-code",
-    "openai-compatible",
+    "multi-agent",
+    "llm",
+    "llm-router",
+    "openai",
+    "chatgpt",
+    "claude",
     "anthropic",
-    "llm-router"
+    "gemini",
+    "ollama",
+    "openrouter",
+    "local-ai",
+    "cline",
+    "roo",
+    "continue",
+    "coding-agent",
+    "vscode-agent",
+    "mcp",
+    "api-router"
   ],
+  "galleryBanner": {
+    "color": "#0D1117",
+    "theme": "dark"
+  },
   "extensionKind": [
     "workspace"
   ],
@@ -34,6 +48,9 @@
   },
   "categories": [
     "AI",
+    "Machine Learning",
+    "Programming Languages",
+    "Testing",
     "Other"
   ],
   "activationEvents": [

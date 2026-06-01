@@ -2,10 +2,17 @@
 
 ## Unreleased
 
-No changes yet.
+- Counts setup progress from required setup checks instead of the Start Server action.
+- Adds sidebar help text for statistics and health signals.
+- Simplifies Marketplace install instructions and first-run usage.
+- Simplifies sidebar setup, task, status, and external-agent setup wording.
+- Turns the main sidebar Start Agent Hub button into a start/stop toggle.
 
 ## 0.7.22
 
+- Improved Marketplace metadata.
+- Added Cline setup guide.
+- Added provider routing documentation.
 - Fixes backend startup by restoring the valid future import in `agent_hub/server.py`.
 - Reduces noisy sidebar output and quiets expected LM Studio offline polling.
 - Keeps the bundled backend import isolated from workspace source paths.

@@ -1,154 +1,97 @@
-# Agent Hub Workspace
+# Agent Hub - Multi-Provider AI Router
 
-Run Agent Hub from VS Code. Use the sidebar or `@agenthub` chat to ask
-questions, explain code, research, or let a permissioned workspace agent edit
-files.
+One OpenAI-compatible API for OpenAI, Claude, Gemini, Ollama, OpenRouter, local models, Cline, Roo Code, Continue, and coding agents.
 
-Agent Hub uses the `cloud-agent` route by default. Fresh configs prefer Ollama
-Cloud model routes, with hosted API-key providers and local LM Studio/Ollama
-models available when you enable them.
+## Why Agent Hub?
 
-## Quick Start
+- Start a coding agent from VS Code
+- Use Cline, Roo Code, Continue, and other tools through one local URL
+- Switch between cloud and local models without changing each tool
+- Fall back to another provider when one fails
+- Ask before file edits, shell commands, or other sensitive actions
 
-1. Install the extension from the Marketplace or from a `.vsix`.
+![Agent Hub demo](media/demo.gif)
+
+## Install
+
+1. Install the extension from the Marketplace or install the `.vsix`.
 2. Install Python 3.11 or newer.
-3. Open a workspace folder and select the Agent Hub activity bar icon.
-4. Type a task in the sidebar `Task` box and choose `Start & Send`.
-5. Agent Hub starts the local server when needed and opens the chat with live progress.
+3. Open a project folder in VS Code.
 
-For Ollama Cloud, install Ollama and sign in:
+That is it for the extension. The backend is bundled inside the VSIX. Node.js is
+only needed if you build the extension from source.
 
-   ```sh
-   ollama signin
-   ```
+## First Run
 
-The packaged extension includes the Agent Hub Python backend. Node.js is only
-needed when building the extension from source.
+1. Click the Agent Hub icon in the activity bar.
+2. Click `Start Agent Hub`.
+3. Type what you want done, then click `Send`.
 
-## Ollama Cloud Example
+Examples:
 
-Ollama Cloud models run through Ollama instead of downloading large local model
-weights. To try one before using Agent Hub:
+- `Explain the current file`
+- `Find why the tests fail`
+- `Add a settings page`
+- `Review this workspace and suggest the next fix`
 
-```sh
-ollama signin
-ollama run gpt-oss:120b-cloud
-```
+![Agent Hub dashboard](media/dashboard.png)
 
-In VS Code:
+## Choose Models
 
-1. Open `Agent Hub: Open Chat`.
-2. Open `Settings`.
-3. Set `Control agent` to `Cloud`.
-4. Set `Cloud route` to `Ollama cloud models first`.
-5. Save settings and restart the Agent Hub server.
+Use whichever setup is easiest:
 
-By default Agent Hub talks to your local Ollama server at
-`http://127.0.0.1:11434`, and Ollama handles cloud authentication after
-`ollama signin`. If you edit `agent-hub.config.json` to connect directly to
-Ollama's hosted API, set `api_key_env` to `OLLAMA_API_KEY` and save that key as
-the `Ollama Cloud` key in Agent Hub settings.
+- Cloud/API models: open `Settings`, save your provider key, then start Agent Hub.
+- Local models: start Ollama or LM Studio, then use `Choose Local Model`.
+- Cline/Roo/Continue: point the tool at Agent Hub's local API URL.
 
-If a model name fails, test it with `ollama run <model-name>` first, then update
-the matching model in `agent-hub.config.json`. Ollama's supported cloud models
-change over time, so use a model available to your Ollama account.
+Agent Hub can use OpenAI, Claude, Gemini, Ollama, Ollama Cloud, OpenRouter, LM
+Studio, and other OpenAI-compatible providers.
 
-Official docs:
+## Use With Cline
 
-- [Ollama Cloud](https://docs.ollama.com/cloud)
-- [Ollama authentication](https://docs.ollama.com/api/authentication)
-
-## Common Commands
-
-- `@agenthub` in VS Code Chat
-- `Agent Hub: Open Chat`
-- `Agent Hub: Start Server`
-- `Agent Hub: Show Status`
-- `Agent Hub: Ask Agent`
-- `Agent Hub: Run Coding Agent`
-- `Agent Hub: Generate Commit Message`
-- `Agent Hub: Research Web`
-- `Agent Hub: Explain Selection`
-- `Agent Hub: Explain Current File`
-
-The sidebar shows server status, setup progress, provider health, token usage,
-permissions, logs, and shortcuts for common actions. When `agentHub.autoStart`
-is enabled, Agent Hub starts the local server before sending a request.
-The Source Control view also exposes `Generate Commit Message` beside the Git
-commit message input on VS Code builds that support SCM input actions, with a
-Source Control title-bar fallback.
-
-## Provider Modes
-
-- `cloud`: use the configured `cloud-agent` route. This is the default.
-- `hybrid`: try cloud providers first, then local fallbacks.
-- `local`: use local LM Studio/Ollama routes.
-
-Hosted API-key models are off by default. Enable `API-key models` in the chat
-settings menu when you want OpenAI/Codex, Claude, Gemini, Groq, OpenRouter,
-Cerebras, Mistral, GitHub Models, Hugging Face, NVIDIA NIM, Cloudflare, or other
-configured providers.
-
-To use local models, choose `Local` in settings, then click `Choose Local Model`
-to scan LM Studio and Ollama or pull a recommended Ollama model.
-
-## External Agent Setup
-
-Cline, RooCode, OpenCode, and similar OpenAI-compatible clients:
+In Cline, choose `OpenAI Compatible` and use:
 
 ```text
-Provider: OpenAI Compatible
 Base URL: http://127.0.0.1:8787/v1
 API Key: agent-hub-local
 Model: agent-hub-coding
 ```
 
-Claude Code or Anthropic-compatible clients:
+Helpful commands:
 
-```text
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-ANTHROPIC_AUTH_TOKEN=agent-hub-local
-ANTHROPIC_MODEL=agent-hub-coding
-```
+- `Agent Hub: Copy Cline Config`
+- `Agent Hub: Test Cline Connection`
+- `Agent Hub: Show Cline Setup`
 
-Use the Agent Hub commands `Copy Cline Config`, `Test Cline Connection`, `Copy
-Claude Code Config`, and `Test Anthropic Endpoint` to verify the gateway.
+![Cline setup](media/cline-setup.png)
 
-## Useful Settings
+## How Routing Works
 
-- `agentHub.serverUrl`: local Agent Hub server URL.
-- `agentHub.pythonPath`: Python executable. Use `auto` for normal setups.
-- `agentHub.configPath`: workspace config file.
-- `agentHub.agentProviderMode`: `cloud`, `hybrid`, or `local`.
-- `agentHub.agentMode`: `agent` or `group-agent`.
-- `agentHub.approvalMode`: permission mode for file, shell, process, and cloud
-  actions.
-- `agentHub.autoStart`: start the server automatically when needed.
+You send one request to Agent Hub. Agent Hub chooses the best configured model
+route and can try the next provider if the first one is offline, rate-limited,
+or failing.
 
-## Build From Source
+![Provider routing](media/provider-routing.png)
 
-From the repository root:
+## Safety
 
-```powershell
-.\install-extension.ps1
-```
+Agent Hub can inspect and edit your workspace only through its permission layer.
+For unfamiliar projects, keep approval mode on `ask`, `safe`, or `readonly`.
 
-On macOS or Linux:
+## Common Commands
 
-```sh
-sh ./install-extension.sh
-```
+- `Agent Hub: Open Chat`
+- `Agent Hub: Start Server`
+- `Agent Hub: Ask Agent`
+- `Agent Hub: Run Coding Agent`
+- `Agent Hub: Explain Current File`
+- `Agent Hub: Generate Commit Message`
+- `Agent Hub: Copy Cline Config`
 
-For a full source setup:
-
-```powershell
-.\install.ps1 -WithExtension
-```
-
-More docs:
+## More Help
 
 - [Cline setup](https://github.com/350285449/Agent-Hub/blob/main/docs/CLINE.md)
 - [Claude Code setup](https://github.com/350285449/Agent-Hub/blob/main/docs/CLAUDE_CODE.md)
+- [Continue setup](https://github.com/350285449/Agent-Hub/blob/main/docs/continue.md)
 - [Permissions](https://github.com/350285449/Agent-Hub/blob/main/docs/PERMISSIONS.md)
 - [Troubleshooting](https://github.com/350285449/Agent-Hub/blob/main/docs/TROUBLESHOOTING.md)
-- [Publishing](https://github.com/350285449/Agent-Hub/blob/main/vscode-extension/PUBLISHING.md)

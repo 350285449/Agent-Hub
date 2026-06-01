@@ -1024,38 +1024,48 @@ async function sidebarOnboardingState(config, health) {
   const keys = await apiKeyStatusRows().catch(() => []);
   const savedKeys = keys.filter((row) => row.saved).length;
   const localStatus = await sidebarLocalServerStatus();
+  const localModelsReady = localStatus.some((row) => row.ok);
   const python = await detectPythonForOnboarding(config, workspace);
   const providers = health && Array.isArray(health.agents) ? health.agents.length : 0;
+  const providerReady = providers > 0 || savedKeys > 0 || localModelsReady;
   return [
     {
       label: "Backend",
       ok: !!backendRoot,
-      detail: backendRoot ? `found at ${backendRoot}` : "backend package not found"
+      detail: backendRoot ? `found at ${backendRoot}` : "backend package not found",
+      setupRequired: true
     },
     {
       label: "Python",
       ok: python.ok,
-      detail: python.detail
+      detail: python.detail,
+      setupRequired: true
     },
     {
       label: "Config",
       ok: !!(configPath && fs.existsSync(configPath)),
-      detail: configPath || "open a workspace folder"
+      detail: configPath ? `using ${configPath}` : "open a workspace folder",
+      setupRequired: true
     },
     {
-      label: "Providers",
-      ok: providers > 0 || savedKeys > 0 || localStatus.some((row) => row.ok),
-      detail: providers > 0 ? `${providers} enabled` : savedKeys > 0 ? `${savedKeys} saved key(s)` : "add a key or start a local model"
+      label: "Model provider",
+      ok: providerReady,
+      detail: providers > 0 ? `${providers} ready` : savedKeys > 0 ? `${savedKeys} saved key(s)` : "save a key or start a local model",
+      setupRequired: true
     },
     {
       label: "Local models",
-      ok: localStatus.some((row) => row.ok),
-      detail: localStatus.map((row) => `${row.name}: ${row.ok ? "running" : "offline"}`).join(" / ")
+      ok: localModelsReady,
+      detail: localStatus.map((row) => `${row.name}: ${row.ok ? "running" : "offline"}`).join(" / "),
+      optional: true,
+      setupRequired: false
     },
     {
-      label: "Start Server",
+      label: "Start Agent Hub",
       ok: health && health.running === true,
-      detail: health && health.running ? `running at ${config.serverUrl}` : "click Start Server"
+      detail: health && health.running ? `running at ${config.serverUrl}` : "click Start Agent Hub",
+      action: true,
+      setupRequired: false
     }
   ];
 }
@@ -1306,6 +1316,59 @@ function sidebarHtml(webview, logoPath) {
       margin-top: 10px;
     }
 
+    .help-menu {
+      margin-top: 10px;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 8px;
+      background: var(--card);
+    }
+
+    .help-menu > summary {
+      cursor: pointer;
+      color: var(--app-fg);
+      font-weight: 600;
+      list-style-position: inside;
+    }
+
+    .help-content {
+      display: grid;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .help-block {
+      display: grid;
+      gap: 5px;
+    }
+
+    .help-block h3 {
+      margin: 0;
+      color: var(--app-fg);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .help-list {
+      display: grid;
+      gap: 5px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .help-list li {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .help-list strong {
+      color: var(--app-fg);
+      font-weight: 600;
+    }
+
     .stat-card {
       display: grid;
       gap: 4px;
@@ -1448,6 +1511,10 @@ function sidebarHtml(webview, logoPath) {
       color: var(--ok);
     }
 
+    .status[data-state="Ready"] {
+      color: var(--ok);
+    }
+
     .status[data-state="Starting"] {
       color: var(--warn);
     }
@@ -1552,6 +1619,16 @@ function sidebarHtml(webview, logoPath) {
 
     .hero-server-action[data-state="Running"]:hover {
       background: color-mix(in srgb, var(--ok) 86%, #000000 14%);
+    }
+
+    .hero-server-action[data-action="stopServer"] {
+      color: #ffffff;
+      background: var(--error);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--error) 40%, transparent);
+    }
+
+    .hero-server-action[data-action="stopServer"]:hover {
+      background: color-mix(in srgb, var(--error) 86%, #000000 14%);
     }
 
     .hero-server-action[data-state="Starting"] {
@@ -1680,10 +1757,10 @@ function sidebarHtml(webview, logoPath) {
     <section class="hero">
       <div class="hero-head">
         <div>
-          <h2>Control center</h2>
-          <div class="hero-copy" id="heroSummary">Checking workspace status...</div>
+          <h2>Get started</h2>
+          <div class="hero-copy" id="heroSummary">Checking what Agent Hub needs next.</div>
         </div>
-        <div class="health-card" title="Health score combines provider availability, success rate, fallbacks, permissions, and context pressure.">
+        <div class="health-card" title="Health score is a 0-100 summary of provider availability, success rate, fallbacks, permissions, context pressure, stream failures, and degraded providers. Open Statistics > Help for details.">
           <span class="health-label">Health</span>
           <strong class="health-value" id="heroHealthScore">--</strong>
         </div>
@@ -1702,7 +1779,7 @@ function sidebarHtml(webview, logoPath) {
           <strong id="heroProviders">0/0</strong>
         </div>
       </div>
-      <button class="primary hero-server-action" id="heroServerAction" type="button" data-primary-action="start-server" data-state="Stopped">START SERVER</button>
+      <button class="primary hero-server-action" id="heroServerAction" type="button" data-primary-action="start-server" data-state="Stopped">Start Agent Hub</button>
       <div class="hero-card">
         <div class="hero-card-title">
           <span>Setup progress</span>
@@ -1715,31 +1792,31 @@ function sidebarHtml(webview, logoPath) {
         </div>
       </div>
       <form class="quick-task" id="quickTaskForm">
-        <label for="quickTaskInput">Task</label>
-        <textarea id="quickTaskInput" placeholder="Fix a bug, explain the current file, add a feature, or inspect the workspace"></textarea>
+        <label for="quickTaskInput">Ask Agent Hub</label>
+        <textarea id="quickTaskInput" placeholder="Describe the question, fix, or feature you want help with"></textarea>
         <div class="task-submit-row">
           <div class="task-options">
             <label><input id="quickTaskIncludeSelection" type="checkbox" checked> Include selection</label>
           </div>
-          <button class="primary" id="quickTaskSend" type="submit">Start &amp; Send</button>
+          <button class="primary" id="quickTaskSend" type="submit">Send</button>
         </div>
       </form>
       <div class="actions quick-actions">
         <button class="command-button" id="openChat" type="button" title="Open Agent Hub chat">
           <span class="button-main">Chat</span>
-          <span class="button-meta">Workspace</span>
+          <span class="button-meta">Open chat</span>
         </button>
         <button class="command-button" id="askAgent" type="button" title="Ask the default route">
           <span class="button-main">Ask</span>
-          <span class="button-meta">Default route</span>
+          <span class="button-meta">Quick question</span>
         </button>
         <button class="command-button" id="codeAgent" type="button" title="Run the coding agent">
           <span class="button-main">Code</span>
-          <span class="button-meta">Agent loop</span>
+          <span class="button-meta">Edit files</span>
         </button>
         <button class="command-button" id="explainFile" type="button" title="Explain the current file">
           <span class="button-main">Explain</span>
-          <span class="button-meta">Current file</span>
+          <span class="button-meta">This file</span>
         </button>
       </div>
     </section>
@@ -1750,6 +1827,32 @@ function sidebarHtml(webview, logoPath) {
       </summary>
       <div class="stat-grid" id="statsGrid"></div>
       <ul class="list" id="insightList"></ul>
+      <details class="help-menu">
+        <summary>What do these numbers mean?</summary>
+        <div class="help-content">
+          <div class="help-block">
+            <h3>Health</h3>
+            <ul class="help-list">
+              <li><strong>Health score</strong>: a 0-100 quick read. Higher means providers are available and recent requests look stable.</li>
+              <li><strong>Healthy</strong>: ready to use. <strong>Degraded</strong>: usable, but recent failures or weak providers were seen. <strong>Needs attention</strong>: no model provider is ready. <strong>Offline</strong>: start Agent Hub first.</li>
+              <li><strong>Why it changes</strong>: failed providers, fallback attempts, denied permissions, stream failures, or very large prompts can lower the score.</li>
+            </ul>
+          </div>
+          <div class="help-block">
+            <h3>Statistics</h3>
+            <ul class="help-list">
+              <li><strong>Providers available</strong>: model providers Agent Hub can use right now.</li>
+              <li><strong>Success rate</strong>: how often provider calls have worked recently.</li>
+              <li><strong>Tokens</strong>: prompt and response size reported by providers.</li>
+              <li><strong>Workspace tool runs</strong>: file, shell, and workspace actions Agent Hub used.</li>
+              <li><strong>Routing fallbacks</strong>: times Agent Hub tried another provider after the first one could not answer.</li>
+              <li><strong>Best model/workflow</strong>: what Agent Hub has learned works best from recent samples. It may show "learning" until enough tasks run.</li>
+              <li><strong>Permission events</strong>: actions that were allowed, denied, or needed approval.</li>
+              <li><strong>Latest context tokens</strong>: how much workspace context was sent with the most recent request.</li>
+            </ul>
+          </div>
+        </div>
+      </details>
     </details>
     <details class="panel" open>
       <summary class="section-head">
@@ -1759,9 +1862,9 @@ function sidebarHtml(webview, logoPath) {
       <div class="detail" id="serverDetail">Checking Agent Hub...</div>
       <ul class="list" id="onboardingList"></ul>
       <div class="actions">
-        <button id="stopServer" type="button">Stop Server</button>
-        <button id="restartServer" type="button">Restart Server</button>
-        <button id="checkHealth" type="button">Check Health</button>
+        <button id="stopServer" type="button">Stop</button>
+        <button id="restartServer" type="button">Restart</button>
+        <button id="checkHealth" type="button">Check Status</button>
       </div>
     </details>
     <details class="panel">
@@ -1907,61 +2010,86 @@ function sidebarHtml(webview, logoPath) {
       const isError = status === "Error";
 
       if (isRunning) {
-        heroServerAction.textContent = "SERVER RUNNING - OPEN CHAT";
+        heroServerAction.textContent = "Stop Agent Hub";
         heroServerAction.disabled = false;
-        heroServerAction.dataset.action = "openChat";
-        setText(heroSummary, "Online at " + serverUrl + ".");
-        setText(serverDetail, "Online and ready for requests.");
+        heroServerAction.dataset.action = "stopServer";
+        setText(heroSummary, "Running. Send a task below, or click Stop Agent Hub when you are done.");
+        setText(serverDetail, "Agent Hub is running at " + serverUrl + ". Click Stop Agent Hub to shut it down.");
       } else if (isStarting) {
-        heroServerAction.textContent = "STARTING AGENT HUB...";
+        heroServerAction.textContent = "Starting Agent Hub...";
         heroServerAction.disabled = true;
         heroServerAction.dataset.action = "";
-        setText(heroSummary, "Starting local backend.");
-        setText(serverDetail, "Starting local backend. Logs will show progress if this takes a moment.");
+        setText(heroSummary, "Starting. This usually takes a moment.");
+        setText(serverDetail, "Starting Agent Hub. Logs will show progress if this takes longer.");
       } else if (isError) {
-        heroServerAction.textContent = "RESTART AGENT HUB";
+        heroServerAction.textContent = "Restart Agent Hub";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "restartServer";
         setText(heroSummary, dashboard.statusText || "Agent Hub needs attention.");
-        setText(serverDetail, dashboard.statusText || "Agent Hub needs attention. Open logs or restart the server.");
+        setText(serverDetail, dashboard.statusText || "Something went wrong. Open logs or restart Agent Hub.");
       } else {
-        heroServerAction.textContent = "START SERVER";
+        heroServerAction.textContent = "Start Agent Hub";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "startServer";
-        setText(heroSummary, "Offline. Ready to start at " + serverUrl + ".");
-        setText(serverDetail, "Offline. Start the local server for " + serverUrl + ".");
+        setText(heroSummary, "Click Start Agent Hub, then send a task.");
+        setText(serverDetail, "Agent Hub is off. Start it to use the sidebar, VS Code Chat, or Cline.");
       }
       heroServerAction.dataset.state = status;
 
       const stopButton = document.getElementById("stopServer");
       const restartButton = document.getElementById("restartServer");
       stopButton.disabled = !isRunning && !isStarting;
-      restartButton.textContent = isRunning ? "Restart / Reload" : "Restart Server";
+      restartButton.textContent = isRunning ? "Restart" : "Start Again";
       restartButton.disabled = isStarting;
     }
 
     function renderSetupSummary(dashboard) {
       const rows = Array.isArray(dashboard.onboarding) ? dashboard.onboarding : [];
-      const complete = rows.filter((row) => row && row.ok).length;
-      const total = rows.length || 1;
+      const setupRows = rows.filter((row) => row && row.setupRequired !== false && row.action !== true);
+      const complete = setupRows.filter((row) => row && row.ok).length;
+      const total = setupRows.length || 1;
       const percent = Math.round((complete / total) * 100);
       setupProgressText.textContent = percent + "%";
-      setupProgressText.dataset.state = percent === 100 ? "Running" : percent >= 50 ? "Starting" : "Stopped";
+      setupProgressText.title = complete + " of " + total + " setup checks passed. Starting Agent Hub is the next action, not a setup check.";
+      setupProgressText.dataset.state = percent === 100 ? "Ready" : percent >= 50 ? "Starting" : "Stopped";
       setupProgressFill.style.width = percent + "%";
 
-      const next = rows.find((row) => row && !row.ok);
+      const nextSetup = setupRows.find((row) => row && !row.ok);
+      const nextAction = rows.find((row) => row && row.action === true && !row.ok);
       if (dashboard.status === "Running" && percent === 100) {
         nextStepTitle.textContent = "Ready to work";
-        nextStepDetail.textContent = "Use the main server button or any quick action to start a task.";
+        nextStepDetail.textContent = "Type a task below, use a quick action, or open chat.";
         return;
       }
-      if (dashboard.status === "Running") {
-        nextStepTitle.textContent = next ? "Next: " + next.label : "Ready to work";
-        nextStepDetail.textContent = next ? next.detail : "Use the main server button or any quick action to start a task.";
+      if (nextSetup) {
+        nextStepTitle.textContent = "Next: " + nextSetup.label;
+        nextStepDetail.textContent = setupStepDetail(nextSetup);
         return;
       }
-      nextStepTitle.textContent = next ? "Next: " + next.label : "Start Agent Hub";
-      nextStepDetail.textContent = next ? next.detail : "Click Start Server after setup checks pass.";
+      if (nextAction) {
+        nextStepTitle.textContent = "Next: Start Agent Hub";
+        nextStepDetail.textContent = "Setup is ready. Click Start Agent Hub to begin.";
+        return;
+      }
+      nextStepTitle.textContent = "Ready to work";
+      nextStepDetail.textContent = "Setup is ready. Send a task whenever you like.";
+    }
+
+    function setupStepDetail(row) {
+      const label = row && row.label ? row.label : "";
+      if (label === "Python") {
+        return "Install Python 3.11 or newer, or set agentHub.pythonPath.";
+      }
+      if (label === "Config") {
+        return "Open a workspace folder so Agent Hub can create or find its config.";
+      }
+      if (label === "Model provider") {
+        return "Save an API key, start Ollama or LM Studio, or choose a local model.";
+      }
+      if (label === "Backend") {
+        return "Reinstall or rebuild the VSIX so the bundled backend is included.";
+      }
+      return row && row.detail ? row.detail : "Complete this setup step.";
     }
 
     function renderStatistics(stats, insights, status) {
@@ -2099,7 +2227,7 @@ function sidebarHtml(webview, logoPath) {
         return "Start the server to collect live statistics.";
       }
       if (Number(stats.providersTotal || 0) && !Number(stats.providersAvailable || 0)) {
-        return "No available provider candidates.";
+        return "No model provider is ready.";
       }
       if (Number(stats.recentFailures || 0) || Number(stats.providersDegraded || 0)) {
         return "Check insights before a long request.";
@@ -2212,10 +2340,28 @@ function sidebarHtml(webview, logoPath) {
       }
       for (const row of rows) {
         onboardingList.append(rowElement(
-          (row.ok ? "[ok] " : "[ ] ") + (row.label || "Setup"),
+          onboardingPrefix(row) + onboardingLabel(row),
           row.detail || ""
         ));
       }
+    }
+
+    function onboardingPrefix(row) {
+      if (row && row.ok) {
+        return "[ok] ";
+      }
+      if (row && row.action) {
+        return "[>] ";
+      }
+      if (row && row.optional) {
+        return "[-] ";
+      }
+      return "[ ] ";
+    }
+
+    function onboardingLabel(row) {
+      const label = row && row.label ? row.label : "Setup";
+      return row && row.optional ? label + " (optional)" : label;
     }
 
     function renderProviderRows(rows) {
@@ -4364,11 +4510,11 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
             <div class="settings-section">
               <div class="settings-section-title">Server</div>
               <div class="settings-actions">
-                <button class="secondary" id="startServer" type="button">Start Server</button>
-                <button class="secondary" id="restartServer" type="button">Restart Server</button>
+                <button class="secondary" id="startServer" type="button">Start Agent Hub</button>
+                <button class="secondary" id="restartServer" type="button">Restart</button>
                 <button class="secondary" id="checkStatus" type="button">Status</button>
                 <button class="secondary" id="pullModel" type="button">Choose Local Model</button>
-                <button class="secondary" id="openOutput" type="button">Open Output</button>
+                <button class="secondary" id="openOutput" type="button">Open Logs</button>
               </div>
             </div>
             <details class="key-panel" id="apiKeyPanel">
@@ -4389,8 +4535,8 @@ ${apiKeyFieldsHtml()}
     <main class="transcript" id="transcript" aria-live="polite">
       <section class="welcome" id="welcome">
         <div>
-          <div class="welcome-title">What should Agent Hub do?</div>
-          <div class="welcome-meta">Start with a normal request. Agent Hub will start the server, gather workspace context, and ask before privileged actions.</div>
+          <div class="welcome-title">What do you want to do?</div>
+          <div class="welcome-meta">Ask in plain language. Agent Hub can start itself, read workspace context, and ask before sensitive actions.</div>
         </div>
         <div class="prompt-pills">
           <button class="prompt-chip secondary" type="button" data-prompt="Inspect this workspace and suggest the next useful improvement">Inspect workspace</button>
@@ -5240,7 +5386,7 @@ async function startServer(options = {}) {
     risk: "medium",
     detail: "This launches Python from the selected workspace and may create or repair the Agent Hub config."
   }))) {
-    setServerLifecycleState("Stopped", "Start Server was cancelled.");
+    setServerLifecycleState("Stopped", "Start Agent Hub was cancelled.");
     return;
   }
   const configChanged = await ensureLocalConfig(config, workspace);
@@ -5498,12 +5644,12 @@ function formatPythonBackendError(error, config, launch, failures = []) {
   const hasMissingPython = failures.length && failures.every((failure) => failure.error && failure.error.code === "ENOENT");
   if ((error && error.code === "ENOENT") || hasMissingPython) {
     return {
-      summary: "Agent Hub could not find Python 3.11+. Install Python or set agentHub.pythonPath.",
+      summary: "Agent Hub needs Python 3.11 or newer.",
       detail: [
-        `Python backend check failed: ${raw}`,
+        `Python check failed: ${raw}`,
         "",
-        "Agent Hub tried common Python launchers and requires Python 3.11 or newer.",
-        "Set VS Code setting agentHub.pythonPath to auto, python, py -3.12, or a full python.exe path."
+        "Install Python 3.11 or newer, then restart VS Code.",
+        "If Python is already installed, set agentHub.pythonPath to auto, python, py -3.12, or a full python.exe path."
       ].join("\n")
     };
   }
@@ -5513,14 +5659,14 @@ function formatPythonBackendError(error, config, launch, failures = []) {
       ? `Bundled backend source was found at: ${launch.backendRoot}`
       : "No bundled backend source was found in this extension package.";
     return {
-      summary: "Agent Hub Python backend is missing. Rebuild/install the latest VSIX or run install.ps1.",
+      summary: "Agent Hub backend files are missing from this extension install.",
       detail: [
-        "Python backend check failed: No module named agent_hub",
+        "Backend check failed: No module named agent_hub",
         sourceLine,
         `Configured Python setting: ${config.pythonPath}`,
         "",
-        "For a packaged extension, rebuild with: cd vscode-extension; npm run package",
-        "For a local repo checkout, run: .\\install.ps1"
+        "Install the latest VSIX again.",
+        "If you are building from source, run: cd vscode-extension; npm run package"
       ].join("\n")
     };
   }
@@ -6875,10 +7021,9 @@ async function checkHealth() {
 async function showStatus() {
   try {
     const health = await requestJson("GET", "/health");
-    const agents = Array.isArray(health.agents) ? health.agents.join(", ") : "unknown";
-    const freeOnly = health.free_only === undefined ? "unknown" : String(health.free_only);
+    const agents = Array.isArray(health.agents) ? health.agents.length : 0;
     setServerLifecycleState("Running", `Running at ${settings().serverUrl}`);
-    vscode.window.showInformationMessage(`Agent Hub online. Agents: ${agents}. free_only: ${freeOnly}.`);
+    vscode.window.showInformationMessage(`Agent Hub is ready. ${agents} model route(s) available.`);
     output.appendLine(JSON.stringify(health, null, 2));
   } catch (error) {
     setServerLifecycleState(serverProcess ? "Error" : "Stopped", `Agent Hub is offline or unhealthy: ${error.message}`);
@@ -6889,16 +7034,21 @@ async function showStatus() {
 async function copyClineConfig() {
   const text = clineConfigText(settings());
   await vscode.env.clipboard.writeText(text);
-  vscode.window.showInformationMessage("Agent Hub Cline config copied. Use model agent-hub-coding.");
+  vscode.window.showInformationMessage("Cline setup copied. Paste it into Cline's OpenAI Compatible provider settings.");
 }
 
 async function showClineSetup() {
   output.show(true);
   output.appendLine("");
-  output.appendLine("Agent Hub Cline setup");
+  output.appendLine("Agent Hub setup for Cline");
+  output.appendLine("");
+  output.appendLine("1. Start Agent Hub from the sidebar.");
+  output.appendLine("2. In Cline, choose OpenAI Compatible.");
+  output.appendLine("3. Paste these values:");
+  output.appendLine("");
   output.appendLine(clineConfigText(settings()));
   output.appendLine("");
-  output.appendLine("Use the OpenAI-compatible provider in Cline. Base URL must include /v1.");
+  output.appendLine("Tip: the Base URL must end with /v1.");
 }
 
 async function testClineConnection() {
@@ -6936,8 +7086,8 @@ async function testClineConnection() {
     const diagnostics = response.diagnostics || {};
     const ok = diagnostics.structured_content_messages > 0 && diagnostics.preserved_tool_results > 0;
     const message = ok
-      ? "Cline request normalization OK: structured content, tool results, and task state are preserved."
-      : "Cline request reached Agent Hub, but context diagnostics look incomplete. Open logs for details.";
+      ? "Cline can reach Agent Hub. You are ready to use model agent-hub-coding."
+      : "Cline reached Agent Hub, but the test found missing context details. Open logs for more information.";
     output.appendLine(JSON.stringify(response, null, 2));
     vscode.window.showInformationMessage(message);
   } catch (error) {
@@ -6948,16 +7098,20 @@ async function testClineConnection() {
 async function copyClaudeCodeConfig() {
   const text = claudeCodeConfigText(settings());
   await vscode.env.clipboard.writeText(text);
-  vscode.window.showInformationMessage("Agent Hub Claude Code config copied.");
+  vscode.window.showInformationMessage("Claude Code setup copied.");
 }
 
 async function showClaudeCodeSetup() {
   output.show(true);
   output.appendLine("");
-  output.appendLine("Agent Hub Claude Code setup");
+  output.appendLine("Agent Hub setup for Claude Code");
+  output.appendLine("");
+  output.appendLine("1. Start Agent Hub from the sidebar.");
+  output.appendLine("2. Add these environment variables to Claude Code:");
+  output.appendLine("");
   output.appendLine(claudeCodeConfigText(settings()));
   output.appendLine("");
-  output.appendLine("Agent Hub exposes Anthropic Messages at /v1/messages and keeps tool_use/tool_result blocks structured.");
+  output.appendLine("Tip: use model agent-hub-coding.");
 }
 
 async function testAnthropicEndpoint() {
@@ -6993,8 +7147,8 @@ async function testAnthropicEndpoint() {
     const diagnostics = response.diagnostics || {};
     const ok = diagnostics.structured_content_messages > 0 && diagnostics.preserved_tool_results > 0;
     const message = ok
-      ? "Anthropic request normalization OK: /v1/messages shape, tool results, and task state are preserved."
-      : "Anthropic request reached Agent Hub, but context diagnostics look incomplete. Open logs for details.";
+      ? "Claude Code can reach Agent Hub. You are ready to use model agent-hub-coding."
+      : "Claude Code reached Agent Hub, but the test found missing context details. Open logs for more information.";
     output.appendLine(JSON.stringify(response, null, 2));
     vscode.window.showInformationMessage(message);
   } catch (error) {
