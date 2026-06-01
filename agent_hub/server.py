@@ -1,4 +1,4 @@
-from __future__ import annotations
+__future__ import annotations
 
 import json
 import hmac
@@ -112,8 +112,6 @@ BACKEND_FEATURES = {
     "optimization_analytics": True,
     "optimization_dashboard": True,
     "routing_simulation": True,
-    "adaptive_retry_metrics": True,
-    "workflow_task_analytics": True,
     "mcp_tool_compatibility_layer": True,
     "tool_execution_loop": True,
     "external_mcp_bridge": True,

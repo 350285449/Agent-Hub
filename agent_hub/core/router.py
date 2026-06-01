@@ -1717,6 +1717,10 @@ class AgentRouter:
             if health.tokens_in > 0:
                 token_efficiency = health.tokens_out / max(1, health.tokens_in)
                 score += min(3.0, token_efficiency)
+        else:
+            score += 0.7 * 12
+            if self.config.enable_load_balancing:
+                score += 2.0
         if self._is_on_cooldown(agent.name):
             score -= 100.0
         if _routing_bool(self.config, "free_first", True) and not self.config.free_only and is_free_agent(agent):
