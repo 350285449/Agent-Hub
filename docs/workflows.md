@@ -27,6 +27,21 @@ Initial workflow endpoints:
 - `POST /v1/workflows/debug`
 - `POST /v1/workflows/explain`
 - `POST /v1/workflows/refactor`
+- `POST /v1/auto`
+
+`POST /v1/auto` selects a workflow pattern automatically:
+
+- `direct_route` for small general requests.
+- `single_worker` for small coding/tool tasks.
+- `planned_worker` for normal coding/debug work.
+- `reviewed_worker` for critical, review, security, or multi-file tasks.
+- `team_reviewed` for large, high-risk, architecture, or migration tasks.
+
+Large `team_reviewed` tasks run planner and researcher stages, then fan out
+non-editing worker proposals, choose the best proposal with a judge step, and
+only then run the editing worker once. This keeps the large-task workflow
+competitive without allowing multiple workers to edit the same workspace at the
+same time.
 
 ## Routing Preferences
 
@@ -43,9 +58,18 @@ context, making execution explainable and repeatable.
 The workflow state records `stages`, `retries`, `files_touched`,
 `validation_result`, and `final_status`.
 
+Adaptive workflow analytics aggregate each selected pattern by task type. The
+optimization dashboard shows success rate, average cost, average latency,
+average retries, recovered failovers, and the strongest planner/worker models
+for each workflow-task row.
+
 Workflow execution events are written to
 `.agent-hub/state/workflow_execution.jsonl` and surfaced by
 `GET /v1/workflows/status`. Passive extension-point models are available for
 planner/reviewer roles, parallel provider calls, consensus/voting, and result
 merging; they are SDK foundation objects and do not change deterministic
 workflow execution yet.
+
+Adaptive workflow upgrades are enabled by default. Set
+`adaptive_workflow_upgrades_enabled=false` to keep selector decisions purely
+heuristic while still recording workflow analytics.

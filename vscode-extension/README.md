@@ -12,15 +12,15 @@ models available when you enable them.
 
 1. Install the extension from the Marketplace or from a `.vsix`.
 2. Install Python 3.11 or newer.
-3. For Ollama Cloud, install Ollama and sign in:
+3. Open a workspace folder and select the Agent Hub activity bar icon.
+4. Type a task in the sidebar `Task` box and choose `Start & Send`.
+5. Agent Hub starts the local server when needed and opens the chat with live progress.
+
+For Ollama Cloud, install Ollama and sign in:
 
    ```sh
    ollama signin
    ```
-
-4. Reload VS Code and open a workspace folder.
-5. Open the Agent Hub activity bar view.
-6. Click `Start Agent Hub`, then use `Chat`, `Ask`, `Code`, or `Explain`.
 
 The packaged extension includes the Agent Hub Python backend. Node.js is only
 needed when building the extension from source.

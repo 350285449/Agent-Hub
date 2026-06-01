@@ -591,6 +591,14 @@ class ServerCompatibilityTests(unittest.TestCase):
                 )
                 optimization = _get_json(f"{base}/v1/optimization")
                 metrics = _get_json(f"{base}/metrics")
+                simulation = _post_json(
+                    f"{base}/v1/routing/simulate",
+                    {
+                        "session_id": "simulate",
+                        "messages": [{"role": "user", "content": "large architecture migration"}],
+                    },
+                )
+                dashboard = _get_text(f"{base}/dashboard/optimization")
             finally:
                 _stop(server, thread)
 
@@ -599,7 +607,14 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertTrue(feedback["matched"])
             self.assertEqual(openai_auto["object"], "chat.completion")
             self.assertEqual(optimization["object"], "agent_hub.optimization")
+            self.assertIn("dashboard", optimization)
             self.assertIn("optimization", metrics)
+            self.assertEqual(simulation["object"], "agent_hub.routing_simulation")
+            self.assertTrue(simulation["dry_run"])
+            self.assertEqual(simulation["workflow_selection"]["pattern"], "team_reviewed")
+            self.assertIn("Optimization Dashboard", dashboard)
+            self.assertIn("Workflow Analytics", dashboard)
+            self.assertIn("Model Win Rates", dashboard)
 
     def test_health_exposes_capability_graph_and_token_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -911,6 +926,11 @@ def _post_text(url: str, payload: dict, headers: dict[str, str] | None = None) -
 def _get_json(url: str) -> dict:
     with urlopen(url, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _get_text(url: str) -> str:
+    with urlopen(url, timeout=5) as response:
+        return response.read().decode("utf-8")
 
 
 def _post_text_with_headers(

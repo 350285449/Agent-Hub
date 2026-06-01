@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from .agent_runner import AgentRunner
+from .application import AdaptiveApplicationService, DiagnosticsApplicationService
 from .api.compatibility import (
     apply_model_routing,
     anthropic_sse_frames,
@@ -34,7 +35,6 @@ from .api.compatibility import (
 from .config import HubConfig
 from .context import request_context_diagnostics
 from .enterprise import export_enterprise_audit
-from .evaluation import ProviderScoreStore
 from .models import HubRequest
 from .observability import metrics_snapshot, permission_snapshot, recent_events, record_event, usage_snapshot
 from .permissions import UNTRUSTED_EXTERNAL
@@ -44,7 +44,7 @@ from .plugins import discover_plugins
 from .core.router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
 from .team_agent_runner import TeamAgentRunner
 from .version import backend_version, build_metadata, config_runtime_hash
-from .workflows import WorkflowEngine, WorkflowSelector, with_workflow_selection_raw
+from .workflows import WorkflowEngine
 
 
 BACKEND_VERSION = backend_version()
@@ -110,6 +110,10 @@ BACKEND_FEATURES = {
     "adaptive_learning_router": True,
     "auto_workflow_selection": True,
     "optimization_analytics": True,
+    "optimization_dashboard": True,
+    "routing_simulation": True,
+    "adaptive_retry_metrics": True,
+    "workflow_task_analytics": True,
     "mcp_tool_compatibility_layer": True,
     "tool_execution_loop": True,
     "external_mcp_bridge": True,
@@ -167,6 +171,14 @@ class AgentHubHTTPServer(ThreadingHTTPServer):
         self.agent_runner = AgentRunner(config, self.router)
         self.team_agent_runner = TeamAgentRunner(config, self.router)
         self.workflow_engine = WorkflowEngine(config, self.router)
+        self.diagnostics_service = DiagnosticsApplicationService(config)
+        self.adaptive_service = AdaptiveApplicationService(
+            config,
+            router=self.router,
+            agent_runner=self.agent_runner,
+            team_agent_runner=self.team_agent_runner,
+            workflow_engine=self.workflow_engine,
+        )
         self.debug_requests: list[dict[str, Any]] = []
 
 
@@ -181,8 +193,17 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         if path == "/dashboard":
             self._send_html(self._root_html())
             return
+        if path == "/dashboard/optimization":
+            self._send_html(_optimization_dashboard_html(self.server.adaptive_service.optimization_summary()))
+            return
         if path == "/v1/status":
-            self._send_json(_status_body(self.server.config, self.server.router))
+            self._send_json(
+                _status_body(
+                    self.server.config,
+                    self.server.router,
+                    provider_scores=self.server.diagnostics_service.provider_scores(),
+                )
+            )
             return
         if path == "/v1/routing/status":
             self._send_diagnostics_json(_routing_status_body(self.server.config, self.server.router))
@@ -211,7 +232,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_json(_routing_history_body(self.server.config))
             return
         if path == "/v1/provider-scores":
-            self._send_json(_provider_scores_body(self.server.config))
+            self._send_json(self.server.diagnostics_service.provider_scores_body())
             return
         if path == "/v1/provider-health":
             self._send_diagnostics_json(_provider_health_body(self.server.config, self.server.router))
@@ -220,7 +241,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_diagnostics_json(_events_body(self.server.config))
             return
         if path == "/v1/optimization":
-            self._send_diagnostics_json(_optimization_body(self.server.router))
+            self._send_diagnostics_json(self.server.adaptive_service.optimization_summary())
             return
         if path == "/v1/tools":
             self._send_diagnostics_json(_tools_body(self.server.router))
@@ -375,7 +396,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 self.server.config.state_dir,
                 self.server.router.health_snapshot(include_history=True),
             )
-            metrics["optimization"] = _optimization_body(self.server.router)
+            metrics["optimization"] = self.server.adaptive_service.optimization_summary()
             self._send_json(
                 redact_secrets(
                     metrics
@@ -483,6 +504,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         if path == "/v1/feedback":
             self._handle_feedback(payload)
             return
+        if path == "/v1/routing/simulate":
+            self._handle_routing_simulation(payload)
+            return
         if path in {"/v1/recommend-model", "/api/v1/recommend-model"}:
             self._handle_recommendation(payload)
             return
@@ -544,7 +568,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         request = request_from_header_payload(payload, self.headers, api_shape="native")
         apply_model_routing(self.server.config, request)
         try:
-            response = self._execute_auto(request)
+            response = self.server.adaptive_service.execute_auto(request)
         except RouterError as exc:
             self._send_json(
                 {
@@ -554,64 +578,30 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 status=getattr(exc, "status_code", None) or 503,
             )
             return
-        self._send_response_for_shape(response, "native", request.stream)
+        self._send_response_for_shape(response, "native", request.stream, include_routing_details=True)
 
     def _handle_feedback(self, payload: dict[str, Any]) -> None:
-        request_id = str(payload.get("request_id") or payload.get("id") or "").strip()
-        rating = str(payload.get("rating") or "").strip().lower()
-        workflow_success = payload.get("workflow_success")
-        if not request_id:
-            self._send_json({"error": {"message": "request_id is required", "type": "invalid_feedback"}}, status=400)
-            return
-        if workflow_success is not None and not isinstance(workflow_success, bool):
-            self._send_json({"error": {"message": "workflow_success must be boolean when provided", "type": "invalid_feedback"}}, status=400)
-            return
-        try:
-            result = self.server.router.adaptive_learning.record_feedback(
-                request_id=request_id,
-                rating=rating,
-                workflow_success=workflow_success,
-            )
-        except ValueError as exc:
-            self._send_json({"error": {"message": str(exc), "type": "invalid_feedback"}}, status=400)
-            return
-        self._send_json({"object": "agent_hub.feedback", **result}, status=200 if result.get("matched") else 404)
+        body, status = self.server.adaptive_service.record_feedback_payload(payload)
+        self._send_json(body, status=status)
 
-    def _execute_auto(self, request: HubRequest) -> Any:
-        selection = WorkflowSelector(self.server.config).select(request)
-        auto_request = replace(
-            request,
-            raw=with_workflow_selection_raw(request, selection),
-            stream=False,
-        )
-        started = time.perf_counter()
-        if selection.pattern == "direct_route":
-            response = self.server.router.route(auto_request)
-        elif selection.pattern == "single_worker":
-            response = self.server.agent_runner.run(auto_request)
-        elif selection.pattern == "team_reviewed":
-            response = self.server.team_agent_runner.run(auto_request)
-        else:
-            response = self.server.workflow_engine.execute(
-                selection.workflow_kind,
-                auto_request,
-            ).response
-        response = _with_workflow_selection_metadata(response, selection.to_dict())
-        self.server.router.adaptive_learning.record_workflow_result(
-            request_id=response.request_id,
-            pattern=selection.pattern,
-            task_type=selection.task_type,
-            success=_auto_response_success(response),
-            latency_seconds=time.perf_counter() - started,
-            recovered_by_failover=bool(response.failover),
-            final_status=_auto_final_status(response),
-            agent=response.agent,
-            provider=response.provider,
-            model=response.model,
-        )
-        return response
+    def _handle_routing_simulation(self, payload: dict[str, Any]) -> None:
+        request = request_from_header_payload(payload, self.headers, api_shape="native")
+        apply_model_routing(self.server.config, request)
+        self._send_json(redact_secrets(self.server.adaptive_service.simulate_request(request)))
 
-    def _send_response_for_shape(self, response: Any, response_shape: str, stream: bool = False) -> None:
+    def _send_response_for_shape(
+        self,
+        response: Any,
+        response_shape: str,
+        stream: bool = False,
+        *,
+        include_routing_details: bool | None = None,
+    ) -> None:
+        routing_details = (
+            self.server.config.expose_routing_details
+            if include_routing_details is None
+            else include_routing_details
+        )
         if stream and response_shape == "openai-chat":
             self._send_openai_stream(response)
             return
@@ -626,7 +616,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 response,
                 response_shape,
                 include_raw=self.server.config.include_raw_responses,
-                include_routing_details=self.server.config.expose_routing_details,
+                include_routing_details=routing_details,
             ),
             headers=_response_headers(response, self.server.router),
         )
@@ -681,8 +671,15 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         )
         mode = _payload_mode(request.raw if isinstance(request.raw, dict) else payload, default_agent=agent_mode_default)
         if mode == "auto":
-            response = self._execute_auto(request)
-            self._send_response_for_shape(response, response_shape, request.stream)
+            response = self.server.adaptive_service.execute_auto(request)
+            self._send_response_for_shape(
+                response,
+                response_shape,
+                request.stream,
+                include_routing_details=(
+                    self.server.config.expose_routing_details or response_shape == "native"
+                ),
+            )
             return
         if response_shape == "native" and request.stream:
             self._send_native_stream(
@@ -986,7 +983,11 @@ class AgentHubHandler(BaseHTTPRequestHandler):
 
     def _root_html(self) -> str:
         config = self.server.config
-        status = _status_body(config, self.server.router)
+        status = _status_body(
+            config,
+            self.server.router,
+            provider_scores=self.server.diagnostics_service.provider_scores(),
+        )
         enabled_agents = [
             name
             for name, agent in config.agents.items()
@@ -994,7 +995,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         ]
         agents = ", ".join(enabled_agents) or "none"
         active = ", ".join(status["active_providers"]) or "none"
-        optimization = _optimization_body(self.server.router)
+        optimization = self.server.adaptive_service.optimization_summary()
         workflow_rate = optimization.get("workflow_success_rate", {})
         workflow_label = (
             f"{float(workflow_rate.get('rate', 0.0)) * 100:.0f}%"
@@ -1132,7 +1133,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       <a href="/v1/status">Status JSON</a> |
       <a href="/v1/routing-history">Routing History</a> |
       <a href="/v1/provider-scores">Provider Scores</a> |
-      <a href="/v1/optimization">Optimization</a>
+      <a href="/dashboard/optimization">Optimization Dashboard</a> |
+      <a href="/v1/optimization">Optimization JSON</a>
     </p>
     <p>
       <a href="/health">Health JSON</a> ·
@@ -1518,7 +1520,12 @@ def _response_permission_status(response: Any) -> str:
     return response_permission_status(response)
 
 
-def _status_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
+def _status_body(
+    config: HubConfig,
+    router: AgentRouter,
+    *,
+    provider_scores: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     health = router.health_snapshot(include_history=True)
     routing = recent_events(config.state_dir, "routing", limit=50)
     tools = recent_events(config.state_dir, "tools", limit=50)
@@ -1533,7 +1540,7 @@ def _status_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
         "active_providers": _active_provider_names(config, router),
         "providers": router.provider_status(),
         "provider_health": health,
-        "provider_scores": ProviderScoreStore(config.state_dir).load(),
+        "provider_scores": provider_scores if provider_scores is not None else dict(router.provider_scores),
         "selected_model": latest.get("model") or latest.get("selected_model"),
         "stream_mode": latest.get("stream_mode") or ("native" if latest.get("type") == "streaming_decision" else "compatibility"),
         "token_usage": usage_snapshot(config.state_dir, health),
@@ -1645,22 +1652,6 @@ def _routing_history_body(config: HubConfig) -> dict[str, Any]:
     }
 
 
-def _provider_scores_body(config: HubConfig) -> dict[str, Any]:
-    scores = ProviderScoreStore(config.state_dir).load()
-    return {
-        "object": "agent_hub.provider_scores",
-        "benchmark_types": [
-            "coding",
-            "reasoning",
-            "summarization",
-            "tool_calling",
-            "long_context",
-            "latency",
-        ],
-        "data": scores,
-    }
-
-
 def _provider_health_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
     health = router.health_snapshot(include_history=True)
     return {
@@ -1681,10 +1672,6 @@ def _events_body(config: HubConfig) -> dict[str, Any]:
     }
 
 
-def _optimization_body(router: AgentRouter) -> dict[str, Any]:
-    return router.adaptive_learning.optimization_summary()
-
-
 def _tools_body(router: AgentRouter) -> dict[str, Any]:
     tools = [tool.to_agent_hub_spec() for tool in router.tool_registry.list()]
     return {
@@ -1692,36 +1679,6 @@ def _tools_body(router: AgentRouter) -> dict[str, Any]:
         "count": len(tools),
         "tools": tools,
     }
-
-
-def _with_workflow_selection_metadata(response: Any, selection: dict[str, Any]) -> Any:
-    raw = dict(response.raw) if isinstance(getattr(response, "raw", None), dict) else {}
-    hub = dict(raw.get("agent_hub") or {})
-    hub["workflow_selection"] = selection
-    hub["workflow_pattern"] = selection.get("pattern")
-    raw["agent_hub"] = hub
-    return replace(response, raw=raw)
-
-
-def _auto_final_status(response: Any) -> str:
-    hub = response.raw.get("agent_hub") if isinstance(getattr(response, "raw", None), dict) else {}
-    workflow = hub.get("workflow") if isinstance(hub, dict) else None
-    state = workflow.get("state") if isinstance(workflow, dict) else None
-    if isinstance(state, dict) and isinstance(state.get("final_status"), str):
-        return state["final_status"]
-    return "completed" if str(getattr(response, "text", "") or "").strip() else "empty"
-
-
-def _auto_response_success(response: Any) -> bool:
-    if _auto_final_status(response) == "blocked":
-        return False
-    hub = response.raw.get("agent_hub") if isinstance(getattr(response, "raw", None), dict) else {}
-    workflow = hub.get("workflow") if isinstance(hub, dict) else None
-    state = workflow.get("state") if isinstance(workflow, dict) else None
-    validation = state.get("validation_result") if isinstance(state, dict) else None
-    if isinstance(validation, dict) and validation.get("ok") is False:
-        return False
-    return bool(str(getattr(response, "text", "") or "").strip())
 
 
 def _workflow_status_body(config: HubConfig) -> dict[str, Any]:
@@ -1771,6 +1728,316 @@ def _provider_row_html(row: dict[str, Any]) -> str:
         f"<td>{str(bool(row.get('supports_tools'))).lower()}</td>"
         "</tr>"
     )
+
+
+def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
+    workflow_rate = optimization.get("workflow_success_rate")
+    workflow_rate = workflow_rate if isinstance(workflow_rate, dict) else {}
+    avg_cost = optimization.get("average_known_cost_usd")
+    avg_latency = optimization.get("average_latency_ms")
+    recovered = optimization.get("failed_requests_recovered", 0)
+    total_retries = optimization.get("total_retries", 0)
+    avg_retries = optimization.get("average_retries", 0)
+    dashboard = optimization.get("dashboard") if isinstance(optimization.get("dashboard"), dict) else {}
+    recommendations = dashboard.get("recommendations") if isinstance(dashboard.get("recommendations"), list) else []
+    task_winners = optimization.get("task_model_winners") if isinstance(optimization.get("task_model_winners"), dict) else {}
+    role_winners = optimization.get("role_model_winners") if isinstance(optimization.get("role_model_winners"), dict) else {}
+    model_rates = optimization.get("model_win_rates") if isinstance(optimization.get("model_win_rates"), list) else []
+    providers = optimization.get("most_effective_providers") if isinstance(optimization.get("most_effective_providers"), list) else []
+    workflow_analytics = optimization.get("workflow_analytics") if isinstance(optimization.get("workflow_analytics"), list) else []
+    workflows = optimization.get("workflow_patterns") if isinstance(optimization.get("workflow_patterns"), list) else []
+    recent = optimization.get("recent_optimization_decisions") if isinstance(optimization.get("recent_optimization_decisions"), list) else []
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Hub Optimization</title>
+  <style>
+    body {{
+      margin: 0;
+      padding: 28px;
+      color: #202124;
+      background: #f6f7f9;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }}
+    main {{ max-width: 1180px; margin: 0 auto; }}
+    header {{ margin-bottom: 18px; }}
+    h1 {{ margin: 0 0 6px; font-size: 28px; }}
+    h2 {{ margin: 28px 0 10px; font-size: 18px; }}
+    p {{ margin: 0 0 14px; color: #5f6368; }}
+    a {{ color: #0b57d0; }}
+    .cards {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 12px;
+      margin: 16px 0 8px;
+    }}
+    .card {{
+      border: 1px solid #d8dde6;
+      border-radius: 8px;
+      padding: 14px;
+      background: #fff;
+    }}
+    .card strong {{ display: block; font-size: 24px; color: #111827; }}
+    .card span {{ display: block; margin-top: 3px; color: #5f6368; font-size: 13px; }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+      border: 1px solid #d8dde6;
+      border-radius: 8px;
+      overflow: hidden;
+    }}
+    th, td {{
+      padding: 9px 10px;
+      border-bottom: 1px solid #e7eaf0;
+      text-align: left;
+      font-size: 13px;
+      vertical-align: top;
+    }}
+    th {{ color: #374151; background: #eef2f7; font-weight: 650; }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; }}
+    .note {{ color: #5f6368; font-size: 13px; margin-top: 8px; }}
+    code {{ padding: 2px 5px; border-radius: 4px; background: #eef2f7; }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Optimization Dashboard</h1>
+      <p>Adaptive routing, workflow selection, cost, latency, and provider effectiveness.</p>
+      <p><a href="/dashboard">Back to Agent Hub</a> · <a href="/v1/optimization">JSON</a></p>
+    </header>
+    <section class="cards">
+      <div class="card"><strong>{_html(_percent_label(workflow_rate.get("rate")))}</strong><span>workflow success over {_html(workflow_rate.get("attempts", 0))} sample(s)</span></div>
+      <div class="card"><strong>{_html(_money_label(avg_cost))}</strong><span>average known cost</span></div>
+      <div class="card"><strong>{_html(_ms_label(avg_latency))}</strong><span>average latency</span></div>
+      <div class="card"><strong>{_html(recovered)}</strong><span>failed requests recovered</span></div>
+      <div class="card"><strong>{_html(avg_retries)}</strong><span>average retries over {_html(total_retries)} total</span></div>
+    </section>
+    <section>
+      <h2>Recommendations</h2>
+      {_recommendation_list_html(recommendations)}
+    </section>
+    <section class="grid">
+      <div>
+        <h2>Best Models By Task</h2>
+        {_task_winners_table_html(task_winners)}
+      </div>
+      <div>
+        <h2>Best Models By Workflow Role</h2>
+        {_role_winners_table_html(role_winners)}
+      </div>
+    </section>
+    <section>
+      <h2>Model Win Rates</h2>
+      {_model_win_rates_table_html(model_rates)}
+    </section>
+    <section>
+      <h2>Most Effective Providers</h2>
+      {_provider_effectiveness_table_html(providers)}
+    </section>
+    <section>
+      <h2>Workflow Analytics</h2>
+      {_workflow_analytics_table_html(workflow_analytics)}
+    </section>
+    <section>
+      <h2>Workflow Patterns</h2>
+      {_workflow_patterns_table_html(workflows)}
+    </section>
+    <section>
+      <h2>Recent Adaptive Decisions</h2>
+      {_recent_adaptive_table_html(recent)}
+      <p class="note">Use <code>POST /v1/routing/simulate</code> to preview routing and workflow choices without making a provider call.</p>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
+def _task_winners_table_html(rows: dict[str, Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(task)}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
+        f"<td>{_html(row.get('attempts', 0))}</td>"
+        f"<td>{_html(_money_label(row.get('average_known_cost_usd')))}</td>"
+        "</tr>"
+        for task, row in sorted(rows.items())
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(
+        ["Task", "Provider", "Model", "Success", "Samples", "Avg Cost"],
+        body,
+    )
+
+
+def _role_winners_table_html(rows: dict[str, Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(role)}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
+        f"<td>{_html(row.get('attempts', 0))}</td>"
+        f"<td>{_html(_ms_label(row.get('average_latency_ms')))}</td>"
+        "</tr>"
+        for role, row in sorted(rows.items())
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(
+        ["Role", "Provider", "Model", "Success", "Samples", "Avg Latency"],
+        body,
+    )
+
+
+def _model_win_rates_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('task_type'))}</td>"
+        f"<td>{_html(row.get('agent'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
+        f"<td>{_html(row.get('attempts', 0))}</td>"
+        f"<td>{_html(row.get('adaptive_bonus', 0.0))}</td>"
+        "</tr>"
+        for row in rows[:25]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(
+        ["Task", "Agent", "Provider", "Model", "Success", "Samples", "Adaptive Bonus"],
+        body,
+    )
+
+
+def _provider_effectiveness_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
+        f"<td>{_html(row.get('attempts', 0))}</td>"
+        f"<td>{_html(_ms_label(row.get('average_latency_ms')))}</td>"
+        f"<td>{_html(_money_label(row.get('average_known_cost_usd')))}</td>"
+        f"<td>{_html(', '.join(row.get('models', [])[:4]) if isinstance(row.get('models'), list) else '')}</td>"
+        "</tr>"
+        for row in rows[:10]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(
+        ["Provider", "Success", "Samples", "Avg Latency", "Avg Cost", "Models"],
+        body,
+    )
+
+
+def _workflow_analytics_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('label') or row.get('workflow_pattern'))}</td>"
+        f"<td>{_html(row.get('task_type'))}</td>"
+        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
+        f"<td>{_html(row.get('attempts', 0))}</td>"
+        f"<td>{_html(_money_label(row.get('average_known_cost_usd')))}</td>"
+        f"<td>{_html(_ms_label(row.get('average_latency_ms')))}</td>"
+        f"<td>{_html(row.get('average_retries', 0))}</td>"
+        f"<td>{_html(row.get('recovered_by_failover_count', 0))}</td>"
+        f"<td>{_html(_role_label(row.get('best_planner')))}</td>"
+        f"<td>{_html(_role_label(row.get('best_worker')))}</td>"
+        "</tr>"
+        for row in rows[:25]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(
+        ["Workflow", "Task", "Success", "Samples", "Avg Cost", "Avg Time", "Avg Retries", "Recovered", "Best Planner", "Best Worker"],
+        body,
+    )
+
+
+def _workflow_patterns_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('workflow_pattern'))}</td>"
+        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
+        f"<td>{_html(row.get('attempts', 0))}</td>"
+        f"<td>{_html(_ms_label(row.get('average_latency_ms')))}</td>"
+        f"<td>{_html(row.get('average_retries', 0))}</td>"
+        f"<td>{_html(row.get('recovered_by_failover_count', 0))}</td>"
+        "</tr>"
+        for row in rows
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(
+        ["Pattern", "Success", "Samples", "Avg Latency", "Avg Retries", "Recovered"],
+        body,
+    )
+
+
+def _recent_adaptive_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('task_type'))}</td>"
+        f"<td>{_html(row.get('workflow_pattern'))}</td>"
+        f"<td>{_html(row.get('agent'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{str(bool(row.get('success'))).lower()}</td>"
+        f"<td>{_html(row.get('latency_ms'))}</td>"
+        f"<td>{_html(_money_label(row.get('estimated_cost_usd')))}</td>"
+        f"<td>{_html(row.get('retry_count', 0))}</td>"
+        "</tr>"
+        for row in rows[-25:]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(
+        ["Task", "Workflow", "Agent", "Model", "Success", "Latency ms", "Cost", "Retries"],
+        body,
+    )
+
+
+def _recommendation_list_html(rows: list[Any]) -> str:
+    items = [
+        f"<li>{_html(row.get('message') if isinstance(row, dict) else row)}</li>"
+        for row in rows
+    ]
+    return "<ul>" + "".join(items) + "</ul>" if items else "<p>No optimization recommendations yet.</p>"
+
+
+def _table_or_empty(headers: list[str], body: str) -> str:
+    if not body:
+        return "<p>No samples yet.</p>"
+    head = "".join(f"<th>{_html(header)}</th>" for header in headers)
+    return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+
+
+def _percent_label(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:.0f}%"
+    except (TypeError, ValueError):
+        return "--"
+
+
+def _money_label(value: Any) -> str:
+    try:
+        return f"${float(value):.4f}"
+    except (TypeError, ValueError):
+        return "--"
+
+
+def _ms_label(value: Any) -> str:
+    try:
+        return f"{float(value):.0f} ms"
+    except (TypeError, ValueError):
+        return "--"
+
+
+def _role_label(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return " / ".join(str(row.get(key) or "") for key in ("provider", "model") if row.get(key))
 
 
 def _routing_failures(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

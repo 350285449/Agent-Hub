@@ -17,7 +17,18 @@ from .reasoning import WorkspaceReasoningState
 from .core.router import AgentRouter, RouterError
 
 
-TEAM_ROLES = ("planner", "researcher", "coder", "reviewer", "validator", "repair", "fixer", "finalizer")
+TEAM_ROLES = (
+    "planner",
+    "researcher",
+    "worker_candidate",
+    "judge",
+    "coder",
+    "reviewer",
+    "validator",
+    "repair",
+    "fixer",
+    "finalizer",
+)
 READ_ONLY_TOOLS = ["list_files", "read_file", "search_files", "repo_map", "run_command"]
 EDIT_TOOLS = [
     "list_files",
@@ -89,10 +100,55 @@ class TeamAgentRunner:
         _merge_response_reasoning(reasoning_state, researcher)
         phases.append({"role": "researcher", "agent": researcher.agent, "text": researcher.text})
 
+        worker_plan = ""
+        worker_candidate_count = _request_int(
+            request,
+            "worker_candidates",
+            default=1,
+            minimum=1,
+            maximum=5,
+        )
+        if worker_candidate_count > 1:
+            judged_workers = self._judge_worker_candidates(
+                request,
+                selected_plan,
+                researcher.text,
+                worker_candidate_count,
+                event_sink,
+                reasoning_state,
+            )
+            failover.extend(
+                event
+                for candidate in judged_workers["candidates"]
+                for event in candidate["response"].failover
+            )
+            if judged_workers.get("judge_response") is not None:
+                failover.extend(judged_workers["judge_response"].failover)
+            worker_plan = judged_workers["selected_text"]
+            phases.append(
+                {
+                    "role": "worker_judge",
+                    "judge": judged_workers["judge"],
+                    "selected_index": judged_workers["selected_index"],
+                    "selected_agent": judged_workers["selected_agent"],
+                    "candidates": [
+                        {
+                            "index": candidate["index"],
+                            "agent": candidate["response"].agent,
+                            "score": candidate["score"],
+                            "text": candidate["text"],
+                        }
+                        for candidate in judged_workers["candidates"]
+                    ],
+                    "text": worker_plan,
+                }
+            )
+
         coder = self._run_coder(
             request,
             selected_plan,
             researcher.text,
+            worker_plan,
             event_sink,
             shell_permission_callback,
             reasoning_state,
@@ -300,11 +356,12 @@ class TeamAgentRunner:
         request: HubRequest,
         plan: str,
         research: str,
+        worker_plan: str,
         event_sink: AgentEventSink | None,
         shell_permission_callback: ShellPermissionCallback | None,
         reasoning_state: WorkspaceReasoningState,
     ) -> HubResponse:
-        prompt = _coder_prompt(request, plan, research)
+        prompt = _coder_prompt(request, plan, research, worker_plan)
         _emit_context_inherited(event_sink, "coder", reasoning_state)
         return AgentRunner(self.config, self.router).run(
             self._role_agent_request(
@@ -329,6 +386,119 @@ class TeamAgentRunner:
             event_sink=event_sink,
             shell_permission_callback=shell_permission_callback,
         )
+
+    def _judge_worker_candidates(
+        self,
+        request: HubRequest,
+        plan: str,
+        research: str,
+        count: int,
+        event_sink: AgentEventSink | None,
+        reasoning_state: WorkspaceReasoningState,
+    ) -> dict[str, Any]:
+        agents = self._role_agents("coder", request)[:count]
+        if not agents:
+            agents = self._role_agents("finalizer", request)[:1]
+        candidates: list[dict[str, Any]] = []
+        if len(agents) == 1:
+            candidates.append(
+                self._worker_candidate(
+                    request,
+                    plan,
+                    research,
+                    agents[0],
+                    1,
+                    event_sink,
+                    reasoning_state,
+                )
+            )
+        else:
+            with ThreadPoolExecutor(max_workers=min(len(agents), count)) as executor:
+                futures = {
+                    executor.submit(
+                        self._worker_candidate,
+                        request,
+                        plan,
+                        research,
+                        agent,
+                        index,
+                        event_sink,
+                        reasoning_state,
+                    ): agent
+                    for index, agent in enumerate(agents, start=1)
+                }
+                for future in as_completed(futures):
+                    candidates.append(future.result())
+        candidates = sorted(candidates, key=lambda item: item["index"])
+        if not candidates:
+            return {
+                "judge": "none",
+                "judge_response": None,
+                "selected_index": 1,
+                "selected_agent": "",
+                "selected_text": "Inspect the workspace, make the requested change, and verify.",
+                "candidates": [],
+            }
+        selected_index = select_best_worker_candidate(
+            [candidate["text"] for candidate in candidates],
+            request,
+        )
+        judge_response: HubResponse | None = None
+        judge = "heuristic"
+        if self._has_role("judge", request):
+            judge_response = self._role_call(
+                request,
+                role="judge",
+                prompt=_judge_prompt(request, plan, research, candidates),
+                event_sink=event_sink,
+                reasoning_state=reasoning_state,
+            )
+            parsed_index = _selected_candidate_index(judge_response.text, len(candidates))
+            if parsed_index is not None:
+                selected_index = parsed_index
+                judge = judge_response.agent
+        selected = candidates[max(0, min(selected_index - 1, len(candidates) - 1))]
+        return {
+            "judge": judge,
+            "judge_response": judge_response,
+            "selected_index": selected["index"],
+            "selected_agent": selected["response"].agent,
+            "selected_text": selected["text"],
+            "candidates": candidates,
+        }
+
+    def _worker_candidate(
+        self,
+        request: HubRequest,
+        plan: str,
+        research: str,
+        agent: AgentConfig,
+        index: int,
+        event_sink: AgentEventSink | None,
+        reasoning_state: WorkspaceReasoningState,
+    ) -> dict[str, Any]:
+        _emit(
+            event_sink,
+            "team_role_started",
+            message=f"Worker candidate {index}: asking {agent.name} for an execution proposal.",
+            role="worker_candidate",
+            agent=agent.name,
+        )
+        response = self._role_call(
+            request,
+            role="worker_candidate",
+            prompt=_worker_candidate_prompt(request, plan, research, index),
+            preferred_agent=agent.name,
+            event_sink=event_sink,
+            reasoning_state=reasoning_state,
+        )
+        text = _compact_phase_text(response.text)
+        return {
+            "index": index,
+            "response": response,
+            "text": text,
+            "score": score_worker_candidate(text, request),
+        }
 
     def _run_fixer(
         self,
@@ -504,6 +674,40 @@ def select_best_plan(plans: list[str], request: HubRequest, root: Path) -> str:
     return max(plans, key=lambda plan: score_plan(plan, request, root))
 
 
+def score_worker_candidate(candidate: str, request: HubRequest) -> float:
+    """Score non-editing worker proposals before the real coder runs."""
+
+    text = candidate.lower()
+    score = 0.0
+    requested_paths = _requested_paths(request)
+    for path in requested_paths:
+        if path.lower() in text:
+            score += 2.0
+    if any(word in text for word in ("test", "verify", "run", "check")):
+        score += 2.0
+    if any(word in text for word in ("minimal", "targeted", "scoped", "preserve")):
+        score += 1.5
+    if any(word in text for word in ("risk", "rollback", "compatib", "regression")):
+        score += 1.0
+    if any(word in text for word in ("read", "inspect", "search")):
+        score += 0.75
+    if any(bad in text for bad in ("rm -rf", "delete the repository", "rewrite everything", "../")):
+        score -= 8.0
+    if "do not test" in text or "skip validation" in text:
+        score -= 3.0
+    return score
+
+
+def select_best_worker_candidate(candidates: list[str], request: HubRequest) -> int:
+    if not candidates:
+        return 1
+    best_index = max(
+        range(len(candidates)),
+        key=lambda index: score_worker_candidate(candidates[index], request),
+    )
+    return best_index + 1
+
+
 def _role_score(agent: AgentConfig, role: str) -> float:
     base = float(agent.priority or 0.0)
     coding = float(agent.coding_score or 0.0)
@@ -511,9 +715,9 @@ def _role_score(agent: AgentConfig, role: str) -> float:
     speed = float(agent.speed_score or 0.0)
     context = min(1.0, float(agent.context_window or 0) / 128_000)
     tools = 0.2 if agent.supports_tools or agent.supports_function_calling else 0.0
-    if role in {"coder", "fixer"}:
+    if role in {"coder", "fixer", "worker_candidate"}:
         return base + coding * 20 + reasoning * 5 + tools * 10
-    if role in {"planner", "reviewer"}:
+    if role in {"planner", "reviewer", "judge"}:
         return base + reasoning * 20 + coding * 5 + context * 5
     if role == "validator":
         return base + reasoning * 16 + coding * 8 + tools * 6 + context * 3
@@ -607,26 +811,88 @@ def _researcher_prompt(request: HubRequest, root: Path, plan: str) -> str:
     )
 
 
-def _coder_prompt(request: HubRequest, plan: str, research: str) -> str:
-    return "\n".join(
+def _coder_prompt(request: HubRequest, plan: str, research: str, worker_plan: str = "") -> str:
+    parts = [
+        "You are the coder in an Agent Hub coding team.",
+        "Confirm the workspace root and target path before editing.",
+        "Inspect files before editing, keep changes scoped, and verify when possible.",
+        "Obey the context change bar using inherited repository graph, inspected files, related files, impacted files, and context score.",
+        "Use one grouped apply_patch for related edits across implementation, tests, configs, docs, and dependency-aware fixes.",
+        "Advance the active execution node; use write_file only for new/generated files and replace_in_file only for tiny isolated edits after the relevant context is inspected.",
+        "",
+        "Task:",
+        request_text(request),
+        "",
+        "Selected plan:",
+        plan,
+    ]
+    if worker_plan:
+        parts.extend(
+            [
+                "",
+                "Selected worker proposal:",
+                worker_plan,
+            ]
+        )
+    parts.extend(
         [
-            "You are the coder in an Agent Hub coding team.",
-            "Confirm the workspace root and target path before editing.",
-            "Inspect files before editing, keep changes scoped, and verify when possible.",
-            "Obey the context change bar using inherited repository graph, inspected files, related files, impacted files, and context score.",
-            "Use one grouped apply_patch for related edits across implementation, tests, configs, docs, and dependency-aware fixes.",
-            "Advance the active execution node; use write_file only for new/generated files and replace_in_file only for tiny isolated edits after the relevant context is inspected.",
-            "",
-            "Task:",
-            request_text(request),
-            "",
-            "Selected plan:",
-            plan,
             "",
             "Research context:",
             research,
         ]
     )
+    return "\n".join(parts)
+
+
+def _worker_candidate_prompt(request: HubRequest, plan: str, research: str, index: int) -> str:
+    return "\n".join(
+        [
+            "You are a worker candidate in an Agent Hub large-task team.",
+            "Propose the best execution approach. Do not edit files, call tools, or claim work is complete.",
+            "Name likely files, validation steps, risks, and the smallest safe implementation path.",
+            f"Candidate index: {index}",
+            "",
+            "Task:",
+            request_text(request),
+            "",
+            "Selected plan:",
+            _compact_phase_text(plan),
+            "",
+            "Research context:",
+            _compact_phase_text(research),
+        ]
+    )
+
+
+def _judge_prompt(
+    request: HubRequest,
+    plan: str,
+    research: str,
+    candidates: list[dict[str, Any]],
+) -> str:
+    lines = [
+        "You are the judge in an Agent Hub large-task team.",
+        "Pick the safest, most complete worker proposal. Prefer scoped changes, validation, and repository-specific detail.",
+        "Return 'selected: N' with a short reason.",
+        "",
+        "Task:",
+        request_text(request),
+        "",
+        "Selected plan:",
+        _compact_phase_text(plan),
+        "",
+        "Research context:",
+        _compact_phase_text(research),
+    ]
+    for candidate in candidates:
+        lines.extend(
+            [
+                "",
+                f"Candidate {candidate['index']} from {candidate['response'].agent}:",
+                _compact_phase_text(candidate["text"]),
+            ]
+        )
+    return "\n".join(lines)
 
 
 def _review_context(request: HubRequest, plan: str, research: str, coder: HubResponse) -> str:
@@ -782,6 +1048,21 @@ def _compact_phase_text(text: str, *, maximum: int = 2400) -> str:
 
 def _score_to_confidence(score: float) -> float:
     return round(max(0.0, min(1.0, 0.45 + (score / 20.0))), 3)
+
+
+def _selected_candidate_index(text: str, maximum: int) -> int | None:
+    match = re.search(r"\bselected\s*[:#-]?\s*(\d+)\b", str(text or ""), flags=re.IGNORECASE)
+    if not match:
+        match = re.search(r"\bcandidate\s+(\d+)\b", str(text or ""), flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    if 1 <= value <= maximum:
+        return value
+    return None
 
 
 def _team_confidence(phases: list[dict[str, Any]], finalizer: HubResponse) -> dict[str, Any]:

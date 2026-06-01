@@ -102,11 +102,26 @@ PUBLIC_IMPORTS = {
     "agent_hub.providers": [
         "Provider",
         "ProviderError",
+        "ProviderCapabilities",
+        "ProviderDescriptor",
+        "ProviderPricing",
         "OpenAIChatProvider",
         "LocalResearchProvider",
         "AnthropicMessagesProvider",
         "GeminiProvider",
+        "SimpleOpenAICompatibleProvider",
+        "builtin_provider_descriptors",
         "create_provider",
+        "descriptor_from_metadata",
+    ],
+    "agent_hub.providers.sdk": [
+        "ProviderAdapter",
+        "ProviderCapabilities",
+        "ProviderDescriptor",
+        "ProviderPricing",
+        "SimpleOpenAICompatibleProvider",
+        "builtin_provider_descriptors",
+        "descriptor_from_metadata",
     ],
     "agent_hub.providers.base": [
         "ProviderAdapter",
@@ -185,6 +200,10 @@ PUBLIC_IMPORTS = {
     "agent_hub.core.router_diagnostics": [
         "build_capability_graph",
         "build_provider_status",
+    ],
+    "agent_hub.core.provider_attempts": [
+        "ProviderAttemptExecutor",
+        "ProviderAttemptHelpers",
     ],
     "agent_hub.events": [
         "RouterEventRecorder",

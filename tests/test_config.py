@@ -128,6 +128,25 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(data["agent_context_compaction_enabled"])
         self.assertFalse(data["prefer_multi_file_patches"])
 
+    def test_adaptive_learning_settings_round_trip(self) -> None:
+        config = config_from_dict(
+            {
+                "adaptive_learning_enabled": False,
+                "adaptive_routing_enabled": False,
+                "adaptive_workflow_upgrades_enabled": False,
+                "agents": [],
+            }
+        )
+
+        self.assertFalse(config.adaptive_learning_enabled)
+        self.assertFalse(config.adaptive_routing_enabled)
+        self.assertFalse(config.adaptive_workflow_upgrades_enabled)
+
+        data = config_to_dict(config)
+        self.assertFalse(data["adaptive_learning_enabled"])
+        self.assertFalse(data["adaptive_routing_enabled"])
+        self.assertFalse(data["adaptive_workflow_upgrades_enabled"])
+
     def test_unlimited_routing_settings_round_trip(self) -> None:
         config = config_from_dict(
             {

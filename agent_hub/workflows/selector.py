@@ -30,6 +30,7 @@ class WorkflowSelection:
     file_count: int
     adaptive_upgrade: bool = False
     baseline_pattern: str = ""
+    signals: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +42,7 @@ class WorkflowSelection:
             "file_count": self.file_count,
             "adaptive_upgrade": self.adaptive_upgrade,
             "baseline_pattern": self.baseline_pattern,
+            "signals": dict(self.signals or {}),
         }
 
 
@@ -58,6 +60,16 @@ class WorkflowSelector:
         has_tools = _request_has_tools(request)
         task_type = _task_type(text, has_tools=has_tools, tokens=tokens)
         workflow_kind = _workflow_kind(text, task_type)
+        signals = {
+            "has_tools": has_tools,
+            "critical": _critical_markers(text),
+            "large_or_high_risk": _team_reviewed(text, tokens=tokens, file_count=file_count),
+            "token_thresholds": {
+                "direct_route_max": 1000,
+                "single_worker_max": 4000,
+                "team_reviewed_min": 12000,
+            },
+        }
         if override:
             return WorkflowSelection(
                 pattern=override,
@@ -66,6 +78,7 @@ class WorkflowSelector:
                 task_type=task_type,
                 estimated_input_tokens=tokens,
                 file_count=file_count,
+                signals=signals,
             )
         if _team_reviewed(text, tokens=tokens, file_count=file_count):
             return self._with_adaptive_upgrade(WorkflowSelection(
@@ -75,6 +88,7 @@ class WorkflowSelector:
                 task_type=task_type,
                 estimated_input_tokens=tokens,
                 file_count=file_count,
+                signals=signals,
             ))
         if not has_tools and tokens < 1000 and task_type == "general" and not _critical_markers(text):
             return self._with_adaptive_upgrade(WorkflowSelection(
@@ -84,6 +98,7 @@ class WorkflowSelector:
                 task_type=task_type,
                 estimated_input_tokens=tokens,
                 file_count=file_count,
+                signals=signals,
             ))
         if (
             task_type in {"coding", "debug", "tool_use"}
@@ -98,6 +113,7 @@ class WorkflowSelector:
                 task_type=task_type,
                 estimated_input_tokens=tokens,
                 file_count=file_count,
+                signals=signals,
             ))
         if _critical_markers(text) or file_count > 1 or task_type == "review":
             return self._with_adaptive_upgrade(WorkflowSelection(
@@ -107,6 +123,7 @@ class WorkflowSelector:
                 task_type=task_type,
                 estimated_input_tokens=tokens,
                 file_count=file_count,
+                signals=signals,
             ))
         if task_type in {"coding", "debug"}:
             return self._with_adaptive_upgrade(WorkflowSelection(
@@ -116,6 +133,7 @@ class WorkflowSelector:
                 task_type=task_type,
                 estimated_input_tokens=tokens,
                 file_count=file_count,
+                signals=signals,
             ))
         return self._with_adaptive_upgrade(WorkflowSelection(
             pattern="direct_route",
@@ -124,9 +142,15 @@ class WorkflowSelector:
             task_type=task_type,
             estimated_input_tokens=tokens,
             file_count=file_count,
+            signals=signals,
         ))
 
     def _with_adaptive_upgrade(self, selection: WorkflowSelection) -> WorkflowSelection:
+        if not (
+            self.config.adaptive_learning_enabled
+            and self.config.adaptive_workflow_upgrades_enabled
+        ):
+            return selection
         upgrade = AdaptiveLearningStore(self.config.state_dir).workflow_upgrade(
             selection.pattern,
             task_type=selection.task_type,
@@ -150,6 +174,7 @@ class WorkflowSelector:
             file_count=selection.file_count,
             adaptive_upgrade=True,
             baseline_pattern=baseline,
+            signals=selection.signals,
         )
 
 
@@ -157,6 +182,11 @@ def with_workflow_selection_raw(request: HubRequest, selection: WorkflowSelectio
     raw = dict(request.raw or {})
     raw["workflow_pattern"] = selection.pattern
     raw["workflow_selection"] = selection.pattern
+    if selection.pattern == "team_reviewed":
+        group = dict(raw.get("group_agent") or {})
+        group.setdefault("plan_candidates", 2)
+        group.setdefault("worker_candidates", 2)
+        raw["group_agent"] = group
     raw.setdefault("agent_hub", {})
     if isinstance(raw["agent_hub"], dict):
         raw["agent_hub"] = {

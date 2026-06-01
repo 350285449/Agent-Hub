@@ -37,6 +37,7 @@ class AdaptiveLearningTests(unittest.TestCase):
                 input_tokens=1000,
                 output_tokens=200,
                 estimated_cost_usd=estimate_known_cost_usd(agent, input_tokens=1000, output_tokens=200),
+                retry_count=1,
                 final=True,
             )
             store.record_workflow_result(
@@ -50,6 +51,7 @@ class AdaptiveLearningTests(unittest.TestCase):
                 agent=agent.name,
                 provider=agent.provider,
                 model=agent.model,
+                retry_count=1,
             )
             feedback = store.record_feedback(request_id="hub-1", rating="up", workflow_success=True)
             summary = AdaptiveLearningStore(Path(tmp)).optimization_summary()
@@ -57,7 +59,160 @@ class AdaptiveLearningTests(unittest.TestCase):
             self.assertTrue(feedback["matched"])
             self.assertEqual(summary["workflow_success_rate"]["successes"], 1)
             self.assertEqual(summary["failed_requests_recovered"], 1)
+            self.assertEqual(summary["total_retries"], 1)
+            self.assertEqual(summary["average_retries"], 1.0)
             self.assertGreater(summary["average_known_cost_usd"], 0)
+            self.assertEqual(summary["task_model_winners"]["coding"]["agent"], "claude")
+            self.assertEqual(summary["role_model_winners"]["coder"]["agent"], "claude")
+            self.assertTrue(summary["model_scorecards"])
+            self.assertEqual(summary["most_effective_providers"][0]["provider"], "anthropic")
+            self.assertEqual(summary["recent_optimization_decisions"][-1]["retry_count"], 1)
+            self.assertTrue(summary["dashboard"]["cards"])
+
+    def test_workflow_analytics_reports_task_rows_and_role_winners(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = AgentConfig(
+                name="claude-planner",
+                provider="anthropic",
+                model="claude-planner-test",
+                cost_per_million_input=3,
+                cost_per_million_output=15,
+            )
+            worker = AgentConfig(
+                name="gpt-worker",
+                provider="openai",
+                model="gpt-worker-test",
+                cost_per_million_input=2,
+                cost_per_million_output=10,
+            )
+            store = AdaptiveLearningStore(Path(tmp))
+
+            store.record_outcome(
+                request_id="research-planner",
+                route="reasoning",
+                task_type="research",
+                workflow_pattern="planned_worker",
+                workflow_role="planner",
+                agent=planner,
+                model=planner.model,
+                success=True,
+                latency_seconds=2.0,
+                failover_attempts=0,
+                retry_count=0,
+                input_tokens=1200,
+                output_tokens=300,
+                estimated_cost_usd=estimate_known_cost_usd(planner, input_tokens=1200, output_tokens=300),
+                final=True,
+            )
+            store.record_outcome(
+                request_id="research-worker",
+                route="coding",
+                task_type="research",
+                workflow_pattern="planned_worker",
+                workflow_role="coder",
+                agent=worker,
+                model=worker.model,
+                success=True,
+                latency_seconds=3.0,
+                failover_attempts=1,
+                retry_count=1,
+                input_tokens=1500,
+                output_tokens=500,
+                estimated_cost_usd=estimate_known_cost_usd(worker, input_tokens=1500, output_tokens=500),
+                final=True,
+            )
+            store.record_workflow_result(
+                request_id="research-worker",
+                pattern="planned_worker",
+                task_type="research",
+                success=True,
+                latency_seconds=14.0,
+                recovered_by_failover=True,
+                final_status="completed",
+                agent=worker.name,
+                provider=worker.provider,
+                model=worker.model,
+                retry_count=2,
+            )
+
+            summary = store.optimization_summary()
+            row = next(
+                item
+                for item in summary["workflow_analytics"]
+                if item["workflow_pattern"] == "planned_worker" and item["task_type"] == "research"
+            )
+
+            self.assertEqual(row["label"], "Research Workflow")
+            self.assertEqual(row["success_rate"], 1.0)
+            self.assertEqual(row["average_latency_ms"], 14000.0)
+            self.assertGreater(row["average_known_cost_usd"], 0)
+            self.assertEqual(row["total_retries"], 2)
+            self.assertEqual(row["average_retries"], 2.0)
+            self.assertEqual(row["best_planner"]["agent"], "claude-planner")
+            self.assertEqual(row["best_worker"]["agent"], "gpt-worker")
+            self.assertEqual(summary["dashboard"]["workflow_analytics"][0]["label"], "Research Workflow")
+
+    def test_routing_signal_exposes_scorecard_and_threshold_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = AgentConfig(name="claude", provider="anthropic", model="claude-test")
+            store = AdaptiveLearningStore(Path(tmp))
+
+            for index in range(4):
+                store.record_outcome(
+                    request_id=f"warm-{index}",
+                    route="coding",
+                    task_type="coding",
+                    workflow_pattern="single_worker",
+                    workflow_role="coder",
+                    agent=agent,
+                    model=agent.model,
+                    success=True,
+                    latency_seconds=1,
+                    failover_attempts=0,
+                    input_tokens=100,
+                    output_tokens=50,
+                    estimated_cost_usd=None,
+                    final=True,
+                )
+
+            warming = store.routing_signal(
+                "claude",
+                route="coding",
+                task_type="coding",
+                workflow_pattern="single_worker",
+                workflow_role="coder",
+            )
+            self.assertFalse(warming["active"])
+            self.assertEqual(warming["scope"], "exact")
+            self.assertEqual(warming["samples_needed"], 1)
+
+            store.record_outcome(
+                request_id="ready",
+                route="coding",
+                task_type="coding",
+                workflow_pattern="single_worker",
+                workflow_role="coder",
+                agent=agent,
+                model=agent.model,
+                success=True,
+                latency_seconds=1,
+                failover_attempts=0,
+                input_tokens=100,
+                output_tokens=50,
+                estimated_cost_usd=None,
+                final=True,
+            )
+            ready = store.routing_signal(
+                "claude",
+                route="coding",
+                task_type="coding",
+                workflow_pattern="single_worker",
+                workflow_role="coder",
+            )
+
+            self.assertTrue(ready["active"])
+            self.assertGreater(ready["adaptive_bonus"], 0)
+            self.assertEqual(ready["scorecard"]["success_rate"], 1.0)
 
     def test_router_uses_adaptive_bonus_after_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +255,7 @@ class AdaptiveLearningTests(unittest.TestCase):
                     final=False,
                 )
             calls: list[str] = []
+            config.expose_routing_details = True
 
             response = AgentRouter(
                 config,
@@ -108,6 +264,10 @@ class AdaptiveLearningTests(unittest.TestCase):
 
             self.assertEqual(response.agent, "good")
             self.assertEqual(calls, ["good"])
+            decision = response.raw["agent_hub"]["routing_decision"]
+            self.assertEqual(decision["selected_agent"], "good")
+            self.assertTrue(decision["candidate_scores"][0]["adaptive"]["active"])
+            self.assertGreater(decision["candidate_scores"][0]["adaptive"]["adaptive_bonus"], 0)
 
     def test_router_keeps_cold_start_and_manual_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -146,6 +306,37 @@ class AdaptiveLearningTests(unittest.TestCase):
             self.assertEqual(cold.agent, "bad")
             self.assertEqual(manual.agent, "bad")
 
+    def test_router_can_disable_adaptive_routing_bonus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _router_config(root)
+            config.adaptive_routing_enabled = False
+            store = AdaptiveLearningStore(config.state_dir)
+            for index in range(5):
+                store.record_outcome(
+                    request_id=f"good-{index}",
+                    route="",
+                    task_type="coding",
+                    workflow_pattern="",
+                    workflow_role="",
+                    agent=config.agents["good"],
+                    model="good-test",
+                    success=True,
+                    latency_seconds=1,
+                    failover_attempts=0,
+                    input_tokens=1,
+                    output_tokens=1,
+                    estimated_cost_usd=None,
+                    final=True,
+                )
+            calls: list[str] = []
+
+            response = AgentRouter(config, provider_factory=lambda agent: _Provider(agent, calls)).route(
+                HubRequest(session_id="s", messages=[{"role": "user", "content": "fix code"}])
+            )
+
+            self.assertEqual(response.agent, "bad")
+
     def test_workflow_selector_patterns_and_override(self) -> None:
         selector = WorkflowSelector(HubConfig())
 
@@ -176,6 +367,14 @@ class AdaptiveLearningTests(unittest.TestCase):
             ).pattern,
             "team_reviewed",
         )
+        large = selector.select(
+            HubRequest(
+                session_id="s",
+                messages=[{"role": "user", "content": "large architecture migration touching many files"}],
+            )
+        )
+        self.assertEqual(large.pattern, "team_reviewed")
+        self.assertTrue(large.to_dict()["signals"]["large_or_high_risk"])
 
     def test_workflow_selector_uses_adaptive_upgrade_after_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -180,6 +180,9 @@ class HubConfig:
     plugin_capability_grants: dict[str, list[str]] = field(default_factory=dict)
     free_only: bool = True
     enable_load_balancing: bool = True
+    adaptive_learning_enabled: bool = True
+    adaptive_routing_enabled: bool = True
+    adaptive_workflow_upgrades_enabled: bool = True
     auto_enable_available_providers: bool = True
     auto_detect_local_models: bool = True
     local_model_probe_timeout_seconds: float = 0.35
@@ -546,6 +549,9 @@ def free_local_config() -> HubConfig:
         max_context_tokens=None,
         compatibility_mode=dict(DEFAULT_COMPATIBILITY_MODE),
         free_only=True,
+        adaptive_learning_enabled=True,
+        adaptive_routing_enabled=True,
+        adaptive_workflow_upgrades_enabled=True,
         auto_enable_available_providers=True,
         auto_detect_local_models=True,
         routing=dict(DEFAULT_ROUTING_CONFIG),
@@ -786,6 +792,12 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         plugin_capability_grants=_string_list_map(raw.get("plugin_capability_grants")),
         free_only=_bool_with_default(raw.get("free_only"), True),
         enable_load_balancing=_bool_with_default(raw.get("enable_load_balancing"), True),
+        adaptive_learning_enabled=_bool_with_default(raw.get("adaptive_learning_enabled"), True),
+        adaptive_routing_enabled=_bool_with_default(raw.get("adaptive_routing_enabled"), True),
+        adaptive_workflow_upgrades_enabled=_bool_with_default(
+            raw.get("adaptive_workflow_upgrades_enabled"),
+            True,
+        ),
         auto_enable_available_providers=_bool_with_default(
             raw.get("auto_enable_available_providers"),
             True,
@@ -935,6 +947,9 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "plugin_capability_grants": config.plugin_capability_grants,
         "free_only": config.free_only,
         "enable_load_balancing": config.enable_load_balancing,
+        "adaptive_learning_enabled": config.adaptive_learning_enabled,
+        "adaptive_routing_enabled": config.adaptive_routing_enabled,
+        "adaptive_workflow_upgrades_enabled": config.adaptive_workflow_upgrades_enabled,
         "auto_enable_available_providers": config.auto_enable_available_providers,
         "auto_detect_local_models": config.auto_detect_local_models,
         "local_model_probe_timeout_seconds": config.local_model_probe_timeout_seconds,

@@ -58,8 +58,9 @@ Agent-Hub is organized around modular backend systems:
 - Plugin SDK foundation: discovers local manifest-only provider, tool,
   workflow, router-strategy, and memory/context plugins without executing
   third-party code.
-- Dashboard: `/dashboard`, `/v1/status`, `/v1/routing-history`, and
-  `/v1/provider-scores` explain model selection and tool/workflow activity.
+- Dashboard: `/dashboard`, `/dashboard/optimization`, `/v1/status`,
+  `/v1/routing-history`, and `/v1/provider-scores` explain model selection,
+  adaptive optimization, retry recovery, and tool/workflow activity.
 
 More detail lives in `docs/architecture.md`, `docs/providers.md`,
 `docs/workflows.md`, `docs/tools.md`, `docs/mcp.md`, `docs/evaluation.md`,
@@ -96,10 +97,17 @@ Workflow endpoints are available for coding tasks:
 - `POST /v1/workflows/debug`
 - `POST /v1/workflows/explain`
 - `POST /v1/workflows/refactor`
+- `POST /v1/auto`
 
 Each workflow is deterministic and explainable: planner, worker, reviewer.
 Optional validation, retry-on-review-failure, test command, and patch summary
 stages are available through request/config flags.
+`/v1/auto` chooses between direct, single-worker, planned, reviewed, and
+team-reviewed workflows. Large team-reviewed tasks collect multiple non-editing
+worker proposals, judge the best proposal, then run one editing worker with the
+selected plan. Adaptive analytics track model win rates, latency, cost, retries,
+thumbs up/down feedback, workflow success, and best planner/worker choices per
+workflow task in `/dashboard/optimization`.
 
 ## Configuration Example
 
@@ -107,6 +115,9 @@ stages are available through request/config flags.
 {
   "free_only": true,
   "expose_routing_details": false,
+  "adaptive_learning_enabled": true,
+  "adaptive_routing_enabled": true,
+  "adaptive_workflow_upgrades_enabled": true,
   "approval_mode": "ask",
   "tool_loop_enabled": true,
   "max_tool_iterations": 4,

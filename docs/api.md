@@ -110,6 +110,9 @@ curl http://127.0.0.1:8787/v1/status
 curl http://127.0.0.1:8787/v1/routing/status
 curl http://127.0.0.1:8787/v1/routing/last-decision
 curl http://127.0.0.1:8787/v1/routing/test-failover
+curl -X POST http://127.0.0.1:8787/v1/routing/simulate \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"large architecture migration"}]}'
 curl http://127.0.0.1:8787/v1/routing-history
 curl http://127.0.0.1:8787/v1/provider-scores
 curl http://127.0.0.1:8787/v1/provider-health
@@ -133,6 +136,12 @@ errors, audit rows, and plugin metadata should keep useful context while
 masking API keys, bearer tokens, auth headers, and secret-looking strings.
 
 `/dashboard` renders the same core provider status in lightweight HTML.
+`/dashboard/optimization` renders adaptive routing, workflow, model, provider,
+cost, latency, retry, and recovery analytics. It includes per-workflow rows such
+as best planner, best worker, average cost, average time, success rate, and
+failover recovery counts. `POST /v1/routing/simulate` previews the auto workflow
+selection, router decision, fallback candidates, and workflow role candidate
+plans without calling a provider or changing adaptive state.
 Internal foundation events are stored in `.agent-hub/state/events.jsonl` and
 include `provider.selected`, `provider.failed`, `router.fallback`,
 `stream.started`, `stream.failed`, `tool.executed`, and `context.truncated`.

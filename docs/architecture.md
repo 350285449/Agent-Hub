@@ -5,6 +5,9 @@ OpenAI-compatible, Anthropic-compatible, or workflow requests; the backend
 normalizes those requests, selects a provider, and returns a compatible
 response without exposing internal details unless `expose_routing_details=true`.
 
+For the platform-level architecture map, dependency analysis, and prioritized
+modernization roadmap, see `docs/platform-architecture-roadmap.md`.
+
 ## Router
 
 `agent_hub.core.router.AgentRouter` ranks enabled agents by route, task type,
@@ -13,11 +16,26 @@ preferences. It preserves failover details internally and can expose selected
 provider, model, fallback chain, routing reason, score, stream mode, and
 context compression metadata when detailed routing is enabled.
 
+`agent_hub.core.provider_attempts.ProviderAttemptExecutor` owns the ranked
+provider execution loop for non-streaming requests: cooldown/preflight skips,
+permission blocks, retry/failover, validation recovery, output-limit
+continuation, success/failure recording, and safe empty fallback generation.
+The router still owns scoring and candidate selection.
+
+## Application Services
+
+`agent_hub.application` contains endpoint-independent services that coordinate
+runtime systems for API handlers. The first services cover adaptive auto-mode
+execution, feedback capture, optimization summaries, and provider-score
+diagnostics so HTTP handlers can delegate business logic without owning it.
+
 ## Provider Manager
 
 `agent_hub.core.provider_manager.ProviderManager` is the adapter gateway. It
 bridges legacy `complete()` adapters and strict `chat()` / `stream()` adapters.
 Provider-specific payload translation stays inside `agent_hub.providers`.
+OpenAI-compatible provider authors can use the lightweight SDK template in
+`docs/provider-sdk.md`, backed by `agent_hub.providers.sdk` descriptors.
 
 ## Streaming System
 

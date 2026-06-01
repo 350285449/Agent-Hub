@@ -4,6 +4,12 @@
 
 No changes yet.
 
+## 0.7.20
+
+- Adds a sidebar task composer that opens chat and sends the request in one flow.
+- Simplifies the first-run dashboard by keeping advanced diagnostics in collapsible panels.
+- Refreshes the chat empty state with starter prompts and clearer live-session layout.
+
 ## 0.7.19
 
 - Adds Phase 9 API streaming compatibility frame builders for OpenAI and Anthropic SSE output.

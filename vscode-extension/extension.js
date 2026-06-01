@@ -11,6 +11,8 @@ let serverProcess = null;
 let modelPullProcess = null;
 let output;
 let chatPanel = null;
+let chatWebviewReady = false;
+let pendingChatRequests = [];
 let extensionContext = null;
 let sidebarProvider = null;
 let statusBarItem = null;
@@ -453,6 +455,17 @@ class AgentHubSidebarProvider {
       openChat(this.context);
       return;
     }
+    if (message.type === "quickTask") {
+      const text = typeof message.text === "string" ? message.text.trim() : "";
+      if (text) {
+        openChat(this.context, {
+          text,
+          includeSelection: !!message.includeSelection,
+          providerMode: settings().agentProviderMode
+        });
+      }
+      return;
+    }
     if (message.type === "askAgent") {
       await askAgent();
       return;
@@ -797,6 +810,25 @@ function sidebarStatistics(health, usage, metrics, permissions, providers, limit
     : {};
   const bestModels = Array.isArray(optimizationSummary.model_win_rates) ? optimizationSummary.model_win_rates : [];
   const bestModel = bestModels[0] || {};
+  const taskWinners = optimizationSummary.task_model_winners && typeof optimizationSummary.task_model_winners === "object"
+    ? optimizationSummary.task_model_winners
+    : {};
+  const codingWinner = taskWinners.coding || taskWinners.debug || taskWinners.tool_use || {};
+  const roleWinners = optimizationSummary.role_model_winners && typeof optimizationSummary.role_model_winners === "object"
+    ? optimizationSummary.role_model_winners
+    : optimizationSummary.best_provider_by_workflow_role && typeof optimizationSummary.best_provider_by_workflow_role === "object"
+      ? optimizationSummary.best_provider_by_workflow_role
+      : {};
+  const plannerWinner = roleWinners.planner || {};
+  const workerWinner = roleWinners.coder || roleWinners.worker || {};
+  const effectiveProviders = Array.isArray(optimizationSummary.most_effective_providers)
+    ? optimizationSummary.most_effective_providers
+    : [];
+  const effectiveProvider = effectiveProviders[0] || {};
+  const workflowAnalytics = Array.isArray(optimizationSummary.workflow_analytics)
+    ? optimizationSummary.workflow_analytics
+    : [];
+  const bestWorkflow = workflowAnalytics[0] || {};
   const successRate = percent(successfulCalls, totalCalls);
   const providerAvailabilityPercent = percent(availableProviders, totalProviders);
   const healthScore = dashboardHealthScore({
@@ -842,8 +874,22 @@ function sidebarStatistics(health, usage, metrics, permissions, providers, limit
     workflowSuccessAttempts: Number(workflowRate.attempts || 0),
     averageKnownCost: optimizationSummary.average_known_cost_usd,
     adaptiveAverageLatencyMs: Number(optimizationSummary.average_latency_ms || 0),
+    adaptiveAverageRetries: Number(optimizationSummary.average_retries || 0),
     failedRequestsRecovered: Number(optimizationSummary.failed_requests_recovered || 0),
+    bestWorkflow: bestWorkflow.label || bestWorkflow.workflow_pattern || "",
+    bestWorkflowAttempts: Number(bestWorkflow.attempts || 0),
+    bestWorkflowSuccessRate: Math.round(Number(bestWorkflow.success_rate || 0) * 100),
     bestLearnedModel: [bestModel.provider, bestModel.model].filter(Boolean).join(" / "),
+    bestCodingModel: [codingWinner.provider, codingWinner.model].filter(Boolean).join(" / "),
+    bestCodingModelAttempts: Number(codingWinner.attempts || 0),
+    bestCodingModelSuccessRate: Math.round(Number(codingWinner.success_rate || 0) * 100),
+    bestPlannerModel: [plannerWinner.provider, plannerWinner.model].filter(Boolean).join(" / "),
+    bestPlannerAttempts: Number(plannerWinner.attempts || 0),
+    bestWorkerModel: [workerWinner.provider, workerWinner.model].filter(Boolean).join(" / "),
+    bestWorkerAttempts: Number(workerWinner.attempts || 0),
+    mostEffectiveProvider: effectiveProvider.provider || "",
+    mostEffectiveProviderAttempts: Number(effectiveProvider.attempts || 0),
+    mostEffectiveProviderSuccessRate: Math.round(Number(effectiveProvider.success_rate || 0) * 100),
     healthScore
   };
 }
@@ -873,7 +919,7 @@ function sidebarInsightRows(dashboard, metrics) {
     insights.push({
       tone: stats.workflowSuccessRate >= 80 ? "ok" : "info",
       main: `${stats.workflowSuccessRate}% workflow success`,
-      meta: stats.bestLearnedModel ? `Best learned model: ${stats.bestLearnedModel}.` : "Adaptive workflow data is accumulating."
+      meta: stats.bestWorkflow ? `Best workflow: ${stats.bestWorkflow}.` : "Adaptive workflow data is accumulating."
     });
   }
   if (stats.permissionDenied > 0) {
@@ -1117,7 +1163,8 @@ function sidebarHtml(webview, logoPath) {
     }
 
     header,
-    section {
+    section,
+    details.panel {
       padding: 12px;
       border-bottom: 1px solid var(--border);
     }
@@ -1369,6 +1416,27 @@ function sidebarHtml(webview, logoPath) {
       margin-bottom: 8px;
     }
 
+    details.panel > summary.section-head {
+      margin: 0 0 8px;
+      list-style: none;
+      cursor: pointer;
+    }
+
+    details.panel > summary.section-head::-webkit-details-marker {
+      display: none;
+    }
+
+    details.panel > summary.section-head::after {
+      content: "+";
+      min-width: 18px;
+      color: var(--muted);
+      text-align: right;
+    }
+
+    details.panel[open] > summary.section-head::after {
+      content: "-";
+    }
+
     .status {
       display: inline-flex;
       align-items: center;
@@ -1474,6 +1542,48 @@ function sidebarHtml(webview, logoPath) {
       min-height: 34px;
     }
 
+    .quick-task {
+      display: grid;
+      gap: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      background: var(--card);
+    }
+
+    .quick-task label,
+    .task-options label {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.3;
+    }
+
+    .quick-task textarea {
+      width: 100%;
+      min-height: 78px;
+      max-height: 160px;
+      resize: vertical;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px;
+      color: var(--app-fg);
+      background: var(--app-bg);
+      font: inherit;
+      line-height: 1.4;
+    }
+
+    .quick-task textarea:focus-visible {
+      outline: 1px solid var(--button);
+      outline-offset: 2px;
+    }
+
+    .task-options {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
     button[data-state="Running"]::before {
       content: "OK ";
     }
@@ -1575,6 +1685,14 @@ function sidebarHtml(webview, logoPath) {
           <div class="meta" id="nextStepDetail">Agent Hub is collecting local status.</div>
         </div>
       </div>
+      <form class="quick-task" id="quickTaskForm">
+        <label for="quickTaskInput">Task</label>
+        <textarea id="quickTaskInput" placeholder="Fix a bug, explain the current file, add a feature, or inspect the workspace"></textarea>
+        <div class="task-options">
+          <label><input id="quickTaskIncludeSelection" type="checkbox" checked> Include selection</label>
+        </div>
+        <button class="primary" id="quickTaskSend" type="submit">Start &amp; Send</button>
+      </form>
       <button class="primary hero-server-action" id="heroServerAction" type="button" data-state="Stopped">Start Agent Hub</button>
       <div class="actions quick-actions">
         <button class="command-button" id="openChat" type="button" title="Open Agent Hub chat">
@@ -1595,19 +1713,19 @@ function sidebarHtml(webview, logoPath) {
         </button>
       </div>
     </section>
-    <section>
-      <div class="section-head">
+    <details class="panel">
+      <summary class="section-head">
         <h2>Statistics</h2>
         <span class="status" id="statsHealth">Waiting</span>
-      </div>
+      </summary>
       <div class="stat-grid" id="statsGrid"></div>
       <ul class="list" id="insightList"></ul>
-    </section>
-    <section>
-      <div class="section-head">
+    </details>
+    <details class="panel" open>
+      <summary class="section-head">
         <h2>Server</h2>
         <span class="status" id="serverStatus">Stopped</span>
-      </div>
+      </summary>
       <div class="detail" id="serverDetail">Checking Agent Hub...</div>
       <ul class="list" id="onboardingList"></ul>
       <div class="actions">
@@ -1616,54 +1734,54 @@ function sidebarHtml(webview, logoPath) {
         <button id="restartServer" type="button">Restart Server</button>
         <button id="checkHealth" type="button">Check Health</button>
       </div>
-    </section>
-    <section>
-      <div class="section-head">
+    </details>
+    <details class="panel">
+      <summary class="section-head">
         <h2>Permissions</h2>
-      </div>
+      </summary>
       <div class="detail" id="permissionDetail">Approval: ask</div>
       <ul class="list" id="permissionList"></ul>
-    </section>
-    <section>
-      <div class="section-head">
+    </details>
+    <details class="panel">
+      <summary class="section-head">
         <h2>Models / Providers</h2>
-      </div>
+      </summary>
       <div class="detail" id="activeModel">No active model yet</div>
       <ul class="list" id="routingChain"></ul>
       <ul class="list" id="providerList"></ul>
-    </section>
-    <section>
-      <div class="section-head">
+    </details>
+    <details class="panel">
+      <summary class="section-head">
         <h2>Limits</h2>
-      </div>
+      </summary>
       <ul class="list" id="limitList"></ul>
-    </section>
-    <section>
-      <div class="section-head">
+    </details>
+    <details class="panel">
+      <summary class="section-head">
         <h2>Token Usage</h2>
-      </div>
+      </summary>
       <div class="detail" id="tokenUsage">No token usage yet</div>
       <div class="detail" id="contextDiagnostics"></div>
-    </section>
-    <section>
-      <div class="section-head">
+    </details>
+    <details class="panel">
+      <summary class="section-head">
         <h2>Activity</h2>
-      </div>
+      </summary>
       <ul class="list" id="activityList"></ul>
-    </section>
-    <section>
-      <div class="section-head">
+    </details>
+    <details class="panel">
+      <summary class="section-head">
         <h2>Logs</h2>
-      </div>
+      </summary>
       <div class="detail" id="logDetail">Open the output channel for live logs.</div>
       <div class="actions">
         <button id="openOutput" type="button">Open Logs</button>
       </div>
-    </section>
-    <section>
-      <div class="section-head">
+    </details>
+    <details class="panel">
+      <summary class="section-head">
         <h2>Settings</h2>
-      </div>
+      </summary>
       <div class="detail" id="settingsDetail"></div>
       <div class="actions">
         <button id="openSettings" type="button">Open Settings</button>
@@ -1674,7 +1792,7 @@ function sidebarHtml(webview, logoPath) {
         <button id="testAnthropicEndpoint" type="button">Test Anthropic Endpoint</button>
         <button id="showClaudeCodeSetup" type="button">Show Claude Code Setup</button>
       </div>
-    </section>
+    </details>
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
@@ -1706,6 +1824,9 @@ function sidebarHtml(webview, logoPath) {
     const activityList = document.getElementById("activityList");
     const logDetail = document.getElementById("logDetail");
     const settingsDetail = document.getElementById("settingsDetail");
+    const quickTaskForm = document.getElementById("quickTaskForm");
+    const quickTaskInput = document.getElementById("quickTaskInput");
+    const quickTaskIncludeSelection = document.getElementById("quickTaskIncludeSelection");
 
     function post(type) {
       vscode.postMessage({ type });
@@ -1872,9 +1993,46 @@ function sidebarHtml(webview, logoPath) {
           percent: Number(stats.workflowSuccessRate || 0)
         },
         {
+          value: stats.bestWorkflow || "--",
+          label: "best workflow",
+          caption: Number(stats.bestWorkflowAttempts || 0)
+            ? Number(stats.bestWorkflowSuccessRate || 0) + "% over " + compactNumber(stats.bestWorkflowAttempts || 0) + " sample(s)"
+            : "waiting for workflow samples"
+        },
+        {
           value: stats.bestLearnedModel || "learning",
           label: "best learned model",
-          caption: Number(stats.adaptiveAverageLatencyMs || 0) ? Math.round(Number(stats.adaptiveAverageLatencyMs || 0)) + " ms avg" : "waiting for samples"
+          caption: Number(stats.adaptiveAverageLatencyMs || 0)
+            ? Math.round(Number(stats.adaptiveAverageLatencyMs || 0)) + " ms avg / " + Number(stats.adaptiveAverageRetries || 0).toFixed(2) + " retries"
+            : "waiting for samples"
+        },
+        {
+          value: stats.bestCodingModel || "--",
+          label: "best coding model",
+          caption: Number(stats.bestCodingModelAttempts || 0)
+            ? Number(stats.bestCodingModelSuccessRate || 0) + "% over " + compactNumber(stats.bestCodingModelAttempts || 0) + " sample(s)"
+            : "waiting for coding samples"
+        },
+        {
+          value: stats.bestPlannerModel || "--",
+          label: "best planner",
+          caption: Number(stats.bestPlannerAttempts || 0)
+            ? compactNumber(stats.bestPlannerAttempts || 0) + " planner sample(s)"
+            : "waiting for planner samples"
+        },
+        {
+          value: stats.bestWorkerModel || "--",
+          label: "best worker",
+          caption: Number(stats.bestWorkerAttempts || 0)
+            ? compactNumber(stats.bestWorkerAttempts || 0) + " worker sample(s)"
+            : "waiting for worker samples"
+        },
+        {
+          value: stats.mostEffectiveProvider || "--",
+          label: "effective provider",
+          caption: Number(stats.mostEffectiveProviderAttempts || 0)
+            ? Number(stats.mostEffectiveProviderSuccessRate || 0) + "% over " + compactNumber(stats.mostEffectiveProviderAttempts || 0) + " sample(s)"
+            : "waiting for provider samples"
         },
         {
           value: stats.averageKnownCost === null || stats.averageKnownCost === undefined ? "--" : "$" + Number(stats.averageKnownCost || 0).toFixed(4),
@@ -2206,6 +2364,21 @@ function sidebarHtml(webview, logoPath) {
       return item;
     }
 
+    quickTaskForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const text = quickTaskInput.value.trim();
+      if (!text) {
+        quickTaskInput.focus();
+        return;
+      }
+      quickTaskInput.value = "";
+      vscode.postMessage({
+        type: "quickTask",
+        text,
+        includeSelection: quickTaskIncludeSelection.checked
+      });
+    });
+
     heroServerAction.addEventListener("click", () => {
       const action = heroServerAction.dataset.action || "startServer";
       if (action) {
@@ -2493,9 +2666,14 @@ function deactivate() {
   stopServerProcess();
 }
 
-function openChat(context) {
+function openChat(context, request = null) {
+  const queued = normalizeChatRequest(request);
+  if (queued) {
+    pendingChatRequests.push(queued);
+  }
   if (chatPanel) {
     chatPanel.reveal(vscode.ViewColumn.Beside);
+    flushPendingChatRequests(chatPanel);
     return;
   }
 
@@ -2514,8 +2692,10 @@ function openChat(context) {
 
   chatPanel.iconPath = logoUri;
   chatPanel.webview.html = chatHtml(chatPanel.webview, logoUri, settings());
+  chatWebviewReady = false;
   chatPanel.onDidDispose(() => {
     chatPanel = null;
+    chatWebviewReady = false;
   });
   chatPanel.webview.onDidReceiveMessage(
     (message) => handleChatMessage(chatPanel, message),
@@ -2524,12 +2704,44 @@ function openChat(context) {
   );
 }
 
+function normalizeChatRequest(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const text = typeof value.text === "string" ? value.text.trim() : "";
+  if (!text) {
+    return null;
+  }
+  return {
+    text,
+    includeSelection: value.includeSelection !== false,
+    providerMode: normalizeAgentProviderMode(value.providerMode || settings().agentProviderMode),
+    autoSend: value.autoSend !== false
+  };
+}
+
+function flushPendingChatRequests(panel) {
+  if (!panel || !panel.webview || !chatWebviewReady || !pendingChatRequests.length) {
+    return;
+  }
+  const requests = pendingChatRequests.splice(0);
+  for (const request of requests) {
+    panel.webview.postMessage({
+      type: "queuedPrompt",
+      ...request
+    });
+  }
+}
+
 async function handleChatMessage(panel, message) {
   if (!panel || !message || typeof message !== "object") {
     return;
   }
 
   if (message.type === "ready" || message.type === "status") {
+    if (message.type === "ready") {
+      chatWebviewReady = true;
+    }
     const online = await isServerOnline();
     panel.webview.postMessage({
       type: "serverStatus",
@@ -2538,6 +2750,7 @@ async function handleChatMessage(panel, message) {
     });
     postChatSettings(panel);
     await postApiKeyStatus(panel);
+    flushPendingChatRequests(panel);
     return;
   }
 
@@ -3438,6 +3651,9 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       --secondary-fg: var(--vscode-button-secondaryForeground, var(--app-fg));
       --secondary-hover: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.22)));
       --bubble: var(--vscode-editor-inactiveSelectionBackground, rgba(127, 127, 127, 0.16));
+      --surface: var(--vscode-editorWidget-background, var(--vscode-input-background, rgba(127, 127, 127, 0.08)));
+      --surface-alt: var(--vscode-sideBarSectionHeader-background, rgba(127, 127, 127, 0.12));
+      --ok: var(--vscode-testing-iconPassed, #3fb950);
       --error: var(--vscode-errorForeground, #f85149);
     }
 
@@ -3665,15 +3881,65 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     }
 
     .transcript {
+      display: grid;
+      align-content: start;
+      gap: 14px;
       overflow-y: auto;
       padding: 14px;
+    }
+
+    .message-list {
+      display: grid;
+      gap: 14px;
+      width: min(980px, 100%);
+      margin: 0 auto;
+    }
+
+    .welcome {
+      display: grid;
+      gap: 12px;
+      width: min(980px, 100%);
+      margin: 0 auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      background: var(--surface);
+    }
+
+    .welcome[hidden] {
+      display: none;
+    }
+
+    .welcome-title {
+      color: var(--app-fg);
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .welcome-meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .prompt-pills {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .prompt-chip {
+      min-height: 42px;
+      color: var(--secondary-fg);
+      background: var(--secondary);
+      text-align: left;
     }
 
     .message {
       display: grid;
       gap: 6px;
       max-width: 920px;
-      margin: 0 0 14px;
+      margin: 0;
     }
 
     .message.user {
@@ -3694,11 +3960,15 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       color: var(--app-fg);
-      background: transparent;
+      background: var(--surface);
     }
 
     .user .bubble {
       background: var(--bubble);
+    }
+
+    .assistant .bubble {
+      border-left: 3px solid var(--ok);
     }
 
     .error .bubble {
@@ -3742,7 +4012,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       gap: 8px;
       padding: 12px 14px 14px;
       border-top: 1px solid var(--border);
-      background: var(--app-bg);
+      background: var(--surface-alt);
     }
 
     textarea {
@@ -3880,7 +4150,8 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
 
     @media (max-width: 720px) {
       .settings-grid,
-      .key-grid {
+      .key-grid,
+      .prompt-pills {
         grid-template-columns: 1fr;
       }
 
@@ -4084,7 +4355,21 @@ ${apiKeyFieldsHtml()}
         </div>
       </div>
     </header>
-    <main class="transcript" id="transcript" aria-live="polite"></main>
+    <main class="transcript" id="transcript" aria-live="polite">
+      <section class="welcome" id="welcome">
+        <div>
+          <div class="welcome-title">What should Agent Hub do?</div>
+          <div class="welcome-meta">Start with a normal request. Agent Hub will start the server, gather workspace context, and ask before privileged actions.</div>
+        </div>
+        <div class="prompt-pills">
+          <button class="prompt-chip secondary" type="button" data-prompt="Inspect this workspace and suggest the next useful improvement">Inspect workspace</button>
+          <button class="prompt-chip secondary" type="button" data-prompt="Explain the current file and call out anything risky">Explain file</button>
+          <button class="prompt-chip secondary" type="button" data-prompt="Find and fix the most likely failing test">Fix tests</button>
+          <button class="prompt-chip secondary" type="button" data-prompt="Research the current problem and summarize the best sources">Research</button>
+        </div>
+      </section>
+      <div class="message-list" id="messageList"></div>
+    </main>
     <form id="form">
       <textarea id="prompt" placeholder="Ask Agent Hub to create, edit, inspect, explain, or run commands"></textarea>
       <div class="actions">
@@ -4103,6 +4388,8 @@ ${apiKeyFieldsHtml()}
     const initialSettings = ${initialSettingsJson};
     const apiKeyIds = ${apiKeyIdsJson};
     const transcript = document.getElementById("transcript");
+    const welcome = document.getElementById("welcome");
+    const messageList = document.getElementById("messageList");
     const form = document.getElementById("form");
     const prompt = document.getElementById("prompt");
     const send = document.getElementById("send");
@@ -4170,6 +4457,10 @@ ${apiKeyFieldsHtml()}
         clearInterval(workingTimer);
         workingTimer = null;
       }
+    }
+
+    function setWelcomeVisible(value) {
+      welcome.hidden = !value;
     }
 
     function setSettingsMenuOpen(value) {
@@ -4286,6 +4577,7 @@ ${apiKeyFieldsHtml()}
     }
 
     function appendMessage(role, text, options = {}) {
+      setWelcomeVisible(false);
       const item = document.createElement("section");
       item.className = "message " + role + (options.error ? " error" : "");
 
@@ -4308,7 +4600,7 @@ ${apiKeyFieldsHtml()}
       if (options.sources && options.sources.length) {
         item.append(detailsBlock("Sources", options.sources));
       }
-      transcript.append(item);
+      messageList.append(item);
       transcript.scrollTop = transcript.scrollHeight;
       return item;
     }
@@ -4701,23 +4993,51 @@ ${apiKeyFieldsHtml()}
       vscode.postMessage({ type: "openOutput" });
     });
 
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const text = prompt.value.trim();
-      if (!text) {
+    for (const chip of document.querySelectorAll("[data-prompt]")) {
+      chip.addEventListener("click", () => {
+        prompt.value = chip.getAttribute("data-prompt") || "";
+        prompt.focus();
+      });
+    }
+
+    function submitPrompt(text, options = {}) {
+      const cleanText = String(text || "").trim();
+      const includeContext = typeof options.includeSelection === "boolean"
+        ? options.includeSelection
+        : includeSelection.checked;
+      const selectedProviderMode = options.providerMode || controlMode.value;
+      const autoSend = options.autoSend !== false;
+      if (!autoSend) {
+        prompt.value = cleanText;
+        includeSelection.checked = includeContext;
+        controlMode.value = selectedProviderMode;
+        prompt.focus();
+        return;
+      }
+      if (!cleanText) {
         return;
       }
       const requestId = Date.now().toString(36) + Math.random().toString(36).slice(2);
-      appendMessage("user", text);
+      appendMessage("user", cleanText);
       pending.set(requestId, appendLiveMessage());
       prompt.value = "";
+      includeSelection.checked = includeContext;
+      controlMode.value = selectedProviderMode;
       setBusy(true);
       startWorkingStatus();
       vscode.postMessage({
         type: "send",
         requestId,
         sessionId,
-        text,
+        text: cleanText,
+        includeSelection: includeContext,
+        providerMode: selectedProviderMode
+      });
+    }
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitPrompt(prompt.value, {
         includeSelection: includeSelection.checked,
         providerMode: controlMode.value
       });
@@ -4763,7 +5083,8 @@ ${apiKeyFieldsHtml()}
     });
 
     document.getElementById("clear").addEventListener("click", () => {
-      transcript.textContent = "";
+      messageList.textContent = "";
+      setWelcomeVisible(true);
       sessionId = "vscode-chat-" + Date.now().toString(36);
       resetSessionModels();
       status.textContent = "Started a new chat";
@@ -4785,6 +5106,14 @@ ${apiKeyFieldsHtml()}
       }
       if (message.type === "chatSettings") {
         applyChatSettings(message.settings, message.text);
+        return;
+      }
+      if (message.type === "queuedPrompt") {
+        submitPrompt(message.text, {
+          includeSelection: message.includeSelection !== false,
+          providerMode: message.providerMode || controlMode.value,
+          autoSend: message.autoSend !== false
+        });
         return;
       }
       if (message.type === "typing") {

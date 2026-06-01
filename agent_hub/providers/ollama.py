@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from . import OpenAIChatProvider
+from .openai_chat import OpenAIChatProvider
 
 
 class OllamaProvider(OpenAIChatProvider):

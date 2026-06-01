@@ -283,7 +283,16 @@ class BaseProviderAdapter:
             return None
         if is_free_agent(self.agent):
             return 0.0
-        return None
+        input_rate = self.agent.cost_per_million_input
+        output_rate = self.agent.cost_per_million_output
+        if input_rate is None and output_rate is None:
+            return None
+        total = 0.0
+        if input_rate is not None:
+            total += max(0, input_tokens) * input_rate / 1_000_000
+        if output_rate is not None:
+            total += max(0, output_tokens) * output_rate / 1_000_000
+        return total
 
     def normalize_request(self, request: ChatRequest | HubRequest) -> ChatRequest:
         if isinstance(request, ChatRequest):
