@@ -4,6 +4,11 @@
 
 No changes yet.
 
+## 0.7.21
+
+- Adds an Agent Hub Git commit message generator to the Source Control input area.
+- Packages the updated SCM action as a fresh VSIX.
+
 ## 0.7.20
 
 - Adds a sidebar task composer that opens chat and sends the request in one flow.
