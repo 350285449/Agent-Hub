@@ -32,10 +32,28 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(commands["agentHub.restartServer"], "Agent Hub: Restart Server")
         self.assertEqual(commands["agentHub.openSettings"], "Agent Hub: Open Settings")
         self.assertEqual(commands["agentHub.checkHealth"], "Agent Hub: Check Health")
+        self.assertEqual(commands["agentHub.generateCommitMessage"], "Agent Hub: Generate Commit Message")
         self.assertEqual(commands["agentHub.copyClineConfig"], "Agent Hub: Copy Cline Config")
         self.assertEqual(commands["agentHub.testClineConnection"], "Agent Hub: Test Cline Connection")
         self.assertEqual(commands["agentHub.copyClaudeCodeConfig"], "Agent Hub: Copy Claude Code Config")
         self.assertEqual(commands["agentHub.testAnthropicEndpoint"], "Agent Hub: Test Anthropic Endpoint")
+
+    def test_commit_message_generator_is_contributed_to_scm(self) -> None:
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertIn("onCommand:agentHub.generateCommitMessage", package["activationEvents"])
+        scm_menu = package["contributes"]["menus"]["scm/title"]
+        self.assertTrue(
+            any(item["command"] == "agentHub.generateCommitMessage" for item in scm_menu)
+        )
+        scm_input_menu = package["contributes"]["menus"]["scm/inputBox"]
+        self.assertTrue(
+            any(item["command"] == "agentHub.generateCommitMessage" for item in scm_input_menu)
+        )
+        self.assertIn('registerCommand("agentHub.generateCommitMessage"', source)
+        self.assertIn("function generateCommitMessage", source)
+        self.assertIn("repository.inputBox.value = message", source)
 
     def test_approval_mode_setting_is_ask_by_default(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))

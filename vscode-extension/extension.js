@@ -390,6 +390,7 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.status", showStatus),
     vscode.commands.registerCommand("agentHub.ask", askAgent),
     vscode.commands.registerCommand("agentHub.codeAgent", runCodingAgent),
+    vscode.commands.registerCommand("agentHub.generateCommitMessage", generateCommitMessage),
     vscode.commands.registerCommand("agentHub.research", researchWeb),
     vscode.commands.registerCommand("agentHub.explainSelection", explainSelection),
     vscode.commands.registerCommand("agentHub.explainFile", explainFile),
@@ -7053,6 +7054,370 @@ async function runCodingAgent() {
       workspace_dir: workspace || "."
     }
   });
+}
+
+async function generateCommitMessage(...args) {
+  const repository = await selectGitRepository(args);
+  if (!repository) {
+    return;
+  }
+
+  let diffContext;
+  try {
+    diffContext = await gitCommitMessageContext(repository);
+  } catch (error) {
+    output.appendLine(`Could not read Git changes: ${error.message}`);
+    vscode.window.showErrorMessage(`Could not read Git changes: ${error.message}`);
+    return;
+  }
+
+  if (!diffContext || !diffContext.context.trim()) {
+    vscode.window.showInformationMessage("No Git changes found to summarize.");
+    return;
+  }
+
+  const config = settings();
+  if (!(await approveModelRequest({
+    providerMode: config.agentProviderMode,
+    contextText: diffContext.context,
+    source: "VS Code Source Control"
+  }))) {
+    vscode.window.showWarningMessage("Commit message generation cancelled because permission was not granted.");
+    return;
+  }
+  if (!(await ensureServerReady())) {
+    vscode.window.showErrorMessage("Agent Hub is not running. Use 'Agent Hub: Start Server' or check the output.");
+    return;
+  }
+
+  try {
+    const message = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Agent Hub: Generating commit message",
+        cancellable: false
+      },
+      () => requestCommitMessage(diffContext)
+    );
+    if (!message) {
+      vscode.window.showWarningMessage("Agent Hub returned an empty commit message.");
+      return;
+    }
+    if (!repository.inputBox) {
+      await vscode.env.clipboard.writeText(message);
+      vscode.window.showWarningMessage("Generated commit message copied, but the Git commit input was unavailable.");
+      return;
+    }
+    repository.inputBox.value = message;
+    vscode.window.showInformationMessage("Agent Hub generated a commit message.");
+  } catch (error) {
+    output.appendLine(`Commit message generation failed: ${error.message}`);
+    vscode.window.showErrorMessage(formatAgentHubError(error));
+  }
+}
+
+async function requestCommitMessage(diffContext) {
+  const config = settings();
+  const body = {
+    session_id: `vscode-commit-${Date.now()}`,
+    mode: "route",
+    route: codingAgentRoute(config),
+    task: commitMessageTask(diffContext.scope),
+    context: diffContext.context,
+    approval_mode: config.approvalMode,
+    provider_approval_granted: true,
+    context_mode: config.contextMode,
+    cline_compatibility_mode: config.clineCompatibilityMode,
+    max_tokens: 160,
+    metadata: {
+      source: "vscode-scm",
+      command: "generateCommitMessage",
+      diff_scope: diffContext.scope
+    }
+  };
+  applyOptionalMaxTokens(body, config);
+
+  output.show(true);
+  output.appendLine("");
+  output.appendLine(`[Agent Hub SCM] Generating commit message for ${diffContext.scope}.`);
+  const response = await requestJson("POST", "/v1/route", body);
+  const message = normalizeCommitMessage(responseText(response));
+  output.appendLine(message || "(empty commit message)");
+  return message;
+}
+
+function commitMessageTask(scope) {
+  return [
+    "Generate a Git commit message for the provided diff.",
+    "Match VS Code Copilot commit-message behavior: concise, specific, and ready to paste into the Source Control commit input.",
+    "Return only the commit message. Do not include markdown, labels, explanations, or quotes.",
+    "Prefer one Conventional Commit subject line like type(scope): summary when it fits.",
+    "Use a short body only when the diff genuinely needs extra explanation.",
+    `Diff scope: ${scope}.`
+  ].join("\n");
+}
+
+function normalizeCommitMessage(text) {
+  let value = String(text || "").trim();
+  if (!value) {
+    return "";
+  }
+  value = value.replace(/^```[a-zA-Z0-9_-]*\s*/, "").replace(/\s*```$/, "").trim();
+  value = value.replace(/^\s*(?:commit message|message)\s*:\s*/i, "").trim();
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    value = value.slice(1, -1).trim();
+  }
+  const lines = value.split(/\r?\n/).map((line) => line.trimEnd());
+  while (lines.length && !lines[0].trim()) {
+    lines.shift();
+  }
+  while (lines.length && !lines[lines.length - 1].trim()) {
+    lines.pop();
+  }
+  if (lines.length === 1) {
+    lines[0] = lines[0].replace(/^[-*]\s+/, "").trim();
+  }
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+async function selectGitRepository(commandArgs = []) {
+  const api = await gitExtensionApi();
+  if (!api) {
+    vscode.window.showWarningMessage("The VS Code Git extension is not available.");
+    return null;
+  }
+
+  const repositories = Array.isArray(api.repositories) ? api.repositories : [];
+  if (!repositories.length) {
+    vscode.window.showWarningMessage("No Git repositories are open in this workspace.");
+    return null;
+  }
+
+  const argumentRepository = repositoryFromCommandArgs(commandArgs, repositories);
+  if (argumentRepository) {
+    return argumentRepository;
+  }
+
+  const editor = currentTextEditor();
+  if (editor && editor.document && editor.document.uri && typeof api.getRepository === "function") {
+    const activeRepository = api.getRepository(editor.document.uri);
+    if (activeRepository) {
+      return activeRepository;
+    }
+  }
+
+  if (repositories.length === 1) {
+    return repositories[0];
+  }
+
+  const workspace = workspaceRoot();
+  if (workspace) {
+    const matchingRepository = repositories.find((repository) => {
+      const root = repositoryRootPath(repository);
+      return root && pathInside(workspace, root);
+    });
+    if (matchingRepository) {
+      return matchingRepository;
+    }
+  }
+
+  const choice = await vscode.window.showQuickPick(
+    repositories.map((repository) => ({
+      label: repositoryLabel(repository),
+      description: repositoryRootPath(repository),
+      repository
+    })),
+    { placeHolder: "Generate a commit message for which repository?" }
+  );
+  return choice ? choice.repository : null;
+}
+
+function repositoryFromCommandArgs(commandArgs, repositories) {
+  const args = Array.isArray(commandArgs) ? commandArgs.flat() : [];
+  for (const arg of args) {
+    if (!arg || typeof arg !== "object") {
+      continue;
+    }
+    if (repositoryRootPath(arg) && arg.inputBox) {
+      return arg;
+    }
+    const rootUri = arg.rootUri || arg.sourceControl && arg.sourceControl.rootUri;
+    if (rootUri && rootUri.fsPath) {
+      const match = repositories.find((repository) => repositoryRootPath(repository) === rootUri.fsPath);
+      if (match) {
+        return match;
+      }
+    }
+  }
+  return null;
+}
+
+async function gitExtensionApi() {
+  const gitExtension = vscode.extensions.getExtension("vscode.git");
+  if (!gitExtension) {
+    return null;
+  }
+  try {
+    const exports = gitExtension.isActive ? gitExtension.exports : await gitExtension.activate();
+    return exports && typeof exports.getAPI === "function" ? exports.getAPI(1) : null;
+  } catch (error) {
+    output.appendLine(`Could not activate VS Code Git extension: ${error.message}`);
+    return null;
+  }
+}
+
+async function gitCommitMessageContext(repository) {
+  const root = repositoryRootPath(repository);
+  if (!root) {
+    throw new Error("Git repository root was unavailable.");
+  }
+
+  const [
+    status,
+    stagedStat,
+    stagedDiff,
+    unstagedStat,
+    unstagedDiff,
+    untrackedOutput
+  ] = await Promise.all([
+    git(root, ["status", "--short"]),
+    git(root, ["diff", "--cached", "--stat", "--find-renames"]),
+    git(root, ["diff", "--cached", "--no-ext-diff", "--find-renames", "--find-copies", "--unified=80"]),
+    git(root, ["diff", "--stat", "--find-renames"]),
+    git(root, ["diff", "--no-ext-diff", "--find-renames", "--find-copies", "--unified=80"]),
+    git(root, ["ls-files", "--others", "--exclude-standard"])
+  ]);
+
+  const untrackedFiles = gitOutputLines(untrackedOutput);
+  const hasStagedChanges = Boolean(stagedDiff.trim() || stagedStat.trim());
+  const hasUnstagedChanges = Boolean(unstagedDiff.trim() || unstagedStat.trim() || untrackedFiles.length);
+  if (!hasStagedChanges && !hasUnstagedChanges) {
+    return null;
+  }
+
+  const scope = hasStagedChanges ? "staged changes" : "unstaged and untracked changes";
+  const parts = [
+    `Repository: ${repositoryLabel(repository)}`,
+    `Scope: ${scope}`,
+    "",
+    "Git status:",
+    status.trim() || "(clean)"
+  ];
+
+  if (hasStagedChanges) {
+    parts.push("", "Staged diff stat:", stagedStat.trim() || "(no stat)");
+    parts.push("", "Staged diff:", stagedDiff.trim());
+  } else {
+    parts.push("", "Unstaged diff stat:", unstagedStat.trim() || "(no stat)");
+    parts.push("", "Unstaged diff:", unstagedDiff.trim() || "(no tracked-file diff)");
+    if (untrackedFiles.length) {
+      parts.push("", "Untracked files:", untrackedFiles.map((file) => `- ${file}`).join("\n"));
+      parts.push("", "Untracked file previews:", untrackedFilePreviews(root, untrackedFiles));
+    }
+  }
+
+  return {
+    context: truncateText(parts.filter((part) => part !== "").join("\n"), 28000),
+    scope,
+    root
+  };
+}
+
+async function git(root, args) {
+  const { stdout } = await execFile("git", args, {
+    cwd: root,
+    timeout: 20000,
+    maxBuffer: 20 * 1024 * 1024
+  });
+  return String(stdout || "");
+}
+
+function gitOutputLines(outputText) {
+  return String(outputText || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function untrackedFilePreviews(root, files) {
+  const previews = [];
+  for (const file of files.slice(0, 8)) {
+    const fullPath = safeRepositoryPath(root, file);
+    if (!fullPath) {
+      continue;
+    }
+    try {
+      const stats = fs.statSync(fullPath);
+      if (!stats.isFile()) {
+        previews.push(`--- ${normalizeRelativePath(file)}\n(directory or special file skipped)`);
+        continue;
+      }
+      if (stats.size > 20000) {
+        previews.push(`--- ${normalizeRelativePath(file)}\n(file is ${stats.size} bytes; content skipped)`);
+        continue;
+      }
+      const buffer = fs.readFileSync(fullPath);
+      if (bufferLooksBinary(buffer)) {
+        previews.push(`--- ${normalizeRelativePath(file)}\n(binary content skipped)`);
+        continue;
+      }
+      previews.push(`--- ${normalizeRelativePath(file)}\n${truncateText(buffer.toString("utf8"), 4000)}`);
+    } catch (error) {
+      previews.push(`--- ${normalizeRelativePath(file)}\n(could not read file: ${error.message})`);
+    }
+  }
+  if (files.length > 8) {
+    previews.push(`... ${files.length - 8} more untracked file(s) omitted.`);
+  }
+  return previews.join("\n\n");
+}
+
+function bufferLooksBinary(buffer) {
+  const limit = Math.min(buffer.length, 8000);
+  for (let index = 0; index < limit; index += 1) {
+    if (buffer[index] === 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function safeRepositoryPath(root, relativePath) {
+  const resolvedRoot = path.resolve(root);
+  const fullPath = path.resolve(resolvedRoot, relativePath);
+  return pathInside(fullPath, resolvedRoot) ? fullPath : null;
+}
+
+function repositoryRootPath(repository) {
+  return repository && repository.rootUri && repository.rootUri.fsPath
+    ? repository.rootUri.fsPath
+    : "";
+}
+
+function repositoryLabel(repository) {
+  const root = repositoryRootPath(repository);
+  if (!root) {
+    return "Git repository";
+  }
+  const rootUri = repository.rootUri;
+  const workspaceFolder = rootUri ? vscode.workspace.getWorkspaceFolder(rootUri) : null;
+  return workspaceFolder ? workspaceFolder.name : path.basename(root);
+}
+
+function pathInside(childPath, parentPath) {
+  const relative = path.relative(path.resolve(parentPath), path.resolve(childPath));
+  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function truncateText(text, maxChars) {
+  const value = String(text || "");
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, maxChars)}\n... truncated ...`;
 }
 
 async function researchWeb() {

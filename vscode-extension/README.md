@@ -66,6 +66,7 @@ Official docs:
 - `Agent Hub: Show Status`
 - `Agent Hub: Ask Agent`
 - `Agent Hub: Run Coding Agent`
+- `Agent Hub: Generate Commit Message`
 - `Agent Hub: Research Web`
 - `Agent Hub: Explain Selection`
 - `Agent Hub: Explain Current File`
@@ -73,6 +74,9 @@ Official docs:
 The sidebar shows server status, setup progress, provider health, token usage,
 permissions, logs, and shortcuts for common actions. When `agentHub.autoStart`
 is enabled, Agent Hub starts the local server before sending a request.
+The Source Control view also exposes `Generate Commit Message` beside the Git
+commit message input on VS Code builds that support SCM input actions, with a
+Source Control title-bar fallback.
 
 ## Provider Modes
 

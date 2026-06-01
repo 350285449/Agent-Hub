@@ -48,6 +48,7 @@
     "onCommand:agentHub.status",
     "onCommand:agentHub.ask",
     "onCommand:agentHub.codeAgent",
+    "onCommand:agentHub.generateCommitMessage",
     "onCommand:agentHub.research",
     "onCommand:agentHub.explainSelection",
     "onCommand:agentHub.explainFile",
@@ -141,6 +142,11 @@
       {
         "command": "agentHub.codeAgent",
         "title": "Agent Hub: Run Coding Agent"
+      },
+      {
+        "command": "agentHub.generateCommitMessage",
+        "title": "Agent Hub: Generate Commit Message",
+        "icon": "$(sparkle)"
       },
       {
         "command": "agentHub.research",
@@ -340,6 +346,19 @@
           "command": "agentHub.openSettings",
           "when": "view == agentHub.sidebar",
           "group": "navigation@3"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "agentHub.generateCommitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation@2"
+        }
+      ],
+      "scm/inputBox": [
+        {
+          "command": "agentHub.generateCommitMessage",
+          "when": "scmProvider == git"
         }
       ],
       "editor/context": [
