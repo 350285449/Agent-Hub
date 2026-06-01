@@ -1534,7 +1534,36 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .hero-server-action {
-      min-height: 30px;
+      min-height: 54px;
+      border-radius: 7px;
+      padding: 12px 14px;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--button) 35%, transparent);
+    }
+
+    .hero-server-action[data-state="Running"] {
+      color: #ffffff;
+      background: var(--ok);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 40%, transparent);
+    }
+
+    .hero-server-action[data-state="Running"]:hover {
+      background: color-mix(in srgb, var(--ok) 86%, #000000 14%);
+    }
+
+    .hero-server-action[data-state="Starting"] {
+      color: #ffffff;
+      background: var(--warn);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn) 40%, transparent);
+    }
+
+    .hero-server-action[data-state="Error"] {
+      color: #ffffff;
+      background: var(--error);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--error) 40%, transparent);
     }
 
     .quick-task {
@@ -1588,14 +1617,6 @@ function sidebarHtml(webview, logoPath) {
       white-space: nowrap;
     }
 
-    button[data-state="Running"]::before {
-      content: "OK ";
-    }
-
-    button[data-state="Starting"]::before {
-      content: "... ";
-    }
-
     button.primary {
       border-color: transparent;
       color: var(--button-fg);
@@ -1605,6 +1626,10 @@ function sidebarHtml(webview, logoPath) {
 
     button.primary:hover {
       background: var(--button-hover);
+    }
+
+    .hero-server-action[data-state="Starting"]:disabled:hover {
+      background: var(--warn);
     }
 
     .detail,
@@ -1677,6 +1702,7 @@ function sidebarHtml(webview, logoPath) {
           <strong id="heroProviders">0/0</strong>
         </div>
       </div>
+      <button class="primary hero-server-action" id="heroServerAction" type="button" data-primary-action="start-server" data-state="Stopped">START SERVER</button>
       <div class="hero-card">
         <div class="hero-card-title">
           <span>Setup progress</span>
@@ -1698,7 +1724,6 @@ function sidebarHtml(webview, logoPath) {
           <button class="primary" id="quickTaskSend" type="submit">Start &amp; Send</button>
         </div>
       </form>
-      <button class="primary hero-server-action" id="heroServerAction" type="button" data-state="Stopped">Start Agent Hub</button>
       <div class="actions quick-actions">
         <button class="command-button" id="openChat" type="button" title="Open Agent Hub chat">
           <span class="button-main">Chat</span>
@@ -1734,7 +1759,6 @@ function sidebarHtml(webview, logoPath) {
       <div class="detail" id="serverDetail">Checking Agent Hub...</div>
       <ul class="list" id="onboardingList"></ul>
       <div class="actions">
-        <button class="primary" id="startServer" type="button" data-primary-action="start-server">Start Server</button>
         <button id="stopServer" type="button">Stop Server</button>
         <button id="restartServer" type="button">Restart Server</button>
         <button id="checkHealth" type="button">Check Health</button>
@@ -1883,25 +1907,25 @@ function sidebarHtml(webview, logoPath) {
       const isError = status === "Error";
 
       if (isRunning) {
-        heroServerAction.textContent = "Server running - Open Chat";
+        heroServerAction.textContent = "SERVER RUNNING - OPEN CHAT";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "openChat";
         setText(heroSummary, "Online at " + serverUrl + ".");
         setText(serverDetail, "Online and ready for requests.");
       } else if (isStarting) {
-        heroServerAction.textContent = "Starting Agent Hub...";
+        heroServerAction.textContent = "STARTING AGENT HUB...";
         heroServerAction.disabled = true;
         heroServerAction.dataset.action = "";
         setText(heroSummary, "Starting local backend.");
         setText(serverDetail, "Starting local backend. Logs will show progress if this takes a moment.");
       } else if (isError) {
-        heroServerAction.textContent = "Restart Agent Hub";
+        heroServerAction.textContent = "RESTART AGENT HUB";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "restartServer";
         setText(heroSummary, dashboard.statusText || "Agent Hub needs attention.");
         setText(serverDetail, dashboard.statusText || "Agent Hub needs attention. Open logs or restart the server.");
       } else {
-        heroServerAction.textContent = "Start Agent Hub";
+        heroServerAction.textContent = "START SERVER";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "startServer";
         setText(heroSummary, "Offline. Ready to start at " + serverUrl + ".");
@@ -1909,12 +1933,8 @@ function sidebarHtml(webview, logoPath) {
       }
       heroServerAction.dataset.state = status;
 
-      const startButton = document.getElementById("startServer");
       const stopButton = document.getElementById("stopServer");
       const restartButton = document.getElementById("restartServer");
-      startButton.textContent = isRunning ? "Server Running" : isStarting ? "Starting..." : isError ? "Try Start Again" : "Start Server";
-      startButton.disabled = isRunning || isStarting;
-      startButton.dataset.state = status;
       stopButton.disabled = !isRunning && !isStarting;
       restartButton.textContent = isRunning ? "Restart / Reload" : "Restart Server";
       restartButton.disabled = isStarting;
@@ -2394,7 +2414,6 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("askAgent").addEventListener("click", () => post("askAgent"));
     document.getElementById("codeAgent").addEventListener("click", () => post("codeAgent"));
     document.getElementById("explainFile").addEventListener("click", () => post("explainFile"));
-    document.getElementById("startServer").addEventListener("click", () => post("startServer"));
     document.getElementById("stopServer").addEventListener("click", () => post("stopServer"));
     document.getElementById("restartServer").addEventListener("click", () => post("restartServer"));
     document.getElementById("checkHealth").addEventListener("click", () => post("checkHealth"));
@@ -3043,6 +3062,13 @@ function cleanOptionalSettingInteger(value, fallback, min, max) {
 }
 
 function applyOptionalMaxTokens(body, config) {
+  if (body && body.max_tokens !== undefined && body.max_tokens !== null) {
+    const explicit = Number(body.max_tokens);
+    if (Number.isFinite(explicit) && explicit > 0) {
+      body.max_tokens = Math.floor(explicit);
+      return body;
+    }
+  }
   const value = config && Number(config.maxTokens);
   if (Number.isFinite(value) && value > 0) {
     body.max_tokens = Math.floor(value);

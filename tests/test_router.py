@@ -745,6 +745,7 @@ class RouterTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=Path(tmp),
                 default_route=["tiny", "large"],
+                routing={"max_tokens_mode": "explicit"},
                 agents={
                     "tiny": AgentConfig(
                         name="tiny",
@@ -780,6 +781,51 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(response.agent, "large")
             self.assertEqual(response.failover[0].agent, "tiny")
             self.assertIn("context window is too small", response.failover[0].reason)
+
+    def test_auto_max_tokens_clamps_to_selected_model_context_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            seen: list[HubRequest] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                default_route=["small"],
+                agents={
+                    "small": AgentConfig(
+                        name="small",
+                        provider="openai-compatible",
+                        model="small-test",
+                        base_url="http://127.0.0.1:9999",
+                        context_window=512,
+                    ),
+                },
+            )
+
+            class RecordingProvider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    seen.append(request)
+                    return ProviderResult(text="done", model=self.agent.model, finish_reason="stop")
+
+            response = AgentRouter(config, provider_factory=RecordingProvider).route(
+                HubRequest(
+                    session_id="abc",
+                    messages=[{"role": "user", "content": "summarize the staged diff"}],
+                    max_tokens=1_000_000,
+                    raw={"max_tokens": 1_000_000},
+                )
+            )
+
+            self.assertEqual(response.agent, "small")
+            self.assertEqual(len(seen), 1)
+            self.assertIsNotNone(seen[0].max_tokens)
+            self.assertLess(seen[0].max_tokens or 0, 1_000_000)
+            self.assertLessEqual(seen[0].max_tokens or 0, 512)
+            self.assertEqual(seen[0].raw["max_tokens"], seen[0].max_tokens)
+            adjusted = seen[0].metadata.get("max_tokens_adjusted")
+            self.assertIsInstance(adjusted, dict)
+            self.assertEqual(adjusted["requested"], 1_000_000)
+            self.assertEqual(adjusted["effective"], seen[0].max_tokens)
 
     def test_token_limit_finish_reason_fails_over_to_next_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -876,6 +922,7 @@ class RouterTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=Path(tmp),
                 default_route=["tiny"],
+                routing={"max_tokens_mode": "explicit"},
                 agents={
                     "tiny": AgentConfig(
                         name="tiny",

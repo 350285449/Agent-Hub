@@ -59,7 +59,13 @@ class RouterPreflightPolicy:
             return f"Agent is missing API key env {agent.api_key_env}"
 
         input_tokens = estimate_input_tokens(request)
-        output_tokens = expected_output_tokens(request, agent)
+        output_tokens = effective_output_tokens(
+            self.config,
+            request,
+            agent,
+            input_tokens=input_tokens,
+            health=health,
+        )
         required_tokens = input_tokens + output_tokens
         quota_reason = _quota_skip_reason(health, required_tokens=required_tokens)
         if quota_reason:
@@ -121,6 +127,86 @@ def expected_output_tokens(request: HubRequest, agent: AgentConfig) -> int:
     if agent.max_tokens is not None:
         return _non_negative_int(agent.max_tokens, default=0)
     return 0
+
+
+def effective_output_tokens(
+    config: HubConfig,
+    request: HubRequest,
+    agent: AgentConfig,
+    *,
+    input_tokens: int,
+    health: ProviderHealth | None = None,
+) -> int:
+    return output_token_budget(
+        config,
+        request,
+        agent,
+        input_tokens=input_tokens,
+        health=health,
+    ).effective
+
+
+@dataclass(frozen=True, slots=True)
+class OutputTokenBudget:
+    requested: int
+    effective: int
+    limit: int | None = None
+    adjusted: bool = False
+    mode: str = "auto"
+
+
+def output_token_budget(
+    config: HubConfig,
+    request: HubRequest,
+    agent: AgentConfig,
+    *,
+    input_tokens: int,
+    health: ProviderHealth | None = None,
+) -> OutputTokenBudget:
+    requested = expected_output_tokens(request, agent)
+    mode = _max_tokens_mode(config)
+    if requested <= 0:
+        return OutputTokenBudget(requested=requested, effective=requested, mode=mode)
+    if mode != "auto":
+        return OutputTokenBudget(requested=requested, effective=requested, mode=mode)
+
+    limit = model_output_token_limit(agent, input_tokens=input_tokens, health=health)
+    if limit is None or limit <= 0:
+        return OutputTokenBudget(requested=requested, effective=requested, limit=limit, mode=mode)
+    effective = min(requested, limit)
+    return OutputTokenBudget(
+        requested=requested,
+        effective=effective,
+        limit=limit,
+        adjusted=effective < requested,
+        mode=mode,
+    )
+
+
+def model_output_token_limit(
+    agent: AgentConfig,
+    *,
+    input_tokens: int,
+    health: ProviderHealth | None = None,
+) -> int | None:
+    caps: list[int] = []
+    input_count = max(0, int(input_tokens or 0))
+    if agent.context_window is not None:
+        caps.append(max(0, int(agent.context_window) - input_count))
+    if health is not None:
+        if health.max_output_tokens is not None:
+            caps.append(max(0, int(health.max_output_tokens)))
+        if health.tokens_remaining is not None:
+            caps.append(max(0, int(health.tokens_remaining) - input_count))
+    if not caps:
+        return None
+    return min(caps)
+
+
+def _max_tokens_mode(config: HubConfig) -> str:
+    routing = getattr(config, "routing", {}) or {}
+    mode = str(routing.get("max_tokens_mode") or "auto").strip().lower().replace("-", "_")
+    return "auto" if mode in {"auto", "automatic", "adaptive", "provider"} else mode
 
 
 def _non_negative_int(value: object, default: int) -> int:
@@ -224,8 +310,12 @@ __all__ = [
     "NO_TOOL_CAPABLE_MODEL",
     "RouterPreflightPolicy",
     "TRANSPARENT_API_SHAPES",
+    "OutputTokenBudget",
+    "effective_output_tokens",
     "estimate_input_tokens",
     "expected_output_tokens",
+    "model_output_token_limit",
+    "output_token_budget",
     "_agent_supports_tools",
     "_is_echo_agent",
     "_is_local_or_private_agent",

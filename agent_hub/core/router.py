@@ -55,6 +55,7 @@ from .routing_policy import (
     RouterPreflightPolicy,
     estimate_input_tokens,
     expected_output_tokens,
+    output_token_budget,
     _agent_supports_tools,
     _is_echo_agent,
     _is_local_or_private_agent,
@@ -707,6 +708,16 @@ class AgentRouter:
         stream: bool = False,
     ) -> HubRequest:
         prepared, usage = self._apply_context_safety_cap(agent, request)
+        prepared, limit_usage = self._apply_model_output_limit(agent, prepared, usage)
+        if limit_usage.get("output_tokens_adjusted"):
+            adjusted_source = replace(
+                request,
+                max_tokens=prepared.max_tokens,
+                raw=prepared.raw,
+                metadata=prepared.metadata,
+            )
+            prepared, usage = self._apply_context_safety_cap(agent, adjusted_source)
+        usage.update(limit_usage)
         metadata = dict(prepared.metadata)
         output_tokens = expected_output_tokens(prepared, agent)
         metadata["agent_hub_debug"] = provider_debug_context(
@@ -753,6 +764,54 @@ class AgentRouter:
                 warnings=usage.get("warnings"),
             )
         return replace(prepared, metadata=metadata, raw=raw)
+
+    def _apply_model_output_limit(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        usage: dict[str, Any],
+    ) -> tuple[HubRequest, dict[str, Any]]:
+        estimated_input = int(usage.get("estimated_input_tokens") or estimate_input_tokens(request))
+        budget = output_token_budget(
+            self.config,
+            request,
+            agent,
+            input_tokens=estimated_input,
+            health=self._health.get(agent.name),
+        )
+        limit_usage = {
+            "requested_output_tokens": int(budget.requested),
+            "estimated_output_tokens": int(budget.effective),
+            "model_output_token_limit": budget.limit,
+            "max_tokens_mode": budget.mode,
+            "output_tokens_adjusted": bool(budget.adjusted),
+        }
+        if not budget.adjusted:
+            return request, limit_usage
+
+        raw = dict(request.raw or {})
+        for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+            if key in raw:
+                raw[key] = int(budget.effective)
+        hub = dict(raw.get("agent_hub") or {})
+        hub["max_tokens_adjusted"] = {
+            "requested": int(budget.requested),
+            "effective": int(budget.effective),
+            "limit": budget.limit,
+            "mode": budget.mode,
+            "provider": agent.provider,
+            "model": agent.model,
+            "context_window": agent.context_window,
+        }
+        raw["agent_hub"] = hub
+        metadata = dict(request.metadata)
+        metadata["max_tokens_adjusted"] = hub["max_tokens_adjusted"]
+        return replace(
+            request,
+            max_tokens=int(budget.effective),
+            raw=raw,
+            metadata=metadata,
+        ), limit_usage
 
     def _chat_with_validation(
         self,
@@ -1705,7 +1764,14 @@ class AgentRouter:
             ):
                 score -= 100.0
             if request is not None:
-                required_tokens = estimate_input_tokens(request) + expected_output_tokens(request, agent)
+                input_tokens = estimate_input_tokens(request)
+                required_tokens = input_tokens + output_token_budget(
+                    self.config,
+                    request,
+                    agent,
+                    input_tokens=input_tokens,
+                    health=health,
+                ).effective
                 if health.tokens_remaining is not None and health.tokens_remaining < required_tokens:
                     score -= 80.0
                 elif health.tokens_remaining is not None and health.tokens_remaining < required_tokens * 2:

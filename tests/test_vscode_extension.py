@@ -64,19 +64,34 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("readonly", approval["enum"])
         self.assertIn("deny", approval["enum"])
 
-    def test_start_server_is_primary_sidebar_action(self) -> None:
+    def test_sidebar_has_single_prominent_server_action(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        sidebar_start = source.index("function sidebarHtml")
+        sidebar_end = source.index("function registerChatParticipant", sidebar_start)
+        sidebar = source[sidebar_start:sidebar_end]
 
         self.assertIn("registerWebviewViewProvider(SIDEBAR_VIEW_ID", source)
         self.assertIn("class PermissionManager", source)
         self.assertIn("requestPermission", source)
-        start_index = source.index('id="startServer"')
-        stop_index = source.index('id="stopServer"', start_index)
-        restart_index = source.index('id="restartServer"', start_index)
+        self.assertEqual(sidebar.count('data-primary-action="start-server"'), 1)
+        self.assertIn('id="heroServerAction"', sidebar)
+        self.assertIn("START SERVER", sidebar)
+        self.assertIn('.hero-server-action[data-state="Running"]', sidebar)
+        self.assertIn("background: var(--ok);", sidebar)
+        self.assertNotIn('id="startServer"', sidebar)
 
-        self.assertIn('data-primary-action="start-server"', source[start_index : start_index + 220])
-        self.assertLess(start_index, stop_index)
-        self.assertLess(start_index, restart_index)
+    def test_sidebar_title_bar_avoids_crowded_server_buttons(self) -> None:
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        view_title = package["contributes"]["menus"].get("view/title", [])
+
+        sidebar_commands = {
+            item["command"]
+            for item in view_title
+            if item.get("when") == "view == agentHub.sidebar"
+        }
+        self.assertNotIn("agentHub.startServer", sidebar_commands)
+        self.assertNotIn("agentHub.checkHealth", sidebar_commands)
+        self.assertNotIn("agentHub.openSettings", sidebar_commands)
 
     def test_sidebar_sections_match_platform_dashboard(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
@@ -135,6 +150,20 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("null", setting["type"])
         self.assertIn("applyOptionalMaxTokens", source)
         self.assertNotIn("max_tokens: config.maxTokens", source)
+
+    def test_commit_message_generation_keeps_small_output_cap(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        helper_start = source.index("function applyOptionalMaxTokens")
+        helper_end = source.index("function normalizeServerUrl", helper_start)
+        helper = source[helper_start:helper_end]
+        commit_start = source.index("async function requestCommitMessage")
+        commit_end = source.index("function commitMessageTask", commit_start)
+        commit_source = source[commit_start:commit_end]
+
+        self.assertIn("max_tokens: 160", commit_source)
+        self.assertIn("applyOptionalMaxTokens(body, config)", commit_source)
+        self.assertLess(helper.index("body.max_tokens"), helper.index("config.maxTokens"))
+        self.assertIn("return body;", helper[: helper.index("config.maxTokens")])
 
     def test_extension_version_metadata_uses_package_json_source(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))

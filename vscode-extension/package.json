@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub Workspace",
   "description": "Run permissioned VS Code workspace agents through Ollama Cloud, hosted providers, or local models.",
-  "version": "0.7.22",
+  "version": "0.7.23",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
@@ -331,23 +331,6 @@
       ]
     },
     "menus": {
-      "view/title": [
-        {
-          "command": "agentHub.startServer",
-          "when": "view == agentHub.sidebar",
-          "group": "navigation@1"
-        },
-        {
-          "command": "agentHub.checkHealth",
-          "when": "view == agentHub.sidebar",
-          "group": "navigation@2"
-        },
-        {
-          "command": "agentHub.openSettings",
-          "when": "view == agentHub.sidebar",
-          "group": "navigation@3"
-        }
-      ],
       "scm/title": [
         {
           "command": "agentHub.generateCommitMessage",
