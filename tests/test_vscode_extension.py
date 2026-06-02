@@ -141,6 +141,21 @@ class VscodeExtensionContributionTests(unittest.TestCase):
 
         self.assertTrue(setting["default"])
 
+    def test_extension_config_defaults_to_global_storage(self) -> None:
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        setting = package["contributes"]["configuration"]["properties"]["agentHub.configPath"]
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertEqual(setting["default"], "")
+        self.assertIn("globalStorageUri", source)
+        self.assertIn("function defaultExtensionConfigPath", source)
+        self.assertIn("function workspaceStorageKey", source)
+        self.assertIn("normalized === DEFAULT_CONFIG_FILENAME", source)
+        self.assertIn('workspace_dir: normalizeWorkspaceDirOption(options.workspaceDir) || "."', source)
+        self.assertIn("const target = vscode.ConfigurationTarget.Global", source)
+        self.assertIn("function clearWorkspaceAgentHubSettings", source)
+        self.assertIn("Moved Agent Hub settings out of workspace settings.", source)
+
     def test_max_tokens_setting_is_unset_by_default(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
         setting = package["contributes"]["configuration"]["properties"]["agentHub.maxTokens"]

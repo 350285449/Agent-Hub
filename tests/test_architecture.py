@@ -30,6 +30,7 @@ class ArchitectureTests(unittest.TestCase):
 
         self.assertIn("agents", data)
         self.assertIn("agent-hub.config.json", ignore_text)
+        self.assertIn("config.example.json", ignore_text)
         self.assertNotIn('"api_key"', example.read_text(encoding="utf-8"))
 
         check = subprocess.run(
@@ -39,6 +40,13 @@ class ArchitectureTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(check.returncode, 0, check.stderr)
+        example_check = subprocess.run(
+            ["git", "check-ignore", "config.example.json"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(example_check.returncode, 0, example_check.stderr)
 
     def test_openai_compatible_adapter_exposes_strict_interface(self) -> None:
         agent = AgentConfig(

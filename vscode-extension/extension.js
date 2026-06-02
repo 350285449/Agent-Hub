@@ -2,6 +2,7 @@
 
 const vscode = require("vscode");
 const cp = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
@@ -20,6 +21,7 @@ let lastActiveTextEditor = null;
 let serverLifecycleState = "Stopped";
 let lastServerMessage = "";
 const EXTENSION_VERSION = readExtensionPackageVersion();
+const DEFAULT_CONFIG_FILENAME = "agent-hub.config.json";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
 const SIDEBAR_VIEW_ID = "agentHub.sidebar";
 const DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b";
@@ -3109,38 +3111,58 @@ function chatSettingsPayload(config) {
 async function saveChatSettingsFromWebview(panel, rawSettings) {
   try {
     const next = normalizeChatSettingsInput(rawSettings);
+    const workspace = workspaceRoot();
+    const resource = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
+      : "VS Code user settings";
     if (!(await requestPermission({
       category: "config_edit",
       description: "Agent Hub wants to modify VS Code and Agent Hub configuration.",
-      resource: next.workspaceSettings.configPath,
+      resource,
       risk: "medium",
       detail: "This may change provider routing, approval mode, model selections, and server settings."
     }))) {
       postChatSettings(panel, "Saving settings was cancelled.");
       return;
     }
-    const target = workspaceRoot()
-      ? vscode.ConfigurationTarget.Workspace
-      : vscode.ConfigurationTarget.Global;
+    const target = vscode.ConfigurationTarget.Global;
     const config = vscode.workspace.getConfiguration("agentHub");
     for (const [key, value] of Object.entries(next.workspaceSettings)) {
       await config.update(key, value, target);
     }
-    const configPath = workspaceRoot()
-      ? resolveConfigPath(next.workspaceSettings.configPath, workspaceRoot())
+    const clearedWorkspaceSettings = workspace
+      ? await clearWorkspaceAgentHubSettings(config, Object.keys(next.workspaceSettings))
+      : false;
+    const configPath = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
       : "";
     const configChanged = configPath
-      ? await saveCloudModelSettingsToConfig(configPath, next.cloudSettings)
+      ? await saveCloudModelSettingsToConfig(configPath, next.cloudSettings, {
+        workspaceDir: generatedConfigWorkspaceDir(next.workspaceSettings.configPath, workspace)
+      })
       : false;
-    const scope = target === vscode.ConfigurationTarget.Workspace ? "workspace" : "user";
     const restartNote = serverProcess || (await isServerOnline())
       ? " Restart Agent Hub to use server or route changes."
       : "";
     const configNote = configChanged ? " Updated Agent Hub model routing." : "";
-    postChatSettings(panel, `Saved ${scope} settings.${configNote}${restartNote}`);
+    const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
+    postChatSettings(panel, `Saved user settings.${migrationNote}${configNote}${restartNote}`);
   } catch (error) {
     postChatSettings(panel, `Could not save settings: ${error.message}`);
   }
+}
+
+async function clearWorkspaceAgentHubSettings(config, keys) {
+  let cleared = 0;
+  for (const key of keys) {
+    const inspected = config.inspect(key);
+    if (!inspected || inspected.workspaceValue === undefined) {
+      continue;
+    }
+    await config.update(key, undefined, vscode.ConfigurationTarget.Workspace);
+    cleared += 1;
+  }
+  return cleared > 0;
 }
 
 function normalizeChatSettingsInput(value) {
@@ -3527,7 +3549,9 @@ async function saveLocalModelChoice(panel, source, options = {}) {
     }
     const config = settings();
     const configPath = resolveConfigPath(config.configPath, workspace);
-    const changed = applyLocalModelSelectionToConfig(configPath, source);
+    const changed = applyLocalModelSelectionToConfig(configPath, source, {
+      workspaceDir: generatedConfigWorkspaceDir(config.configPath, workspace)
+    });
     const restartNote = serverProcess
       ? " Restart Agent Hub to use it."
       : ((await isServerOnline())
@@ -5734,13 +5758,15 @@ function prependEnvPath(env, name, value) {
 
 async function ensureLocalConfig(config, workspace) {
   const configPath = resolveConfigPath(config.configPath, workspace);
+  const workspaceDir = generatedConfigWorkspaceDir(config.configPath, workspace);
   if (fs.existsSync(configPath)) {
-    return repairGeneratedLocalConfig(configPath);
+    return repairGeneratedLocalConfig(configPath, { workspaceDir });
   }
 
   const sources = await detectLocalModelSources();
   const selectedSources = sources.length ? sources : fallbackLocalModelSources();
-  const data = localConfigForLocalModels(selectedSources);
+  const data = localConfigForLocalModels(selectedSources, { workspaceDir });
+  ensureConfigDirectory(configPath);
   fs.writeFileSync(configPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   output.appendLine(`Created Agent Hub config at ${configPath}.`);
   output.appendLine(`Configured cloud control agents: ${describeCloudSources(selectedSources)}`);
@@ -5751,7 +5777,8 @@ async function ensureLocalConfig(config, workspace) {
   return true;
 }
 
-async function repairGeneratedLocalConfig(configPath) {
+async function repairGeneratedLocalConfig(configPath, options = {}) {
+  const workspaceDir = normalizeWorkspaceDirOption(options.workspaceDir);
   let raw;
   let usedLenientParser = false;
   try {
@@ -5763,7 +5790,7 @@ async function repairGeneratedLocalConfig(configPath) {
     const sources = await detectLocalModelSources();
     const selectedSources = sources.length ? sources : fallbackLocalModelSources();
     const backupPath = backupConfigFile(configPath);
-    fs.writeFileSync(configPath, `${JSON.stringify(localConfigForLocalModels(selectedSources), null, 2)}\n`, "utf8");
+    fs.writeFileSync(configPath, `${JSON.stringify(localConfigForLocalModels(selectedSources, { workspaceDir }), null, 2)}\n`, "utf8");
     output.appendLine(`Backed up unreadable Agent Hub config to ${backupPath}.`);
     output.appendLine(`Created a fresh local Agent Hub config at ${configPath}.`);
     output.appendLine(`Configured cloud control agents: ${describeCloudSources(selectedSources)}`);
@@ -5824,7 +5851,8 @@ async function repairGeneratedLocalConfig(configPath) {
       : (sources.length ? sources : configuredLocalSources(raw));
     const repaired = localConfigForLocalModels(selectedSources, {
       cloudRouteMode: configCloudRouteMode(raw),
-      cloudSettings: cloudModelSettingsFromConfig(raw)
+      cloudSettings: cloudModelSettingsFromConfig(raw),
+      workspaceDir
     });
     if (explicitLocalSources.length) {
       repaired.local_model_selection = raw.local_model_selection;
@@ -5844,6 +5872,15 @@ async function repairGeneratedLocalConfig(configPath) {
       output.appendLine(`Configured local control agents: ${describeLocalSources(selectedSources)}`);
       return true;
     }
+  }
+
+  if (workspaceDir && raw.workspace_dir !== workspaceDir) {
+    const backupPath = backupConfigFile(configPath);
+    raw.workspace_dir = workspaceDir;
+    fs.writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+    output.appendLine(`Updated Agent Hub workspace_dir for ${configPath}.`);
+    output.appendLine(`Original config was backed up to ${backupPath}.`);
+    return true;
   }
 
   if (usedLenientParser) {
@@ -5952,7 +5989,8 @@ function localModelSelection(source) {
   };
 }
 
-function applyLocalModelSelectionToConfig(configPath, source) {
+function applyLocalModelSelectionToConfig(configPath, source, options = {}) {
+  const workspaceDir = normalizeWorkspaceDirOption(options.workspaceDir);
   const existingText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
   let data;
   let backedUpExisting = false;
@@ -5967,8 +6005,11 @@ function applyLocalModelSelectionToConfig(configPath, source) {
   }
 
   if (!data || typeof data !== "object" || Array.isArray(data)) {
-    data = localConfigForLocalModels([source]);
+    data = localConfigForLocalModels([source], { workspaceDir });
   } else {
+    if (workspaceDir) {
+      data.workspace_dir = workspaceDir;
+    }
     data.agents = Array.isArray(data.agents) ? data.agents : [];
     data.routes = Array.isArray(data.routes) ? data.routes : [];
     upsertAgentConfig(data.agents, localModelAgentConfig(source));
@@ -5984,12 +6025,14 @@ function applyLocalModelSelectionToConfig(configPath, source) {
     const backupPath = backupConfigFile(configPath);
     output.appendLine(`Backed up Agent Hub config to ${backupPath}.`);
   }
+  ensureConfigDirectory(configPath);
   fs.writeFileSync(configPath, nextText, "utf8");
   output.appendLine(`Configured local control model: ${source.label} (${source.model}).`);
   return true;
 }
 
-async function saveCloudModelSettingsToConfig(configPath, cloudSettings) {
+async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options = {}) {
+  const workspaceDir = normalizeWorkspaceDirOption(options.workspaceDir);
   const existingText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
   let data;
   let backedUpExisting = false;
@@ -6007,10 +6050,14 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings) {
     const sources = await detectLocalModelSources();
     data = localConfigForLocalModels(sources.length ? sources : fallbackLocalModelSources(), {
       cloudRouteMode: cloudSettings.cloudRouteMode,
-      cloudSettings
+      cloudSettings,
+      workspaceDir
     });
   }
 
+  if (workspaceDir) {
+    data.workspace_dir = workspaceDir;
+  }
   data.agents = Array.isArray(data.agents) ? data.agents : [];
   data.routes = Array.isArray(data.routes) ? data.routes : [];
   data.free_only = cloudSettings.freeOnly !== false;
@@ -6036,6 +6083,7 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings) {
     const backupPath = backupConfigFile(configPath);
     output.appendLine(`Backed up Agent Hub config to ${backupPath}.`);
   }
+  ensureConfigDirectory(configPath);
   fs.writeFileSync(configPath, nextText, "utf8");
   output.appendLine(`Configured cloud route mode: ${data.cloud_control_selection.route_mode}.`);
   return true;
@@ -6237,7 +6285,7 @@ function localConfigForLocalModels(sources, options = {}) {
     inbox_dir: ".agent-hub/inbox",
     outbox_dir: ".agent-hub/outbox",
     archive_dir: ".agent-hub/archive",
-    workspace_dir: ".",
+    workspace_dir: normalizeWorkspaceDirOption(options.workspaceDir) || ".",
     agent_max_steps: 8,
     agent_context_budget_tokens: 32000,
     agent_context_compaction_enabled: true,
@@ -8097,7 +8145,7 @@ function settings() {
   return {
     serverUrl: config.get("serverUrl", "http://127.0.0.1:8787").replace(/\/+$/, ""),
     pythonPath: config.get("pythonPath", "auto"),
-    configPath: config.get("configPath", "agent-hub.config.json"),
+    configPath: config.get("configPath", ""),
     route: config.get("route", "coding"),
     researchRoute: config.get("researchRoute", "research"),
     codingAgentRoute: config.get("codingAgentRoute", "local-agent"),
@@ -8310,10 +8358,69 @@ function workspaceRoot() {
 }
 
 function resolveConfigPath(configPath, workspace) {
-  if (path.isAbsolute(configPath)) {
-    return configPath;
+  const configured = String(configPath || "").trim();
+  if (isDefaultConfigSetting(configured)) {
+    return defaultExtensionConfigPath(workspace);
   }
-  return path.join(workspace, configPath);
+  const expanded = expandHomePath(configured);
+  if (path.isAbsolute(expanded)) {
+    return expanded;
+  }
+  if (!workspace) {
+    return path.resolve(expanded);
+  }
+  return path.join(workspace, expanded);
+}
+
+function isDefaultConfigSetting(configPath) {
+  const normalized = normalizeRelativePath(String(configPath || "").trim());
+  return !normalized || normalized === DEFAULT_CONFIG_FILENAME;
+}
+
+function defaultExtensionConfigPath(workspace) {
+  const storageRoot = extensionContext && extensionContext.globalStorageUri
+    ? extensionContext.globalStorageUri.fsPath
+    : path.join(workspace || process.cwd(), ".agent-hub", "vscode");
+  return path.join(storageRoot, "workspaces", workspaceStorageKey(workspace), DEFAULT_CONFIG_FILENAME);
+}
+
+function workspaceStorageKey(workspace) {
+  const resolved = path.resolve(workspace || "no-workspace");
+  const label = (path.basename(resolved) || "workspace").replace(/[^A-Za-z0-9._-]+/g, "-");
+  const hash = crypto.createHash("sha1").update(resolved.toLowerCase()).digest("hex").slice(0, 12);
+  return `${label}-${hash}`;
+}
+
+function generatedConfigWorkspaceDir(configPath, workspace) {
+  if (!workspace || !isDefaultConfigSetting(configPath)) {
+    return "";
+  }
+  return path.resolve(workspace);
+}
+
+function normalizeWorkspaceDirOption(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text ? path.resolve(text) : "";
+}
+
+function ensureConfigDirectory(configPath) {
+  const directory = path.dirname(configPath);
+  if (directory && directory !== "." && !fs.existsSync(directory)) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+}
+
+function expandHomePath(value) {
+  if (value === "~") {
+    return process.env.HOME || process.env.USERPROFILE || value;
+  }
+  if (value.startsWith(`~${path.sep}`) || value.startsWith("~/") || value.startsWith("~\\")) {
+    const home = process.env.HOME || process.env.USERPROFILE;
+    if (home) {
+      return path.join(home, value.slice(2));
+    }
+  }
+  return value;
 }
 
 async function isServerOnline() {

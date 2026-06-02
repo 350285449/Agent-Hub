@@ -221,8 +221,8 @@
         },
         "agentHub.configPath": {
           "type": "string",
-          "default": "agent-hub.config.json",
-          "description": "Path to Agent-Hub config, relative to the workspace root unless absolute."
+          "default": "",
+          "description": "Path to Agent-Hub config. Leave empty to store a per-workspace config in VS Code global storage. Use an absolute path or ./agent-hub.config.json to opt into a workspace file."
         },
         "agentHub.route": {
           "type": "string",

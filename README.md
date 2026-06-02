@@ -149,9 +149,9 @@ Run provider evaluation:
 python -m agent_hub eval --route coding --json
 ```
 
-Keep real `agent-hub.config.json`, backups, logs, state folders, provider health
-state, `.vsix` packages, and API keys out of git. Use
-`agent-hub.config.example.json` for shareable examples.
+Keep real `agent-hub.config.json`, generated `config.example.json` files,
+backups, logs, state folders, provider health state, `.vsix` packages, and API
+keys out of git. Use `agent-hub.config.example.json` for shareable examples.
 
 ## Cline And Continue
 
@@ -549,12 +549,14 @@ After installing, reload VS Code, open any workspace, and use:
 - `Agent Hub: Explain Selection`
 - `Agent Hub: Explain Current File`
 
-The extension uses the same local server and config as the CLI. Packaged VSIX
-builds include the Agent Hub Python backend and start
-`python -m agent_hub --config agent-hub.config.json serve --watch-inbox` from
-the opened workspace. Settings are available under `Agent Hub`, including
-`agentHub.serverUrl`, `agentHub.pythonPath` (`auto` tries common Python 3.11+
-launchers), `agentHub.configPath`,
+The extension uses the same local server as the CLI. Packaged VSIX builds
+include the Agent Hub Python backend and start it from the opened workspace with
+an extension-managed per-workspace config stored in VS Code global storage. This
+keeps generated config and backup files out of git by default. Set
+`agentHub.configPath` to an absolute path or `./agent-hub.config.json` only when
+you intentionally want a project-local config. Settings are available under
+`Agent Hub`, including `agentHub.serverUrl`, `agentHub.pythonPath` (`auto` tries
+common Python 3.11+ launchers), `agentHub.configPath`,
 `agentHub.route`, `agentHub.codingAgentRoute`, `agentHub.researchRoute`,
 `agentHub.agentMaxSteps`, `agentHub.allowShellTools`, `agentHub.maxTokens`, and
 `agentHub.autoStart`.

@@ -13,6 +13,8 @@ Thumbs.db
 .agent-hub-state/
 agent-hub.config.json
 agent-hub.config.json.*.bak
+config.example.json
+config.example.json.*.bak
 *.config.local.json
 *.config.backup.json
 *.bak
