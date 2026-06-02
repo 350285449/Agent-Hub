@@ -3,6 +3,9 @@
 `release.json` is the release metadata source for Agent Hub packaging. It
 records the VS Code extension version, Python backend version, protocol/API
 compatibility version, minimum supported backend version, and release timestamp.
+Use `python scripts/sync_version.py <version>` before release packaging so
+`release.json`, `pyproject.toml`, `agent_hub/version.py`, and VS Code extension
+metadata stay aligned.
 CI may stamp build metadata into `release.json` during a workflow run:
 `commit_sha`, `build_timestamp_utc`, and `git_tag`.
 

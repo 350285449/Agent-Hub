@@ -75,7 +75,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("requestPermission", source)
         self.assertEqual(sidebar.count('data-primary-action="start-server"'), 1)
         self.assertIn('id="heroServerAction"', sidebar)
-        self.assertIn("START SERVER", sidebar)
+        self.assertIn(">Start</button>", sidebar)
         self.assertIn('.hero-server-action[data-state="Running"]', sidebar)
         self.assertIn("background: var(--ok);", sidebar)
         self.assertNotIn('id="startServer"', sidebar)
@@ -97,14 +97,14 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
 
         headings = [
-            "<h2>Control center</h2>",
-            "<h2>Statistics</h2>",
-            "<h2>Server</h2>",
+            "<h2>Ask anything</h2>",
+            "<h2>Health</h2>",
+            "<h2>Setup</h2>",
             "<h2>Permissions</h2>",
-            "<h2>Models / Providers</h2>",
+            "<h2>Models</h2>",
             "<h2>Limits</h2>",
-            "<h2>Token Usage</h2>",
-            "<h2>Activity</h2>",
+            "<h2>Tokens</h2>",
+            "<h2>Recent Activity</h2>",
             "<h2>Logs</h2>",
             "<h2>Settings</h2>",
         ]
@@ -193,7 +193,8 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('env.PYTHONSAFEPATH = "1"', source)
         self.assertIn('env.PYTHONDONTWRITEBYTECODE = "1"', source)
 
-    def test_python_backend_version_is_separate_but_internally_consistent(self) -> None:
+    def test_extension_and_python_backend_versions_match(self) -> None:
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         backend_version = (ROOT / "agent_hub" / "version.py").read_text(encoding="utf-8")
 
@@ -201,6 +202,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         base_version = backend_version.split('BASE_VERSION = "', 1)[1].split('"', 1)[0]
 
         self.assertEqual(base_version, pyproject_version)
+        self.assertEqual(package["version"], pyproject_version)
 
     def test_setup_helpers_are_registered_in_extension_source(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")

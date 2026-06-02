@@ -6,7 +6,6 @@ import re
 import ast
 import fnmatch
 import shutil
-import subprocess
 import tempfile
 import time
 import uuid
@@ -27,6 +26,7 @@ from .permissions import (
     approval_mode_from_request,
     tool_permission_request,
 )
+from .security.command_runner import CommandExecutionRequest, run_workspace_command
 
 
 SKIPPED_DIRS = {
@@ -1308,17 +1308,19 @@ class AgentToolbox:
             maximum=MAX_COMMAND_TIMEOUT_SECONDS,
         )
         self._check_shell_permission(command=command, cwd=cwd, timeout_seconds=timeout)
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        completed = run_workspace_command(
+            CommandExecutionRequest(
+                command=command,
+                workspace_dir=self.root,
+                cwd=cwd,
+                timeout_seconds=timeout,
+                state_dir=self.config.state_dir,
+                source="agent_toolbox.run_command",
+            )
         )
         return {
             "command": command,
-            "cwd": self._relative(cwd),
+            "cwd": completed.cwd,
             "returncode": completed.returncode,
             "stdout": completed.stdout[:MAX_TOOL_OUTPUT_CHARS],
             "stderr": completed.stderr[:MAX_TOOL_OUTPUT_CHARS],

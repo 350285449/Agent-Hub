@@ -28,6 +28,7 @@ from .context import (
 )
 from .models import FailoverEvent, HubRequest, HubResponse
 from .reasoning import WorkspaceReasoningState
+from .security.command_runner import CommandExecutionRequest, run_workspace_command
 from .core.router import AgentRouter
 from .token_budget import TokenBudget, TokenBudgetManager, estimate_messages_tokens
 
@@ -4033,13 +4034,15 @@ def _validate_after_edit(
     checks: list[dict[str, Any]] = []
     for item in commands:
         try:
-            completed = subprocess.run(
-                item["command"],
-                shell=item["shell"],
-                cwd=str(root),
-                capture_output=True,
-                text=True,
-                timeout=item["timeout_seconds"],
+            completed = run_workspace_command(
+                CommandExecutionRequest(
+                    command=item["command"],
+                    workspace_dir=root,
+                    cwd=root,
+                    timeout_seconds=item["timeout_seconds"],
+                    state_dir=config.state_dir,
+                    source=f"post_edit_validation.{item['name']}",
+                )
             )
             checks.append(
                 {
@@ -4130,7 +4133,6 @@ def _validation_command_plan(
                 "category": "syntax",
                 "command": [sys.executable, "-m", "py_compile", *py_files],
                 "display": "python -m py_compile " + " ".join(changed_files),
-                "shell": False,
                 "timeout_seconds": 120,
             }
         )
@@ -4141,7 +4143,6 @@ def _validation_command_plan(
                 "category": "tests",
                 "command": [sys.executable, "-m", "unittest", "discover", "-v"],
                 "display": "python -m unittest discover -v",
-                "shell": False,
                 "timeout_seconds": 300,
             }
         )
@@ -4153,7 +4154,6 @@ def _validation_command_plan(
                 "category": _validation_command_category(command),
                 "command": formatted_command,
                 "display": formatted_command,
-                "shell": True,
                 "timeout_seconds": 600 if mode == "strict" else 300,
             }
         )

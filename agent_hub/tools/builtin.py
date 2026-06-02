@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import fnmatch
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from ..config import HubConfig
+from ..security.command_runner import CommandExecutionRequest, run_workspace_command
 from .registry import ToolRegistry
 from .types import Tool, ToolCall, ToolResult
 
@@ -195,13 +195,15 @@ def _shell_execute(call: ToolCall, context: Any) -> ToolResult:
     if not cwd.is_dir():
         raise ValueError("cwd must be a workspace directory")
     timeout = _int_arg(call.arguments, "timeout_seconds", 30, 1, MAX_COMMAND_SECONDS)
-    completed = subprocess.run(
-        command,
-        cwd=cwd,
-        shell=True,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
+    completed = run_workspace_command(
+        CommandExecutionRequest(
+            command=command,
+            workspace_dir=context.workspace_dir,
+            cwd=cwd,
+            timeout_seconds=timeout,
+            state_dir=getattr(context.config, "state_dir", None),
+            source="builtin.shell_execute",
+        )
     )
     output = (completed.stdout or "") + (completed.stderr or "")
     return ToolResult(

@@ -81,6 +81,22 @@ class CliTests(unittest.TestCase):
             self.assertIn("Agent-Hub health", output)
             self.assertIn("reliability", output)
 
+    def test_doctor_json_includes_install_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+            buffer = io.StringIO()
+
+            with patch("agent_hub.cli._backend_reachability") as backend, redirect_stdout(buffer):
+                backend.return_value = {"ok": True, "url": "http://127.0.0.1:8787/health", "detail": "HTTP 200"}
+                code = main(["--config", str(path), "doctor", "--json"])
+
+            self.assertEqual(code, 0)
+            data = json.loads(buffer.getvalue())
+            self.assertIn("install_checks", data)
+            self.assertTrue(any(row["id"] == "python_version" for row in data["install_checks"]))
+            self.assertTrue(data["backend_reachable"]["ok"])
+
     def test_agent_command_reports_route_errors_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"

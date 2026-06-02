@@ -111,6 +111,8 @@ def validate_version_consistency(
         failures.append("release.json backend_version does not match pyproject.toml")
     if backend_base_version != pyproject_version:
         failures.append("agent_hub/version.py BASE_VERSION does not match pyproject.toml")
+    if package_version != pyproject_version:
+        failures.append("vscode-extension/package.json version does not match pyproject.toml")
     if release.get("minimum_supported_backend_version") != release.get("backend_version"):
         failures.append("minimum_supported_backend_version should match backend_version for Phase 9")
     return failures

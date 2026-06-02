@@ -37,6 +37,9 @@ const backendBaseVersion = readBackendBaseVersion(backendVersionPath);
 if (pyprojectVersion && backendBaseVersion && pyprojectVersion !== backendBaseVersion) {
   failures.push(`pyproject.toml version ${pyprojectVersion} does not match agent_hub/version.py BASE_VERSION ${backendBaseVersion}`);
 }
+if (pyprojectVersion && manifest.version && pyprojectVersion !== manifest.version) {
+  failures.push(`pyproject.toml version ${pyprojectVersion} does not match package.json ${manifest.version}`);
+}
 
 if (failures.length) {
   console.error("Extension version consistency check failed:");
@@ -46,13 +49,7 @@ if (failures.length) {
   process.exit(1);
 }
 
-if (pyprojectVersion && pyprojectVersion !== manifest.version) {
-  console.log(
-    `Extension version ${manifest.version}; Python backend version ${pyprojectVersion} is intentionally separate.`
-  );
-} else {
-  console.log(`Extension version metadata is consistent at ${manifest.version}.`);
-}
+console.log(`Extension and Python backend version metadata is consistent at ${manifest.version}.`);
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));

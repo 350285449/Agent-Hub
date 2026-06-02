@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.25
+
+- Syncs extension and backend release metadata for the next package.
+- Adds install verification, packaging checks, and command-runner hardening.
+
 ## Unreleased
 
 No changes yet.

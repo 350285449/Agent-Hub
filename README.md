@@ -158,7 +158,7 @@ keys out of git. Use `agent-hub.config.example.json` for shareable examples.
 Cline:
 
 - Base URL: `http://127.0.0.1:8787/v1`
-- API key: any local placeholder
+- API key: `local-agent-hub-token`
 - Model: `agent-hub-coding`
 - Recommended config: `"approval_mode": "auto"` and
   `"cline_compatibility_mode": true`
@@ -442,9 +442,10 @@ agent-hub doctor
 ```
 
 The doctor report includes config path, backend version, Python runtime,
-enabled providers, missing API keys, local model servers, Cline/Claude
-endpoints, approval mode, safe mode, token optimization mode, context
-diagnostics, likely problems, and exact fixes.
+install checks, dependency checks, config status, backend reachability, bundled
+backend snapshot status, enabled providers, missing API keys, local model
+servers, Cline/Claude endpoints, approval mode, safe mode, token optimization
+mode, context diagnostics, likely problems, and exact fixes.
 
 Router/provider errors also expose structured categories internally
 (`configuration`, `provider`, `rate_limit`, `quota`, `context_limit`,

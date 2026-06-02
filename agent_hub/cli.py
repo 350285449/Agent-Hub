@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
 import threading
 import time
+import tomllib
 import uuid
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any
 from typing import Sequence
@@ -27,6 +30,7 @@ from .config_migration import migrate_config_file
 from .context import request_context_diagnostics
 from .evaluation import BenchmarkRunner, ProviderScoreStore, default_benchmark_tasks
 from .inbox import InboxProcessor
+from .observability import STREAM_FILES, recent_events
 from .payloads import request_from_payload
 from .provider_presets import (
     FREE_PROVIDER_PRESETS,
@@ -39,6 +43,85 @@ from .core.router import AgentRouter, RouterError
 from .server import serve
 from .team_agent_runner import TeamAgentRunner
 from .version import backend_version
+
+
+ROUTING_PRESETS: dict[str, dict[str, Any]] = {
+    "cheap-local": {
+        "name": "cheap-local",
+        "label": "Cheap local mode",
+        "description": "Prefer free local or user-controlled endpoints.",
+        "selector": "cheap-local",
+        "free_only": True,
+        "approval_mode": "ask",
+        "free_first": True,
+    },
+    "best-coding": {
+        "name": "best-coding",
+        "label": "Best coding mode",
+        "description": "Prefer tool-capable agents with strong coding scores.",
+        "selector": "best-coding",
+        "free_only": False,
+        "approval_mode": "ask",
+        "free_first": False,
+    },
+    "private": {
+        "name": "private",
+        "label": "Private mode",
+        "description": "Use local/private endpoints only.",
+        "selector": "private",
+        "free_only": True,
+        "approval_mode": "ask",
+        "free_first": True,
+    },
+    "fastest": {
+        "name": "fastest",
+        "label": "Fastest mode",
+        "description": "Prefer the lowest-latency configured agents.",
+        "selector": "fastest",
+        "free_only": False,
+        "approval_mode": "ask",
+        "free_first": False,
+    },
+    "fallback-safe": {
+        "name": "fallback-safe",
+        "label": "Fallback-safe mode",
+        "description": "Keep broad fallback enabled while using safe approvals.",
+        "selector": "fallback-safe",
+        "free_only": False,
+        "approval_mode": "safe",
+        "free_first": True,
+    },
+}
+
+LOCAL_PROVIDER_TYPES = {
+    "echo",
+    "local-research",
+    "lm-studio",
+    "localai",
+    "llama-cpp",
+    "ollama",
+    "ollama-local",
+    "vllm",
+}
+LOCAL_URL_PREFIXES = (
+    "http://127.0.0.1",
+    "https://127.0.0.1",
+    "http://localhost",
+    "https://localhost",
+    "http://[::1]",
+    "https://[::1]",
+)
+SENSITIVE_KEY_FRAGMENTS = (
+    "apikey",
+    "api_key",
+    "authorization",
+    "bearer",
+    "password",
+    "secret",
+    "token",
+    "xapikey",
+    "x-api-key",
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -128,7 +211,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     providers_parser = subparsers.add_parser("providers", help="List known provider types.")
     providers_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
-    presets_parser = subparsers.add_parser("presets", help="List editable free provider presets.")
+    presets_parser = subparsers.add_parser("presets", help="List provider and routing presets.")
+    presets_parser.add_argument("action", nargs="?", choices=["apply"], help="Apply a routing preset.")
+    presets_parser.add_argument("preset_name", nargs="?", help="Preset to apply.")
     presets_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     add_provider_parser = subparsers.add_parser(
@@ -247,6 +332,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     route_test_parser.add_argument("prompt", nargs="*", default=["hello"])
     route_test_parser.add_argument("--route", default="cloud-agent")
     route_test_parser.add_argument("--json", action="store_true")
+
+    export_logs_parser = subparsers.add_parser("export-logs", help="Export recent diagnostic logs.")
+    export_logs_parser.add_argument("--format", choices=["json", "markdown", "zip"], default="json")
+    export_logs_parser.add_argument("--output", help="Output path. Defaults to stdout for json/markdown.")
 
     chat_parser = subparsers.add_parser("chat", help="Open an interactive Codex-style workspace chat.")
     chat_parser.add_argument("--route", default="cloud-agent", help="Route to use for chat turns.")
@@ -371,12 +460,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_table(rows, ["provider_type", "display_name", "base_url", "api_key_env", "free"])
         return 0
     if command == "presets":
-        rows = preset_rows()
+        if args.action == "apply":
+            return _apply_routing_preset(args.config, args.preset_name, as_json=args.json)
+        provider_rows = preset_rows()
+        routing_rows = _routing_preset_rows()
         if args.json:
-            print(json.dumps(rows, indent=2, ensure_ascii=False))
+            print(
+                json.dumps(
+                    {
+                        "provider_presets": provider_rows,
+                        "routing_presets": routing_rows,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
         else:
-            _print_table(rows, ["name", "provider_type", "model", "free", "enabled", "context_window"])
+            print("Provider presets:")
+            _print_table(provider_rows, ["name", "provider_type", "model", "free", "enabled", "context_window"])
+            print()
+            print("Routing presets:")
+            _print_table(routing_rows, ["name", "label", "free_only", "approval_mode", "description"])
         return 0
+    if command == "export-logs":
+        return _export_logs(config, output_format=args.format, output_path=args.output)
     if command == "local-models":
         report = _local_models_report(config)
         if args.json:
@@ -811,6 +918,288 @@ def _add_free_presets(path: str, *, route: str, enabled: bool) -> int:
     return 0
 
 
+def _routing_preset_rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": name,
+            "label": preset["label"],
+            "free_only": preset["free_only"],
+            "approval_mode": preset["approval_mode"],
+            "description": preset["description"],
+        }
+        for name, preset in ROUTING_PRESETS.items()
+    ]
+
+
+def _apply_routing_preset(path: str, preset_name: str | None, *, as_json: bool) -> int:
+    preset = _routing_preset_from_name(preset_name)
+    if preset is None:
+        known = ", ".join(ROUTING_PRESETS)
+        if preset_name:
+            print(f"Unknown routing preset {preset_name!r}. Known presets: {known}.")
+        else:
+            print(f"Choose a routing preset: {known}.")
+        return 2
+
+    config_path = Path(path)
+    data = _load_or_default_config_dict(config_path)
+    agent_names = _select_routing_preset_agents(data, preset)
+    if not agent_names:
+        print("No configured agents are available for that preset.")
+        return 1
+
+    data["default_route"] = agent_names
+    data["free_only"] = bool(preset["free_only"])
+    data["approval_mode"] = str(preset["approval_mode"])
+    routing = data.setdefault("routing", {})
+    if isinstance(routing, dict):
+        routing["auto_failover"] = True
+        routing["free_first"] = bool(preset["free_first"])
+        if preset["name"] == "fallback-safe":
+            routing["max_provider_attempts"] = max(3, int(routing.get("max_provider_attempts") or 3))
+    if preset["name"] == "private":
+        data["auto_enable_available_providers"] = False
+
+    for route_name in ("cloud-agent", "coding", "hybrid-agent"):
+        _replace_route_agents(data, route_name, agent_names)
+    if preset["name"] in {"cheap-local", "private"}:
+        _replace_route_agents(data, "local-agent", agent_names)
+
+    _write_config_dict(config_path, data)
+    result = {
+        "preset": preset["name"],
+        "config": str(config_path),
+        "default_route": agent_names,
+        "free_only": data["free_only"],
+        "approval_mode": data["approval_mode"],
+    }
+    if as_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"Applied {preset['label']} to {config_path}.")
+        print("default_route: " + ", ".join(agent_names))
+        print(f"free_only: {data['free_only']}")
+        print(f"approval_mode: {data['approval_mode']}")
+    return 0
+
+
+def _routing_preset_from_name(name: str | None) -> dict[str, Any] | None:
+    if not name:
+        return None
+    key = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    if key.endswith("-mode"):
+        key = key[: -len("-mode")]
+    return ROUTING_PRESETS.get(key)
+
+
+def _select_routing_preset_agents(data: dict[str, Any], preset: dict[str, Any]) -> list[str]:
+    raw_agents = data.get("agents", [])
+    if not isinstance(raw_agents, list):
+        return []
+    agents = [agent for agent in raw_agents if isinstance(agent, dict) and isinstance(agent.get("name"), str)]
+    enabled = [agent for agent in agents if _agent_enabled(agent)]
+    candidates = enabled or agents
+    selector = str(preset["selector"])
+
+    if selector == "private":
+        selected = [agent for agent in candidates if _agent_is_private(agent)]
+    elif selector == "cheap-local":
+        selected = [agent for agent in candidates if _agent_is_free(agent) and _agent_is_private(agent)]
+    elif selector == "best-coding":
+        selected = sorted(candidates, key=_coding_agent_rank, reverse=True)
+    elif selector == "fastest":
+        selected = sorted(candidates, key=_speed_agent_rank, reverse=True)
+    elif selector == "fallback-safe":
+        selected = sorted(candidates, key=_fallback_safe_agent_rank, reverse=True)
+    else:
+        selected = candidates
+
+    if not selected:
+        selected = sorted(candidates, key=_fallback_safe_agent_rank, reverse=True)
+    names: list[str] = []
+    for agent in selected:
+        name = str(agent.get("name"))
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _replace_route_agents(data: dict[str, Any], route_name: str, agent_names: list[str]) -> None:
+    routes = data.setdefault("routes", [])
+    if not isinstance(routes, list):
+        data["routes"] = routes = []
+    route = next(
+        (item for item in routes if isinstance(item, dict) and item.get("name") == route_name),
+        None,
+    )
+    if route is None:
+        route = {"name": route_name, "keywords": _default_route_keywords(route_name), "agents": []}
+        routes.append(route)
+    route["agents"] = list(agent_names)
+
+
+def _default_route_keywords(route_name: str) -> list[str]:
+    if route_name == "coding":
+        return ["code", "bug", "fix", "refactor", "test", "repo"]
+    if route_name == "local-agent":
+        return ["agent", "workspace", "edit", "implement"]
+    return []
+
+
+def _agent_enabled(agent: dict[str, Any]) -> bool:
+    return agent.get("enabled", True) is not False
+
+
+def _agent_is_free(agent: dict[str, Any]) -> bool:
+    return agent.get("free", True) is not False
+
+
+def _agent_is_private(agent: dict[str, Any]) -> bool:
+    provider_type = str(agent.get("provider_type") or "").lower()
+    provider = str(agent.get("provider") or "").lower()
+    name = str(agent.get("name") or "").lower()
+    if provider_type == "ollama-cloud" or name.endswith("-cloud"):
+        return False
+    if provider_type in LOCAL_PROVIDER_TYPES or provider in LOCAL_PROVIDER_TYPES:
+        return True
+    base_url = str(agent.get("base_url") or "").lower()
+    return base_url.startswith(LOCAL_URL_PREFIXES)
+
+
+def _coding_agent_rank(agent: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    return (
+        _safe_float(agent.get("coding_score")),
+        1.0 if agent.get("supports_tools") or agent.get("supports_function_calling") else 0.0,
+        _safe_float(agent.get("reasoning_score")),
+        _safe_float(agent.get("priority")),
+        _safe_float(agent.get("context_window")),
+    )
+
+
+def _speed_agent_rank(agent: dict[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        _safe_float(agent.get("speed_score")),
+        _safe_float(agent.get("priority")),
+        1.0 if _agent_is_private(agent) else 0.0,
+        _safe_float(agent.get("coding_score")),
+    )
+
+
+def _fallback_safe_agent_rank(agent: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    return (
+        1.0 if _agent_is_free(agent) else 0.0,
+        1.0 if _agent_is_private(agent) else 0.0,
+        _safe_float(agent.get("priority")),
+        _safe_float(agent.get("coding_score")),
+        _safe_float(agent.get("speed_score")),
+    )
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _export_logs(config: Any, *, output_format: str, output_path: str | None) -> int:
+    bundle = _log_export_bundle(config)
+    json_text = json.dumps(bundle, indent=2, ensure_ascii=False, default=str)
+    markdown_text = _log_bundle_markdown(bundle)
+    if output_format == "zip":
+        path = Path(output_path or "agent-hub-debug-bundle.zip")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("debug-bundle.json", json_text)
+            archive.writestr("debug-bundle.md", markdown_text)
+        print(f"Wrote {path}")
+        return 0
+
+    text = markdown_text if output_format == "markdown" else json_text
+    if output_path:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        print(f"Wrote {path}")
+    else:
+        print(text)
+    return 0
+
+
+def _log_export_bundle(config: Any) -> dict[str, Any]:
+    streams = {
+        stream: [_redact_sensitive(event) for event in recent_events(config.state_dir, stream, limit=200)]
+        for stream in STREAM_FILES
+    }
+    return {
+        "object": "agent_hub.debug_bundle",
+        "backend_version": backend_version(),
+        "generated_at": time.time(),
+        "state_dir": str(config.state_dir),
+        "server": {"host": config.host, "port": config.port},
+        "config": {
+            "free_only": config.free_only,
+            "approval_mode": config.approval_mode,
+            "shell_command_policy": config.shell_command_policy,
+            "cline_compatibility_mode": config.cline_compatibility_mode,
+            "routes": [route.name for route in config.routes],
+            "agents": sorted(config.agents),
+        },
+        "counts": {stream: len(events) for stream, events in streams.items()},
+        "streams": streams,
+    }
+
+
+def _log_bundle_markdown(bundle: dict[str, Any]) -> str:
+    lines = [
+        "# Agent Hub Debug Bundle",
+        "",
+        f"- backend_version: {bundle.get('backend_version')}",
+        f"- generated_at: {bundle.get('generated_at')}",
+        f"- state_dir: {bundle.get('state_dir')}",
+        "",
+        "## Counts",
+        "",
+    ]
+    counts = bundle.get("counts")
+    if isinstance(counts, dict):
+        for stream, count in sorted(counts.items()):
+            lines.append(f"- {stream}: {count}")
+    streams = bundle.get("streams")
+    if isinstance(streams, dict):
+        for stream, events in sorted(streams.items()):
+            lines.extend(["", f"## {stream}", ""])
+            if not isinstance(events, list) or not events:
+                lines.append("No recent events.")
+                continue
+            for event in events[-10:]:
+                lines.append("```json")
+                lines.append(json.dumps(event, indent=2, ensure_ascii=False, default=str))
+                lines.append("```")
+    return "\n".join(lines) + "\n"
+
+
+def _redact_sensitive(value: Any, key: str = "") -> Any:
+    if _sensitive_key(key):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {str(item_key): _redact_sensitive(item_value, str(item_key)) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [_redact_sensitive(item, key) for item in value]
+    if isinstance(value, str):
+        stripped = value.strip()
+        lowered = stripped.lower()
+        if lowered.startswith("bearer ") or lowered.startswith("sk-") or lowered.startswith("xox"):
+            return "[redacted]"
+    return value
+
+
+def _sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    collapsed = re.sub(r"[^a-z0-9]+", "", lowered)
+    return any(fragment in lowered or fragment in collapsed for fragment in SENSITIVE_KEY_FRAGMENTS)
+
+
 def _cloud_provider_defaults(provider: str) -> tuple[str, str, str]:
     normalized = provider.lower()
     if normalized in {"openai", "codex"}:
@@ -1214,7 +1603,9 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
             )
 
     local_servers = _local_endpoint_status()
-    likely_problems = _doctor_likely_problems(config, rows, local_servers)
+    install_checks = _doctor_install_checks(config, config_path, rows)
+    backend_status = _backend_reachability(config)
+    likely_problems = _doctor_likely_problems(config, rows, local_servers, install_checks, backend_status)
     fixes = _doctor_exact_fixes(config, rows, likely_problems)
     return {
         "config": config_path,
@@ -1238,6 +1629,11 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
         "agents": rows,
         "enabled_providers": [row["name"] for row in rows if row["enabled"]],
         "missing_api_keys": _missing_api_key_rows(rows),
+        "install_checks": install_checks,
+        "dependency_checks": [row for row in install_checks if row.get("category") == "dependency"],
+        "config_exists": any(row.get("id") == "config_file" and row.get("ok") for row in install_checks),
+        "providers_available": bool(usable),
+        "backend_reachable": backend_status,
         "local_servers": local_servers,
         "provider_health": provider_health,
         "recommendations": recommendations,
@@ -1288,10 +1684,122 @@ def _local_endpoint_status() -> list[dict[str, Any]]:
     return rows
 
 
+def _doctor_install_checks(config: Any, config_path: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    root = Path(__file__).resolve().parents[1]
+    config_file = Path(config_path)
+    if not config_file.is_absolute():
+        config_file = Path.cwd() / config_file
+    checks: list[dict[str, Any]] = [
+        {
+            "id": "python_version",
+            "category": "runtime",
+            "ok": sys.version_info >= (3, 11),
+            "detail": f"{sys.version.split()[0]} at {sys.executable}",
+        },
+        {
+            "id": "config_file",
+            "category": "config",
+            "ok": config_file.exists(),
+            "detail": str(config_file.resolve()),
+        },
+        {
+            "id": "providers_available",
+            "category": "provider",
+            "ok": any(row["allowed"] and row["status"] in {"ready", "configured"} for row in rows),
+            "detail": ", ".join(row["name"] for row in rows if row["enabled"]) or "no enabled providers",
+        },
+    ]
+    checks.extend(_dependency_checks(root))
+    extension_manifest = root / "vscode-extension" / "package.json"
+    checks.append(
+        {
+            "id": "vscode_extension_manifest",
+            "category": "extension",
+            "ok": extension_manifest.exists(),
+            "detail": extension_manifest.as_posix(),
+        }
+    )
+    snapshot = root / "vscode-extension" / "backend" / "SNAPSHOT.json"
+    checks.append(
+        {
+            "id": "backend_snapshot",
+            "category": "extension",
+            "ok": snapshot.exists(),
+            "detail": snapshot.as_posix() if snapshot.exists() else "run npm run prepare-backend before packaging",
+        }
+    )
+    checks.append(
+        {
+            "id": "vscode_extension_connected",
+            "category": "extension",
+            "ok": False,
+            "optional": True,
+            "detail": "Cannot be proven from CLI; use Agent Hub: Check Health inside VS Code.",
+        }
+    )
+    return checks
+
+
+def _dependency_checks(root: Path) -> list[dict[str, Any]]:
+    pyproject = root / "pyproject.toml"
+    dependencies: list[str] = []
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        project = data.get("project") if isinstance(data, dict) else {}
+        raw = project.get("dependencies") if isinstance(project, dict) else []
+        dependencies = [str(item) for item in raw if isinstance(item, str)] if isinstance(raw, list) else []
+    except (OSError, tomllib.TOMLDecodeError):
+        return [
+            {
+                "id": "runtime_dependencies",
+                "category": "dependency",
+                "ok": False,
+                "detail": "Could not read pyproject.toml",
+            }
+        ]
+    if not dependencies:
+        return [
+            {
+                "id": "runtime_dependencies",
+                "category": "dependency",
+                "ok": True,
+                "detail": "No third-party runtime dependencies declared.",
+            }
+        ]
+    rows: list[dict[str, Any]] = []
+    for dependency in dependencies:
+        module = _dependency_import_name(dependency)
+        rows.append(
+            {
+                "id": f"dependency:{module}",
+                "category": "dependency",
+                "ok": importlib.util.find_spec(module) is not None,
+                "detail": dependency,
+            }
+        )
+    return rows
+
+
+def _dependency_import_name(dependency: str) -> str:
+    name = re.split(r"[<>=!~;\[]", dependency, maxsplit=1)[0].strip()
+    return name.replace("-", "_")
+
+
+def _backend_reachability(config: Any) -> dict[str, Any]:
+    url = f"http://{config.host}:{config.port}/health"
+    try:
+        with urllib.request.urlopen(url, timeout=0.8) as response:
+            return {"ok": 200 <= int(response.status) < 300, "url": url, "detail": f"HTTP {response.status}"}
+    except Exception as exc:
+        return {"ok": False, "url": url, "detail": str(exc)}
+
+
 def _doctor_likely_problems(
     config: Any,
     rows: list[dict[str, Any]],
     local_servers: list[dict[str, Any]],
+    install_checks: list[dict[str, Any]],
+    backend_status: dict[str, Any],
 ) -> list[str]:
     problems: list[str] = []
     if not any(row.get("enabled") and row.get("allowed") and row.get("status") in {"ready", "configured"} for row in rows):
@@ -1304,6 +1812,13 @@ def _doctor_likely_problems(
         problems.append("approval_mode_review_recommended")
     if not config.cline_compatibility_mode:
         problems.append("cline_compatibility_disabled")
+    if not backend_status.get("ok"):
+        problems.append("backend_not_reachable")
+    for row in install_checks:
+        if row.get("optional"):
+            continue
+        if not row.get("ok"):
+            problems.append(f"install_check_failed:{row.get('id')}")
     return problems
 
 
@@ -1325,6 +1840,12 @@ def _doctor_exact_fixes(
         fixes.append("Use approval_mode=ask or safe for publishable setups; readonly is best for demos.")
     if "cline_compatibility_disabled" in problems:
         fixes.append("Set cline_compatibility_mode=true in agent-hub.config.json.")
+    if "backend_not_reachable" in problems:
+        fixes.append(f"Start the backend with agent-hub serve, or click Start in VS Code, then check http://{config.host}:{config.port}/health.")
+    if any(problem == "install_check_failed:backend_snapshot" for problem in problems):
+        fixes.append("Run npm run prepare-backend from vscode-extension before packaging the VSIX.")
+    if any(problem == "install_check_failed:config_file" for problem in problems):
+        fixes.append("Run agent-hub init or confirm --config points at the intended agent-hub.config.json.")
     fixes.append(f"Cline: base URL http://{config.host}:{config.port}/v1, model agent-hub-coding, API key any non-empty placeholder.")
     fixes.append(f"Claude Code: Anthropic base URL http://{config.host}:{config.port}, model agent-hub-coding.")
     return fixes
@@ -1344,7 +1865,14 @@ def _print_doctor(report: dict[str, Any]) -> None:
     print(f"token_optimization_mode: {report['token_optimization_mode']}")
     print(f"cline_compatibility_mode: {report['cline_compatibility_mode']}")
     print(f"default_route: {', '.join(report['default_route'])}")
+    backend = report.get("backend_reachable") or {}
+    print(f"backend_reachable: {backend.get('ok')} ({backend.get('url', '')})")
     print()
+    install_checks = report.get("install_checks")
+    if isinstance(install_checks, list) and install_checks:
+        print("Install checks:")
+        _print_table(install_checks, ["id", "category", "ok", "detail"])
+        print()
     _print_table(report["agents"], ["name", "provider", "model", "enabled", "free", "allowed", "tokens", "status"])
     health_rows = _health_rows(report.get("provider_health", {}))
     if health_rows:

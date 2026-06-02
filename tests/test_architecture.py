@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import json
+import fnmatch
 import subprocess
 import unittest
 from pathlib import Path
@@ -33,20 +34,29 @@ class ArchitectureTests(unittest.TestCase):
         self.assertIn("config.example.json", ignore_text)
         self.assertNotIn('"api_key"', example.read_text(encoding="utf-8"))
 
-        check = subprocess.run(
-            ["git", "check-ignore", "agent-hub.config.json"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(check.returncode, 0, check.stderr)
-        example_check = subprocess.run(
-            ["git", "check-ignore", "config.example.json"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(example_check.returncode, 0, example_check.stderr)
+        if (root / ".git").exists():
+            check = subprocess.run(
+                ["git", "check-ignore", "agent-hub.config.json"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(check.returncode, 0, check.stderr)
+            example_check = subprocess.run(
+                ["git", "check-ignore", "config.example.json"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(example_check.returncode, 0, example_check.stderr)
+        else:
+            patterns = [
+                line.strip()
+                for line in ignore_text.splitlines()
+                if line.strip() and not line.startswith("#")
+            ]
+            self.assertTrue(_ignored_by_patterns("agent-hub.config.json", patterns))
+            self.assertTrue(_ignored_by_patterns("config.example.json", patterns))
 
     def test_openai_compatible_adapter_exposes_strict_interface(self) -> None:
         agent = AgentConfig(
@@ -176,6 +186,23 @@ class ArchitectureTests(unittest.TestCase):
         self.assertEqual(local.fallback_chain, ["local"])
         self.assertIn("Privacy/local", local.reason)
 
+    def test_gitignore_safety_check_has_zip_download_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".gitignore").write_text(
+                "agent-hub.config.json\nconfig.example.json\n",
+                encoding="utf-8",
+            )
+            patterns = [
+                line.strip()
+                for line in (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+            self.assertFalse((root / ".git").exists())
+            self.assertTrue(_ignored_by_patterns("agent-hub.config.json", patterns))
+            self.assertTrue(_ignored_by_patterns("config.example.json", patterns))
+
 
 def _routing_config(path: Path) -> HubConfig:
     return HubConfig(
@@ -237,6 +264,17 @@ def _routing_config(path: Path) -> HubConfig:
             ),
         },
     )
+
+
+def _ignored_by_patterns(path: str, patterns: list[str]) -> bool:
+    normalized = path.replace("\\", "/").strip("./")
+    for pattern in patterns:
+        clean = pattern.replace("\\", "/").strip()
+        if not clean or clean.startswith("!"):
+            continue
+        if fnmatch.fnmatch(normalized, clean) or fnmatch.fnmatch(Path(normalized).name, clean):
+            return True
+    return False
 
 
 if __name__ == "__main__":

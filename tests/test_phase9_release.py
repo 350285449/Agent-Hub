@@ -66,8 +66,8 @@ class PhaseNineReleaseMetadataTests(unittest.TestCase):
             release=release,
             package=package,
             lock=lock,
-            pyproject_version="0.7.4",
-            backend_base_version="0.7.4",
+            pyproject_version="0.7.7",
+            backend_base_version="0.7.7",
         )
 
         self.assertTrue(any("package-lock.json version" in item for item in failures))
@@ -118,9 +118,9 @@ def _release_manifest() -> dict[str, object]:
         "schema_version": 1,
         "name": "agent-hub",
         "extension_version": "0.7.7",
-        "backend_version": "0.7.4",
+        "backend_version": "0.7.7",
         "protocol_api_compatibility_version": "1",
-        "minimum_supported_backend_version": "0.7.4",
+        "minimum_supported_backend_version": "0.7.7",
         "release_timestamp_utc": "2026-05-27T00:00:00Z",
         "build": {
             "metadata_source": "release.json",

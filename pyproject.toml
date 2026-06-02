@@ -4,15 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-hub"
-version = "0.7.4"
+version = "0.7.25"
 description = "Local routing hub with Codex-style workspace chat, provider failover, and team-agent orchestration."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Agent Hub" }]
 dependencies = []
 
+[project.optional-dependencies]
+test = [
+  "pytest",
+  "pytest-timeout",
+]
+
 [project.scripts]
 agent-hub = "agent_hub.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["agent_hub*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 300
+markers = [
+  "unit: fast isolated tests that do not start HTTP servers or package artifacts",
+  "integration: tests that exercise HTTP servers, workflows, stress paths, or cross-module behavior",
+  "packaging: release, VSIX, backend snapshot, version, and packaging checks",
+]
