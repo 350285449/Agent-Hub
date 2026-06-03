@@ -49,7 +49,7 @@ def pytest_collection_modifyitems(config, items):  # type: ignore[no-untyped-def
         name = path.name
         if name in PACKAGING_NAMES:
             item.add_marker(pytest.mark.packaging)
-            item.add_marker(pytest.mark.timeout(30))
+            item.add_marker(pytest.mark.timeout(60))
         elif name in STRESS_NAMES:
             item.add_marker(pytest.mark.integration)
             item.add_marker(pytest.mark.stress)

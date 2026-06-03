@@ -3,6 +3,7 @@
 [![tests](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=tests)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 [![release validation](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=release%20validation)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 [![packaging](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=packaging)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
+[![fresh install](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=fresh%20install)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 
 Agent-Hub is a local routing layer and lightweight workspace agent for LLM
 requests. It accepts JSON, chooses a configured agent/model, can run a small
@@ -448,11 +449,13 @@ curl http://127.0.0.1:8787/debug/context
 
 ## Runtime Dependencies
 
-`pyproject.toml` intentionally declares only `packaging>=24.0` as a runtime
-dependency. The import audit for `agent_hub/` reports `packaging` as the only
-non-stdlib runtime import; provider transports use Python stdlib HTTP modules.
-Test and release tools stay in optional extras such as `.[test]` and
-`.[release]`.
+Agent Hub intentionally uses the Python standard library for most functionality.
+The only required runtime dependency is:
+
+- `packaging>=24.0`
+
+Additional dependencies are optional and installed only when specific providers
+or development tools are used.
 
 ## Operations
 
@@ -535,9 +538,13 @@ python scripts/generate_backend_snapshot.py
 python scripts/validate_backend_drift.py
 Push-Location vscode-extension; npm ci; npm run prepare-backend; Pop-Location
 python scripts/validate_release.py
-python -m pytest -m "not integration and not stress"
+python -m pytest -m "not integration and not stress" --cov=agent_hub
 python -m pytest -m packaging
 ```
+
+CI also runs a fresh-install proof job: `pip install -e .`, `agent-hub doctor`,
+then `pytest -m "not integration and not stress"` after installing `.[test]`.
+The main CI matrix publishes `coverage.xml` as a workflow artifact.
 
 Optional slower lanes:
 

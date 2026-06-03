@@ -36,13 +36,16 @@ tool permission checks. Dangerous shell patterns such as recursive forced
 delete, admin elevation, `git reset --hard`, and install-script piping are
 blocked before execution. Denied tool calls are recorded in the tool event log.
 
-`agent_hub/tools/workspace_tools.py` is intentionally centralized at this stage.
-It owns the shared permission boundary for file ops, search, patch application,
-shell execution, workspace checkpoints, rollback, provider tool schemas, and
-generated-backend edit guards. Splitting it into `file_ops.py`, `search_ops.py`,
-`patch_ops.py`, `safety.py`, and `workspace_state.py` is the intended future
-shape, but only after those pieces have stable interfaces that preserve one
-approval/checkpoint/rollback path for mutating tools.
+Workspace tooling is split by responsibility:
+
+- `workspace_tools.py`: `AgentToolbox` orchestration and permission boundary.
+- `workspace_files.py`: provider-facing tool schemas.
+- `workspace_search.py`: repo map, dependency, symbol, and search helpers.
+- `workspace_patch.py`: unified diff parsing and patch application helpers.
+- `workspace_state.py`: checkpoints, rollback, path canonicalization, and
+  atomic writes.
+- `workspace_safety.py`: shared limits, request options, risk summaries, shell
+  policy helpers, and tool result messages.
 
 ## Runtime Tool Loop
 

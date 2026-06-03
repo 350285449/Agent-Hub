@@ -53,7 +53,11 @@ TEXT_SUFFIXES = {
 }
 SKIPPED_SCAN_PARTS = {
     ".git",
+    ".agent-hub",
+    ".agent-hub-state",
+    ".mypy_cache",
     ".pytest_cache",
+    ".ruff_cache",
     ".venv",
     ".venv-check",
     "__pycache__",
@@ -463,13 +467,22 @@ def _dependency_names(dependencies: list[Any]) -> set[str]:
 
 def _iter_text_files(root: Path) -> list[Path]:
     files: list[Path] = []
-    for path in root.rglob("*"):
-        if not path.is_file():
+    for current, dirnames, filenames in os.walk(root):
+        current_path = Path(current)
+        try:
+            relative_parts = current_path.relative_to(root).parts
+        except ValueError:
             continue
-        if any(part in SKIPPED_SCAN_PARTS for part in path.relative_to(root).parts):
+        if any(part in SKIPPED_SCAN_PARTS for part in relative_parts):
+            dirnames[:] = []
             continue
-        if path.suffix.lower() in TEXT_SUFFIXES or path.name in {"Dockerfile", "LICENSE", "README"}:
-            files.append(path)
+        dirnames[:] = [name for name in dirnames if name not in SKIPPED_SCAN_PARTS]
+        for filename in filenames:
+            path = current_path / filename
+            if any(part in SKIPPED_SCAN_PARTS for part in path.relative_to(root).parts):
+                continue
+            if path.suffix.lower() in TEXT_SUFFIXES or path.name in {"Dockerfile", "LICENSE", "README"}:
+                files.append(path)
     return files
 
 
