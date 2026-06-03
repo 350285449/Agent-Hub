@@ -41,6 +41,7 @@ from .commands_provider import (
     _print_metrics,
     _recommend,
     _route_test,
+    _route_diagnose,
     _routing_preset_rows,
 )
 from .commands_server import (
@@ -294,6 +295,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     route_test_parser.add_argument("--route", default="cloud-agent")
     route_test_parser.add_argument("--json", action="store_true")
 
+    route_diagnose_parser = subparsers.add_parser(
+        "route-diagnose",
+        help="Explain provider/model selection, skipped providers, fallback reason, latency, and cost.",
+    )
+    route_diagnose_parser.add_argument("prompt", nargs="*", default=["Diagnose routing."])
+    route_diagnose_parser.add_argument("--route", default="cloud-agent")
+    route_diagnose_parser.add_argument(
+        "--prefer",
+        choices=["balanced", "coding", "reasoning", "speed"],
+        default="balanced",
+        help="Recommendation bias.",
+    )
+    route_diagnose_parser.add_argument(
+        "--needs-tools",
+        action="store_true",
+        help="Prefer models with tool/function-call support.",
+    )
+    route_diagnose_parser.add_argument(
+        "--output-tokens",
+        type=int,
+        default=1024,
+        help="Estimated output tokens used for known cost calculation.",
+    )
+    route_diagnose_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     export_logs_parser = subparsers.add_parser("export-logs", help="Export recent diagnostic logs.")
     export_logs_parser.add_argument("--format", choices=["json", "markdown", "zip"], default="json")
     export_logs_parser.add_argument("--output", help="Output path. Defaults to stdout for json/markdown.")
@@ -447,9 +473,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_table(routing_rows, ["name", "label", "free_only", "approval_mode", "description"])
         return 0
     if command == "export-logs":
-        return _export_logs(config, output_format=args.format, output_path=args.output)
+        return _export_logs(config, output_format=args.format, output_path=args.output, config_path=args.config)
     if command == "debug-bundle":
-        return _export_logs(config, output_format="zip", output_path=args.output)
+        return _export_logs(config, output_format="zip", output_path=args.output, config_path=args.config)
     if command == "local-models":
         report = _local_models_report(config)
         if args.json:
@@ -565,6 +591,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _eval_providers(config, route=args.route, limit=args.limit, as_json=args.json)
     if command == "route-test":
         return _route_test(config, route=args.route, prompt=" ".join(args.prompt), as_json=args.json)
+    if command == "route-diagnose":
+        return _route_diagnose(
+            config,
+            route=args.route,
+            prompt=" ".join(args.prompt),
+            output_tokens=args.output_tokens,
+            prefer=args.prefer,
+            needs_tools=args.needs_tools,
+            as_json=args.json,
+        )
     if command == "chat":
         if not args.allow_cloud:
             config.free_only = True

@@ -1,6 +1,8 @@
 # Agent-Hub
 
-[![CI](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml/badge.svg)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
+[![CI passing](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=CI%20passing)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
+[![tests passing](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=tests%20passing)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
+[![release validation passing](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=release%20validation%20passing)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 
 Agent-Hub is a local routing layer and lightweight workspace agent for LLM
 requests. It accepts JSON, chooses a configured agent/model, can run a small
@@ -501,6 +503,7 @@ Diagnostics:
 ```powershell
 python -m agent_hub health --route cloud-agent
 python -m agent_hub metrics --route cloud-agent
+agent-hub route-diagnose --route cloud-agent --needs-tools "fix a failing test"
 python -m agent_hub doctor
 agent-hub debug-bundle --output agent-hub-debug-bundle.zip
 ```
@@ -509,8 +512,11 @@ agent-hub debug-bundle --output agent-hub-debug-bundle.zip
 `metrics` includes persisted latency, streaming-speed estimates, tool-call
 success/failure counts, token usage, and recent failover history. `doctor`
 combines config readiness with the same provider-health and recommendation
-signals. `debug-bundle` exports recent status, config shape, logs, routing,
-provider health, and other diagnostics with secret-like values redacted.
+signals. `route-diagnose` shows the selected provider, selected model, skipped
+providers, fallback reason, latency, and estimated cost when configured.
+`debug-bundle` exports sanitized version info, config, logs, doctor output,
+provider status, and release validation results with secret-like values
+redacted.
 
 Test proof:
 
@@ -581,9 +587,9 @@ The installer packages the extension, bundles the Python backend, finds the
 `code`/`code-insiders`/`codium` CLI, installs the VSIX with `--force`, and warns
 if Python 3.11+ is missing. It needs Node.js 20 or newer to build the VSIX.
 
-`vscode-extension/backend` is generated during packaging, intentionally
-gitignored, and should not be committed. To regenerate the backend snapshot
-without packaging a VSIX, run:
+`vscode-extension/backend` is generated during packaging and intentionally
+gitignored. Run `cd vscode-extension && npm run prepare-backend` to regenerate
+it without packaging a VSIX. The equivalent root-level validation flow is:
 
 ```sh
 python scripts/generate_backend_snapshot.py

@@ -833,6 +833,149 @@ def _estimate(
     return 0
 
 
+def _route_diagnose(
+    config: Any,
+    *,
+    route: str,
+    prompt: str,
+    output_tokens: int,
+    prefer: str,
+    needs_tools: bool,
+    as_json: bool,
+) -> int:
+    router = AgentRouter(config)
+    output_estimate = max(1, int(output_tokens))
+    request = request_from_payload(
+        {
+            "session_id": f"route-diagnose-{uuid.uuid4().hex}",
+            "route": route,
+            "task": prompt or "Diagnose routing.",
+            "max_tokens": output_estimate,
+            "use_session_history": False,
+            "record_session": False,
+        }
+    )
+    decision = router.decide(request)
+    rows = router.recommend(
+        request,
+        limit=max(1, len(config.agents)),
+        needs_tools=needs_tools or None,
+        prefer=None if prefer == "balanced" else prefer,
+        include_unavailable=True,
+    )
+    input_tokens = _estimate_request_tokens(request)
+    candidates = [
+        _diagnostic_candidate(
+            config,
+            row,
+            input_tokens=input_tokens,
+            output_tokens=output_estimate,
+        )
+        for row in rows
+    ]
+    selected = next((row for row in candidates if row.get("available")), candidates[0] if candidates else None)
+    skipped = [row for row in candidates if not row.get("available")]
+    fallback_reason = _diagnostic_fallback_reason(skipped)
+    report = {
+        "object": "agent_hub.route_diagnosis",
+        "route": route,
+        "routing_mode": decision.routing_mode,
+        "task_type": decision.task_type,
+        "selected_agent": selected.get("agent") if selected else None,
+        "selected_provider": selected.get("provider") if selected else None,
+        "selected_model": selected.get("model") if selected else None,
+        "skipped_providers": skipped,
+        "fallback_reason": fallback_reason,
+        "latency_ms": selected.get("latency_ms") if selected else None,
+        "estimated_cost_usd": selected.get("estimated_cost_usd") if selected else None,
+        "estimated_input_tokens": input_tokens,
+        "estimated_output_tokens": output_estimate,
+        "why_provider_chosen": selected.get("why") if selected else decision.reason,
+        "fallback_chain": list(decision.fallback_chain),
+        "candidates": candidates,
+    }
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        _print_route_diagnosis(report)
+    return 0
+
+
+def _diagnostic_candidate(
+    config: Any,
+    row: dict[str, Any],
+    *,
+    input_tokens: int,
+    output_tokens: int,
+) -> dict[str, Any]:
+    agent = config.agents.get(row.get("agent"))
+    cost = (
+        estimate_known_cost_usd(agent, input_tokens=input_tokens, output_tokens=output_tokens)
+        if agent is not None
+        else None
+    )
+    latency_ms = row.get("average_latency_ms") or None
+    return {
+        "rank": row.get("rank"),
+        "agent": row.get("agent"),
+        "provider": row.get("provider"),
+        "provider_type": row.get("provider_type"),
+        "model": row.get("model"),
+        "available": bool(row.get("available")),
+        "reason": row.get("unavailable_reason") or row.get("why") or "",
+        "fallback_reason": row.get("unavailable_reason") or "",
+        "latency_ms": latency_ms,
+        "estimated_cost_usd": cost,
+        "score": row.get("score"),
+        "free": row.get("free"),
+        "why": row.get("why") or "",
+        "quota_state": row.get("quota_state"),
+        "remaining": row.get("remaining"),
+    }
+
+
+def _diagnostic_fallback_reason(skipped: list[dict[str, Any]]) -> str:
+    for row in skipped:
+        reason = str(row.get("fallback_reason") or row.get("reason") or "").strip()
+        if reason:
+            return reason
+    return ""
+
+
+def _print_route_diagnosis(report: dict[str, Any]) -> None:
+    print(f"Route diagnosis: {report['route']}")
+    print(f"Selected provider: {report.get('selected_provider') or 'none'}")
+    print(f"Selected model: {report.get('selected_model') or 'none'}")
+    print(f"Selected agent: {report.get('selected_agent') or 'none'}")
+    print(f"Fallback reason: {report.get('fallback_reason') or 'none'}")
+    print(f"Latency: {_display_latency(report.get('latency_ms'))}")
+    print(f"Estimated cost: {_display_cost(report.get('estimated_cost_usd'))}")
+    if report.get("why_provider_chosen"):
+        print(f"Why: {report['why_provider_chosen']}")
+    skipped = report.get("skipped_providers")
+    if isinstance(skipped, list) and skipped:
+        print()
+        print("Skipped providers:")
+        _print_table(skipped, ["agent", "provider", "model", "reason", "latency_ms", "estimated_cost_usd"])
+    candidates = report.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        print()
+        print("Candidates:")
+        _print_table(candidates, ["rank", "agent", "provider", "model", "available", "score", "latency_ms"])
+
+
+def _display_latency(value: Any) -> str:
+    if value is None or value == "" or value == 0 or value == 0.0:
+        return "unavailable"
+    return f"{value} ms"
+
+
+def _display_cost(value: Any) -> str:
+    if value is None:
+        return "unavailable"
+    return f"${float(value):.6f}"
+
+
 def _estimate_request_tokens(request: Any) -> int:
     try:
         from .token_budget import estimate_messages_tokens

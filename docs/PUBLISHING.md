@@ -17,6 +17,10 @@ CI may stamp build metadata into `release.json` during a workflow run:
 - `pyproject.toml` and `agent_hub/version.py` are the Python backend version
   sources and must agree.
 
+`vscode-extension/backend` is generated during packaging and intentionally
+gitignored. Run `cd vscode-extension && npm run prepare-backend` to regenerate
+the bundled backend snapshot before packaging or validating a VSIX.
+
 ## Release Flow
 
 From the repository root:

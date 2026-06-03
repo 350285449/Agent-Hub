@@ -72,6 +72,9 @@ vscode-extension/agent-hub-vscode-<version>.vsix
 `npm.cmd run package`, `npm.cmd run publish`, and `vscode:prepublish` all run
 backend staging before VSCE packaging, so a clean source checkout does not need
 a checked-in `vscode-extension/backend` directory.
+`vscode-extension/backend` is generated during packaging and intentionally
+gitignored. Run `cd vscode-extension && npm run prepare-backend` to regenerate
+it before packaging when you want to inspect the staged backend.
 
 Validate the packaged archive before installing or publishing:
 

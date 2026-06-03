@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import sys
 import time
 import uuid
 import zipfile
@@ -9,9 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from .agent_runner import AgentRunner
+from .config import config_to_dict
 from .core.router import AgentRouter, RouterError
 from .observability import STREAM_FILES, recent_events
 from .payloads import request_from_payload
+from .security.secrets import redact_secret_like_text, secret_key
 from .version import backend_version
 from .output import _print_route_error, _shell_permission_prompt
 
@@ -202,23 +206,46 @@ def _wants_agent_mode(payload: dict) -> bool:
     return isinstance(mode, str) and mode.lower() == "agent"
 
 
-def _export_logs(config: Any, *, output_format: str, output_path: str | None) -> int:
-    bundle = _log_export_bundle(config)
+def _export_logs(
+    config: Any,
+    *,
+    output_format: str,
+    output_path: str | None,
+    config_path: str | None = None,
+) -> int:
+    bundle = _log_export_bundle(config, config_path=config_path)
     json_text = json.dumps(bundle, indent=2, ensure_ascii=False, default=str)
     markdown_text = _log_bundle_markdown(bundle)
     if output_format == "zip":
         path = Path(output_path or "agent-hub-debug-bundle.zip")
         path.parent.mkdir(parents=True, exist_ok=True)
+        files = [
+            "manifest.json",
+            "debug-bundle.json",
+            "debug-bundle.md",
+            "version-info.json",
+            "config.json",
+            "logs.json",
+            "doctor.json",
+            "provider-status.json",
+            "validation.json",
+        ]
         manifest = {
             "object": "agent_hub.debug_bundle_manifest",
             "backend_version": bundle.get("backend_version"),
             "generated_at": bundle.get("generated_at"),
-            "files": ["debug-bundle.json", "debug-bundle.md"],
+            "files": files,
         }
         with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False, default=str))
             archive.writestr("debug-bundle.json", json_text)
             archive.writestr("debug-bundle.md", markdown_text)
+            archive.writestr("version-info.json", _json_bundle_part(bundle.get("version_info")))
+            archive.writestr("config.json", _json_bundle_part(bundle.get("config")))
+            archive.writestr("logs.json", _json_bundle_part(bundle.get("logs")))
+            archive.writestr("doctor.json", _json_bundle_part(bundle.get("doctor_output")))
+            archive.writestr("provider-status.json", _json_bundle_part(bundle.get("provider_status")))
+            archive.writestr("validation.json", _json_bundle_part(bundle.get("validation_result")))
         print(f"Wrote {path}")
         return 0
 
@@ -233,18 +260,31 @@ def _export_logs(config: Any, *, output_format: str, output_path: str | None) ->
     return 0
 
 
-def _log_export_bundle(config: Any) -> dict[str, Any]:
+def _json_bundle_part(value: Any) -> str:
+    return json.dumps({} if value is None else value, indent=2, ensure_ascii=False, default=str)
+
+
+def _log_export_bundle(config: Any, *, config_path: str | None = None) -> dict[str, Any]:
+    router = AgentRouter(config)
+    provider_health = _sanitize_debug_value(router.health_snapshot(include_history=True))
+    provider_status = _sanitize_debug_value(router.provider_status())
+    doctor_output = _sanitize_debug_value(_debug_doctor_output(config, config_path=config_path))
+    validation_result = _sanitize_debug_value(_debug_validation_result())
     streams = {
-        stream: [_redact_sensitive(event) for event in recent_events(config.state_dir, stream, limit=200)]
+        stream: [_sanitize_debug_value(event) for event in recent_events(config.state_dir, stream, limit=200)]
         for stream in STREAM_FILES
     }
+    version_info = _debug_version_info()
+    config_data = _sanitize_debug_value(config_to_dict(config))
     return {
         "object": "agent_hub.debug_bundle",
-        "backend_version": backend_version(),
+        "backend_version": version_info["backend_version"],
+        "version_info": version_info,
         "generated_at": time.time(),
         "state_dir": str(config.state_dir),
         "server": {"host": config.host, "port": config.port},
-        "config": {
+        "config": config_data,
+        "config_summary": {
             "free_only": config.free_only,
             "approval_mode": config.approval_mode,
             "shell_command_policy": config.shell_command_policy,
@@ -252,6 +292,11 @@ def _log_export_bundle(config: Any) -> dict[str, Any]:
             "routes": [route.name for route in config.routes],
             "agents": sorted(config.agents),
         },
+        "doctor_output": doctor_output,
+        "provider_status": provider_status,
+        "provider_health": provider_health,
+        "validation_result": validation_result,
+        "logs": streams.get("logs", []),
         "counts": {stream: len(events) for stream, events in streams.items()},
         "streams": streams,
     }
@@ -264,6 +309,24 @@ def _log_bundle_markdown(bundle: dict[str, Any]) -> str:
         f"- backend_version: {bundle.get('backend_version')}",
         f"- generated_at: {bundle.get('generated_at')}",
         f"- state_dir: {bundle.get('state_dir')}",
+        "",
+        "## Version Info",
+        "",
+        "```json",
+        json.dumps(bundle.get("version_info", {}), indent=2, ensure_ascii=False, default=str),
+        "```",
+        "",
+        "## Validation",
+        "",
+        "```json",
+        json.dumps(bundle.get("validation_result", {}), indent=2, ensure_ascii=False, default=str),
+        "```",
+        "",
+        "## Provider Status",
+        "",
+        "```json",
+        json.dumps(bundle.get("provider_status", []), indent=2, ensure_ascii=False, default=str),
+        "```",
         "",
         "## Counts",
         "",
@@ -287,21 +350,70 @@ def _log_bundle_markdown(bundle: dict[str, Any]) -> str:
 
 
 def _redact_sensitive(value: Any, key: str = "") -> Any:
-    if _sensitive_key(key):
-        return "[redacted]"
-    if isinstance(value, dict):
-        return {str(item_key): _redact_sensitive(item_value, str(item_key)) for item_key, item_value in value.items()}
-    if isinstance(value, list):
-        return [_redact_sensitive(item, key) for item in value]
-    if isinstance(value, str):
-        stripped = value.strip()
-        lowered = stripped.lower()
-        if lowered.startswith("bearer ") or lowered.startswith("sk-") or lowered.startswith("xox"):
-            return "[redacted]"
-    return value
+    return _sanitize_debug_value(value, key)
 
 
 def _sensitive_key(key: str) -> bool:
+    return _sensitive_debug_key(key)
+
+
+def _sanitize_debug_value(value: Any, key: str = "") -> Any:
+    if _sensitive_debug_key(key):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {str(item_key): _sanitize_debug_value(item_value, str(item_key)) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_debug_value(item, key) for item in value]
+    if isinstance(value, str):
+        return redact_secret_like_text(value)
+    return value
+
+
+def _sensitive_debug_key(key: str) -> bool:
+    if key.lower().replace("-", "_").endswith("_env"):
+        return False
+    if secret_key(key):
+        return True
     lowered = key.lower()
     collapsed = re.sub(r"[^a-z0-9]+", "", lowered)
     return any(fragment in lowered or fragment in collapsed for fragment in SENSITIVE_KEY_FRAGMENTS)
+
+
+def _debug_version_info() -> dict[str, Any]:
+    return {
+        "backend_version": backend_version(),
+        "python_version": sys.version.split()[0],
+        "python_executable": sys.executable,
+    }
+
+
+def _debug_doctor_output(config: Any, *, config_path: str | None) -> dict[str, Any]:
+    try:
+        from .commands_doctor import _doctor_report
+
+        return _doctor_report(config, config_path or "agent-hub.config.json")
+    except Exception as exc:
+        return {
+            "object": "agent_hub.doctor_error",
+            "ok": False,
+            "error": str(exc),
+        }
+
+
+def _debug_validation_result() -> dict[str, Any]:
+    root = Path(__file__).resolve().parents[1]
+    try:
+        from scripts.validate_release import validate_release
+
+        failures = validate_release(root, require_vsix=False)
+    except Exception as exc:
+        return {
+            "object": "agent_hub.release_validation",
+            "ok": False,
+            "error": str(exc),
+        }
+    return {
+        "object": "agent_hub.release_validation",
+        "ok": not failures,
+        "failures": failures,
+    }

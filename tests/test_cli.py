@@ -346,10 +346,78 @@ class CliTests(unittest.TestCase):
             self.assertIn("estimated_cost_usd", row)
             self.assertIn("routing_explanation", row)
 
+    def test_route_diagnose_reports_selection_skips_latency_and_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "state_dir": str(Path(tmp) / "state"),
+                        "auto_detect_local_models": False,
+                        "free_only": True,
+                        "default_route": ["paid", "free"],
+                        "routes": [{"name": "coding", "agents": ["paid", "free"]}],
+                        "agents": [
+                            {
+                                "name": "paid",
+                                "provider": "openai-compatible",
+                                "model": "paid-test",
+                                "base_url": "https://example.invalid/v1",
+                                "free": False,
+                                "supports_tools": True,
+                            },
+                            {
+                                "name": "free",
+                                "provider": "openai-compatible",
+                                "model": "free-test",
+                                "base_url": "http://127.0.0.1:9999",
+                                "free": True,
+                                "supports_tools": True,
+                                "cost_per_million_input": 1.0,
+                                "cost_per_million_output": 2.0,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "route-diagnose",
+                        "--route",
+                        "coding",
+                        "--needs-tools",
+                        "--output-tokens",
+                        "1000",
+                        "--json",
+                        "fix tests",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            data = json.loads(buffer.getvalue())
+            self.assertEqual(data["object"], "agent_hub.route_diagnosis")
+            self.assertEqual(data["selected_provider"], "openai-compatible")
+            self.assertEqual(data["selected_model"], "free-test")
+            self.assertIn("latency_ms", data)
+            self.assertGreater(data["estimated_cost_usd"], 0)
+            self.assertEqual(data["fallback_reason"], "skipped by free_only")
+            self.assertEqual(data["skipped_providers"][0]["agent"], "paid")
+            self.assertEqual(data["skipped_providers"][0]["reason"], "skipped by free_only")
+
     def test_debug_bundle_exports_zip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"
             _write_minimal_config(path)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["agents"][0]["api_key"] = "sk-test-secret-value-1234567890"
+            data["agents"][0]["api_key_env"] = "ECHO_API_KEY"
+            path.write_text(json.dumps(data), encoding="utf-8")
             output = Path(tmp) / "debug.zip"
             buffer = io.StringIO()
 
@@ -359,7 +427,21 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertTrue(output.exists())
             with zipfile.ZipFile(output) as archive:
-                self.assertIn("manifest.json", set(archive.namelist()))
+                names = set(archive.namelist())
+                self.assertIn("manifest.json", names)
+                self.assertIn("version-info.json", names)
+                self.assertIn("config.json", names)
+                self.assertIn("logs.json", names)
+                self.assertIn("doctor.json", names)
+                self.assertIn("provider-status.json", names)
+                self.assertIn("validation.json", names)
+                manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+                self.assertIn("doctor.json", manifest["files"])
+                config = json.loads(archive.read("config.json").decode("utf-8"))
+                self.assertEqual(config["agents"][0]["api_key"], "[REDACTED]")
+                self.assertEqual(config["agents"][0]["api_key_env"], "ECHO_API_KEY")
+                validation = json.loads(archive.read("validation.json").decode("utf-8"))
+                self.assertEqual(validation["object"], "agent_hub.release_validation")
 
     def test_chat_runs_one_turn_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

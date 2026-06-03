@@ -3,7 +3,10 @@
 `agent_hub/` is the canonical Python backend source.
 
 `vscode-extension/backend/agent_hub/` is a generated VS Code packaging snapshot.
-It is refreshed by:
+The parent `vscode-extension/backend` directory is generated during packaging
+and intentionally gitignored. Run `cd vscode-extension && npm run prepare-backend`
+to regenerate it from the extension directory, or refresh it from the repository
+root with:
 
 ```powershell
 python scripts/generate_backend_snapshot.py
