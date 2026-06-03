@@ -23,6 +23,50 @@ Hosted API-key providers remain available as configurable fallbacks. It does not
 automate bypassing free-tier limits, scraping web UIs, or downloading
 proprietary vendor models.
 
+## Why Use Agent-Hub?
+
+Agent-Hub gives local AI tooling one gateway instead of one-off vendor
+integrations. Use OpenAI, Anthropic, OpenRouter-style, Ollama, local, and custom
+OpenAI-compatible providers behind the same local API, then change providers
+without rewriting every coding tool.
+
+- Avoid vendor lock-in with one local compatibility layer for many providers.
+- Use one gateway for Cline, Claude Code, Continue, VS Code, scripts, and local
+  workflows.
+- Automatically route to the best available model for the task instead of a
+  fixed default.
+- Reduce cost through cheaper-model routing, context compression, repo-map
+  injection, and provider fallback.
+- Improve reliability with health tracking, cooldowns, quota-aware failover,
+  retry, and safe empty-response recovery.
+- Improve safety with centralized provider, shell, install, file-write,
+  deletion, and config-edit permissions.
+- Keep coding workflows local and auditable through JSONL request, routing,
+  permission, workflow, and tool logs.
+- Give developers visibility into selected models, routing reasons, fallback
+  events, cost/context estimates, permission blocks, and workflow progress.
+
+## Killer Feature: Smart Workspace-Aware Model Routing
+
+Agent-Hub does more than route by price or uptime. It classifies the task,
+repository hints, file types, risk level, context size, and required
+capabilities, then chooses a provider/model/workflow with an explainable reason.
+
+Examples:
+
+- "Explain this concept" routes to a cheaper fast model.
+- "Refactor this large module" routes to a long-context coding model.
+- "Edit config and run an install" stays in the coding/reviewer path and
+  triggers permission gates.
+- Failed, rate-limited, or quota-exhausted providers automatically fall back.
+- Large repo tasks use context compression and repo-map injection.
+- High-risk shell commands are blocked or require approval before execution.
+
+See `/v1/routing/last-decision` or `/v1/status` for `selected_provider`,
+`selected_model`, `routing_reason`, `task_classification`,
+`cost_context_estimate`, fallback events, permission blocks, and workflow
+progress.
+
 ## What It Runs
 
 - Local HTTP server on `127.0.0.1:8787`
@@ -67,10 +111,11 @@ Agent-Hub is organized around modular backend systems:
   `/v1/routing-history`, and `/v1/provider-scores` explain model selection,
   adaptive optimization, retry recovery, and tool/workflow activity.
 
-More detail lives in `docs/architecture.md`, `docs/providers.md`,
-`docs/workflows.md`, `docs/tools.md`, `docs/mcp.md`, `docs/evaluation.md`,
-`docs/install-vsix.md`, `docs/plugins.md`, `docs/deployment.md`, and
-`docs/api.md`.
+More detail lives in `docs/why-agent-hub.md`, `docs/architecture.md`,
+`docs/killer-feature-smart-routing.md`, `docs/security-boundaries.md`,
+`docs/api-compatibility.md`, `docs/providers.md`, `docs/workflows.md`,
+`docs/tools.md`, `docs/mcp.md`, `docs/evaluation.md`, `docs/install-vsix.md`,
+`docs/plugins.md`, `docs/deployment.md`, and `docs/api.md`.
 
 Dedicated setup docs are also available for [Cline](docs/CLINE.md),
 [Claude Code](docs/CLAUDE_CODE.md), [Continue](docs/continue.md), and

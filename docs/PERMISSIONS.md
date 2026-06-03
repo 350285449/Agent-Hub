@@ -22,3 +22,6 @@ Recommended production modes:
 Dangerous commands such as `rm -rf`, `git reset --hard`, sudo/admin escalation,
 downloaded install scripts, and credential exposure are blocked or require
 explicit approval.
+
+See `docs/security-boundaries.md` for the provider, workflow, filesystem,
+shell, and API boundary model.

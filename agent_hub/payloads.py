@@ -179,7 +179,7 @@ def openai_chat_response(
     }
     if include_routing_details:
         data["agent_hub"] = _hub_metadata(response)
-    _add_research_metadata(data, response)
+        _add_research_metadata(data["agent_hub"], response)
     return data
 
 
@@ -205,8 +205,6 @@ def anthropic_message_response(
     if include_routing_details:
         data["agent_hub"] = _hub_metadata(response)
         _add_research_metadata(data["agent_hub"], response)
-    else:
-        _add_research_metadata(data, response)
     return data
 
 
@@ -252,7 +250,7 @@ def openai_response_response(
     }
     if include_routing_details:
         data["agent_hub"] = _hub_metadata(response)
-    _add_research_metadata(data, response)
+        _add_research_metadata(data["agent_hub"], response)
     return data
 
 
@@ -449,6 +447,7 @@ def _hub_metadata(response: HubResponse) -> dict[str, Any]:
             "token_budget",
             "confidence",
             "routing_summary",
+            "routing_decision",
         ):
             if key in raw_metadata:
                 data[key] = raw_metadata[key]

@@ -16,6 +16,21 @@ preferences. It preserves failover details internally and can expose selected
 provider, model, fallback chain, routing reason, score, stream mode, and
 context compression metadata when detailed routing is enabled.
 
+The router boundary is intentionally narrow:
+
+- `agent_hub.core.task_classifier.TaskClassifier` classifies task type, file
+  types, risk level, required capabilities, repository-context need, and the
+  suggested routing mode.
+- `agent_hub.core.context_preparation.ContextPreparationService` adds built-in
+  tool specs and repository context before provider execution. `decide()` does
+  not mutate requests or inject tools.
+- `agent_hub.core.provider_manager.ProviderManager` creates adapters and
+  normalizes provider `chat()` / `stream()` results.
+- `agent_hub.core.provider_attempts.ProviderAttemptExecutor` owns provider
+  attempts, fallback, output-limit continuation, and success/failure recording.
+- `agent_hub.core.interfaces` defines protocol interfaces between router,
+  context engine, providers, tools, and workflow orchestration.
+
 `agent_hub.core.provider_attempts.ProviderAttemptExecutor` owns the ranked
 provider execution loop for non-streaming requests: cooldown/preflight skips,
 permission blocks, retry/failover, validation recovery, output-limit
@@ -52,6 +67,10 @@ tool reliability, streaming speed, recent failures, and cooldowns. Health is
 persisted in `.agent-hub/state/provider_health.json` and contributes to dynamic
 provider scores.
 
+Provider health, cooldowns, routing history writes, and tool-result counters
+are guarded through router state locks or atomic JSONL/file writes so
+simultaneous requests can update telemetry without corrupting state.
+
 Provider evaluation scores are stored in `.agent-hub/state/provider_scores.json`
 and can add a small routing bias after real benchmark runs.
 
@@ -72,6 +91,12 @@ referenced files that were not selected as evidence.
 Planner -> Worker -> Reviewer workflows for code, review, debug, explain, and
 refactor tasks. Optional stages add reviewer retry, shell validation commands,
 validator review, patch summary, and a workflow state object.
+
+Workflow-owned file and shell actions go through
+`agent_hub.workflows.workspace_service.SafeWorkspaceService`, which wraps the
+same permission-aware `AgentToolbox` used by provider tool loops. Workflows
+support per-stage timeouts, cancellation checks, and dry-run file/shell action
+previews.
 
 ## Tool System
 

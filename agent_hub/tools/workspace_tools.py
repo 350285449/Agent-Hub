@@ -300,6 +300,11 @@ class AgentToolbox:
                     "error": decision.reason or f"Permission denied for tool {name}.",
                 }
             
+            if self._dry_run_requested(name, args):
+                response = self._dry_run_response(name, args, decision)
+                self._record_tool_event(name, args, response)
+                return response
+
             if self._is_mutating_tool(name):
                 checkpoint = self._create_edit_checkpoint(name, args)
             try:
@@ -395,6 +400,36 @@ class AgentToolbox:
 
     def _is_mutating_tool(self, name: str) -> bool:
         return name in MUTATING_AGENT_TOOLS
+
+    def _dry_run_requested(self, name: str, args: dict[str, Any]) -> bool:
+        if name not in {*MUTATING_AGENT_TOOLS, "run_command"}:
+            return False
+        return _truthy(args.get("dry_run")) or _truthy(_request_option(self.request, "dry_run", False))
+
+    def _dry_run_response(
+        self,
+        name: str,
+        args: dict[str, Any],
+        decision: PermissionDecision,
+    ) -> dict[str, Any]:
+        affected_files = self._get_affected_files(name, args)
+        preview = ""
+        if name == "apply_patch":
+            preview = self._patch_plan(args)["patch_preview"]
+        elif name in {"write_file", "replace_in_file"}:
+            preview = self._single_edit_preview(name, args)
+        elif name == "run_command":
+            preview = str(args.get("command") or "")
+        return {
+            "ok": True,
+            "tool": name,
+            "dry_run": True,
+            "would_execute": name == "run_command",
+            "would_modify": name in MUTATING_AGENT_TOOLS,
+            "affected_files": affected_files,
+            "patch_preview": preview[:MAX_PATCH_CHARS],
+            "permission": decision.to_dict(),
+        }
 
     def _create_edit_checkpoint(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         paths = self._checkpoint_paths_for_edit(name, args)

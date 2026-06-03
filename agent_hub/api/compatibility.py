@@ -105,6 +105,40 @@ def response_for_shape(
     )
 
 
+def error_response_for_shape(
+    error: dict[str, Any],
+    response_shape: str,
+    *,
+    agent_hub: dict[str, Any] | None = None,
+    failover: list[dict[str, Any]] | None = None,
+    include_routing_details: bool = False,
+) -> dict[str, Any]:
+    public_error = {
+        "message": str(error.get("message") or "Agent Hub request failed."),
+        "type": str(error.get("type") or "agent_hub_error"),
+    }
+    if error.get("code") is not None:
+        public_error["code"] = error.get("code")
+    if error.get("param") is not None:
+        public_error["param"] = error.get("param")
+    if response_shape == "anthropic-messages":
+        body: dict[str, Any] = {
+            "type": "error",
+            "error": {
+                "type": public_error["type"],
+                "message": public_error["message"],
+            },
+        }
+    else:
+        body = {"error": dict(error)}
+    if include_routing_details:
+        if agent_hub:
+            body["agent_hub"] = agent_hub
+        if failover:
+            body["failover"] = failover
+    return body
+
+
 def openai_chat_sse_frames(
     response: HubResponse,
     *,
@@ -577,6 +611,7 @@ __all__ = [
     "compatibility_endpoint",
     "compatibility_label",
     "debug_api_shape",
+    "error_response_for_shape",
     "has_session_key",
     "known_client_from_user_agent",
     "model_lookup_error",

@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass, field, fields, replace
 from collections.abc import Callable
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from ...adaptive import AdaptiveLearningStore, estimate_known_cost_usd
@@ -45,9 +46,11 @@ from ..health import (
     health_state_label,
     provider_cost_efficiency_score,
 )
+from ..context_preparation import ContextPreparationService
 from ..provider_manager import ProviderManager
 from ..provider_attempts import ProviderAttemptExecutor, ProviderAttemptHelpers
 from ..router_diagnostics import build_capability_graph, build_provider_status
+from ..task_classifier import TaskClassifier
 from ..routing_policy import (
     CONFIGURATION_ERROR,
     ECHO_DISABLED,
@@ -126,6 +129,7 @@ class RoutingDecision:
     task_type: str | None = None
     estimated_input_tokens: int = 0
     candidate_scores: list[dict[str, Any]] = field(default_factory=list)
+    task_classification: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = {
@@ -138,6 +142,8 @@ class RoutingDecision:
             "fallback_chain": list(self.fallback_chain),
             "estimated_input_tokens": self.estimated_input_tokens,
         }
+        if self.task_classification:
+            data["task_classification"] = dict(self.task_classification)
         if self.candidate_scores:
             data["candidate_scores"] = list(self.candidate_scores)
         return data
@@ -210,6 +216,8 @@ class AgentRouter:
         self.session_store = session_store or SessionStore(config.state_dir)
         self._health_path = config.state_dir / HEALTH_STATE_FILE
         self.health_tracker = ProviderHealthTracker(self._health_path)
+        self._state_lock = RLock()
+        self.task_classifier = TaskClassifier()
         self._health: dict[str, ProviderHealth] = self._load_provider_health()
         self.preflight_policy = RouterPreflightPolicy(config, self._health)
         self.provider_permission_policy = ProviderPermissionPolicy(config)
@@ -247,6 +255,12 @@ class AgentRouter:
             self.tool_registry.extend(MCPServerRegistry(config).agent_hub_tools())
         except Exception:
             pass
+        self.context_preparation = ContextPreparationService(
+            config,
+            tool_registry=self.tool_registry,
+            has_tool_capable_candidate=self._has_tool_capable_candidate,
+            repo_context_provider=repo_context_for_request,
+        )
         self.tool_pipeline = ToolExecutionPipeline(self.tool_registry)
         self.tool_loop_runner = ToolLoopRunner(
             config=config,
@@ -1002,72 +1016,13 @@ class AgentRouter:
         return replace(request, messages=[*history, *request.messages])
 
     def _prepare_request(self, request: HubRequest, *, include_tools: bool = True) -> HubRequest:
-        if include_tools:
-            request = self._with_builtin_tool_specs(request)
-        prepared = self._with_repo_context(request)
-        return prepared
+        return self.context_preparation.prepare(request, include_tools=include_tools)
 
     def _with_repo_context(self, request: HubRequest) -> HubRequest:
-        if not getattr(self.config, "repo_context_enabled", True):
-            return request
-        if _agent_runner_managed_request(request):
-            return request
-        if _request_has_client_tool_specs(request):
-            return request
-        if not _repo_context_useful(request):
-            return request
-        if any(message.get("agent_hub_repo_context") for message in request.messages if isinstance(message, dict)):
-            return request
-        max_files = self.config.repo_context_max_files
-        max_chars = self.config.repo_context_max_chars
-        if _compatibility_reductions_enabled(self.config, request, "reduced_repo_context"):
-            max_files = min(max_files, 3)
-            max_chars = min(max_chars, 4_000)
-        try:
-            selection = repo_context_for_request(
-                request,
-                self.config.workspace_dir,
-                max_files=max_files,
-                max_chars=max_chars,
-                ignore_patterns=self.config.repo_ignore_patterns,
-            )
-        except Exception:
-            return request
-        message = selection.to_message()
-        if message is None:
-            return request
-        raw = dict(request.raw or {})
-        hub = dict(raw.get("agent_hub") or {})
-        hub["repo_context"] = selection.to_dict()
-        raw["agent_hub"] = hub
-        return replace(request, messages=[message, *request.messages], raw=raw)
+        return self.context_preparation.with_repo_context(request)
 
     def _with_builtin_tool_specs(self, request: HubRequest) -> HubRequest:
-        if not getattr(self.config, "tool_loop_enabled", True):
-            return request
-        if _request_is_cline(request) and not getattr(self.config, "tool_loop_enabled_for_cline", False):
-            return request
-        if _agent_runner_managed_request(request):
-            return request
-        if _request_has_client_tool_specs(request):
-            return request
-        if _request_option(request, "disable_builtin_tools", "disable_agent_hub_tools") is True:
-            return request
-        if not _repo_or_tool_task(request):
-            return request
-        if not self._has_tool_capable_candidate(request):
-            return request
-        raw = dict(request.raw or {})
-        if isinstance(raw.get("agent_hub_tools"), list) and raw["agent_hub_tools"]:
-            return request
-        tool_specs = [tool.to_agent_hub_spec() for tool in self.tool_registry.list()]
-        if _compatibility_reductions_enabled(self.config, request, "minimal_tool_schema"):
-            tool_specs = [_minimal_tool_schema(spec) for spec in tool_specs]
-        raw["agent_hub_tools"] = tool_specs
-        hub = dict(raw.get("agent_hub") or {})
-        hub["auto_execute_tools"] = True
-        raw["agent_hub"] = hub
-        return replace(request, raw=raw)
+        return self.context_preparation.with_builtin_tool_specs(request)
 
     def _has_tool_capable_candidate(self, request: HubRequest) -> bool:
         names: list[str] = []
@@ -1102,8 +1057,9 @@ class AgentRouter:
     def decide(self, request: HubRequest) -> RoutingDecision:
         """Choose a ranked fallback chain before execution."""
 
+        classification = self.task_classifier.classify(request)
         mode = self._routing_mode(request)
-        task_type = self._classify_task(request)
+        task_type = classification.task_type
         agents = self._candidate_agent_pool(request, mode=mode)
         selected = agents[0] if agents else None
         candidate_scores = self._routing_candidate_scorecards(request, agents)
@@ -1124,8 +1080,9 @@ class AgentRouter:
             task_type=task_type,
             reason=reason,
             fallback_chain=[agent.name for agent in agents],
-            estimated_input_tokens=estimate_input_tokens(request),
+            estimated_input_tokens=classification.estimated_input_tokens,
             candidate_scores=candidate_scores,
+            task_classification=classification.to_dict(),
         )
 
     def _candidate_agents(
@@ -1219,30 +1176,10 @@ class AgentRouter:
             return "manual"
         if _privacy_requested(request):
             return "local_private"
-        task_type = self._classify_task(request)
-        if task_type == "long_context":
-            return "long_context"
-        if task_type in {"coding", "debug", "review", "tool_use"}:
-            return "coding"
-        return DEFAULT_ROUTING_MODE
+        return self.task_classifier.classify(request).routing_mode
 
     def _classify_task(self, request: HubRequest) -> str:
-        if _privacy_requested(request):
-            return "local_private"
-        if estimate_input_tokens(request) >= LONG_CONTEXT_TOKEN_THRESHOLD:
-            return "long_context"
-        text = _classification_text(request).lower()
-        if _request_has_tools(request):
-            return "tool_use"
-        if _looks_like_debug_task(text):
-            return "debug"
-        if _looks_like_review_task(text):
-            return "review"
-        if _looks_like_research_task(text):
-            return "research"
-        if _looks_like_coding_task(text):
-            return "coding"
-        return "general"
+        return self.task_classifier.classify(request).task_type
 
     def _rank_agents_for_mode(
         self,
@@ -1338,12 +1275,21 @@ class AgentRouter:
         request: HubRequest,
         agents: list[AgentConfig],
     ) -> list[dict[str, Any]]:
-        task_type = self._classify_task(request)
+        classification = self.task_classifier.classify(request)
+        task_type = classification.task_type
         workflow_pattern = _request_workflow_pattern(request)
         workflow_role = _request_workflow_role(request)
+        estimated_input = classification.estimated_input_tokens
         rows: list[dict[str, Any]] = []
         for rank, agent in enumerate(agents[:8], start=1):
             health = self._health.get(agent.name)
+            output_budget = output_token_budget(
+                self.config,
+                request,
+                agent,
+                input_tokens=estimated_input,
+                health=health,
+            )
             if self.config.adaptive_learning_enabled and self.config.adaptive_routing_enabled:
                 adaptive = self.adaptive_learning.routing_signal(
                     agent.name,
@@ -1367,6 +1313,15 @@ class AgentRouter:
                     "provider_type": agent.provider_type or normalize_provider(agent.provider),
                     "model": agent.model,
                     "routing_score": round(self._routing_score(agent, request), 3),
+                    "why": _recommendation_reason(agent, text=request_text(request), prefer=None, index=rank - 1),
+                    "task_classification": classification.to_dict(),
+                    "estimated_input_tokens": estimated_input,
+                    "estimated_output_tokens": int(output_budget.effective),
+                    "estimated_cost_usd": estimate_known_cost_usd(
+                        agent,
+                        input_tokens=estimated_input,
+                        output_tokens=int(output_budget.effective),
+                    ),
                     "adaptive": adaptive,
                     "health": {
                         "success_count": health.success_count if health else 0,
@@ -1408,6 +1363,19 @@ class AgentRouter:
             return "Privacy/local mode was requested, so only local/private providers were considered."
         if request.stream and selected.supports_streaming:
             return "Selected best available streaming-capable route candidate."
+        classification = self.task_classifier.classify(request)
+        if classification.task_type == "security_sensitive_change":
+            return (
+                "Security-sensitive workspace change detected; selected a coding/review-capable "
+                "candidate with permission gates active."
+            )
+        if classification.task_type == "simple_explanation":
+            return "Simple explanation request; selected a cheaper fast candidate when available."
+        if classification.repository_context_needed:
+            return (
+                f"{classification.reason_sentence()} Selected {selected.name} because its "
+                "capabilities best match the workspace-aware task."
+            )
         if task_type != "general":
             return f"Selected best available candidate for {task_type} task."
         return "Selected best available route candidate using priority, health, and capability scores."
@@ -1494,36 +1462,41 @@ class AgentRouter:
         return self._cooldown_until(agent_name) > time.time()
 
     def _cooldown_until(self, agent_name: str) -> float:
-        health = self._health.get(agent_name)
-        return max(
-            self._cooldowns.get(agent_name, 0.0),
-            health.cooldown_deadline() if health else 0.0,
-        )
+        with self._state_lock:
+            health = self._health.get(agent_name)
+            return max(
+                self._cooldowns.get(agent_name, 0.0),
+                health.cooldown_deadline() if health else 0.0,
+            )
 
     def cooldown_agent(self, agent_name: str, seconds: float | None = None) -> None:
         agent = self.config.agents.get(agent_name)
         duration = seconds if seconds is not None else (agent.cooldown_seconds if agent else 0)
         if duration <= 0:
             return
-        cooldown_until = time.time() + duration
-        self._cooldowns[agent_name] = cooldown_until
-        health = self._health.setdefault(agent_name, ProviderHealth())
-        health.cooldown_until = max(health.cooldown_until, cooldown_until)
-        health.unavailable_until = max(health.unavailable_until, cooldown_until)
-        health.last_checked_at = time.time()
-        self._save_provider_health()
+        with self._state_lock:
+            cooldown_until = time.time() + duration
+            self._cooldowns[agent_name] = cooldown_until
+            health = self._health.setdefault(agent_name, ProviderHealth())
+            health.cooldown_until = max(health.cooldown_until, cooldown_until)
+            health.unavailable_until = max(health.unavailable_until, cooldown_until)
+            health.last_checked_at = time.time()
+            self._save_provider_health()
 
     def health_snapshot(self, *, include_history: bool = False) -> dict[str, dict[str, Any]]:
         """Return normalized provider health for diagnostics and tests."""
 
-        now = time.time()
-        names = sorted(set(self.config.agents) | set(self._health))
+        with self._state_lock:
+            now = time.time()
+            names = sorted(set(self.config.agents) | set(self._health))
+            health_rows = {name: self._health.get(name, ProviderHealth()) for name in names}
+            cooldown_rows = {name: self._cooldowns.get(name, 0.0) for name in names}
         snapshot: dict[str, dict[str, Any]] = {}
         for name in names:
-            health = self._health.get(name, ProviderHealth())
+            health = health_rows[name]
             agent = self.config.agents.get(name)
             capabilities = agent_capabilities(agent) if agent else None
-            cooldown_until = max(self._cooldowns.get(name, 0.0), health.cooldown_deadline())
+            cooldown_until = max(cooldown_rows.get(name, 0.0), health.cooldown_deadline())
             available = bool(agent.enabled) if agent else False
             if agent and self.config.free_only and not is_free_agent(agent):
                 available = False
@@ -1901,50 +1874,51 @@ class AgentRouter:
         request_id: str | None = None,
         first_token_latency_seconds: float | None = None,
     ) -> None:
-        health = self._health.setdefault(agent.name, ProviderHealth())
-        now = time.time()
-        health.success_count += 1
-        health.total_latency_seconds += max(0.0, latency_seconds)
-        health.last_success_at = now
-        health.last_checked_at = now
-        health.last_request_source = request_source(request)
-        health.last_route = request.route or ""
-        health.last_request_started_at = max(0.0, now - max(0.0, latency_seconds))
-        health.last_first_token_latency_seconds = max(
-            0.0,
-            float(first_token_latency_seconds)
-            if first_token_latency_seconds is not None
-            else float(_provider_stream_metadata(result.raw).get("first_token_latency_seconds") or 0.0),
-        )
-        health.last_total_latency_seconds = max(0.0, latency_seconds)
-        health.last_finish_reason = str(result.finish_reason or "")
-        health.last_failover_attempts = max(0, int(failover_attempts))
-        health.rate_limited = False
-        health.quota_exhausted = False
-        tokens_in = _usage_int(result.usage, "prompt_tokens", "input_tokens")
-        tokens_out = _usage_int(result.usage, "completion_tokens", "output_tokens")
-        if tokens_out <= 0:
-            tokens_out = _result_output_tokens(result)
-        health.last_input_tokens = tokens_in
-        health.last_output_tokens = tokens_out
-        health.last_tokens_per_second = tokens_out / latency_seconds if latency_seconds > 0 and tokens_out > 0 else 0.0
-        health.tokens_in += tokens_in
-        health.tokens_out += tokens_out
-        if latency_seconds > 0 and tokens_out > 0:
-            health.total_tokens_per_second += tokens_out / latency_seconds
-            health.tokens_per_second_sample_count += 1
-        if request.stream and latency_seconds > 0 and tokens_out > 0:
-            health.total_streaming_tokens_per_second += tokens_out / latency_seconds
-            health.streaming_sample_count += 1
-        _apply_agent_capabilities(health, agent)
-        _apply_provider_metadata(
-            health,
-            _provider_metadata_from_raw(result.raw),
-            agent=agent,
-        )
-        health.last_context_compaction_usage = _context_usage(request)
-        health.quota_state = _health_quota_state(health)
-        self._save_provider_health()
+        with self._state_lock:
+            health = self._health.setdefault(agent.name, ProviderHealth())
+            now = time.time()
+            health.success_count += 1
+            health.total_latency_seconds += max(0.0, latency_seconds)
+            health.last_success_at = now
+            health.last_checked_at = now
+            health.last_request_source = request_source(request)
+            health.last_route = request.route or ""
+            health.last_request_started_at = max(0.0, now - max(0.0, latency_seconds))
+            health.last_first_token_latency_seconds = max(
+                0.0,
+                float(first_token_latency_seconds)
+                if first_token_latency_seconds is not None
+                else float(_provider_stream_metadata(result.raw).get("first_token_latency_seconds") or 0.0),
+            )
+            health.last_total_latency_seconds = max(0.0, latency_seconds)
+            health.last_finish_reason = str(result.finish_reason or "")
+            health.last_failover_attempts = max(0, int(failover_attempts))
+            health.rate_limited = False
+            health.quota_exhausted = False
+            tokens_in = _usage_int(result.usage, "prompt_tokens", "input_tokens")
+            tokens_out = _usage_int(result.usage, "completion_tokens", "output_tokens")
+            if tokens_out <= 0:
+                tokens_out = _result_output_tokens(result)
+            health.last_input_tokens = tokens_in
+            health.last_output_tokens = tokens_out
+            health.last_tokens_per_second = tokens_out / latency_seconds if latency_seconds > 0 and tokens_out > 0 else 0.0
+            health.tokens_in += tokens_in
+            health.tokens_out += tokens_out
+            if latency_seconds > 0 and tokens_out > 0:
+                health.total_tokens_per_second += tokens_out / latency_seconds
+                health.tokens_per_second_sample_count += 1
+            if request.stream and latency_seconds > 0 and tokens_out > 0:
+                health.total_streaming_tokens_per_second += tokens_out / latency_seconds
+                health.streaming_sample_count += 1
+            _apply_agent_capabilities(health, agent)
+            _apply_provider_metadata(
+                health,
+                _provider_metadata_from_raw(result.raw),
+                agent=agent,
+            )
+            health.last_context_compaction_usage = _context_usage(request)
+            health.quota_state = _health_quota_state(health)
+            self._save_provider_health()
         self._record_adaptive_outcome(
             request_id=request_id,
             request=request,
@@ -1977,57 +1951,61 @@ class AgentRouter:
         routing_mode: str | None = None,
         failover_attempts: int = 0,
     ) -> None:
-        health = self._health.setdefault(agent.name, ProviderHealth())
-        now = time.time()
-        health.failure_count += 1
-        health.last_failure_at = now
-        health.last_checked_at = now
-        if request is not None:
-            usage = _context_usage(request)
-            health.last_request_source = request_source(request)
-            health.last_route = request.route or ""
-            health.last_request_started_at = now
-            health.last_input_tokens = int(usage.get("estimated_input_tokens") or estimate_input_tokens(request))
-            health.last_output_tokens = 0
-            health.last_context_compaction_usage = usage
-        health.last_total_latency_seconds = 0.0
-        health.last_tokens_per_second = 0.0
-        health.last_finish_reason = ""
-        health.last_failover_attempts = max(0, int(failover_attempts))
         normalized_error_type = _canonical_error_type(error_type)
-        if normalized_error_type == "provider_unavailable" and (
-            "timed out" in message.lower() or "timeout" in message.lower()
-        ):
-            health.timeout_count += 1
-        if unavailable_until is not None:
-            health.unavailable_until = max(health.unavailable_until, unavailable_until)
-            health.cooldown_until = max(health.cooldown_until, unavailable_until)
-        if normalized_error_type:
-            health.last_error_type = normalized_error_type
-        if message:
-            health.last_error_message = message[:500]
-        if (request is not None and request.stream) or "stream" in normalized_error_type:
-            health.stream_interruption_count += 1
-        health.rate_limited = normalized_error_type == "temporary_rate_limit"
-        if normalized_error_type == "quota_exhausted":
-            health.quota_exhausted = True
-        _apply_agent_capabilities(health, agent)
-        _apply_provider_metadata(health, metadata or {}, agent=agent)
-        health.quota_state = _health_quota_state(health)
-        health.failover_events.append(
-            {
-                "time": now,
-                "agent": agent.name,
-                "provider": agent.provider,
-                "model": agent.model,
-                "reason": message[:500],
-                "status_code": status_code,
-                "error_type": normalized_error_type,
-                "unavailable_until": unavailable_until,
-            }
-        )
-        health.failover_events = health.failover_events[-MAX_FAILOVER_HISTORY:]
-        self._save_provider_health()
+        with self._state_lock:
+            health = self._health.setdefault(agent.name, ProviderHealth())
+            now = time.time()
+            health.failure_count += 1
+            health.last_failure_at = now
+            health.last_checked_at = now
+            if request is not None:
+                usage = _context_usage(request)
+                health.last_request_source = request_source(request)
+                health.last_route = request.route or ""
+                health.last_request_started_at = now
+                health.last_input_tokens = int(usage.get("estimated_input_tokens") or estimate_input_tokens(request))
+                health.last_output_tokens = 0
+                health.last_context_compaction_usage = usage
+            health.last_total_latency_seconds = 0.0
+            health.last_tokens_per_second = 0.0
+            health.last_finish_reason = ""
+            health.last_failover_attempts = max(0, int(failover_attempts))
+            if normalized_error_type == "provider_unavailable" and (
+                "timed out" in message.lower() or "timeout" in message.lower()
+            ):
+                health.timeout_count += 1
+            if unavailable_until is not None:
+                health.unavailable_until = max(health.unavailable_until, unavailable_until)
+                health.cooldown_until = max(health.cooldown_until, unavailable_until)
+            if normalized_error_type:
+                health.last_error_type = normalized_error_type
+            if message:
+                health.last_error_message = message[:500]
+            if (request is not None and request.stream) or "stream" in normalized_error_type:
+                health.stream_interruption_count += 1
+            health.rate_limited = normalized_error_type == "temporary_rate_limit"
+            if normalized_error_type == "quota_exhausted":
+                health.quota_exhausted = True
+            _apply_agent_capabilities(health, agent)
+            _apply_provider_metadata(health, metadata or {}, agent=agent)
+            health.quota_state = _health_quota_state(health)
+            health.failover_events.append(
+                {
+                    "time": now,
+                    "agent": agent.name,
+                    "provider": agent.provider,
+                    "model": agent.model,
+                    "reason": message[:500],
+                    "status_code": status_code,
+                    "error_type": normalized_error_type,
+                    "unavailable_until": unavailable_until,
+                }
+            )
+            health.failover_events = health.failover_events[-MAX_FAILOVER_HISTORY:]
+            failure_count = health.failure_count
+            degraded = health.is_degraded()
+            last_input_tokens = health.last_input_tokens
+            self._save_provider_health()
         if request_id is not None and request is not None:
             self._record_internal_event(
                 PROVIDER_FAILED,
@@ -2041,8 +2019,8 @@ class AgentRouter:
                 message=message,
                 status_code=status_code,
                 unavailable_until=unavailable_until,
-                failure_count=health.failure_count,
-                degraded=health.is_degraded(),
+                failure_count=failure_count,
+                degraded=degraded,
                 retryable=unavailable_until is not None,
                 metadata=metadata or {},
             )
@@ -2054,11 +2032,11 @@ class AgentRouter:
             success=False,
             latency_seconds=None,
             failover_attempts=failover_attempts,
-            input_tokens=health.last_input_tokens,
+            input_tokens=last_input_tokens,
             output_tokens=0,
             estimated_cost_usd=estimate_known_cost_usd(
                 agent,
-                input_tokens=health.last_input_tokens,
+                input_tokens=last_input_tokens,
                 output_tokens=0,
             ),
             error_type=normalized_error_type,
@@ -2068,13 +2046,14 @@ class AgentRouter:
     def record_tool_result(self, agent_name: str, ok: bool) -> None:
         """Record whether an agent-produced tool call completed successfully."""
 
-        health = self._health.setdefault(agent_name, ProviderHealth())
-        if ok:
-            health.tool_call_success_count += 1
-        else:
-            health.tool_call_failure_count += 1
-        health.last_checked_at = time.time()
-        self._save_provider_health()
+        with self._state_lock:
+            health = self._health.setdefault(agent_name, ProviderHealth())
+            if ok:
+                health.tool_call_success_count += 1
+            else:
+                health.tool_call_failure_count += 1
+            health.last_checked_at = time.time()
+            self._save_provider_health()
 
     def _record_adaptive_outcome(
         self,
@@ -2135,7 +2114,8 @@ class AgentRouter:
 
     def _save_provider_health(self) -> None:
         try:
-            self.health_tracker.save(self._health)
+            with self._state_lock:
+                self.health_tracker.save(self._health)
         except OSError:
             return
 

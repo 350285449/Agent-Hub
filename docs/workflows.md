@@ -20,6 +20,15 @@ Optional stages:
 - Validator stage runs when `validate=true` or validation commands are present.
 - Patch summary stage runs when `patch_summary=true`.
 
+Execution controls:
+
+- `agent_hub.workflow_stage_timeout_seconds` sets a per-stage timeout.
+- `agent_hub.workflow_cancelled=true` cancels before the next stage starts.
+- `agent_hub.dry_run=true` previews workflow-owned file and shell actions
+  through the workspace service without applying file modifications.
+- Validation commands use `SafeWorkspaceService`, so shell policy, permission
+  checks, audit logs, and dry-run behavior match normal tools.
+
 Initial workflow endpoints:
 
 - `POST /v1/workflows/code`

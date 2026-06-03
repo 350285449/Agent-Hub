@@ -1,6 +1,8 @@
 # API Examples
 
 Agent-Hub exposes native and compatibility endpoints on the local server.
+Compatibility schemas are documented in `docs/api-compatibility.md`; internal
+workflow/routing metadata is hidden unless `expose_routing_details=true`.
 
 ## OpenAI Chat Completions
 
@@ -89,6 +91,14 @@ Use `validate=true` to add the optional validator stage. Use
 `patch_summary=true` to include a deterministic patch-summary stage. If
 `validation_commands` are configured and shell tools are allowed, workflows run
 those commands through the same shell policy as normal tools.
+
+Workflow options:
+
+- `agent_hub.workflow_stage_timeout_seconds`: fail a stage that exceeds the
+  timeout.
+- `agent_hub.workflow_cancelled`: cancel before the next stage starts.
+- `agent_hub.dry_run`: preview workflow-owned file/shell actions without
+  applying file changes.
 
 Workflow extension-point models are available for future planner/reviewer,
 parallel-provider, consensus, and result-merge strategies. They are passive

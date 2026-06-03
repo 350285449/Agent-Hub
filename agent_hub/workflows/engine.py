@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -9,9 +10,17 @@ from ..config import HubConfig
 from ..models import FailoverEvent, HubRequest, HubResponse
 from ..payloads import request_text
 from ..core.router import AgentRouter
-from ..tools import ToolCall, ToolExecutionContext, ToolExecutionPipeline, create_builtin_registry
 from .events import WorkflowEventRecorder, WorkflowEventSink
-from .planning import WorkflowPlanner, WorkflowStage, compact_text
+from .planning import WorkflowPlanner, WorkflowStage, compact_text, truthy
+from .workspace_service import SafeWorkspaceService
+
+
+class WorkflowTimeoutError(TimeoutError):
+    error_type = "workflow_stage_timeout"
+
+
+class WorkflowCancelledError(RuntimeError):
+    error_type = "workflow_cancelled"
 
 
 @dataclass(slots=True)
@@ -111,6 +120,7 @@ class WorkflowEngine:
         self.router = router or AgentRouter(config)
         self.planner = WorkflowPlanner(config)
         self.event_recorder = WorkflowEventRecorder(config.state_dir)
+        self.workspace_service = SafeWorkspaceService(config)
 
     def execute(
         self,
@@ -118,17 +128,26 @@ class WorkflowEngine:
         request: HubRequest,
         *,
         event_sink: WorkflowEventSink | None = None,
+        cancel_event: Any | None = None,
+        stage_timeout_seconds: float | None = None,
+        dry_run: bool | None = None,
     ) -> WorkflowResult:
         normalized = self.planner.normalize(kind)
         workflow_id = f"wf_{uuid.uuid4().hex}"
         task = request_text(request)
         state = WorkflowState()
         workflow_pattern = _workflow_pattern(request)
+        timeout_seconds = _workflow_stage_timeout(request, stage_timeout_seconds)
+        dry_run_enabled = _workflow_dry_run(request, dry_run)
         memory = WorkflowMemory(
             workflow_id=workflow_id,
             kind=normalized,
             task=task,
-            context={"workflow_pattern": workflow_pattern} if workflow_pattern else {},
+            context={
+                **({"workflow_pattern": workflow_pattern} if workflow_pattern else {}),
+                "dry_run": dry_run_enabled,
+                "stage_timeout_seconds": timeout_seconds,
+            },
             state=state,
         )
         stages = self.planner.stages_for_pattern(normalized, workflow_pattern)
@@ -149,7 +168,8 @@ class WorkflowEngine:
             workflow_pattern=workflow_pattern,
         )
         for index, stage in enumerate(stages, start=1):
-            final_response = self._run_model_stage(
+            self._raise_if_cancelled(request, cancel_event, workflow_id, event_sink)
+            final_response = self._run_model_stage_with_controls(
                 normalized,
                 stage,
                 request,
@@ -159,12 +179,14 @@ class WorkflowEngine:
                 len(stages),
                 event_sink,
                 failover,
+                timeout_seconds=timeout_seconds,
             )
 
         if self.planner.review_blocks(memory) and self.planner.retry_enabled(request):
             state.retries += 1
             retry_stage = WorkflowStage("work_retry", "coder", "coding")
-            final_response = self._run_model_stage(
+            self._raise_if_cancelled(request, cancel_event, workflow_id, event_sink)
+            final_response = self._run_model_stage_with_controls(
                 normalized,
                 retry_stage,
                 request,
@@ -174,8 +196,10 @@ class WorkflowEngine:
                 len(stages) + 2,
                 event_sink,
                 failover,
+                timeout_seconds=timeout_seconds,
             )
-            final_response = self._run_model_stage(
+            self._raise_if_cancelled(request, cancel_event, workflow_id, event_sink)
+            final_response = self._run_model_stage_with_controls(
                 normalized,
                 WorkflowStage("review_retry", "reviewer", "reliable"),
                 request,
@@ -185,13 +209,16 @@ class WorkflowEngine:
                 len(stages) + 2,
                 event_sink,
                 failover,
+                timeout_seconds=timeout_seconds,
             )
 
         if self.config.allow_shell_tools and self.config.validation_commands:
-            self._run_validation_commands(memory, workflow_id)
+            self._raise_if_cancelled(request, cancel_event, workflow_id, event_sink)
+            self._run_validation_commands(memory, workflow_id, request, dry_run=dry_run_enabled)
 
         if self.planner.validation_requested(request):
-            final_response = self._run_model_stage(
+            self._raise_if_cancelled(request, cancel_event, workflow_id, event_sink)
+            final_response = self._run_model_stage_with_controls(
                 normalized,
                 WorkflowStage("validate", "validator", "reliable"),
                 request,
@@ -201,6 +228,7 @@ class WorkflowEngine:
                 len(memory.stage_results) + 1,
                 event_sink,
                 failover,
+                timeout_seconds=timeout_seconds,
             )
 
         if self.planner.patch_summary_requested(request):
@@ -330,20 +358,108 @@ class WorkflowEngine:
         )
         return response
 
+    def _run_model_stage_with_controls(
+        self,
+        normalized: str,
+        stage: WorkflowStage,
+        request: HubRequest,
+        memory: WorkflowMemory,
+        workflow_id: str,
+        index: int,
+        total: int,
+        event_sink: WorkflowEventSink | None,
+        failover: list[FailoverEvent],
+        *,
+        timeout_seconds: float | None,
+    ) -> HubResponse:
+        if timeout_seconds is None or timeout_seconds <= 0:
+            return self._run_model_stage(
+                normalized,
+                stage,
+                request,
+                memory,
+                workflow_id,
+                index,
+                total,
+                event_sink,
+                failover,
+            )
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-hub-workflow-stage")
+        future = executor.submit(
+            self._run_model_stage,
+            normalized,
+            stage,
+            request,
+            memory,
+            workflow_id,
+            index,
+            total,
+            event_sink,
+            failover,
+        )
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            self.event_recorder.emit(
+                event_sink,
+                "workflow_stage_timeout",
+                workflow_id=workflow_id,
+                stage=stage.name,
+                role=stage.role,
+                timeout_seconds=timeout_seconds,
+            )
+            self._record_workflow_event(
+                "workflow_stage_timeout",
+                workflow_id=workflow_id,
+                workflow=normalized,
+                stage=stage.name,
+                role=stage.role,
+                timeout_seconds=timeout_seconds,
+            )
+            raise WorkflowTimeoutError(
+                f"Workflow stage {stage.name!r} timed out after {timeout_seconds:.2f}s"
+            ) from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _raise_if_cancelled(
+        self,
+        request: HubRequest,
+        cancel_event: Any | None,
+        workflow_id: str,
+        event_sink: WorkflowEventSink | None,
+    ) -> None:
+        cancelled = _workflow_cancelled(request)
+        if cancel_event is not None:
+            is_set = getattr(cancel_event, "is_set", None)
+            cancelled = cancelled or (bool(is_set()) if callable(is_set) else bool(cancel_event))
+        if not cancelled:
+            return
+        self.event_recorder.emit(event_sink, "workflow_cancelled", workflow_id=workflow_id)
+        self._record_workflow_event("workflow_cancelled", workflow_id=workflow_id)
+        raise WorkflowCancelledError(f"Workflow {workflow_id} was cancelled.")
+
     def _record_workflow_event(self, event_type: str, **data: Any) -> None:
         self.event_recorder.record(event_type, **data)
 
-    def _run_validation_commands(self, memory: WorkflowMemory, workflow_id: str) -> None:
+    def _run_validation_commands(
+        self,
+        memory: WorkflowMemory,
+        workflow_id: str,
+        request: HubRequest,
+        *,
+        dry_run: bool = False,
+    ) -> None:
         state = memory.state or WorkflowState()
-        registry = create_builtin_registry(self.config)
-        pipeline = ToolExecutionPipeline(registry)
-        context = ToolExecutionContext(config=self.config)
         command_results: list[dict[str, Any]] = []
         started = time.time()
         for command in self.config.validation_commands[:5]:
-            result = pipeline.execute(
-                ToolCall(name="shell_execute", arguments={"command": command}),
-                context,
+            result = self.workspace_service.run_shell_command(
+                request,
+                command,
+                timeout_seconds=120,
+                dry_run=dry_run,
             )
             command_results.append(result.to_dict())
         finished = time.time()
@@ -389,3 +505,36 @@ def _workflow_pattern(request: HubRequest) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip().lower()
     return ""
+
+
+def _workflow_stage_timeout(request: HubRequest, explicit: float | None) -> float | None:
+    if explicit is not None:
+        return max(0.0, float(explicit))
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    for value in (
+        hub.get("workflow_stage_timeout_seconds"),
+        hub.get("stage_timeout_seconds"),
+        raw.get("workflow_stage_timeout_seconds"),
+        raw.get("stage_timeout_seconds"),
+    ):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        return max(0.0, parsed)
+    return None
+
+
+def _workflow_dry_run(request: HubRequest, explicit: bool | None) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    return truthy(hub.get("dry_run")) or truthy(raw.get("dry_run"))
+
+
+def _workflow_cancelled(request: HubRequest) -> bool:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    return truthy(hub.get("workflow_cancelled")) or truthy(raw.get("workflow_cancelled"))

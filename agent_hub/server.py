@@ -18,6 +18,7 @@ from .api.compatibility import (
     anthropic_sse_frames,
     compatibility_endpoint,
     debug_api_shape,
+    error_response_for_shape,
     model_lookup_error,
     openai_chat_sse_frames,
     openai_model_rows,
@@ -337,7 +338,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         apply_model_routing(self.server.config, request)
         model_error = model_lookup_error(self.server.config, request)
         if model_error is not None:
-            self._send_json({"error": model_error}, status=404)
+            self._send_json(
+                error_response_for_shape(model_error, response_shape),
+                status=404,
+            )
             return
         diagnostics = request_context_diagnostics(request)
         _record_debug_request(
@@ -492,11 +496,21 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     "message": str(exc),
                     "suggested_fix": suggested_fix,
                 }
-            if self.server.config.expose_routing_details or permission_required:
-                error_body["failover"] = [event.to_dict() for event in exc.failover]
+            include_error_details = self.server.config.expose_routing_details or permission_required
+            failover_details = [event.to_dict() for event in exc.failover]
+            if include_error_details:
+                error_body["failover"] = failover_details
             status = getattr(exc, "status_code", None)
             if status is None:
                 status = 403 if permission_required else 503
+            if response_shape == "anthropic-messages":
+                error_body = error_response_for_shape(
+                    error_body["error"],
+                    response_shape,
+                    agent_hub=error_body.get("agent_hub"),
+                    failover=failover_details,
+                    include_routing_details=self.server.config.expose_routing_details,
+                )
             self._send_json(error_body, status=status)
             return
 

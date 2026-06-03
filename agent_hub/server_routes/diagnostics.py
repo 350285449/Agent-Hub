@@ -91,7 +91,10 @@ def _status_body(
     health = router.health_snapshot(include_history=True)
     routing = recent_events(config.state_dir, "routing", limit=50)
     tools = recent_events(config.state_dir, "tools", limit=50)
+    permissions = recent_events(config.state_dir, "permissions", limit=50)
+    workflows = recent_events(config.state_dir, "workflows", limit=50)
     latest = routing[-1] if routing else {}
+    latest_decision = latest.get("routing_decision") if isinstance(latest.get("routing_decision"), dict) else {}
     return {
         "object": "agent_hub.status",
         "status": "running",
@@ -104,10 +107,20 @@ def _status_body(
         "provider_health": health,
         "provider_scores": provider_scores if provider_scores is not None else dict(router.provider_scores),
         "selected_model": latest.get("model") or latest.get("selected_model"),
+        "selected_provider": latest.get("provider") or latest_decision.get("selected_provider"),
+        "routing_reason": latest_decision.get("reason") or latest.get("reason") or "",
+        "routing_decision": latest_decision,
+        "cost_context_estimate": _routing_diagnostics_module()._cost_context_estimate(latest),
         "stream_mode": latest.get("stream_mode") or ("native" if latest.get("type") == "streaming_decision" else "compatibility"),
         "token_usage": usage_snapshot(config.state_dir, health),
         "fallback_history": _routing_failures(routing),
         "workflow_stages": _recent_workflow_stages(routing),
+        "workflow_progress": workflows[-25:],
+        "permission_blocked_actions": [
+            item
+            for item in permissions
+            if item.get("denied") is True or item.get("requires_approval") is True
+        ][-25:],
         "tool_calls": tools[-25:],
         "routing_history_count": len(routing),
     }

@@ -11,6 +11,7 @@ def routing_status_body(config: Any, router: AgentRouter) -> dict[str, Any]:
     health = router.health_snapshot(include_history=True)
     routing = recent_events(config.state_dir, "routing", limit=100)
     latest = latest_routing_decision(routing)
+    latest_decision = latest.get("routing_decision") if isinstance(latest.get("routing_decision"), dict) else {}
     recommendations = router.recommend(
         HubRequest(
             session_id="routing-status",
@@ -28,6 +29,11 @@ def routing_status_body(config: Any, router: AgentRouter) -> dict[str, Any]:
         "running": True,
         "active_provider": latest.get("agent") or latest.get("selected_agent"),
         "active_model": latest.get("model") or latest.get("selected_model"),
+        "selected_provider": latest.get("provider") or latest_decision.get("selected_provider"),
+        "selected_model": latest.get("model") or latest_decision.get("selected_model"),
+        "routing_reason": latest_decision.get("reason") or latest.get("reason") or "",
+        "task_classification": latest_decision.get("task_classification") or {},
+        "cost_context_estimate": _cost_context_estimate(latest),
         "routing_candidates": recommendations,
         "degraded_providers": [row for row in health.values() if row.get("degraded")],
         "cooldowns": {
@@ -36,6 +42,9 @@ def routing_status_body(config: Any, router: AgentRouter) -> dict[str, Any]:
             if row.get("cooldown_until")
         },
         "last_failover_reason": last_failover_reason(routing),
+        "fallback_events": routing_failures(routing),
+        "permission_blocked_actions": permission_blocked_actions(config),
+        "workflow_progress": workflow_progress(config),
         "last_decision": latest,
         "client_sources": client_source_counts(config, health),
         "streaming_stats": {
@@ -53,9 +62,15 @@ def routing_status_body(config: Any, router: AgentRouter) -> dict[str, Any]:
 def routing_last_decision_body(config: Any) -> dict[str, Any]:
     routing = recent_events(config.state_dir, "routing", limit=100)
     latest = latest_routing_decision(routing)
+    decision = latest.get("routing_decision") if isinstance(latest.get("routing_decision"), dict) else {}
     return {
         "object": "agent_hub.routing.last_decision",
         "decision": latest,
+        "selected_provider": latest.get("provider") or decision.get("selected_provider"),
+        "selected_model": latest.get("model") or decision.get("selected_model"),
+        "routing_reason": decision.get("reason") or latest.get("reason") or "",
+        "task_classification": decision.get("task_classification") or {},
+        "cost_context_estimate": _cost_context_estimate(latest),
         "failover": latest.get("failover", []) if isinstance(latest, dict) else [],
     }
 
@@ -194,6 +209,45 @@ def recent_workflow_stages(events: list[dict[str, Any]]) -> list[dict[str, Any]]
         if isinstance(event.get("workflow_stage"), str)
         or str(event.get("type", "")).startswith("workflow_")
     ][-25:]
+
+
+def permission_blocked_actions(config: Any) -> list[dict[str, Any]]:
+    events = recent_events(config.state_dir, "permissions", limit=100)
+    blocked = [
+        event
+        for event in events
+        if event.get("denied") is True or event.get("requires_approval") is True
+    ]
+    return blocked[-25:]
+
+
+def workflow_progress(config: Any) -> list[dict[str, Any]]:
+    events = recent_events(config.state_dir, "workflows", limit=100)
+    return [
+        event
+        for event in events
+        if str(event.get("type", "")).startswith("workflow_")
+    ][-25:]
+
+
+def _cost_context_estimate(event: dict[str, Any]) -> dict[str, Any]:
+    decision = event.get("routing_decision") if isinstance(event.get("routing_decision"), dict) else {}
+    candidates = decision.get("candidate_scores") if isinstance(decision.get("candidate_scores"), list) else []
+    selected = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+    return {
+        "estimated_input_tokens": (
+            event.get("estimated_input_tokens")
+            or decision.get("estimated_input_tokens")
+            or selected.get("estimated_input_tokens")
+        ),
+        "estimated_output_tokens": selected.get("estimated_output_tokens"),
+        "estimated_cost_usd": selected.get("estimated_cost_usd"),
+        "context_strategy": (
+            (decision.get("task_classification") or {}).get("context_strategy")
+            if isinstance(decision.get("task_classification"), dict)
+            else None
+        ),
+    }
 
 
 def event_source(event: dict[str, Any]) -> str:
