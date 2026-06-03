@@ -35,7 +35,7 @@ From the repository root:
 ```powershell
 git status --short
 node --version
-python -m pip install -e ".[test,release]"
+python -m pip install -e ".[dev,release]"
 python scripts/generate_backend_snapshot.py
 python scripts/validate_backend_drift.py
 python scripts/validate_release.py

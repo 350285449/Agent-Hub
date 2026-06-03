@@ -117,19 +117,29 @@ def validate_pyproject_metadata(pyproject: dict[str, Any]) -> list[str]:
         failures.append("pyproject.toml project.dependencies must be a list")
 
     optional = project.get("optional-dependencies")
+    dev_deps = optional.get("dev") if isinstance(optional, dict) else []
+    if not isinstance(dev_deps, list):
+        failures.append("pyproject.toml optional dev dependencies must be a list")
+    else:
+        normalized = _dependency_names(dev_deps)
+        for dependency in ("build", "pytest", "pytest-timeout"):
+            if dependency not in normalized:
+                failures.append(f"pyproject.toml dev extra is missing {dependency}")
+
     test_deps = optional.get("test") if isinstance(optional, dict) else []
     if not isinstance(test_deps, list):
         failures.append("pyproject.toml optional test dependencies must be a list")
     else:
-        normalized = {str(item).split(">", 1)[0].split("=", 1)[0].strip() for item in test_deps}
+        normalized = _dependency_names(test_deps)
         for dependency in ("pytest", "pytest-timeout"):
             if dependency not in normalized:
                 failures.append(f"pyproject.toml test extra is missing {dependency}")
+
     release_deps = optional.get("release") if isinstance(optional, dict) else []
     if not isinstance(release_deps, list):
         failures.append("pyproject.toml optional release dependencies must be a list")
     else:
-        normalized = {str(item).split(">", 1)[0].split("=", 1)[0].strip() for item in release_deps}
+        normalized = _dependency_names(release_deps)
         for dependency in ("build", "packaging"):
             if dependency not in normalized:
                 failures.append(f"pyproject.toml release extra is missing {dependency}")
@@ -275,6 +285,17 @@ def _valid_version(value: str) -> bool:
     except InvalidVersion:
         return False
     return True
+
+
+def _dependency_names(dependencies: list[Any]) -> set[str]:
+    names: set[str] = set()
+    for item in dependencies:
+        if not isinstance(item, str):
+            continue
+        match = re.match(r"\s*([A-Za-z0-9_.-]+)", item)
+        if match:
+            names.add(match.group(1))
+    return names
 
 
 def main(argv: list[str] | None = None) -> int:

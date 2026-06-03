@@ -515,7 +515,7 @@ provider health, and other diagnostics with secret-like values redacted.
 Test proof:
 
 ```powershell
-python -m pip install -e ".[test,release]"
+python -m pip install -e ".[dev,release]"
 python -m compileall -q agent_hub scripts
 Push-Location vscode-extension; npm ci; npm run prepare-backend; Pop-Location
 python scripts/validate_release.py

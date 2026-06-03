@@ -22,7 +22,7 @@ CI may stamp build metadata into `release.json` during a workflow run:
 From the repository root:
 
 ```powershell
-python -m pip install -e ".[test,release]"
+python -m pip install -e ".[dev,release]"
 python scripts/package_clean.py
 python scripts/generate_backend_snapshot.py
 python scripts/validate_backend_drift.py
