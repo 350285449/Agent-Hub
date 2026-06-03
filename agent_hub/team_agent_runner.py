@@ -250,7 +250,6 @@ class TeamAgentRunner:
             failover=failover,
             citations=finalizer.citations,
             search_results=finalizer.search_results,
-            images=finalizer.images,
             related_questions=finalizer.related_questions,
         )
         if request.record_session:

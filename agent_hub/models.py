@@ -82,7 +82,6 @@ class ProviderResult:
     finish_reason: str | None = None
     citations: list[str] = field(default_factory=list)
     search_results: list[dict[str, Any]] = field(default_factory=list)
-    images: list[dict[str, Any]] = field(default_factory=list)
     related_questions: list[str] = field(default_factory=list)
 
 
@@ -133,7 +132,6 @@ class HubResponse:
     failover: list[FailoverEvent] = field(default_factory=list)
     citations: list[str] = field(default_factory=list)
     search_results: list[dict[str, Any]] = field(default_factory=list)
-    images: list[dict[str, Any]] = field(default_factory=list)
     related_questions: list[str] = field(default_factory=list)
 
     def to_native_dict(
@@ -169,8 +167,6 @@ class HubResponse:
             data["citations"] = self.citations
         if self.search_results:
             data["search_results"] = self.search_results
-        if self.images:
-            data["images"] = self.images
         if self.related_questions:
             data["related_questions"] = self.related_questions
         return data

@@ -65,10 +65,7 @@ def _agent_with_descriptor_defaults(
             agent.supports_streaming,
             descriptor.capabilities.supports_streaming,
         ),
-        supports_vision=_first_not_none(
-            agent.supports_vision,
-            descriptor.capabilities.supports_vision,
-        ),
+        supports_vision=False,
         supports_function_calling=_first_not_none(
             agent.supports_function_calling,
             descriptor.capabilities.supports_function_calling,

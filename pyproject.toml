@@ -9,12 +9,14 @@ description = "Local routing hub with Codex-style workspace chat, provider failo
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Agent Hub" }]
-dependencies = []
+dependencies = [
+  "packaging>=24.0",
+]
 
 [project.optional-dependencies]
 test = [
-  "pytest",
-  "pytest-timeout",
+  "pytest>=8.0",
+  "pytest-timeout>=2.3",
 ]
 
 [project.scripts]
@@ -26,6 +28,7 @@ include = ["agent_hub*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 300
+timeout_method = "thread"
 markers = [
   "unit: fast isolated tests that do not start HTTP servers or package artifacts",
   "integration: tests that exercise HTTP servers, workflows, stress paths, or cross-module behavior",

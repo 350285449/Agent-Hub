@@ -9,7 +9,7 @@ health scoring, and diagnostics while preserving every existing response shape.
 - Added `agent_hub.capabilities.AgentCapabilities`.
 - Added `agent_capabilities(agent)` as the canonical normalization point for
   `supports_tools`, `supports_function_calling`, `supports_streaming`,
-  `supports_vision`, `supports_json`, context window, and max output tokens.
+  `supports_json`, context window, and max output tokens.
 - Added `agent_supports_tools(agent)` so tool-capable routing decisions use the
   same function-calling fallback everywhere.
 - Wired the shared model into:
@@ -49,7 +49,7 @@ tools, json, streaming, vision, context_window
 Provider manager rows still emit:
 
 ```text
-context_window, supports_streaming, supports_tools, supports_vision
+context_window, supports_streaming, supports_tools
 ```
 
 ## Risks Introduced

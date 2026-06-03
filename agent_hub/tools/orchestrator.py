@@ -211,7 +211,6 @@ def replace_provider_result_raw(result: ProviderResult, raw: dict[str, Any]) -> 
         finish_reason=result.finish_reason,
         citations=list(result.citations),
         search_results=list(result.search_results),
-        images=list(result.images),
         related_questions=list(result.related_questions),
     )
 

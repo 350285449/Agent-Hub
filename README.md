@@ -67,6 +67,10 @@ More detail lives in `docs/architecture.md`, `docs/providers.md`,
 `docs/install-vsix.md`, `docs/plugins.md`, `docs/deployment.md`, and
 `docs/api.md`.
 
+Dedicated setup docs are also available for [Cline](docs/CLINE.md),
+[Claude Code](docs/CLAUDE_CODE.md), [Continue](docs/continue.md), and
+[Ollama](docs/OLLAMA.md).
+
 ## OpenAI-Compatible Usage
 
 Chat completions:

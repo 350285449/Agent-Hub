@@ -671,8 +671,6 @@ def _add_research_metadata(data: dict[str, Any], response: HubResponse) -> None:
         data["citations"] = response.citations
     if response.search_results:
         data["search_results"] = response.search_results
-    if response.images:
-        data["images"] = response.images
     if response.related_questions:
         data["related_questions"] = response.related_questions
 
@@ -751,8 +749,33 @@ def _responses_input_messages(value: Any, *, preserve_structured: bool = False) 
 
 def _responses_content_value(value: Any, *, preserve_structured: bool) -> Any:
     if preserve_structured and isinstance(value, list):
-        return [dict(item) if isinstance(item, dict) else item for item in value]
+        return [
+            item
+            for item in (_structured_text_tool_content(item) for item in value)
+            if item is not None
+        ]
     return _responses_content_text(value)
+
+
+def _structured_text_tool_content(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value if isinstance(value, str) else None
+    block_type = value.get("type")
+    if block_type in {
+        "text",
+        "input_text",
+        "output_text",
+        "tool_use",
+        "tool_result",
+        "function_call",
+        "function_call_output",
+        "file",
+        "input_file",
+    }:
+        return dict(value)
+    if isinstance(value.get("text"), str) or isinstance(value.get("content"), str):
+        return {"type": "text", "text": content_to_text(value)}
+    return None
 
 
 def _responses_content_text(value: Any) -> str:

@@ -19,6 +19,15 @@ Use `Agent Hub: Test Cline Connection` to verify that structured content,
 `task_progress`, TODO state, active files, and tool results are preserved before
 Cline sends a real model request.
 
+Before a long task, run:
+
+```powershell
+agent-hub doctor
+```
+
+Confirm that the backend is reachable, at least one provider is ready, and the
+Cline endpoint is `http://127.0.0.1:8787/v1`.
+
 Agent-Hub preserves Cline's client-provided tool schema by default. Built-in
 Agent-Hub tools are executed by the backend only when Agent-Hub owns the tool
 schema or `agent_hub.auto_execute_tools=true` is sent.
@@ -104,4 +113,6 @@ curl http://127.0.0.1:8787/debug/context
 ```
 
 If Cline shows empty context, confirm that `cline_compatibility_mode` is `true`
-in `agent-hub.config.json` and that Cline is pointed at `/v1`.
+in `agent-hub.config.json` and that Cline is pointed at `/v1`. For local-only
+work, choose the `local-agent` route or set provider mode to `Local` in the VS
+Code sidebar.

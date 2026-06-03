@@ -25,6 +25,8 @@ Common fixes:
 
 - No usable model: enable a provider, set the missing API key, or start Ollama
   or LM Studio.
+- Ollama offline: run `ollama serve`, then `agent-hub local-models`, and confirm
+  `http://127.0.0.1:11434/api/tags` is reachable from the same machine.
 - Backend not running: click `Start Server` in the sidebar.
 - Backend missing from VSIX: run `npm run prepare-backend` in
   `vscode-extension/`, then package again.
@@ -75,3 +77,16 @@ and token estimates.
 If the failure happens only on long or multi-file tasks, set an explicit
 `compatibility_mode.max_context_tokens`, reduce `repo_context_max_files`, or use
 a provider with a larger reliable context window.
+
+## Backend Snapshot Drift
+
+Packaged VS Code builds use `vscode-extension/backend`. If release validation
+reports backend drift, regenerate the snapshot from the repository root:
+
+```powershell
+python scripts/generate_backend_snapshot.py
+python scripts/validate_release.py
+```
+
+Do not edit files inside `vscode-extension/backend` directly; edit the canonical
+backend files under `agent_hub/`, then regenerate.

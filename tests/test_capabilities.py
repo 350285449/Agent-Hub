@@ -51,7 +51,6 @@ class CapabilityModelTests(unittest.TestCase):
             model="m",
             supports_function_calling=True,
             supports_streaming=True,
-            supports_vision=True,
             context_window=4096,
         )
 
@@ -59,7 +58,7 @@ class CapabilityModelTests(unittest.TestCase):
 
         self.assertTrue(provider.supports_tools())
         self.assertTrue(provider.supports_streaming())
-        self.assertTrue(provider.supports_vision())
+        self.assertFalse(provider.supports_vision())
         self.assertEqual(provider.context_limit("m"), 4096)
 
     def test_provider_manager_model_rows_use_capability_model(self) -> None:

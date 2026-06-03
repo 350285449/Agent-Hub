@@ -147,7 +147,6 @@ def max_loop_result(result: ProviderResult, metadata: ToolLoopMetadata) -> Provi
         finish_reason="tool_loop_max_reached",
         citations=list(result.citations),
         search_results=list(result.search_results),
-        images=list(result.images),
         related_questions=list(result.related_questions),
     )
 

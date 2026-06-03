@@ -46,7 +46,6 @@ Provider contract surface that must remain stable:
 - `ProviderAdapter.health_check()`
 - `ProviderAdapter.supports_streaming()`
 - `ProviderAdapter.supports_tools()`
-- `ProviderAdapter.supports_vision()`
 - `ProviderAdapter.context_limit()`
 - `ProviderAdapter.cost_estimate()`
 - `ProviderAdapter.normalize_request()`

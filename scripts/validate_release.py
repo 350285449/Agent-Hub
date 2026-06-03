@@ -4,9 +4,12 @@ import argparse
 import json
 import re
 import sys
+import tomllib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from packaging.version import InvalidVersion, Version
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -26,10 +29,12 @@ def validate_release(root: Path, *, require_vsix: bool = False) -> list[str]:
     release = read_json(root / "release.json")
     package = read_json(root / "vscode-extension" / "package.json")
     lock = read_json(root / "vscode-extension" / "package-lock.json")
+    pyproject = read_toml(root / "pyproject.toml")
     pyproject_version = read_toml_version(root / "pyproject.toml")
     backend_base_version = read_backend_base_version(root / "agent_hub" / "version.py")
 
     failures.extend(validate_release_metadata(release))
+    failures.extend(validate_pyproject_metadata(pyproject))
     failures.extend(
         validate_version_consistency(
             release=release,
@@ -70,6 +75,13 @@ def validate_release_metadata(release: dict[str, Any]) -> list[str]:
             failures.append(f"release.json is missing {key}")
     if release.get("release_timestamp_utc") and not _valid_utc_timestamp(str(release["release_timestamp_utc"])):
         failures.append("release.json release_timestamp_utc must be an ISO UTC timestamp")
+    for key in (
+        "extension_version",
+        "backend_version",
+        "minimum_supported_backend_version",
+    ):
+        if release.get(key) and not _valid_version(str(release[key])):
+            failures.append(f"release.json {key} must be a valid version")
 
     build = release.get("build")
     if not isinstance(build, dict):
@@ -87,6 +99,42 @@ def validate_release_metadata(release: dict[str, Any]) -> list[str]:
     git_tag = build.get("git_tag")
     if git_tag is not None and not isinstance(git_tag, str):
         failures.append("release.json build.git_tag must be a string")
+    return failures
+
+
+def validate_pyproject_metadata(pyproject: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    project = pyproject.get("project") if isinstance(pyproject, dict) else {}
+    build_system = pyproject.get("build-system") if isinstance(pyproject, dict) else {}
+    if not isinstance(project, dict):
+        return ["pyproject.toml project metadata must be an object"]
+
+    dependencies = project.get("dependencies")
+    if not isinstance(dependencies, list) or not dependencies:
+        failures.append("pyproject.toml project.dependencies must declare runtime dependencies")
+    elif not any(str(item).split(">", 1)[0].split("=", 1)[0].strip() == "packaging" for item in dependencies):
+        failures.append("pyproject.toml project.dependencies must include packaging")
+
+    optional = project.get("optional-dependencies")
+    test_deps = optional.get("test") if isinstance(optional, dict) else []
+    if not isinstance(test_deps, list):
+        failures.append("pyproject.toml optional test dependencies must be a list")
+    else:
+        normalized = {str(item).split(">", 1)[0].split("=", 1)[0].strip() for item in test_deps}
+        for dependency in ("pytest", "pytest-timeout"):
+            if dependency not in normalized:
+                failures.append(f"pyproject.toml test extra is missing {dependency}")
+
+    scripts = project.get("scripts")
+    if not isinstance(scripts, dict) or scripts.get("agent-hub") != "agent_hub.cli:main":
+        failures.append("pyproject.toml must expose agent-hub = agent_hub.cli:main")
+
+    if project.get("requires-python") != ">=3.11":
+        failures.append("pyproject.toml requires-python must be >=3.11")
+
+    build_requires = build_system.get("requires") if isinstance(build_system, dict) else []
+    if not isinstance(build_requires, list) or not any(str(item).startswith("setuptools") for item in build_requires):
+        failures.append("pyproject.toml build-system must require setuptools")
     return failures
 
 
@@ -115,6 +163,13 @@ def validate_version_consistency(
         failures.append("vscode-extension/package.json version does not match pyproject.toml")
     if release.get("minimum_supported_backend_version") != release.get("backend_version"):
         failures.append("minimum_supported_backend_version should match backend_version for Phase 9")
+    for label, value in (
+        ("package.json version", package_version),
+        ("pyproject.toml version", pyproject_version),
+        ("agent_hub/version.py BASE_VERSION", backend_base_version),
+    ):
+        if value and not _valid_version(str(value)):
+            failures.append(f"{label} must be a valid version")
     return failures
 
 
@@ -151,6 +206,14 @@ def read_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def read_toml(path: Path) -> dict[str, Any]:
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def read_toml_version(path: Path) -> str:
     try:
         text = path.read_text(encoding="utf-8")
@@ -176,6 +239,14 @@ def _valid_utc_timestamp(value: str) -> bool:
     except ValueError:
         return False
     return parsed.utcoffset() is not None and parsed.utcoffset().total_seconds() == 0
+
+
+def _valid_version(value: str) -> bool:
+    try:
+        Version(value)
+    except InvalidVersion:
+        return False
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:

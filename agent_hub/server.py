@@ -1143,20 +1143,21 @@ class AgentHubHandler(BaseHTTPRequestHandler):
 </html>"""
 
     def _send_openai_stream(self, response: Any) -> None:
+        frames = openai_chat_sse_frames(
+            response,
+            include_routing_details=self.server.config.expose_routing_details,
+        )
+        body = "".join(frames).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Agent-Hub-Stream-Mode", "compatibility")
         self._send_common_headers()
         for name, value in _response_headers(response, self.server.router).items():
             self.send_header(name, value)
         self.end_headers()
-        for frame in openai_chat_sse_frames(
-            response,
-            include_routing_details=self.server.config.expose_routing_details,
-        ):
-            if not _safe_write(self, frame):
-                return
+        self.wfile.write(body)
         _safe_flush(self)
 
     def _send_openai_native_stream(self, stream: Any) -> None:
@@ -1289,36 +1290,38 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             write_data("[DONE]")
 
     def _send_anthropic_stream(self, response: Any) -> None:
+        frames = anthropic_sse_frames(
+            response,
+            include_routing_details=self.server.config.expose_routing_details,
+        )
+        body = "".join(frames).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
         self._send_common_headers()
         for name, value in _response_headers(response, self.server.router).items():
             self.send_header(name, value)
         self.end_headers()
-        for frame in anthropic_sse_frames(
-            response,
-            include_routing_details=self.server.config.expose_routing_details,
-        ):
-            if not _safe_write(self, frame):
-                return
+        self.wfile.write(body)
         _safe_flush(self)
 
     def _send_openai_response_stream(self, response: Any) -> None:
+        frames = openai_response_sse_frames(
+            response,
+            include_routing_details=self.server.config.expose_routing_details,
+        )
+        body = "".join(frames).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Agent-Hub-Stream-Mode", "compatibility")
         self._send_common_headers()
         for name, value in _response_headers(response, self.server.router).items():
             self.send_header(name, value)
         self.end_headers()
-        for frame in openai_response_sse_frames(
-            response,
-            include_routing_details=self.server.config.expose_routing_details,
-        ):
-            if not _safe_write(self, frame):
-                return
+        self.wfile.write(body)
         _safe_flush(self)
 
 

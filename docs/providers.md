@@ -10,7 +10,7 @@ Adapters should expose:
 - `chat(request)` for normalized non-streaming calls.
 - `complete(request)` for legacy compatibility.
 - `stream(request)` only when the provider truly supports native streaming.
-- `supports_streaming()`, `supports_tools()`, `supports_vision()`.
+- `supports_streaming()` and `supports_tools()`.
 - `context_limit()` and `cost_estimate()` when known.
 - Optional config fields `cost_per_million_input` and
   `cost_per_million_output` help adaptive routing prefer cheaper providers

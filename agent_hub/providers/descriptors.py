@@ -127,7 +127,7 @@ def descriptor_from_metadata(metadata: ProviderMetadata) -> ProviderDescriptor:
             supports_tools=metadata.supports_tools,
             supports_json=metadata.supports_json,
             supports_streaming=metadata.supports_streaming,
-            supports_vision=metadata.supports_vision,
+            supports_vision=False,
             supports_function_calling=metadata.supports_function_calling,
         ),
         default_free=metadata.free,

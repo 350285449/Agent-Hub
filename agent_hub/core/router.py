@@ -1459,7 +1459,6 @@ class AgentRouter:
             failover=list(failover),
             citations=result.citations,
             search_results=result.search_results,
-            images=result.images,
             related_questions=result.related_questions,
         )
 
@@ -2717,7 +2716,6 @@ def _merge_continuation_result(
         finish_reason=result.finish_reason,
         citations=result.citations,
         search_results=result.search_results,
-        images=result.images,
         related_questions=result.related_questions,
     )
 

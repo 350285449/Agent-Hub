@@ -8,7 +8,11 @@ from pathlib import Path
 from scripts.backend_snapshot import generate_snapshot, validate_snapshot
 from scripts.package_clean import cleanup_messages
 from scripts.update_release_metadata import update_release_metadata
-from scripts.validate_release import validate_release_metadata, validate_version_consistency
+from scripts.validate_release import (
+    validate_pyproject_metadata,
+    validate_release_metadata,
+    validate_version_consistency,
+)
 
 
 class PhaseNineReleaseMetadataTests(unittest.TestCase):
@@ -73,6 +77,19 @@ class PhaseNineReleaseMetadataTests(unittest.TestCase):
         self.assertTrue(any("package-lock.json version" in item for item in failures))
         self.assertTrue(any("package-lock root package version" in item for item in failures))
 
+    def test_pyproject_metadata_validation_requires_runtime_and_test_dependencies(self) -> None:
+        pyproject = _pyproject_metadata()
+
+        self.assertEqual(validate_pyproject_metadata(pyproject), [])
+
+        pyproject["project"]["dependencies"] = []
+        pyproject["project"]["optional-dependencies"]["test"] = ["pytest>=8.0"]
+
+        failures = validate_pyproject_metadata(pyproject)
+
+        self.assertTrue(any("project.dependencies" in item for item in failures))
+        self.assertTrue(any("pytest-timeout" in item for item in failures))
+
 
 class PhaseNineSnapshotEnforcementTests(unittest.TestCase):
     def test_snapshot_required_files_are_enforced(self) -> None:
@@ -126,6 +143,24 @@ def _release_manifest() -> dict[str, object]:
             "metadata_source": "release.json",
             "backend_snapshot_manifest": "vscode-extension/backend/SNAPSHOT.json",
             "canonical_backend": "agent_hub",
+        },
+    }
+
+
+def _pyproject_metadata() -> dict[str, object]:
+    return {
+        "build-system": {"requires": ["setuptools>=69"]},
+        "project": {
+            "name": "agent-hub",
+            "version": "0.7.7",
+            "requires-python": ">=3.11",
+            "dependencies": ["packaging>=24.0"],
+            "optional-dependencies": {
+                "test": ["pytest>=8.0", "pytest-timeout>=2.3"],
+            },
+            "scripts": {
+                "agent-hub": "agent_hub.cli:main",
+            },
         },
     }
 

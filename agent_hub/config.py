@@ -446,7 +446,7 @@ def free_local_config() -> HubConfig:
             supports_tools=True,
             supports_json=True,
             supports_streaming=True,
-            supports_vision=True,
+            supports_vision=False,
             supports_function_calling=True,
         ),
         "claude": AgentConfig(
@@ -467,7 +467,7 @@ def free_local_config() -> HubConfig:
             supports_tools=True,
             supports_json=True,
             supports_streaming=True,
-            supports_vision=True,
+            supports_vision=False,
             supports_function_calling=True,
         ),
         "gemini": AgentConfig(
@@ -488,7 +488,7 @@ def free_local_config() -> HubConfig:
             supports_tools=True,
             supports_json=True,
             supports_streaming=True,
-            supports_vision=True,
+            supports_vision=False,
             supports_function_calling=True,
         ),
         "chatgpt": AgentConfig(
@@ -512,7 +512,7 @@ def free_local_config() -> HubConfig:
             supports_tools=True,
             supports_json=True,
             supports_streaming=True,
-            supports_vision=True,
+            supports_vision=False,
             supports_function_calling=True,
         ),
         "echo": AgentConfig(

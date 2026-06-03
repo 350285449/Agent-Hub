@@ -40,7 +40,6 @@ from .provider_presets import (
     provider_metadata_rows,
 )
 from .core.router import AgentRouter, RouterError
-from .server import serve
 from .team_agent_runner import TeamAgentRunner
 from .version import backend_version
 
@@ -513,6 +512,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             processor = InboxProcessor(config)
             thread = threading.Thread(target=processor.watch, daemon=True)
             thread.start()
+        serve = getattr(__import__("agent_hub.server", fromlist=["serve"]), "serve")
         serve(config)
         return 0
     if command == "watch":

@@ -87,7 +87,6 @@ class OpenAIChatProvider(BaseProviderAdapter):
                 "logit_bias",
                 "logprobs",
                 "metadata",
-                "modalities",
                 "n",
                 "parallel_tool_calls",
                 "presence_penalty",

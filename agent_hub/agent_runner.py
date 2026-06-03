@@ -1087,7 +1087,6 @@ class AgentRunner:
                 failover=failover,
                 citations=response.citations,
                 search_results=response.search_results,
-                images=response.images,
                 related_questions=response.related_questions,
             )
         return HubResponse(

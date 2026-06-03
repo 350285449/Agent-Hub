@@ -57,7 +57,7 @@ def agent_capabilities(agent: AgentConfig) -> AgentCapabilities:
         supports_tools=bool(agent.supports_tools),
         supports_json=bool(agent.supports_json),
         supports_streaming=bool(agent.supports_streaming),
-        supports_vision=bool(agent.supports_vision),
+        supports_vision=False,
         supports_function_calling=bool(agent.supports_function_calling),
         context_window=agent.context_window,
         max_output_tokens=agent.max_tokens,

@@ -35,9 +35,6 @@ STRUCTURED_BLOCK_TYPES = {
     "tool_result",
     "function_call",
     "function_call_output",
-    "image",
-    "image_url",
-    "input_image",
     "file",
     "input_file",
 }

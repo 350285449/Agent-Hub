@@ -233,7 +233,6 @@ class WorkflowEngine:
             failover=failover,
             citations=final_response.citations,
             search_results=final_response.search_results,
-            images=final_response.images,
             related_questions=final_response.related_questions,
         )
         if request.record_session:

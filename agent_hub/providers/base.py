@@ -114,7 +114,6 @@ class ChatResponse:
     finish_reason: str | None = None
     citations: list[str] = field(default_factory=list)
     search_results: list[dict[str, Any]] = field(default_factory=list)
-    images: list[dict[str, Any]] = field(default_factory=list)
     related_questions: list[str] = field(default_factory=list)
 
     @classmethod
@@ -128,7 +127,6 @@ class ChatResponse:
             finish_reason=result.finish_reason,
             citations=list(result.citations),
             search_results=list(result.search_results),
-            images=list(result.images),
             related_questions=list(result.related_questions),
         )
 
@@ -141,7 +139,6 @@ class ChatResponse:
             finish_reason=self.finish_reason,
             citations=list(self.citations),
             search_results=list(self.search_results),
-            images=list(self.images),
             related_questions=list(self.related_questions),
         )
 

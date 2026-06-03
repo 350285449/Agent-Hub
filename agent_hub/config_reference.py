@@ -8,6 +8,9 @@ from typing import Any, get_args, get_origin
 from .config import AgentConfig, HubConfig, MCPServerConfig, RouteRule
 
 
+REFERENCE_OMITTED_KEYS = {"supports_vision"}
+
+
 def generate_config_reference() -> str:
     sections = [
         "# Agent Hub Config Reference",
@@ -34,6 +37,8 @@ def _section(title: str, cls: type[Any]) -> str:
         "| --- | --- | --- |",
     ]
     for field in fields(cls):
+        if field.name in REFERENCE_OMITTED_KEYS:
+            continue
         lines.append(
             f"| `{field.name}` | `{_type_name(field.type)}` | `{_default_value(field)}` |"
         )
