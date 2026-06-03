@@ -1,3 +1,14 @@
+"""Workspace tool boundary for file, patch, search, shell, and checkpoint ops.
+
+This module is intentionally centralized for now. The public AgentToolbox entry
+point coordinates path containment, approval prompts, enterprise policy, edit
+checkpoints, rollback, generated-backend guards, tool aliases, and provider tool
+schemas in one permission boundary. Splitting file_ops/search_ops/patch_ops/etc.
+is desirable once those cross-cutting safety guarantees have smaller service
+interfaces, but premature extraction would duplicate approval and rollback logic
+across mutating tools.
+"""
+
 from __future__ import annotations
 
 import json
