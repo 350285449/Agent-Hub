@@ -22,13 +22,14 @@ CI may stamp build metadata into `release.json` during a workflow run:
 From the repository root:
 
 ```powershell
-python -m pip install -e ".[dev,release]"
+python -m pip install -e ".[test,dev,release]"
 python scripts/package_clean.py
 python scripts/generate_backend_snapshot.py
 python scripts/validate_backend_drift.py
 python scripts/check_config_reference.py
 python scripts/validate_release.py
 cd vscode-extension
+npm run prepare-backend
 npm.cmd run check
 npm.cmd run package
 ```
@@ -56,10 +57,15 @@ direct VSCE packaging.
 It installs with `npm ci` to verify `package-lock.json`, installs the Python
 `test` and `release` extras, compiles Python, validates config drift, generates
 and validates the backend snapshot, validates `release.json`, runs packaging
-pytest checks, runs the default unit pytest lane, checks VS Code extension
-syntax, packages a VSIX, and validates VSIX cleanliness with source-tree
-artifact checks. Integration and stress tests are opt-in under pytest; the
-manual release workflow runs them before packaging.
+pytest checks, runs the default `pytest -m "not integration and not stress"`
+lane, checks VS Code extension syntax, packages a VSIX, and validates VSIX
+cleanliness with source-tree artifact checks. Integration and stress tests are
+separate pytest lanes:
+
+```powershell
+pytest -m integration
+pytest -m stress
+```
 
 ## Manual Release Workflow
 

@@ -43,7 +43,7 @@ from .core.router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
 from .team_agent_runner import TeamAgentRunner
 from .version import build_metadata, config_runtime_hash
 from .workflows import WorkflowEngine
-from .middleware import (
+from .server_routes.middleware import (
     diagnostics_auth_error as _diagnostics_auth_error,
     diagnostics_auth_required as _diagnostics_auth_required,
     diagnostics_token as _diagnostics_token,
@@ -52,7 +52,65 @@ from .middleware import (
     request_path as _request_path,
     request_query as _request_query,
 )
-from .routes import handle_get as handle_route_get, handle_post as handle_route_post
+from .server_routes import handle_get as handle_route_get, handle_post as handle_route_post
+from .server_routes.chat import (
+    _response_headers,
+    _stream_response_headers,
+    _recover_native_stream,
+    _stream_replay_safe,
+    _stream_recovery_request,
+    _trim_stream_overlap,
+    _safe_header_value,
+    _safe_write,
+    _safe_flush,
+    _response_token_metadata,
+    _response_permission_status,
+    _wants_agent_mode,
+    _payload_mode,
+    _positive_int,
+)
+from .server_routes.diagnostics import (
+    _record_debug_request,
+    _debug_context_summary,
+    _routing_diagnostics_module,
+    _routing_failures,
+    _recent_workflow_stages,
+    _routing_status_body,
+    _routing_last_decision_body,
+    _routing_test_failover_body,
+    _client_sources_body,
+    _routing_history_body,
+    _provider_health_body,
+    _status_body,
+    _events_body,
+    _tools_body,
+    _workflow_status_body,
+    _plugins_body,
+    _enterprise_audit_body,
+    _provider_row_html,
+    _optimization_dashboard_html,
+    _task_winners_table_html,
+    _role_winners_table_html,
+    _model_win_rates_table_html,
+    _provider_effectiveness_table_html,
+    _workflow_analytics_table_html,
+    _workflow_patterns_table_html,
+    _recent_adaptive_table_html,
+    _recommendation_list_html,
+    _table_or_empty,
+    _percent_label,
+    _money_label,
+    _ms_label,
+    _role_label,
+    _html,
+    _limits_body,
+    _active_provider_names,
+    _available_model_ids,
+    _openai_model_rows,
+    _model_rows,
+    _apply_model_routing,
+    _model_lookup_error,
+)
 
 
 DIAGNOSTIC_ENDPOINTS = {
@@ -980,680 +1038,109 @@ def serve(config: HubConfig) -> None:
         server.server_close()
 
 
-def _record_debug_request(server: AgentHubHTTPServer, entry: dict[str, Any]) -> None:
-    entry = {"time": time.time(), **entry}
-    server.debug_requests.append(entry)
-    if len(server.debug_requests) > 100:
-        del server.debug_requests[:-100]
-
-
-def _debug_context_summary(server: AgentHubHTTPServer) -> dict[str, Any]:
-    recent = server.debug_requests[-20:]
-    if not recent:
-        return {
-            "request_count": 0,
-            "incoming_token_count": 0,
-            "compacted_token_count": 0,
-            "protected_token_count": 0,
-            "warning": "",
-        }
-    latest = recent[-1].get("diagnostics") if isinstance(recent[-1], dict) else {}
-    diagnostics = latest if isinstance(latest, dict) else {}
-    suspicious = [
-        item
-        for item in recent
-        if isinstance(item.get("diagnostics"), dict)
-        and item["diagnostics"].get("suspiciously_empty")
-    ]
-    return {
-        "request_count": len(recent),
-        "incoming_context_size": diagnostics.get("incoming_token_count", 0),
-        "preserved_context_size": diagnostics.get("compacted_token_count", 0),
-        "compacted_amount": diagnostics.get("dropped_token_count", 0),
-        "incoming_token_count": diagnostics.get("incoming_token_count", 0),
-        "compacted_token_count": diagnostics.get("compacted_token_count", 0),
-        "protected_token_count": diagnostics.get("protected_token_count", 0),
-        "preserved_tool_calls": diagnostics.get("preserved_tool_calls", 0),
-        "preserved_tool_results": diagnostics.get("preserved_tool_results", 0),
-        "preserved_todo_count": diagnostics.get("preserved_todo_count", 0),
-        "active_files_detected": diagnostics.get("active_files_detected", []),
-        "task_progress_present": diagnostics.get("task_progress_present", False),
-        "suspiciously_empty": diagnostics.get("suspiciously_empty", False),
-        "warning": (
-            "Incoming context looks suspiciously empty; check Cline/Claude Code setup and active workspace state."
-            if suspicious
-            else ""
-        ),
-    }
-
-
-def _response_headers(response: Any, router: AgentRouter) -> dict[str, str]:
-    return response_headers(response, router)
-
-
-def _stream_response_headers(stream: Any, router: AgentRouter) -> dict[str, str]:
-    return stream_response_headers(stream, router)
-
-
-def _recover_native_stream(
-    server: AgentHubHTTPServer,
-    stream: Any,
-    *,
-    replay_required: bool = True,
-    emitted_text: str = "",
-) -> Any | None:
-    policy = str(getattr(server.config, "native_stream_failure_policy", "recover") or "recover")
-    routing = getattr(server.config, "routing", {}) or {}
-    if policy == "recover":
-        policy = "fallback_provider"
-    if policy == "terminate":
-        return None
-    if replay_required and not str(emitted_text or "").strip() and not _stream_replay_safe(getattr(stream, "request", None)):
-        return None
-    if policy == "retry_same_provider":
-        request = _stream_recovery_request(
-            stream.request,
-            recovery="retry_same_provider",
-            emitted_text=emitted_text,
-        )
-        return server.router.native_stream_for_agent(request, stream.agent.name)
-    if policy == "fallback_provider":
-        server.router.cooldown_agent(stream.agent.name, getattr(stream.agent, "cooldown_seconds", 1.0))
-        request = _stream_recovery_request(
-            stream.request,
-            recovery="fallback_provider",
-            emitted_text=emitted_text,
-        )
-        return server.router.native_stream(request)
-    return None
-
-
-def _stream_replay_safe(request: Any) -> bool:
-    raw = request.raw if request is not None and isinstance(getattr(request, "raw", None), dict) else {}
-    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
-    for value in (
-        hub.get("stream_replay_safe"),
-        hub.get("replay_safe"),
-        raw.get("stream_replay_safe"),
-        raw.get("replay_safe"),
-    ):
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}:
-            return True
-    return False
 
 
-def _stream_recovery_request(request: Any, *, recovery: str, emitted_text: str = "") -> Any:
-    raw = dict(request.raw or {})
-    hub = dict(raw.get("agent_hub") or {})
-    hub["stream_recovery_attempt"] = recovery
-    raw["agent_hub"] = hub
-    partial = str(emitted_text or "").strip()
-    if not partial:
-        return replace(request, raw=raw, record_session=False)
-    messages = [
-        *[dict(message) for message in request.messages],
-        {
-            "role": "assistant",
-            "content": partial,
-            "agent_hub_partial_response": True,
-        },
-        {
-            "role": "user",
-            "content": (
-                "Continue from the exact point where the stream stopped. "
-                "Do not repeat completed text. Preserve the requested format, JSON/schema "
-                "requirements, tool state, and task context."
-            ),
-            "agent_hub_stream_recovery_instruction": True,
-        },
-    ]
-    return replace(request, messages=messages, raw=raw, record_session=False)
 
 
-def _trim_stream_overlap(prefix: str, suffix: str) -> str:
-    if not prefix or not suffix:
-        return suffix
-    max_overlap = min(len(prefix), len(suffix), 4000)
-    for size in range(max_overlap, 0, -1):
-        if prefix[-size:] == suffix[:size]:
-            return suffix[size:]
-    return suffix
 
 
-def _safe_header_value(value: Any) -> str:
-    return safe_header_value(value)
 
 
-def _safe_write(handler: AgentHubHandler, text: str) -> bool:
-    try:
-        handler.wfile.write(text.encode("utf-8"))
-        return True
-    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-        return False
 
-
-def _safe_flush(handler: AgentHubHandler) -> None:
-    try:
-        handler.wfile.flush()
-    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-        return
 
 
-def _response_token_metadata(response: Any) -> dict[str, Any]:
-    return response_token_metadata(response)
-
 
-def _response_permission_status(response: Any) -> str:
-    return response_permission_status(response)
 
 
-def _routing_diagnostics_module() -> Any:
-    return __import__("agent_hub.routing_diagnostics", fromlist=["routing_diagnostics"])
 
 
-def _routing_failures(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return _routing_diagnostics_module().routing_failures(events)
 
 
-def _recent_workflow_stages(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return _routing_diagnostics_module().recent_workflow_stages(events)
 
 
-def _routing_status_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
-    return _routing_diagnostics_module().routing_status_body(config, router)
 
 
-def _routing_last_decision_body(config: HubConfig) -> dict[str, Any]:
-    return _routing_diagnostics_module().routing_last_decision_body(config)
 
 
-def _routing_test_failover_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
-    return _routing_diagnostics_module().routing_test_failover_body(config, router)
 
 
-def _client_sources_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
-    return _routing_diagnostics_module().client_sources_body(config, router)
-
-
-def _routing_history_body(config: HubConfig) -> dict[str, Any]:
-    return _routing_diagnostics_module().routing_history_body(config)
-
-
-def _provider_health_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
-    return _routing_diagnostics_module().provider_health_body(config, router)
-
-
-def _status_body(
-    config: HubConfig,
-    router: AgentRouter,
-    *,
-    provider_scores: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    health = router.health_snapshot(include_history=True)
-    routing = recent_events(config.state_dir, "routing", limit=50)
-    tools = recent_events(config.state_dir, "tools", limit=50)
-    latest = routing[-1] if routing else {}
-    return {
-        "object": "agent_hub.status",
-        "status": "running",
-        "running": True,
-        "version": BACKEND_VERSION,
-        "features": BACKEND_FEATURES,
-        "workspace_dir": str(config.workspace_dir),
-        "active_providers": _active_provider_names(config, router),
-        "providers": router.provider_status(),
-        "provider_health": health,
-        "provider_scores": provider_scores if provider_scores is not None else dict(router.provider_scores),
-        "selected_model": latest.get("model") or latest.get("selected_model"),
-        "stream_mode": latest.get("stream_mode") or ("native" if latest.get("type") == "streaming_decision" else "compatibility"),
-        "token_usage": usage_snapshot(config.state_dir, health),
-        "fallback_history": _routing_failures(routing),
-        "workflow_stages": _recent_workflow_stages(routing),
-        "tool_calls": tools[-25:],
-        "routing_history_count": len(routing),
-    }
-
-
-def _events_body(config: HubConfig) -> dict[str, Any]:
-    return {
-        "object": "agent_hub.events",
-        "events": recent_events(config.state_dir, "events", limit=100),
-        "routing": recent_events(config.state_dir, "routing", limit=50),
-        "workflows": recent_events(config.state_dir, "workflows", limit=50),
-        "adaptive": recent_events(config.state_dir, "adaptive", limit=50),
-    }
-
-
-def _tools_body(router: AgentRouter) -> dict[str, Any]:
-    tools = [tool.to_agent_hub_spec() for tool in router.tool_registry.list()]
-    return {
-        "object": "agent_hub.tools",
-        "count": len(tools),
-        "tools": tools,
-    }
-
-
-def _workflow_status_body(config: HubConfig) -> dict[str, Any]:
-    events = recent_events(config.state_dir, "workflows", limit=100)
-    return {
-        "object": "agent_hub.workflow_status",
-        "recent": events,
-        "active": [],
-        "count": len(events),
-    }
-
-
-def _plugins_body(config: HubConfig) -> dict[str, Any]:
-    return DiagnosticsApplicationService(config).plugins_body()
-
-
-def _enterprise_audit_body(config: HubConfig, query: dict[str, str] | None = None) -> dict[str, Any]:
-    return DiagnosticsApplicationService(config).enterprise_audit_body(query)
-
-
-def _provider_row_html(row: dict[str, Any]) -> str:
-    return (
-        "<tr>"
-        f"<td>{_html(row.get('provider'))}</td>"
-        f"<td>{_html(row.get('model'))}</td>"
-        f"<td>{_html(row.get('health'))}</td>"
-        f"<td>{_html(row.get('score'))}</td>"
-        f"<td>{_html(row.get('latency_ms'))} ms</td>"
-        f"<td>{str(bool(row.get('supports_tools'))).lower()}</td>"
-        "</tr>"
-    )
-
-
-def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
-    workflow_rate = optimization.get("workflow_success_rate")
-    workflow_rate = workflow_rate if isinstance(workflow_rate, dict) else {}
-    avg_cost = optimization.get("average_known_cost_usd")
-    avg_latency = optimization.get("average_latency_ms")
-    recovered = optimization.get("failed_requests_recovered", 0)
-    total_retries = optimization.get("total_retries", 0)
-    avg_retries = optimization.get("average_retries", 0)
-    dashboard = optimization.get("dashboard") if isinstance(optimization.get("dashboard"), dict) else {}
-    recommendations = dashboard.get("recommendations") if isinstance(dashboard.get("recommendations"), list) else []
-    task_winners = optimization.get("task_model_winners") if isinstance(optimization.get("task_model_winners"), dict) else {}
-    role_winners = optimization.get("role_model_winners") if isinstance(optimization.get("role_model_winners"), dict) else {}
-    model_rates = optimization.get("model_win_rates") if isinstance(optimization.get("model_win_rates"), list) else []
-    providers = optimization.get("most_effective_providers") if isinstance(optimization.get("most_effective_providers"), list) else []
-    workflow_analytics = optimization.get("workflow_analytics") if isinstance(optimization.get("workflow_analytics"), list) else []
-    workflows = optimization.get("workflow_patterns") if isinstance(optimization.get("workflow_patterns"), list) else []
-    recent = optimization.get("recent_optimization_decisions") if isinstance(optimization.get("recent_optimization_decisions"), list) else []
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Agent Hub Optimization</title>
-  <style>
-    body {{
-      margin: 0;
-      padding: 28px;
-      color: #202124;
-      background: #f6f7f9;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.45;
-    }}
-    main {{ max-width: 1180px; margin: 0 auto; }}
-    header {{ margin-bottom: 18px; }}
-    h1 {{ margin: 0 0 6px; font-size: 28px; }}
-    h2 {{ margin: 28px 0 10px; font-size: 18px; }}
-    p {{ margin: 0 0 14px; color: #5f6368; }}
-    a {{ color: #0b57d0; }}
-    .cards {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-      gap: 12px;
-      margin: 16px 0 8px;
-    }}
-    .card {{
-      border: 1px solid #d8dde6;
-      border-radius: 8px;
-      padding: 14px;
-      background: #fff;
-    }}
-    .card strong {{ display: block; font-size: 24px; color: #111827; }}
-    .card span {{ display: block; margin-top: 3px; color: #5f6368; font-size: 13px; }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      background: #fff;
-      border: 1px solid #d8dde6;
-      border-radius: 8px;
-      overflow: hidden;
-    }}
-    th, td {{
-      padding: 9px 10px;
-      border-bottom: 1px solid #e7eaf0;
-      text-align: left;
-      font-size: 13px;
-      vertical-align: top;
-    }}
-    th {{ color: #374151; background: #eef2f7; font-weight: 650; }}
-    tr:last-child td {{ border-bottom: 0; }}
-    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; }}
-    .note {{ color: #5f6368; font-size: 13px; margin-top: 8px; }}
-    code {{ padding: 2px 5px; border-radius: 4px; background: #eef2f7; }}
-  </style>
-</head>
-<body>
-  <main>
-    <header>
-      <h1>Optimization Dashboard</h1>
-      <p>Adaptive routing, workflow selection, cost, latency, and provider effectiveness.</p>
-      <p><a href="/dashboard">Back to Agent Hub</a> · <a href="/v1/optimization">JSON</a></p>
-    </header>
-    <section class="cards">
-      <div class="card"><strong>{_html(_percent_label(workflow_rate.get("rate")))}</strong><span>workflow success over {_html(workflow_rate.get("attempts", 0))} sample(s)</span></div>
-      <div class="card"><strong>{_html(_money_label(avg_cost))}</strong><span>average known cost</span></div>
-      <div class="card"><strong>{_html(_ms_label(avg_latency))}</strong><span>average latency</span></div>
-      <div class="card"><strong>{_html(recovered)}</strong><span>failed requests recovered</span></div>
-      <div class="card"><strong>{_html(avg_retries)}</strong><span>average retries over {_html(total_retries)} total</span></div>
-    </section>
-    <section>
-      <h2>Recommendations</h2>
-      {_recommendation_list_html(recommendations)}
-    </section>
-    <section class="grid">
-      <div>
-        <h2>Best Models By Task</h2>
-        {_task_winners_table_html(task_winners)}
-      </div>
-      <div>
-        <h2>Best Models By Workflow Role</h2>
-        {_role_winners_table_html(role_winners)}
-      </div>
-    </section>
-    <section>
-      <h2>Model Win Rates</h2>
-      {_model_win_rates_table_html(model_rates)}
-    </section>
-    <section>
-      <h2>Most Effective Providers</h2>
-      {_provider_effectiveness_table_html(providers)}
-    </section>
-    <section>
-      <h2>Workflow Analytics</h2>
-      {_workflow_analytics_table_html(workflow_analytics)}
-    </section>
-    <section>
-      <h2>Workflow Patterns</h2>
-      {_workflow_patterns_table_html(workflows)}
-    </section>
-    <section>
-      <h2>Recent Adaptive Decisions</h2>
-      {_recent_adaptive_table_html(recent)}
-      <p class="note">Use <code>POST /v1/routing/simulate</code> to preview routing and workflow choices without making a provider call.</p>
-    </section>
-  </main>
-</body>
-</html>"""
-
-
-def _task_winners_table_html(rows: dict[str, Any]) -> str:
-    body = "".join(
-        "<tr>"
-        f"<td>{_html(task)}</td>"
-        f"<td>{_html(row.get('provider'))}</td>"
-        f"<td>{_html(row.get('model'))}</td>"
-        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
-        f"<td>{_html(row.get('attempts', 0))}</td>"
-        f"<td>{_html(_money_label(row.get('average_known_cost_usd')))}</td>"
-        "</tr>"
-        for task, row in sorted(rows.items())
-        if isinstance(row, dict)
-    )
-    return _table_or_empty(
-        ["Task", "Provider", "Model", "Success", "Samples", "Avg Cost"],
-        body,
-    )
-
-
-def _role_winners_table_html(rows: dict[str, Any]) -> str:
-    body = "".join(
-        "<tr>"
-        f"<td>{_html(role)}</td>"
-        f"<td>{_html(row.get('provider'))}</td>"
-        f"<td>{_html(row.get('model'))}</td>"
-        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
-        f"<td>{_html(row.get('attempts', 0))}</td>"
-        f"<td>{_html(_ms_label(row.get('average_latency_ms')))}</td>"
-        "</tr>"
-        for role, row in sorted(rows.items())
-        if isinstance(row, dict)
-    )
-    return _table_or_empty(
-        ["Role", "Provider", "Model", "Success", "Samples", "Avg Latency"],
-        body,
-    )
-
-
-def _model_win_rates_table_html(rows: list[Any]) -> str:
-    body = "".join(
-        "<tr>"
-        f"<td>{_html(row.get('task_type'))}</td>"
-        f"<td>{_html(row.get('agent'))}</td>"
-        f"<td>{_html(row.get('provider'))}</td>"
-        f"<td>{_html(row.get('model'))}</td>"
-        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
-        f"<td>{_html(row.get('attempts', 0))}</td>"
-        f"<td>{_html(row.get('adaptive_bonus', 0.0))}</td>"
-        "</tr>"
-        for row in rows[:25]
-        if isinstance(row, dict)
-    )
-    return _table_or_empty(
-        ["Task", "Agent", "Provider", "Model", "Success", "Samples", "Adaptive Bonus"],
-        body,
-    )
-
-
-def _provider_effectiveness_table_html(rows: list[Any]) -> str:
-    body = "".join(
-        "<tr>"
-        f"<td>{_html(row.get('provider'))}</td>"
-        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
-        f"<td>{_html(row.get('attempts', 0))}</td>"
-        f"<td>{_html(_ms_label(row.get('average_latency_ms')))}</td>"
-        f"<td>{_html(_money_label(row.get('average_known_cost_usd')))}</td>"
-        f"<td>{_html(', '.join(row.get('models', [])[:4]) if isinstance(row.get('models'), list) else '')}</td>"
-        "</tr>"
-        for row in rows[:10]
-        if isinstance(row, dict)
-    )
-    return _table_or_empty(
-        ["Provider", "Success", "Samples", "Avg Latency", "Avg Cost", "Models"],
-        body,
-    )
-
-
-def _workflow_analytics_table_html(rows: list[Any]) -> str:
-    body = "".join(
-        "<tr>"
-        f"<td>{_html(row.get('label') or row.get('workflow_pattern'))}</td>"
-        f"<td>{_html(row.get('task_type'))}</td>"
-        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
-        f"<td>{_html(row.get('attempts', 0))}</td>"
-        f"<td>{_html(_money_label(row.get('average_known_cost_usd')))}</td>"
-        f"<td>{_html(_ms_label(row.get('average_latency_ms')))}</td>"
-        f"<td>{_html(row.get('average_retries', 0))}</td>"
-        f"<td>{_html(row.get('recovered_by_failover_count', 0))}</td>"
-        f"<td>{_html(_role_label(row.get('best_planner')))}</td>"
-        f"<td>{_html(_role_label(row.get('best_worker')))}</td>"
-        "</tr>"
-        for row in rows[:25]
-        if isinstance(row, dict)
-    )
-    return _table_or_empty(
-        ["Workflow", "Task", "Success", "Samples", "Avg Cost", "Avg Time", "Avg Retries", "Recovered", "Best Planner", "Best Worker"],
-        body,
-    )
-
-
-def _workflow_patterns_table_html(rows: list[Any]) -> str:
-    body = "".join(
-        "<tr>"
-        f"<td>{_html(row.get('workflow_pattern'))}</td>"
-        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
-        f"<td>{_html(row.get('attempts', 0))}</td>"
-        f"<td>{_html(_ms_label(row.get('average_latency_ms')))}</td>"
-        f"<td>{_html(row.get('average_retries', 0))}</td>"
-        f"<td>{_html(row.get('recovered_by_failover_count', 0))}</td>"
-        "</tr>"
-        for row in rows
-        if isinstance(row, dict)
-    )
-    return _table_or_empty(
-        ["Pattern", "Success", "Samples", "Avg Latency", "Avg Retries", "Recovered"],
-        body,
-    )
-
-
-def _recent_adaptive_table_html(rows: list[Any]) -> str:
-    body = "".join(
-        "<tr>"
-        f"<td>{_html(row.get('task_type'))}</td>"
-        f"<td>{_html(row.get('workflow_pattern'))}</td>"
-        f"<td>{_html(row.get('agent'))}</td>"
-        f"<td>{_html(row.get('model'))}</td>"
-        f"<td>{str(bool(row.get('success'))).lower()}</td>"
-        f"<td>{_html(row.get('latency_ms'))}</td>"
-        f"<td>{_html(_money_label(row.get('estimated_cost_usd')))}</td>"
-        f"<td>{_html(row.get('retry_count', 0))}</td>"
-        "</tr>"
-        for row in rows[-25:]
-        if isinstance(row, dict)
-    )
-    return _table_or_empty(
-        ["Task", "Workflow", "Agent", "Model", "Success", "Latency ms", "Cost", "Retries"],
-        body,
-    )
-
-
-def _recommendation_list_html(rows: list[Any]) -> str:
-    items = [
-        f"<li>{_html(row.get('message') if isinstance(row, dict) else row)}</li>"
-        for row in rows
-    ]
-    return "<ul>" + "".join(items) + "</ul>" if items else "<p>No optimization recommendations yet.</p>"
-
-
-def _table_or_empty(headers: list[str], body: str) -> str:
-    if not body:
-        return "<p>No samples yet.</p>"
-    head = "".join(f"<th>{_html(header)}</th>" for header in headers)
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
-
-
-def _percent_label(value: Any) -> str:
-    try:
-        return f"{float(value) * 100:.0f}%"
-    except (TypeError, ValueError):
-        return "--"
-
-
-def _money_label(value: Any) -> str:
-    try:
-        return f"${float(value):.4f}"
-    except (TypeError, ValueError):
-        return "--"
-
-
-def _ms_label(value: Any) -> str:
-    try:
-        return f"{float(value):.0f} ms"
-    except (TypeError, ValueError):
-        return "--"
-
-
-def _role_label(row: Any) -> str:
-    if not isinstance(row, dict):
-        return ""
-    return " / ".join(str(row.get(key) or "") for key in ("provider", "model") if row.get(key))
-
-
-def _html(value: Any) -> str:
-    text = str(value if value is not None else "")
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-
-
-def _limits_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
-    return DiagnosticsApplicationService(config).limits_body(router)
-
-
-def _active_provider_names(config: HubConfig, router: AgentRouter) -> list[str]:
-    return DiagnosticsApplicationService(config).active_provider_names(router)
-
-
-def _available_model_ids(config: HubConfig, router: AgentRouter) -> list[str]:
-    return DiagnosticsApplicationService(config).available_model_ids(router)
-
-
-def _openai_model_rows(
-    config: HubConfig,
-    router: AgentRouter,
-    *,
-    include_routing_details: bool = False,
-) -> list[dict[str, Any]]:
-    return openai_model_rows(
-        config,
-        router,
-        include_routing_details=include_routing_details,
-    )
-
-
-def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:
-    return DiagnosticsApplicationService(config).model_rows(router)
-
-
-def _apply_model_routing(config: HubConfig, request: HubRequest) -> None:
-    apply_model_routing(config, request)
-
-
-def _model_lookup_error(config: HubConfig, request: HubRequest) -> dict[str, Any] | None:
-    return model_lookup_error(config, request)
-
-
-def _wants_agent_mode(payload: dict[str, Any], default: bool = False) -> bool:
-    hub_options = payload.get("agent_hub")
-    if isinstance(hub_options, dict) and "agent_mode" in hub_options:
-        return bool(hub_options["agent_mode"])
-    if "agent_mode" in payload:
-        return bool(payload["agent_mode"])
-    mode = payload.get("mode")
-    if isinstance(mode, str) and mode.lower() == "agent":
-        return True
-    return default
-
-
-def _payload_mode(payload: dict[str, Any], default_agent: bool = False) -> str:
-    hub_options = payload.get("agent_hub")
-    if isinstance(hub_options, dict):
-        mode = hub_options.get("mode")
-        if isinstance(mode, str) and mode.lower() in {"agent", "group-agent", "team-agent", "auto"}:
-            return "group-agent" if mode.lower() == "team-agent" else mode.lower()
-        if bool(hub_options.get("agent_mode")):
-            return "agent"
-    mode = payload.get("mode")
-    if isinstance(mode, str) and mode.lower() in {"agent", "group-agent", "team-agent", "auto"}:
-        return "group-agent" if mode.lower() == "team-agent" else mode.lower()
-    if bool(payload.get("agent_mode")):
-        return "agent"
-    return "agent" if default_agent else "route"
-
-
-def _positive_int(value: Any, *, default: int, maximum: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        number = default
-    return max(1, min(number, maximum))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

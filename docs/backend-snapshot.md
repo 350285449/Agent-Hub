@@ -23,8 +23,13 @@ To prevent drift before release:
 
 ```powershell
 python -m compileall -q agent_hub
-python -m pytest -m unit
+python -m pytest -m "not integration and not stress"
+python -m pytest -m integration
+python -m pytest -m stress
 python scripts/generate_backend_snapshot.py
+cd vscode-extension
+npm run prepare-backend
+cd ..
 python scripts/validate_backend_drift.py
 python scripts/validate_release.py
 ```
@@ -39,7 +44,7 @@ packages, or temporary files appear in the snapshot.
 
 CI regenerates the snapshot before validation so clean checkouts can produce
 the same package structure deterministically. Release packaging uses the same
-generator through `npm.cmd run prepare-backend`; packaging tests also regenerate
+generator through `npm run prepare-backend`; packaging tests also regenerate
 the ignored snapshot before checking release consistency.
 
 Phase 10 should decide whether the generated snapshot remains an ignored local

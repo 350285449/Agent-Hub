@@ -41,8 +41,8 @@ def pytest_collection_modifyitems(config, items):  # type: ignore[no-untyped-def
 
     run_integration = bool(config.getoption("--run-integration")) or _marker_requested(config, "integration")
     run_stress = bool(config.getoption("--run-stress")) or _marker_requested(config, "stress")
-    skip_integration = pytest.mark.skip(reason="integration test; run with --run-integration")
-    skip_stress = pytest.mark.skip(reason="stress test; run with --run-stress")
+    skip_integration = pytest.mark.skip(reason='integration test; run with -m "integration"')
+    skip_stress = pytest.mark.skip(reason='stress test; run with -m "stress"')
 
     for item in items:
         path = Path(str(item.fspath))

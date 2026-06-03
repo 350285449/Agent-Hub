@@ -47,9 +47,18 @@ FAN_OUT_BASELINE = {
 
 FAN_OUT_EXEMPT_EDGES = {
     "agent_hub.core.router": {
+        "agent_hub.core.routing.selection",
+    },
+    "agent_hub.core.routing.selection": {
         "agent_hub.capabilities",
         "agent_hub.core.router_diagnostics",
         "agent_hub.core.routing_policy",
+    },
+    "agent_hub.server": {
+        "agent_hub.server_routes.__init__",
+        "agent_hub.server_routes.chat",
+        "agent_hub.server_routes.diagnostics",
+        "agent_hub.server_routes.middleware",
     },
     "agent_hub.providers.__init__": {
         "agent_hub.providers.errors",
@@ -201,6 +210,29 @@ PUBLIC_IMPORTS = {
         "build_capability_graph",
         "build_provider_status",
     ],
+    "agent_hub.core.routing.selection": [
+        "AgentRouter",
+        "RoutingDecision",
+        "RouterError",
+    ],
+    "agent_hub.core.routing.fallback": [
+        "RouterError",
+        "_no_fallback_reason",
+        "_route_error_type",
+    ],
+    "agent_hub.core.routing.policies": [
+        "RouterPreflightPolicy",
+        "estimate_input_tokens",
+        "expected_output_tokens",
+    ],
+    "agent_hub.core.routing.provider_status": [
+        "ProviderHealth",
+        "ProviderHealthTracker",
+    ],
+    "agent_hub.core.routing.scoring": [
+        "RoutingDecision",
+        "_recommendation_reason",
+    ],
     "agent_hub.core.provider_attempts": [
         "ProviderAttemptExecutor",
         "ProviderAttemptHelpers",
@@ -298,7 +330,7 @@ class ArchitectureGuardrailTests(unittest.TestCase):
 
     def test_router_provider_permissions_flow_through_security_boundary(self) -> None:
         graph = _internal_import_graph()
-        router_deps = graph.get("agent_hub.core.router", set())
+        router_deps = graph.get("agent_hub.core.routing.selection", set())
         forbidden = {
             "agent_hub.enterprise",
             "agent_hub.permissions",
@@ -310,7 +342,7 @@ class ArchitectureGuardrailTests(unittest.TestCase):
 
     def test_router_observability_flows_through_event_recorder(self) -> None:
         graph = _internal_import_graph()
-        router_deps = graph.get("agent_hub.core.router", set())
+        router_deps = graph.get("agent_hub.core.routing.selection", set())
 
         self.assertIn("agent_hub.events", router_deps)
         self.assertNotIn("agent_hub.observability", router_deps)

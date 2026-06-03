@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
+import os
 import re
+import subprocess
 import sys
 import tomllib
 from datetime import datetime
@@ -16,15 +19,57 @@ sys.path.insert(0, str(ROOT))
 
 from agent_hub.dependency_audit import validate_dependency_declarations
 from agent_hub.config_reference import generate_config_reference
-from scripts.backend_snapshot import validate_snapshot
+from scripts.backend_snapshot import REQUIRED_SNAPSHOT_FILES, build_manifest, source_files, validate_snapshot
 from scripts.validate_vsix_cleanliness import expected_vsix_path, validate_vsix
 
 
 VERSIONED_VSIX_PATTERN = re.compile(r"agent-hub-vscode-\d+\.\d+\.\d+(?:[-.\w]*)?\.vsix")
 COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,40}$")
+PACKAGE_TEST_SENTINEL = "AGENT_HUB_VALIDATE_RELEASE_PACKAGE_TESTS"
+FORBIDDEN_MEDIA_REFERENCE_PATTERNS = (
+    re.compile(r"gpt[-_\s]?image", re.IGNORECASE),
+    re.compile(r"image" + r"[-_\s]?generation", re.IGNORECASE),
+    re.compile(r"\bimages\.generate\b", re.IGNORECASE),
+    re.compile(r"generated" + r"\s+screenshots?", re.IGNORECASE),
+)
+TEXT_SUFFIXES = {
+    ".cfg",
+    ".css",
+    ".html",
+    ".ini",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".ps1",
+    ".py",
+    ".sh",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+SKIPPED_SCAN_PARTS = {
+    ".git",
+    ".pytest_cache",
+    ".venv",
+    ".venv-check",
+    "__pycache__",
+    "node_modules",
+    "backend",
+    "build",
+    "agent_hub.egg-info",
+}
 
 
-def validate_release(root: Path, *, require_vsix: bool = False) -> list[str]:
+def validate_release(
+    root: Path,
+    *,
+    require_vsix: bool = False,
+    run_package_tests: bool = False,
+) -> list[str]:
     root = root.resolve()
     failures: list[str] = []
     release = read_json(root / "release.json")
@@ -38,6 +83,10 @@ def validate_release(root: Path, *, require_vsix: bool = False) -> list[str]:
     failures.extend(validate_pyproject_metadata(pyproject))
     failures.extend(validate_dependency_declarations(root, pyproject))
     failures.extend(validate_extension_packaging_scripts(package))
+    failures.extend(validate_backend_generation_documented(root))
+    failures.extend(validate_backend_snapshot_generation(root))
+    failures.extend(validate_no_forbidden_media_references(root))
+    failures.extend(validate_no_dangerous_shell_true(root))
     failures.extend(
         validate_version_consistency(
             release=release,
@@ -54,6 +103,8 @@ def validate_release(root: Path, *, require_vsix: bool = False) -> list[str]:
 
     failures.extend(validate_snapshot(root))
     failures.extend(validate_release_docs(root))
+    if run_package_tests:
+        failures.extend(validate_package_tests(root))
 
     vsix_path = expected_vsix_path(root)
     if vsix_path.exists():
@@ -122,9 +173,12 @@ def validate_pyproject_metadata(pyproject: dict[str, Any]) -> list[str]:
         failures.append("pyproject.toml optional dev dependencies must be a list")
     else:
         normalized = _dependency_names(dev_deps)
-        for dependency in ("build", "pytest", "pytest-timeout"):
+        for dependency in ("build",):
             if dependency not in normalized:
                 failures.append(f"pyproject.toml dev extra is missing {dependency}")
+        for dependency in ("pytest", "pytest-timeout"):
+            if dependency in normalized:
+                failures.append(f"pyproject.toml dev extra should not include test-only dependency {dependency}")
 
     test_deps = optional.get("test") if isinstance(optional, dict) else []
     if not isinstance(test_deps, list):
@@ -213,12 +267,22 @@ def validate_version_consistency(
 
 def validate_release_docs(root: Path) -> list[str]:
     failures: list[str] = []
-    docs = [
+    required_docs = [
+        root / "README.md",
+        root / "CONTRIBUTING.md",
+        root / "docs" / "backend-snapshot.md",
+        root / "docs" / "api.md",
+        root / "docs" / "architecture.md",
+    ]
+    for path in required_docs:
+        if not path.exists():
+            failures.append(f"required documentation is missing: {path.relative_to(root).as_posix()}")
+    release_docs = [
         root / "docs" / "PUBLISHING.md",
         root / "docs" / "install-vsix.md",
         root / "vscode-extension" / "PUBLISHING.md",
     ]
-    for path in docs:
+    for path in release_docs:
         if not path.exists():
             failures.append(f"release documentation is missing: {path.relative_to(root).as_posix()}")
             continue
@@ -234,6 +298,104 @@ def validate_release_docs(root: Path) -> list[str]:
         if marker not in install and marker not in publishing:
             failures.append(f"release docs do not include shared marker: {marker}")
     return failures
+
+
+def validate_backend_generation_documented(root: Path) -> list[str]:
+    failures: list[str] = []
+    docs = {
+        "docs/backend-snapshot.md": root / "docs" / "backend-snapshot.md",
+        "docs/PUBLISHING.md": root / "docs" / "PUBLISHING.md",
+        "README.md": root / "README.md",
+    }
+    required = ("generate_backend_snapshot.py", "npm run prepare-backend", "validate_backend_drift.py")
+    for rel, path in docs.items():
+        if not path.exists():
+            failures.append(f"backend generation documentation is missing: {rel}")
+            continue
+        text = path.read_text(encoding="utf-8")
+        for marker in required:
+            if marker not in text:
+                failures.append(f"{rel} does not document backend generation marker: {marker}")
+    return failures
+
+
+def validate_backend_snapshot_generation(root: Path) -> list[str]:
+    failures: list[str] = []
+    try:
+        files = source_files(root)
+        manifest = build_manifest(root, files=files)
+    except Exception as exc:
+        return [f"backend snapshot generation failed before writing files: {exc}"]
+    paths = {item.relative_path for item in files}
+    for required in REQUIRED_SNAPSHOT_FILES:
+        if required not in paths:
+            failures.append(f"backend snapshot generation source is missing required file: {required}")
+    if not manifest.get("tree_sha256") or manifest.get("file_count", 0) <= 0:
+        failures.append("backend snapshot generation did not produce a valid manifest")
+    if manifest.get("generated_by") != "scripts/generate_backend_snapshot.py":
+        failures.append("backend snapshot manifest generated_by marker is unexpected")
+    return failures
+
+
+def validate_no_forbidden_media_references(root: Path) -> list[str]:
+    failures: list[str] = []
+    for path in _iter_text_files(root):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for pattern in FORBIDDEN_MEDIA_REFERENCE_PATTERNS:
+            if pattern.search(text):
+                failures.append(
+                    f"forbidden generated-media reference in {_rel(root, path)}: {pattern.pattern}"
+                )
+                break
+    return failures
+
+
+def validate_no_dangerous_shell_true(root: Path) -> list[str]:
+    failures: list[str] = []
+    for path in _iter_text_files(root):
+        if path.suffix.lower() != ".py":
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == "shell" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
+                    failures.append(f"dangerous shell={'True'} in {_rel(root, path)}:{node.lineno}")
+    return failures
+
+
+def validate_package_tests(root: Path) -> list[str]:
+    if os.environ.get(PACKAGE_TEST_SENTINEL) == "1":
+        return []
+    env = os.environ.copy()
+    env[PACKAGE_TEST_SENTINEL] = "1"
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "pytest", "-m", "packaging"],
+            cwd=root,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=180,
+            check=False,
+        )
+    except FileNotFoundError:
+        return ["package tests could not run because pytest is not installed"]
+    except subprocess.TimeoutExpired as exc:
+        output = (exc.stdout or "").strip()
+        detail = f": {_last_output_lines(output)}" if output else ""
+        return [f"package tests timed out{detail}"]
+    if completed.returncode == 0:
+        return []
+    return [f"package tests failed: {_last_output_lines(completed.stdout)}"]
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -298,11 +460,35 @@ def _dependency_names(dependencies: list[Any]) -> set[str]:
     return names
 
 
+def _iter_text_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in SKIPPED_SCAN_PARTS for part in path.relative_to(root).parts):
+            continue
+        if path.suffix.lower() in TEXT_SUFFIXES or path.name in {"Dockerfile", "LICENSE", "README"}:
+            files.append(path)
+    return files
+
+
+def _last_output_lines(output: str, *, limit: int = 8) -> str:
+    lines = [line for line in output.strip().splitlines() if line.strip()]
+    return " | ".join(lines[-limit:])
+
+
+def _rel(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate Agent Hub release metadata and packaging drift.")
     parser.add_argument("--require-vsix", action="store_true", help="Fail if the current versioned VSIX is missing.")
     args = parser.parse_args(argv)
-    failures = validate_release(ROOT, require_vsix=args.require_vsix)
+    failures = validate_release(ROOT, require_vsix=args.require_vsix, run_package_tests=True)
     if failures:
         print("Release validation failed:")
         for failure in failures:

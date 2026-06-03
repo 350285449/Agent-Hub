@@ -515,19 +515,21 @@ provider health, and other diagnostics with secret-like values redacted.
 Test proof:
 
 ```powershell
-python -m pip install -e ".[dev,release]"
+python -m pip install -e ".[test,dev,release]"
 python -m compileall -q agent_hub scripts
+python scripts/generate_backend_snapshot.py
+python scripts/validate_backend_drift.py
 Push-Location vscode-extension; npm ci; npm run prepare-backend; Pop-Location
 python scripts/validate_release.py
+python -m pytest -m "not integration and not stress"
 python -m pytest -m packaging
-python -m pytest -m unit --durations=20
 ```
 
 Optional slower lanes:
 
 ```powershell
-python -m pytest --run-integration -m integration --durations=20
-python -m pytest --run-integration --run-stress -m "integration or stress" --durations=20
+python -m pytest -m integration
+python -m pytest -m stress
 cd vscode-extension
 npm run check
 npm run check:version
@@ -584,6 +586,8 @@ gitignored, and should not be committed. To regenerate the backend snapshot
 without packaging a VSIX, run:
 
 ```sh
+python scripts/generate_backend_snapshot.py
+python scripts/validate_backend_drift.py
 cd vscode-extension && npm run prepare-backend
 ```
 
@@ -811,8 +815,9 @@ one grouped approval payload with affected files, summary, patch preview,
 planned commands, and validation plan.
 
 After edits, Agent-Hub can validate changed code. `validation_mode: "basic"`
-runs Python syntax checks for changed `.py` files and the default pytest unit
-lane when tests exist. `validation_mode: "strict"` also runs configured
+runs Python syntax checks for changed `.py` files and the default pytest lane
+(`python -m pytest -m "not integration and not stress"`) when tests exist.
+`validation_mode: "strict"` also runs configured
 validation commands. Disable with `validation_mode: "off"` or
 `--no-auto-validate`.
 
@@ -821,7 +826,7 @@ Ollama or LM Studio, then use `Agent Hub: Run Coding Agent` in VS Code or:
 
 ```powershell
 python -m agent_hub agent --allow-shell-tools "inspect the repo and fix the failing tests"
-python -m agent_hub agent --validation-mode strict --validation-command "python -m pytest -m unit" "update implementation, tests, and docs"
+python -m agent_hub agent --validation-mode strict --validation-command "python -m pytest -m \"not integration and not stress\"" "update implementation, tests, and docs"
 ```
 
 To ask before every shell command in CLI agent modes, add

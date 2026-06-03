@@ -14,9 +14,9 @@ workflows.
 5. Run:
 
 ```sh
-python -m pytest -m unit
-python -m pytest --run-integration -m integration
-python -m pytest --run-stress -m stress
+python -m pytest -m "not integration and not stress"
+python -m pytest -m integration
+python -m pytest -m stress
 python -m compileall -q agent_hub
 ```
 

@@ -75,10 +75,13 @@ jobs:
         run: python -m pytest -m packaging
 
       - name: Run default Python pytest checks
-        run: python -m pytest -m unit --durations=20
+        run: python -m pytest -m "not integration and not stress" --durations=20
 
-      - name: Run integration and stress pytest checks
-        run: python -m pytest --run-integration --run-stress -m "integration or stress" --durations=20
+      - name: Run integration pytest checks
+        run: python -m pytest -m integration --durations=20
+
+      - name: Run stress pytest checks
+        run: python -m pytest -m stress --durations=20
 
       - name: Check VS Code extension syntax
         working-directory: vscode-extension

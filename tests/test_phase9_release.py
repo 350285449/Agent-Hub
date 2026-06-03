@@ -84,13 +84,13 @@ class PhaseNineReleaseMetadataTests(unittest.TestCase):
 
         self.assertEqual(validate_pyproject_metadata(pyproject), [])
 
-        pyproject["project"]["optional-dependencies"]["dev"] = ["build>=1.2", "pytest>=8.0"]
+        pyproject["project"]["optional-dependencies"]["dev"] = []
         pyproject["project"]["optional-dependencies"]["test"] = ["pytest>=8.0"]
         pyproject["project"]["optional-dependencies"]["release"] = ["packaging>=24.0"]
 
         failures = validate_pyproject_metadata(pyproject)
 
-        self.assertTrue(any("dev extra is missing pytest-timeout" in item for item in failures))
+        self.assertTrue(any("dev extra is missing build" in item for item in failures))
         self.assertTrue(any("pytest-timeout" in item for item in failures))
         self.assertTrue(any("release extra is missing build" in item for item in failures))
 
@@ -193,7 +193,7 @@ def _pyproject_metadata() -> dict[str, object]:
             "requires-python": ">=3.11",
             "dependencies": ["packaging>=24.0"],
             "optional-dependencies": {
-                "dev": ["build>=1.2", "pytest>=8.0", "pytest-timeout>=2.3"],
+                "dev": ["build>=1.2"],
                 "release": ["build>=1.2", "packaging>=24.0"],
                 "test": ["pytest>=8.0", "pytest-timeout>=2.3"],
             },
