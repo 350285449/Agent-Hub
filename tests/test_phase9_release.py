@@ -97,7 +97,7 @@ class PhaseNineReleaseMetadataTests(unittest.TestCase):
             root = Path(tmp)
             package = root / "agent_hub"
             package.mkdir()
-            (package / "__init__.py").write_text("import email\n", encoding="utf-8")
+            (package / "__init__.py").write_text("import email\nimport packaging.version\n", encoding="utf-8")
             pyproject = _pyproject_metadata()
 
             self.assertEqual(validate_dependency_declarations(root, pyproject), [])
@@ -189,7 +189,7 @@ def _pyproject_metadata() -> dict[str, object]:
             "name": "agent-hub",
             "version": "0.7.7",
             "requires-python": ">=3.11",
-            "dependencies": [],
+            "dependencies": ["packaging>=24.0"],
             "optional-dependencies": {
                 "release": ["build>=1.2", "packaging>=24.0"],
                 "test": ["pytest>=8.0", "pytest-timeout>=2.3"],

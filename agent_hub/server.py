@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import json
-import hmac
-import os
 import time
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs
 
 from .agent_runner import AgentRunner
 from .application import (
@@ -46,6 +43,16 @@ from .core.router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
 from .team_agent_runner import TeamAgentRunner
 from .version import build_metadata, config_runtime_hash
 from .workflows import WorkflowEngine
+from .middleware import (
+    diagnostics_auth_error as _diagnostics_auth_error,
+    diagnostics_auth_required as _diagnostics_auth_required,
+    diagnostics_token as _diagnostics_token,
+    diagnostics_token_from_headers as _diagnostics_token_from_headers,
+    public_bind_host as _public_bind_host,
+    request_path as _request_path,
+    request_query as _request_query,
+)
+from .routes import handle_get as handle_route_get, handle_post as handle_route_post
 
 
 DIAGNOSTIC_ENDPOINTS = {
@@ -62,6 +69,10 @@ DIAGNOSTIC_ENDPOINTS = {
     "/v1/workflows/status",
     "/v1/plugins",
     "/v1/enterprise/audit",
+    "/debug/context",
+    "/debug/request",
+    "/metrics",
+    "/permissions",
 }
 COMPATIBILITY_ENDPOINT_REGISTRATION_MARKERS = (
     "/agent",
@@ -72,6 +83,7 @@ COMPATIBILITY_ENDPOINT_REGISTRATION_MARKERS = (
     "/v1/feedback",
     "/v1/chat/completions",
     "/v1/messages",
+    "/api/v1/models",
     "/v1/responses",
     "/v1/route",
 )
@@ -101,150 +113,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = _request_path(self.path)
-        if path in {"/", ""}:
-            self._send_html(self._root_html())
-            return
-        if path == "/dashboard":
-            self._send_html(self._root_html())
-            return
-        if path == "/dashboard/optimization":
-            self._send_html(_optimization_dashboard_html(self.server.adaptive_service.optimization_summary()))
-            return
-        if path == "/v1/status":
-            self._send_json(
-                _status_body(
-                    self.server.config,
-                    self.server.router,
-                    provider_scores=self.server.diagnostics_service.provider_scores(),
-                )
-            )
-            return
-        if path == "/v1/routing/status":
-            self._send_diagnostics_json(_routing_status_body(self.server.config, self.server.router))
-            return
-        if path == "/v1/routing/last-decision":
-            self._send_diagnostics_json(_routing_last_decision_body(self.server.config))
-            return
-        if path == "/v1/routing/test-failover":
-            self._send_diagnostics_json(_routing_test_failover_body(self.server.config, self.server.router))
-            return
-        if path == "/v1/limits":
-            self._send_diagnostics_json(self.server.diagnostics_service.limits_body(self.server.router))
-            return
-        if path == "/v1/usage":
-            self._send_diagnostics_json(
-                usage_snapshot(
-                    self.server.config.state_dir,
-                    self.server.router.health_snapshot(include_history=True),
-                )
-            )
-            return
-        if path == "/v1/client-sources":
-            self._send_diagnostics_json(_client_sources_body(self.server.config, self.server.router))
-            return
-        if path == "/v1/routing-history":
-            self._send_json(_routing_history_body(self.server.config))
-            return
-        if path == "/v1/provider-scores":
-            self._send_json(self.server.diagnostics_service.provider_scores_body())
-            return
-        if path == "/v1/provider-health":
-            self._send_diagnostics_json(_provider_health_body(self.server.config, self.server.router))
-            return
-        if path == "/v1/events":
-            self._send_diagnostics_json(_events_body(self.server.config))
-            return
-        if path == "/v1/optimization":
-            self._send_diagnostics_json(self.server.adaptive_service.optimization_summary())
-            return
-        if path == "/v1/tools":
-            self._send_diagnostics_json(_tools_body(self.server.router))
-            return
-        if path == "/v1/workflows/status":
-            self._send_diagnostics_json(_workflow_status_body(self.server.config))
-            return
-        if path == "/v1/plugins":
-            self._send_diagnostics_json(self.server.diagnostics_service.plugins_body())
-            return
-        if path == "/v1/enterprise/audit":
-            self._send_diagnostics_json(self.server.diagnostics_service.enterprise_audit_body(_request_query(self.path)))
-            return
-        if path == "/health":
-            self._send_json(
-                self.server.diagnostics_service.backend_health_body(
-                    self.server.router,
-                    context_diagnostics=_debug_context_summary(self.server),
-                )
-            )
-            return
-        if path == "/limits":
-            self._send_json(self.server.diagnostics_service.limits_body(self.server.router))
-            return
-        if path == "/usage":
-            self._send_json(
-                redact_secrets(
-                    usage_snapshot(
-                        self.server.config.state_dir,
-                        self.server.router.health_snapshot(include_history=True),
-                    )
-                )
-            )
-            return
-        if path == "/permissions":
-            self._send_json(
-                redact_secrets(
-                    permission_snapshot(
-                        self.server.config.state_dir,
-                        approval_mode=self.server.config.approval_mode,
-                        safe_mode=self.server.config.approval_mode == "safe",
-                    )
-                )
-            )
-            return
-        if path == "/metrics":
-            metrics = metrics_snapshot(
-                self.server.config.state_dir,
-                self.server.router.health_snapshot(include_history=True),
-            )
-            metrics["optimization"] = self.server.adaptive_service.optimization_summary()
-            self._send_json(
-                redact_secrets(
-                    metrics
-                )
-            )
-            return
-        if path == "/debug/request":
-            self._send_json(
-                redact_secrets(
-                    {
-                        "object": "agent_hub.debug.request",
-                        "recent": list(reversed(self.server.debug_requests[-20:])),
-                    }
-                )
-            )
-            return
-        if path == "/debug/context":
-            self._send_json(
-                redact_secrets(
-                    {
-                        "object": "agent_hub.debug.context",
-                        "summary": _debug_context_summary(self.server),
-                        "recent": list(reversed(self.server.debug_requests[-20:])),
-                    }
-                )
-            )
-            return
-        if path in {"/models", "/v1/models", "/api/v1/models"}:
-            self._send_json(
-                {
-                    "object": "list",
-                    "data": _openai_model_rows(
-                        self.server.config,
-                        self.server.router,
-                        include_routing_details=self.server.config.expose_routing_details,
-                    ),
-                }
-            )
+        if handle_route_get(self, path):
             return
         self._send_json({"error": "not found"}, status=404)
 
@@ -274,60 +143,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return
 
         path = _request_path(self.path)
-        if path == "/debug/request":
-            api_shape = debug_api_shape(payload)
-            request = request_from_header_payload(payload, self.headers, api_shape=api_shape)
-            diagnostics = request_context_diagnostics(request)
-            _record_debug_request(
-                self.server,
-                {
-                    "path": path,
-                    "api_shape": api_shape,
-                    "response_shape": "debug",
-                    "session_id": request.session_id,
-                    "route": request.route,
-                    "preferred_agent": request.preferred_agent,
-                    "message_count": len(request.messages),
-                    "diagnostics": diagnostics,
-                },
-            )
-            self._send_json(
-                {
-                    "object": "agent_hub.debug.request",
-                    "api_shape": api_shape,
-                    "session_id": request.session_id,
-                    "route": request.route,
-                    "preferred_agent": request.preferred_agent,
-                    "message_count": len(request.messages),
-                    "metadata": request.metadata,
-                    "diagnostics": diagnostics,
-                }
-            )
-            return
-        if path.startswith("/v1/workflows/"):
-            workflow = path.rsplit("/", 1)[-1]
-            self._handle_workflow(payload, workflow)
-            return
-        if path == "/v1/auto":
-            self._handle_auto_payload(payload)
-            return
-        if path == "/v1/feedback":
-            self._handle_feedback(payload)
-            return
-        if path == "/v1/routing/simulate":
-            self._handle_routing_simulation(payload)
-            return
-        if path in {"/v1/recommend-model", "/api/v1/recommend-model"}:
-            self._handle_recommendation(payload)
-            return
-        endpoint = compatibility_endpoint(path)
-        if endpoint is not None:
-            self._handle_payload(
-                payload,
-                api_shape=endpoint.api_shape,
-                response_shape=endpoint.response_shape,
-                agent_mode_default=endpoint.agent_mode_default,
-            )
+        if handle_route_post(self, path, payload):
             return
         self._send_json({"error": "not found"}, status=404)
 
@@ -1998,88 +1814,3 @@ def _positive_int(value: Any, *, default: int, maximum: int) -> int:
     except (TypeError, ValueError):
         number = default
     return max(1, min(number, maximum))
-
-
-def _request_path(path: str) -> str:
-    return path.split("?", 1)[0]
-
-
-def _request_query(path: str) -> dict[str, str]:
-    if "?" not in path:
-        return {}
-    parsed = parse_qs(path.split("?", 1)[1], keep_blank_values=False)
-    return {
-        key: values[-1]
-        for key, values in parsed.items()
-        if values
-    }
-
-
-def _diagnostics_auth_error(config: HubConfig, headers: Any) -> tuple[dict[str, Any], int] | None:
-    if not _diagnostics_auth_required(config):
-        return None
-    expected = _diagnostics_token(config)
-    if not expected:
-        return (
-            {
-                "error": {
-                    "type": "diagnostics_auth_not_configured",
-                    "message": (
-                        "Diagnostics endpoints require diagnostics_auth_token or "
-                        "diagnostics_auth_token_env when Agent Hub is bound publicly."
-                    ),
-                }
-            },
-            403,
-        )
-    provided = _diagnostics_token_from_headers(headers)
-    if provided and hmac.compare_digest(provided, expected):
-        return None
-    return (
-        {
-            "error": {
-                "type": "diagnostics_auth_required",
-                "message": "Diagnostics authentication is required for this endpoint.",
-            }
-        },
-        401,
-    )
-
-
-def _diagnostics_auth_required(config: HubConfig) -> bool:
-    return _public_bind_host(str(getattr(config, "host", "127.0.0.1") or "127.0.0.1"))
-
-
-def _diagnostics_token(config: HubConfig) -> str:
-    explicit = getattr(config, "diagnostics_auth_token", None)
-    if isinstance(explicit, str) and explicit:
-        return explicit
-    env_name = getattr(config, "diagnostics_auth_token_env", None)
-    if isinstance(env_name, str) and env_name:
-        return os.environ.get(env_name, "")
-    return ""
-
-
-def _diagnostics_token_from_headers(headers: Any) -> str:
-    direct = headers.get("X-Agent-Hub-Diagnostics-Token")
-    if isinstance(direct, str) and direct.strip():
-        return direct.strip()
-    auth = headers.get("Authorization")
-    if isinstance(auth, str) and auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return ""
-
-
-def _public_bind_host(host: str) -> bool:
-    value = host.strip().lower()
-    if value in {"", "localhost", "127.0.0.1", "::1"}:
-        return False
-    if value in {"0.0.0.0", "::", "[::]"}:
-        return True
-    try:
-        import ipaddress
-
-        address = ipaddress.ip_address(value.strip("[]"))
-    except ValueError:
-        return True
-    return not address.is_loopback

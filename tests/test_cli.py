@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -244,6 +245,72 @@ class CliTests(unittest.TestCase):
             output = buffer.getvalue()
             self.assertIn("coder", output)
             self.assertIn("score", output)
+
+    def test_estimate_command_reports_cost_latency_and_explanation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "state_dir": str(Path(tmp) / "state"),
+                        "auto_detect_local_models": False,
+                        "default_route": ["coder"],
+                        "routes": [{"name": "coding", "agents": ["coder"]}],
+                        "agents": [
+                            {
+                                "name": "coder",
+                                "provider": "openai-compatible",
+                                "model": "coder-test",
+                                "base_url": "http://127.0.0.1:9999",
+                                "free": True,
+                                "cost_per_million_input": 1.0,
+                                "cost_per_million_output": 2.0,
+                                "supports_tools": True,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "estimate",
+                        "--route",
+                        "coding",
+                        "--output-tokens",
+                        "1000",
+                        "--json",
+                        "fix tests",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            data = json.loads(buffer.getvalue())
+            self.assertEqual(data["object"], "agent_hub.routing_estimate")
+            row = data["recommendations"][0]
+            self.assertEqual(row["agent"], "coder")
+            self.assertIn("estimated_cost_usd", row)
+            self.assertIn("routing_explanation", row)
+
+    def test_debug_bundle_exports_zip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+            output = Path(tmp) / "debug.zip"
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(["--config", str(path), "debug-bundle", "--output", str(output)])
+
+            self.assertEqual(code, 0)
+            self.assertTrue(output.exists())
+            with zipfile.ZipFile(output) as archive:
+                self.assertIn("manifest.json", set(archive.namelist()))
 
     def test_chat_runs_one_turn_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

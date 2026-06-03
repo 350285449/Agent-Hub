@@ -545,6 +545,14 @@ Install it from the GitHub clone:
 The installer packages the extension, bundles the Python backend, finds the
 `code`/`code-insiders`/`codium` CLI, installs the VSIX with `--force`, and warns
 if Python 3.11+ is missing. It needs Node.js 20 or newer to build the VSIX.
+
+`vscode-extension/backend` is generated during packaging and is intentionally
+gitignored. To regenerate the backend snapshot without packaging a VSIX, run:
+
+```sh
+cd vscode-extension && npm run prepare-backend
+```
+
 After installing, reload VS Code, open any workspace, and use:
 
 - `Agent Hub: Open Chat`

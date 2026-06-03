@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-INTERNAL_TOP_LEVEL = {"agent_hub"}
+INTERNAL_TOP_LEVEL = {"agent_hub", "scripts"}
 RELEASE_EXTRA_DEPENDENCIES = {"build", "packaging"}
 
 
@@ -57,13 +57,15 @@ def runtime_import_names(root: Path) -> set[str]:
 def runtime_dependency_audit(root: Path, pyproject: dict[str, Any] | None = None) -> dict[str, Any]:
     pyproject = pyproject if pyproject is not None else load_pyproject(root)
     imports = runtime_import_names(root)
+    declared_dependencies = declared_project_dependencies(pyproject)
     declared = {
         dependency_import_name(dependency)
-        for dependency in declared_project_dependencies(pyproject)
+        for dependency in declared_dependencies
     }
     return {
         "runtime_imports": sorted(imports),
         "declared_runtime_dependencies": sorted(declared),
+        "declared_runtime_dependency_specs": declared_dependencies,
         "missing": sorted(imports - declared),
         "extra": sorted(declared - imports),
     }
@@ -117,6 +119,8 @@ def dependency_install_checks(root: Path) -> list[dict[str, Any]]:
 def validate_dependency_declarations(root: Path, pyproject: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     audit = runtime_dependency_audit(root, pyproject)
+    if not audit["declared_runtime_dependency_specs"]:
+        failures.append("pyproject.toml project.dependencies must not be empty")
     for name in audit["missing"]:
         failures.append(f"pyproject.toml project.dependencies is missing runtime dependency for import {name}")
     for name in audit["extra"]:
