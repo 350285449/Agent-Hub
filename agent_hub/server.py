@@ -10,15 +10,18 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from .agent_runner import AgentRunner
-from .application import AdaptiveApplicationService, DiagnosticsApplicationService
+from .application import (
+    AdaptiveApplicationService,
+    BACKEND_FEATURES,
+    BACKEND_VERSION,
+    DiagnosticsApplicationService,
+)
 from .api.compatibility import (
     apply_model_routing,
     anthropic_sse_frames,
-    available_model_ids,
     compatibility_endpoint,
     debug_api_shape,
     model_lookup_error,
-    model_rows,
     openai_chat_sse_frames,
     openai_model_rows,
     openai_response_sse_frames,
@@ -34,104 +37,17 @@ from .api.compatibility import (
 )
 from .config import HubConfig
 from .context import request_context_diagnostics
-from .enterprise import export_enterprise_audit
 from .models import HubRequest
 from .observability import metrics_snapshot, permission_snapshot, recent_events, record_event, usage_snapshot
 from .permissions import UNTRUSTED_EXTERNAL
 from .security.secrets import redact_secrets
 from .streaming import safe_stream_failure_chunk
-from .plugins import discover_plugins
 from .core.router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
 from .team_agent_runner import TeamAgentRunner
-from .version import backend_version, build_metadata, config_runtime_hash
+from .version import build_metadata, config_runtime_hash
 from .workflows import WorkflowEngine
 
 
-BACKEND_VERSION = backend_version()
-BACKEND_FEATURES = {
-    "native_agent_streaming": True,
-    "native_agent_tool_schemas": True,
-    "agent_progress_v2": True,
-    "workspace_edit_events": True,
-    "active_file_context_resolution": True,
-    "current_folder_context": True,
-    "workspace_shell_commands": True,
-    "file_write_tools": True,
-    "fast_write_finalize": True,
-    "multi_file_apply_patch": True,
-    "post_edit_validation": True,
-    "team_agent_mode": True,
-    "transparent_openai_responses": True,
-    "openrouter_style_api_path": True,
-    "provider_presets": True,
-    "automatic_config_initialization": True,
-    "model_recommendations": True,
-    "quota_aware_failover": True,
-    "persistent_provider_health": True,
-    "adaptive_latency_routing": True,
-    "provider_health_metrics": True,
-    "provider_health_scoring": True,
-    "native_provider_streaming": True,
-    "shell_command_permission_policy": True,
-    "agent_hub_model_aliases": True,
-    "openai_tool_call_passthrough": True,
-    "anthropic_messages_compatibility": True,
-    "anthropic_tool_use_passthrough": True,
-    "local_dummy_auth_compatibility": True,
-    "workspace_checkpoints": True,
-    "validation_repair_loops": True,
-    "validation_rollback": True,
-    "context_change_bar": True,
-    "agent_context_compaction": True,
-    "context_usage_bar": True,
-    "strict_repository_context": True,
-    "grouped_patch_enforcement": True,
-    "repository_context_scoring": True,
-    "repository_graph_propagation": True,
-    "semantic_related_file_detection": True,
-    "anti_hallucination_edit_blocking": True,
-    "limits_endpoint": True,
-    "response_limit_headers": True,
-    "central_permission_manager": True,
-    "provider_permission_gate": True,
-    "debug_echo_gate": True,
-    "cline_tool_model_gate": True,
-    "central_token_budget_manager": True,
-    "tool_security_classifier": True,
-    "secret_detection": True,
-    "structured_observability": True,
-    "capability_graph": True,
-    "safe_mode": True,
-    "cline_compatibility_mode": True,
-    "protected_context_categories": True,
-    "context_debug_endpoints": True,
-    "context_engine_v2": True,
-    "deterministic_workflows": True,
-    "adaptive_learning_router": True,
-    "auto_workflow_selection": True,
-    "optimization_analytics": True,
-    "optimization_dashboard": True,
-    "routing_simulation": True,
-    "mcp_tool_compatibility_layer": True,
-    "tool_execution_loop": True,
-    "external_mcp_bridge": True,
-    "repo_aware_coding": True,
-    "provider_evaluation": True,
-    "dashboard_status_endpoints": True,
-    "raw_provider_response_debugging": True,
-    "response_normalization_hardening": True,
-    "streaming_recovery": True,
-    "context_safety_cap": True,
-    "repo_ignore_patterns": True,
-    "plugin_sdk_foundation": True,
-    "signed_plugin_manifests": True,
-    "plugin_sandbox_foundation": True,
-    "enterprise_foundation_models": True,
-    "enterprise_audit_logs": True,
-    "config_migration": True,
-    "events_endpoint": True,
-    "deployment_templates": True,
-}
 DIAGNOSTIC_ENDPOINTS = {
     "/v1/provider-health",
     "/v1/routing/status",
@@ -213,7 +129,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_diagnostics_json(_routing_test_failover_body(self.server.config, self.server.router))
             return
         if path == "/v1/limits":
-            self._send_diagnostics_json(_limits_body(self.server.config, self.server.router))
+            self._send_diagnostics_json(self.server.diagnostics_service.limits_body(self.server.router))
             return
         if path == "/v1/usage":
             self._send_diagnostics_json(
@@ -248,125 +164,21 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_diagnostics_json(_workflow_status_body(self.server.config))
             return
         if path == "/v1/plugins":
-            self._send_diagnostics_json(_plugins_body(self.server.config))
+            self._send_diagnostics_json(self.server.diagnostics_service.plugins_body())
             return
         if path == "/v1/enterprise/audit":
-            self._send_diagnostics_json(_enterprise_audit_body(self.server.config, _request_query(self.path)))
+            self._send_diagnostics_json(self.server.diagnostics_service.enterprise_audit_body(_request_query(self.path)))
             return
         if path == "/health":
             self._send_json(
-                {
-                    "status": "ok",
-                    "running": True,
-                    "server_status": "running",
-                    "version": BACKEND_VERSION,
-                    "build": build_metadata(),
-                    "runtime": {"config_hash": config_runtime_hash(self.server.config)},
-                    "features": BACKEND_FEATURES,
-                    "agents": [
-                        name
-                        for name, agent in self.server.config.agents.items()
-                        if agent.enabled
-                    ],
-                    "configured_agents": list(self.server.config.agents),
-                    "free_only": self.server.config.free_only,
-                    "allow_shell_tools": self.server.config.allow_shell_tools,
-                    "shell_command_policy": self.server.config.shell_command_policy,
-                    "approval_mode": self.server.config.approval_mode,
-                    "debug_echo_enabled": self.server.config.debug_echo_enabled,
-                    "permission_policy": {
-                        "approval_mode": self.server.config.approval_mode,
-                        "safe_mode": self.server.config.approval_mode == "safe",
-                        "readonly_mode": self.server.config.approval_mode == "readonly",
-                        "shell_command_policy": self.server.config.shell_command_policy,
-                        "external_provider_approval": True,
-                        "file_write_approval": self.server.config.approval_mode in {"ask", "safe", "readonly", "deny"},
-                        "dangerous_command_blocking": True,
-                        "secret_detection": True,
-                    },
-                    "prefer_multi_file_patches": self.server.config.prefer_multi_file_patches,
-                    "grouped_patch_enforcement": {
-                        "enabled": self.server.config.prefer_multi_file_patches,
-                    },
-                    "context_change_bar": {
-                        "enabled": self.server.config.context_change_bar_enabled,
-                        "mode": self.server.config.context_change_bar_mode,
-                        "threshold": self.server.config.context_change_bar_threshold,
-                    },
-                    "agent_context_compaction": {
-                        "enabled": self.server.config.agent_context_compaction_enabled,
-                        "budget_tokens": self.server.config.agent_context_budget_tokens,
-                        "mode": self.server.config.context_mode,
-                    },
-                    "token_budget": {
-                        "mode": self.server.config.context_mode,
-                        "budget_tokens": self.server.config.agent_context_budget_tokens,
-                        "max_context_tokens": self.server.config.max_context_tokens,
-                        "compatibility_mode": self.server.config.compatibility_mode,
-                        "adaptive_modes": ["minimal", "balanced", "deep"],
-                        "cline_compatibility_mode": self.server.config.cline_compatibility_mode,
-                        "protected_categories": [
-                            "recent_tool_calls",
-                            "task_progress",
-                            "todos",
-                            "active_editor",
-                            "workspace_state",
-                            "mcp_state",
-                            "latest_reasoning",
-                        ],
-                    },
-                    "context_diagnostics": _debug_context_summary(self.server),
-                    "streaming": {
-                        "force_compatibility_streaming": self.server.config.force_compatibility_streaming,
-                    },
-                    "repo_ignore_patterns": self.server.config.repo_ignore_patterns,
-                    "plugins": _plugins_body(self.server.config),
-                    "repository_context_scoring": {
-                        "enabled": self.server.config.context_change_bar_enabled,
-                        "light_minimum": 3,
-                        "strict_minimum": 6,
-                        "changed_file_threshold": self.server.config.context_change_bar_threshold,
-                    },
-                    "repository_graph": {
-                        "enabled": True,
-                        "node_count": 0,
-                        "related_file_detection_enabled": True,
-                        "strict_anti_hallucination_enforcement_enabled": (
-                            self.server.config.context_change_bar_enabled
-                            and self.server.config.context_change_bar_mode == "strict"
-                        ),
-                    },
-                    "workspace_dir": str(self.server.config.workspace_dir),
-                    "initialization": self.server.config.initialization_report,
-                    "provider_health": self.server.router.health_snapshot(),
-                    "providers": self.server.router.provider_status(),
-                    "capability_graph": self.server.router.capability_graph(),
-                    "active_providers": _active_provider_names(
-                        self.server.config,
-                        self.server.router,
-                    ),
-                    "limits": _limits_body(self.server.config, self.server.router),
-                    "recommendations": self.server.router.recommend(
-                        HubRequest(
-                            session_id="health",
-                            route="cloud-agent",
-                            messages=[{"role": "user", "content": "select an agent model"}],
-                            record_session=False,
-                        ),
-                        limit=5,
-                        needs_tools=True,
-                        include_unavailable=True,
-                    ),
-                    "models": _model_rows(self.server.config, self.server.router),
-                    "available_models": _available_model_ids(
-                        self.server.config,
-                        self.server.router,
-                    ),
-                }
+                self.server.diagnostics_service.backend_health_body(
+                    self.server.router,
+                    context_diagnostics=_debug_context_summary(self.server),
+                )
             )
             return
         if path == "/limits":
-            self._send_json(_limits_body(self.server.config, self.server.router))
+            self._send_json(self.server.diagnostics_service.limits_body(self.server.router))
             return
         if path == "/usage":
             self._send_json(
@@ -1693,29 +1505,11 @@ def _workflow_status_body(config: HubConfig) -> dict[str, Any]:
 
 
 def _plugins_body(config: HubConfig) -> dict[str, Any]:
-    return discover_plugins(config).to_dict()
+    return DiagnosticsApplicationService(config).plugins_body()
 
 
 def _enterprise_audit_body(config: HubConfig, query: dict[str, str] | None = None) -> dict[str, Any]:
-    query = query or {}
-    export = export_enterprise_audit(
-        config.state_dir,
-        limit=_positive_int(query.get("limit"), default=100, maximum=1000),
-        user=query.get("user") or query.get("actor_id"),
-        workspace=query.get("workspace") or query.get("workspace_id"),
-        action=query.get("action"),
-        allowed=_allowed_query(query),
-        start_at=query.get("start_at") or query.get("from"),
-        end_at=query.get("end_at") or query.get("to"),
-        retention_days=getattr(config, "enterprise_audit_retention_days", None),
-    )
-    events = export["events"]
-    return {
-        "object": "agent_hub.enterprise_audit",
-        "count": len(events),
-        "recent": events,
-        "export": export,
-    }
+    return DiagnosticsApplicationService(config).enterprise_audit_body(query)
 
 
 def _provider_row_html(row: dict[str, Any]) -> str:
@@ -2134,136 +1928,15 @@ def _html(value: Any) -> str:
 
 
 def _limits_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
-    health = router.health_snapshot(include_history=True)
-    recommendations = router.recommend(
-        HubRequest(
-            session_id="limits",
-            route="cloud-agent",
-            messages=[{"role": "user", "content": "select an agent model"}],
-            record_session=False,
-        ),
-        limit=8,
-        needs_tools=True,
-        include_unavailable=True,
-    )
-    active = next((row for row in recommendations if row.get("available")), None)
-    if active is None and recommendations:
-        active = recommendations[0]
-    providers = [
-        _provider_limit_row(name, agent, health.get(name, {}))
-        for name, agent in sorted(config.agents.items())
-        if agent.enabled
-    ]
-    failed_models: list[dict[str, Any]] = []
-    for row in providers:
-        if row.get("last_error_message"):
-            failed_models.append(
-                {
-                    "agent": row["agent"],
-                    "provider": row["provider"],
-                    "model": row["model"],
-                    "reason": row["last_error_message"],
-                    "cooldown_until": row["cooldown_until"],
-                }
-            )
-    return {
-        "object": "agent_hub.limits",
-        "status": "running",
-        "running": True,
-        "active_model": _active_model_row(active),
-        "active_providers": [
-            row["agent"]
-            for row in providers
-            if row.get("available")
-        ],
-        "providers": providers,
-        "limits": providers,
-        "provider_health": health,
-        "cooldowns": {
-            row["agent"]: row["cooldown_until"]
-            for row in providers
-            if row.get("cooldown_until")
-        },
-        "available_models": _available_model_ids(config, router),
-        "failed_models": failed_models,
-        "fallback_models": failed_models,
-        "recommendations": recommendations,
-    }
-
-
-def _provider_limit_row(
-    name: str,
-    agent: Any,
-    health: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "agent": name,
-        "provider": agent.provider,
-        "provider_name": agent.provider,
-        "provider_type": agent.provider_type,
-        "model": agent.model,
-        "available": bool(health.get("available")),
-        "degraded": bool(health.get("degraded")),
-        "remaining": health.get("remaining", "unknown"),
-        "quota_state": health.get("quota_state", "unknown"),
-        "quota_source": health.get("quota_source", "unknown"),
-        "quota_remaining": health.get("quota_remaining"),
-        "requests_remaining": health.get("requests_remaining"),
-        "tokens_remaining": health.get("tokens_remaining"),
-        "credits_remaining": health.get("credits_remaining"),
-        "rate_limit_reset_at": health.get("rate_limit_reset_at"),
-        "cooldown_until": health.get("cooldown_until"),
-        "unavailable_until": health.get("unavailable_until"),
-        "last_error_type": health.get("last_error_type"),
-        "last_error_message": health.get("last_error_message"),
-        "average_latency_seconds": health.get("average_latency_seconds"),
-        "tokens_per_second": health.get("average_tokens_per_second"),
-        "context_limit": health.get("context_window"),
-        "output_limit": health.get("max_output_tokens"),
-        "last_request_source": health.get("last_request_source"),
-        "last_failover_attempts": health.get("last_failover_attempts"),
-        "stream_interruption_count": health.get("stream_interruption_count", 0),
-        "success_count": health.get("success_count", 0),
-        "failure_count": health.get("failure_count", 0),
-    }
-
-
-def _active_model_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not row:
-        return None
-    return {
-        "agent": row.get("agent"),
-        "provider": row.get("provider"),
-        "provider_name": row.get("provider"),
-        "provider_type": row.get("provider_type"),
-        "model": row.get("model"),
-        "available": row.get("available"),
-        "remaining": row.get("remaining", "unknown"),
-        "quota_state": row.get("quota_state", "unknown"),
-        "requests_remaining": row.get("requests_remaining"),
-        "tokens_remaining": row.get("tokens_remaining"),
-        "credits_remaining": row.get("credits_remaining"),
-        "rate_limit_reset_at": row.get("rate_limit_reset_at"),
-        "cooldown_until": row.get("cooldown_until"),
-        "average_latency_seconds": row.get("average_latency_seconds"),
-        "tokens_per_second": row.get("tokens_per_second"),
-        "context_limit": row.get("context_limit"),
-        "output_limit": row.get("output_limit"),
-        "source_client": row.get("last_request_source"),
-    }
+    return DiagnosticsApplicationService(config).limits_body(router)
 
 
 def _active_provider_names(config: HubConfig, router: AgentRouter) -> list[str]:
-    health = router.health_snapshot()
-    return [
-        name
-        for name, agent in sorted(config.agents.items())
-        if agent.enabled and health.get(name, {}).get("available")
-    ]
+    return DiagnosticsApplicationService(config).active_provider_names(router)
 
 
 def _available_model_ids(config: HubConfig, router: AgentRouter) -> list[str]:
-    return available_model_ids(config, router)
+    return DiagnosticsApplicationService(config).available_model_ids(router)
 
 
 def _openai_model_rows(
@@ -2280,7 +1953,7 @@ def _openai_model_rows(
 
 
 def _model_rows(config: HubConfig, router: AgentRouter) -> list[dict[str, Any]]:
-    return model_rows(config, router)
+    return DiagnosticsApplicationService(config).model_rows(router)
 
 
 def _apply_model_routing(config: HubConfig, request: HubRequest) -> None:
@@ -2340,26 +2013,6 @@ def _request_query(path: str) -> dict[str, str]:
         for key, values in parsed.items()
         if values
     }
-
-
-def _allowed_query(query: dict[str, str]) -> bool | None:
-    if "allowed" in query:
-        return _query_bool(query["allowed"])
-    if "allow" in query and _query_bool(query["allow"]) is True:
-        return True
-    for key in ("deny", "denied"):
-        if key in query and _query_bool(query[key]) is True:
-            return False
-    return None
-
-
-def _query_bool(value: str) -> bool | None:
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on", "allow", "allowed"}:
-        return True
-    if text in {"0", "false", "no", "off", "deny", "denied"}:
-        return False
-    return None
 
 
 def _diagnostics_auth_error(config: HubConfig, headers: Any) -> tuple[dict[str, Any], int] | None:

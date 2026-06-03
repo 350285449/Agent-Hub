@@ -9,6 +9,8 @@ from scripts.backend_snapshot import generate_snapshot, validate_snapshot
 from scripts.package_clean import cleanup_messages
 from scripts.update_release_metadata import update_release_metadata
 from scripts.validate_release import (
+    validate_dependency_declarations,
+    validate_extension_packaging_scripts,
     validate_pyproject_metadata,
     validate_release_metadata,
     validate_version_consistency,
@@ -82,13 +84,46 @@ class PhaseNineReleaseMetadataTests(unittest.TestCase):
 
         self.assertEqual(validate_pyproject_metadata(pyproject), [])
 
-        pyproject["project"]["dependencies"] = []
         pyproject["project"]["optional-dependencies"]["test"] = ["pytest>=8.0"]
+        pyproject["project"]["optional-dependencies"]["release"] = ["packaging>=24.0"]
 
         failures = validate_pyproject_metadata(pyproject)
 
-        self.assertTrue(any("project.dependencies" in item for item in failures))
         self.assertTrue(any("pytest-timeout" in item for item in failures))
+        self.assertTrue(any("release extra is missing build" in item for item in failures))
+
+    def test_dependency_declaration_validation_matches_runtime_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package = root / "agent_hub"
+            package.mkdir()
+            (package / "__init__.py").write_text("import email\n", encoding="utf-8")
+            pyproject = _pyproject_metadata()
+
+            self.assertEqual(validate_dependency_declarations(root, pyproject), [])
+
+            (package / "network.py").write_text("import requests\n", encoding="utf-8")
+            failures = validate_dependency_declarations(root, pyproject)
+
+            self.assertTrue(any("missing runtime dependency for import requests" in item for item in failures))
+
+    def test_extension_packaging_scripts_prepare_backend_snapshot(self) -> None:
+        package = {
+            "scripts": {
+                "prepare-backend": "node scripts/prepare-backend.js",
+                "validate-backend-drift": "python ../scripts/validate_backend_drift.py",
+                "package": "npm run prepare-backend && npm run validate-backend-drift && npx @vscode/vsce package",
+                "publish": "npm run prepare-backend && npm run validate-release && npx @vscode/vsce publish",
+                "vscode:prepublish": "npm run prepare-backend && npm run validate-backend-drift",
+            }
+        }
+
+        self.assertEqual(validate_extension_packaging_scripts(package), [])
+
+        package["scripts"]["vscode:prepublish"] = "npm run validate-backend-drift"
+        failures = validate_extension_packaging_scripts(package)
+
+        self.assertTrue(any("vscode:prepublish script must run prepare-backend" in item for item in failures))
 
 
 class PhaseNineSnapshotEnforcementTests(unittest.TestCase):
@@ -154,8 +189,9 @@ def _pyproject_metadata() -> dict[str, object]:
             "name": "agent-hub",
             "version": "0.7.7",
             "requires-python": ">=3.11",
-            "dependencies": ["packaging>=24.0"],
+            "dependencies": [],
             "optional-dependencies": {
+                "release": ["build>=1.2", "packaging>=24.0"],
                 "test": ["pytest>=8.0", "pytest-timeout>=2.3"],
             },
             "scripts": {

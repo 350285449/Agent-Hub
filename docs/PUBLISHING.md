@@ -22,6 +22,7 @@ CI may stamp build metadata into `release.json` during a workflow run:
 From the repository root:
 
 ```powershell
+python -m pip install -e ".[test,release]"
 python scripts/package_clean.py
 python scripts/generate_backend_snapshot.py
 python scripts/validate_backend_drift.py
@@ -45,15 +46,20 @@ python scripts/package_clean.py --apply --include-current-vsix
 ```
 
 Then run `npm.cmd run package` from `vscode-extension`.
+The package and publish scripts both run `prepare-backend`, and
+`vscode:prepublish` also regenerates and validates the backend snapshot for
+direct VSCE packaging.
 
 ## CI Validation
 
 `.github/workflows/ci.yml` runs on pull requests, pushes, and manual dispatch.
-It installs with `npm ci` to verify `package-lock.json`, compiles Python,
-runs unittest discovery, validates config drift, generates and validates the
-backend snapshot, validates `release.json`, checks VS Code extension syntax,
-packages a VSIX, and validates VSIX cleanliness with source-tree artifact
-checks.
+It installs with `npm ci` to verify `package-lock.json`, installs the Python
+`test` and `release` extras, compiles Python, validates config drift, generates
+and validates the backend snapshot, validates `release.json`, runs packaging
+pytest checks, runs the default unit pytest lane, checks VS Code extension
+syntax, packages a VSIX, and validates VSIX cleanliness with source-tree
+artifact checks. Integration and stress tests are opt-in under pytest; the
+manual release workflow runs them before packaging.
 
 ## Manual Release Workflow
 
@@ -94,8 +100,8 @@ regenerated.
 
 `validate_release.py` also checks extension version metadata, backend version
 metadata, generated config reference freshness, backend snapshot drift, release
-doc placeholders, package-lock version consistency, and the current VSIX if it
-exists.
+doc placeholders, dependency declarations, package-lock version consistency,
+extension packaging hooks, and the current VSIX if it exists.
 
 ## Manual Publishing
 

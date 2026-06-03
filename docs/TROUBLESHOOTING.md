@@ -10,6 +10,10 @@ The doctor report includes config path, backend version, Python runtime,
 install checks, dependency checks, backend reachability, generated backend
 snapshot status, enabled providers, missing API keys, local model servers,
 Cline/Claude endpoints, approval mode, safe mode, token mode, and likely fixes.
+Use `agent-hub doctor --json` when filing an issue; the JSON output includes a
+`runtime_dependency_audit` row and optional `release_dependency:*` rows so you
+can tell whether a local install problem is runtime-related or release-tooling
+related.
 
 Useful endpoints:
 
@@ -29,7 +33,10 @@ Common fixes:
   `http://127.0.0.1:11434/api/tags` is reachable from the same machine.
 - Backend not running: click `Start Server` in the sidebar.
 - Backend missing from VSIX: run `npm run prepare-backend` in
-  `vscode-extension/`, then package again.
+  `vscode-extension/`, then package again. `npm run package`,
+  `npm run publish`, and VSCE prepublish all regenerate the snapshot.
+- Release validation cannot import release tooling: install the release extra
+  with `python -m pip install -e ".[release]"`.
 - Port conflict: stop the old server or change `agentHub.serverUrl`.
 - Cline empty context: use base URL ending in `/v1`, model `agent-hub-coding`,
   and keep `cline_compatibility_mode=true`.
@@ -85,6 +92,7 @@ reports backend drift, regenerate the snapshot from the repository root:
 
 ```powershell
 python scripts/generate_backend_snapshot.py
+python scripts/validate_backend_drift.py
 python scripts/validate_release.py
 ```
 

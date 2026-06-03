@@ -450,6 +450,8 @@ install checks, dependency checks, config status, backend reachability, bundled
 backend snapshot status, enabled providers, missing API keys, local model
 servers, Cline/Claude endpoints, approval mode, safe mode, token optimization
 mode, context diagnostics, likely problems, and exact fixes.
+Use `agent-hub doctor --json` for issue reports or automation; dependency
+checks distinguish the runtime import audit from optional release tooling.
 
 Router/provider errors also expose structured categories internally
 (`configuration`, `provider`, `rate_limit`, `quota`, `context_limit`,
@@ -767,8 +769,8 @@ one grouped approval payload with affected files, summary, patch preview,
 planned commands, and validation plan.
 
 After edits, Agent-Hub can validate changed code. `validation_mode: "basic"`
-runs Python syntax checks for changed `.py` files and `python -m unittest
-discover -v` when tests exist. `validation_mode: "strict"` also runs configured
+runs Python syntax checks for changed `.py` files and the default pytest unit
+lane when tests exist. `validation_mode: "strict"` also runs configured
 validation commands. Disable with `validation_mode: "off"` or
 `--no-auto-validate`.
 
@@ -777,7 +779,7 @@ Ollama or LM Studio, then use `Agent Hub: Run Coding Agent` in VS Code or:
 
 ```powershell
 python -m agent_hub agent --allow-shell-tools "inspect the repo and fix the failing tests"
-python -m agent_hub agent --validation-mode strict --validation-command "python -m unittest discover -v" "update implementation, tests, and docs"
+python -m agent_hub agent --validation-mode strict --validation-command "python -m pytest -m unit" "update implementation, tests, and docs"
 ```
 
 To ask before every shell command in CLI agent modes, add

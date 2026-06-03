@@ -27,6 +27,7 @@ from .permissions import (
     tool_permission_request,
 )
 from .security.command_runner import CommandExecutionRequest, run_workspace_command
+from .agent_tool_dispatch import MUTATING_AGENT_TOOLS, dispatch_agent_tool
 
 
 SKIPPED_DIRS = {
@@ -492,24 +493,7 @@ class AgentToolbox:
             if self._is_mutating_tool(name):
                 checkpoint = self._create_edit_checkpoint(name, args)
             try:
-                if name == "list_files":
-                    result = self._list_files(args)
-                elif name == "read_file":
-                    result = self._read_file(args)
-                elif name == "search_files":
-                    result = self._search_files(args)
-                elif name == "repo_map":
-                    result = self._repo_map(args)
-                elif name == "write_file":
-                    result = self._write_file(args)
-                elif name == "replace_in_file":
-                    result = self._replace_in_file(args)
-                elif name == "apply_patch":
-                    result = self._apply_patch(args)
-                elif name == "run_command":
-                    result = self._run_command(args)
-                else:
-                    raise ToolError(f"Unknown tool {name!r}")
+                result = dispatch_agent_tool(self, name, args)
             except BaseException:
                 if checkpoint is not None:
                     rollback_result = self._restore_checkpoint_safely(checkpoint)
@@ -600,7 +584,7 @@ class AgentToolbox:
             return
 
     def _is_mutating_tool(self, name: str) -> bool:
-        return name in ("write_file", "replace_in_file", "apply_patch")
+        return name in MUTATING_AGENT_TOOLS
 
     def _create_edit_checkpoint(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         paths = self._checkpoint_paths_for_edit(name, args)

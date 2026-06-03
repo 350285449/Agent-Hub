@@ -26,7 +26,9 @@ agent-hub doctor
 ```
 
 Confirm that the backend is reachable, at least one provider is ready, and the
-Cline endpoint is `http://127.0.0.1:8787/v1`.
+Cline endpoint is `http://127.0.0.1:8787/v1`. If you need a machine-readable
+setup check, run `agent-hub doctor --json` and inspect `backend_reachable`,
+`providers_available`, `missing_api_keys`, and `exact_fixes`.
 
 Agent-Hub preserves Cline's client-provided tool schema by default. Built-in
 Agent-Hub tools are executed by the backend only when Agent-Hub owns the tool
@@ -109,6 +111,7 @@ Diagnostics:
 
 ```powershell
 agent-hub inspect-request .\cline-payload.json --api-shape openai-chat
+agent-hub doctor --json
 curl http://127.0.0.1:8787/debug/context
 ```
 

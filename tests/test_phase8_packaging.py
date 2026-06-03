@@ -43,6 +43,7 @@ class PhaseEightBackendSnapshotTests(unittest.TestCase):
 
 class PhaseEightReleaseValidationTests(unittest.TestCase):
     def test_release_manifest_consistency(self) -> None:
+        generate_snapshot(ROOT)
         failures = validate_release(ROOT, require_vsix=False)
 
         self.assertEqual(failures, [])

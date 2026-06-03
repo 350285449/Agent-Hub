@@ -35,9 +35,11 @@ From the repository root:
 ```powershell
 git status --short
 node --version
+python -m pip install -e ".[test,release]"
 python scripts/generate_backend_snapshot.py
 python scripts/validate_backend_drift.py
 python scripts/validate_release.py
+python -m pytest -m unit
 python scripts/package_clean.py
 cd vscode-extension
 npm.cmd ci
@@ -67,6 +69,10 @@ This runs the backend staging step and creates:
 vscode-extension/agent-hub-vscode-<version>.vsix
 ```
 
+`npm.cmd run package`, `npm.cmd run publish`, and `vscode:prepublish` all run
+backend staging before VSCE packaging, so a clean source checkout does not need
+a checked-in `vscode-extension/backend` directory.
+
 Validate the packaged archive before installing or publishing:
 
 ```powershell
@@ -85,8 +91,9 @@ npm.cmd run package
 
 The GitHub Actions workflow `Manual VSIX Release` can be started with
 `workflow_dispatch`. It stamps CI build metadata into `release.json`,
-regenerates the backend snapshot, validates release metadata, runs tests,
-packages the VSIX, validates the archive, uploads the VSIX as a workflow
+regenerates the backend snapshot, validates release metadata, runs the default
+unit pytest lane plus opt-in integration/stress checks, packages the VSIX,
+validates the archive, uploads the VSIX as a workflow
 artifact, and can create or update a GitHub Release tagged as
 `v<extension-version>` with the VSIX attached. It does not publish to the
 Marketplace.

@@ -10,7 +10,9 @@ python scripts/generate_backend_snapshot.py
 ```
 
 The VS Code packaging command `npm.cmd run prepare-backend` delegates to the
-same generator.
+same generator. `npm.cmd run package`, `npm.cmd run publish`, and the
+`vscode:prepublish` hook all run snapshot preparation before packaging or
+publishing.
 
 The snapshot exists so a packaged VSIX can bundle the backend without requiring
 an editable repository checkout. Do not make feature fixes directly in
@@ -21,7 +23,7 @@ To prevent drift before release:
 
 ```powershell
 python -m compileall -q agent_hub
-python -m unittest discover -s tests
+python -m pytest -m unit
 python scripts/generate_backend_snapshot.py
 python scripts/validate_backend_drift.py
 python scripts/validate_release.py
@@ -37,7 +39,8 @@ packages, or temporary files appear in the snapshot.
 
 CI regenerates the snapshot before validation so clean checkouts can produce
 the same package structure deterministically. Release packaging uses the same
-generator through `npm.cmd run prepare-backend`.
+generator through `npm.cmd run prepare-backend`; packaging tests also regenerate
+the ignored snapshot before checking release consistency.
 
 Phase 10 should decide whether the generated snapshot remains an ignored local
 artifact or moves to a wheel-based backend package.

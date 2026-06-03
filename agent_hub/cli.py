@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import re
 import sys
 import threading
 import time
-import tomllib
 import uuid
 import urllib.error
 import urllib.request
@@ -27,7 +25,7 @@ from .config import (
     normalize_provider,
 )
 from .config_migration import migrate_config_file
-from .context import request_context_diagnostics
+from .dependency_audit import dependency_install_checks
 from .evaluation import BenchmarkRunner, ProviderScoreStore, default_benchmark_tasks
 from .inbox import InboxProcessor
 from .observability import STREAM_FILES, recent_events
@@ -1478,6 +1476,10 @@ def _inspect_request(path: str | None, *, api_shape: str, as_json: bool) -> int:
         print("Request JSON must be an object.")
         return 1
     request = request_from_payload(payload, api_shape=api_shape)
+    request_context_diagnostics = getattr(
+        __import__("agent_hub.context", fromlist=["request_context_diagnostics"]),
+        "request_context_diagnostics",
+    )
     diagnostics = request_context_diagnostics(request)
     report = {
         "api_shape": api_shape,
@@ -1741,48 +1743,7 @@ def _doctor_install_checks(config: Any, config_path: str, rows: list[dict[str, A
 
 
 def _dependency_checks(root: Path) -> list[dict[str, Any]]:
-    pyproject = root / "pyproject.toml"
-    dependencies: list[str] = []
-    try:
-        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-        project = data.get("project") if isinstance(data, dict) else {}
-        raw = project.get("dependencies") if isinstance(project, dict) else []
-        dependencies = [str(item) for item in raw if isinstance(item, str)] if isinstance(raw, list) else []
-    except (OSError, tomllib.TOMLDecodeError):
-        return [
-            {
-                "id": "runtime_dependencies",
-                "category": "dependency",
-                "ok": False,
-                "detail": "Could not read pyproject.toml",
-            }
-        ]
-    if not dependencies:
-        return [
-            {
-                "id": "runtime_dependencies",
-                "category": "dependency",
-                "ok": True,
-                "detail": "No third-party runtime dependencies declared.",
-            }
-        ]
-    rows: list[dict[str, Any]] = []
-    for dependency in dependencies:
-        module = _dependency_import_name(dependency)
-        rows.append(
-            {
-                "id": f"dependency:{module}",
-                "category": "dependency",
-                "ok": importlib.util.find_spec(module) is not None,
-                "detail": dependency,
-            }
-        )
-    return rows
-
-
-def _dependency_import_name(dependency: str) -> str:
-    name = re.split(r"[<>=!~;\[]", dependency, maxsplit=1)[0].strip()
-    return name.replace("-", "_")
+    return dependency_install_checks(root)
 
 
 def _backend_reachability(config: Any) -> dict[str, Any]:

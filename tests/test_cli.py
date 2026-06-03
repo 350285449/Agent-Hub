@@ -95,7 +95,8 @@ class CliTests(unittest.TestCase):
             data = json.loads(buffer.getvalue())
             self.assertIn("install_checks", data)
             self.assertTrue(any(row["id"] == "python_version" for row in data["install_checks"]))
-            self.assertTrue(any(row["id"] == "dependency:packaging" for row in data["dependency_checks"]))
+            self.assertTrue(any(row["id"] == "runtime_dependency_audit" for row in data["dependency_checks"]))
+            self.assertTrue(any(row["id"] == "release_dependency:packaging" for row in data["dependency_checks"]))
             self.assertTrue(data["backend_reachable"]["ok"])
             self.assertTrue(any("Cline:" in fix for fix in data["exact_fixes"]))
 

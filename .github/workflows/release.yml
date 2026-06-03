@@ -46,8 +46,8 @@ jobs:
         working-directory: vscode-extension
         run: npm ci
 
-      - name: Install Python test extras
-        run: python -m pip install -e ".[test]"
+      - name: Install Python test and release extras
+        run: python -m pip install -e ".[test,release]"
 
       - name: Stamp CI build metadata
         run: python scripts/update_release_metadata.py --from-ci-env
@@ -72,10 +72,13 @@ jobs:
         run: python scripts/validate_release.py
 
       - name: Run packaging pytest checks
-        run: python -m pytest -m packaging tests/test_phase8_packaging.py
+        run: python -m pytest -m packaging
 
-      - name: Run Python unittest discovery
-        run: python -m unittest discover -s tests
+      - name: Run default Python pytest checks
+        run: python -m pytest -m unit --durations=20
+
+      - name: Run integration and stress pytest checks
+        run: python -m pytest --run-integration --run-stress -m "integration or stress" --durations=20
 
       - name: Check VS Code extension syntax
         working-directory: vscode-extension

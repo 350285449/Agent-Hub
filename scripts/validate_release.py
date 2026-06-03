@@ -14,6 +14,7 @@ from packaging.version import InvalidVersion, Version
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from agent_hub.dependency_audit import validate_dependency_declarations
 from agent_hub.config_reference import generate_config_reference
 from scripts.backend_snapshot import validate_snapshot
 from scripts.validate_vsix_cleanliness import expected_vsix_path, validate_vsix
@@ -35,6 +36,8 @@ def validate_release(root: Path, *, require_vsix: bool = False) -> list[str]:
 
     failures.extend(validate_release_metadata(release))
     failures.extend(validate_pyproject_metadata(pyproject))
+    failures.extend(validate_dependency_declarations(root, pyproject))
+    failures.extend(validate_extension_packaging_scripts(package))
     failures.extend(
         validate_version_consistency(
             release=release,
@@ -110,10 +113,8 @@ def validate_pyproject_metadata(pyproject: dict[str, Any]) -> list[str]:
         return ["pyproject.toml project metadata must be an object"]
 
     dependencies = project.get("dependencies")
-    if not isinstance(dependencies, list) or not dependencies:
-        failures.append("pyproject.toml project.dependencies must declare runtime dependencies")
-    elif not any(str(item).split(">", 1)[0].split("=", 1)[0].strip() == "packaging" for item in dependencies):
-        failures.append("pyproject.toml project.dependencies must include packaging")
+    if not isinstance(dependencies, list):
+        failures.append("pyproject.toml project.dependencies must be a list")
 
     optional = project.get("optional-dependencies")
     test_deps = optional.get("test") if isinstance(optional, dict) else []
@@ -124,6 +125,14 @@ def validate_pyproject_metadata(pyproject: dict[str, Any]) -> list[str]:
         for dependency in ("pytest", "pytest-timeout"):
             if dependency not in normalized:
                 failures.append(f"pyproject.toml test extra is missing {dependency}")
+    release_deps = optional.get("release") if isinstance(optional, dict) else []
+    if not isinstance(release_deps, list):
+        failures.append("pyproject.toml optional release dependencies must be a list")
+    else:
+        normalized = {str(item).split(">", 1)[0].split("=", 1)[0].strip() for item in release_deps}
+        for dependency in ("build", "packaging"):
+            if dependency not in normalized:
+                failures.append(f"pyproject.toml release extra is missing {dependency}")
 
     scripts = project.get("scripts")
     if not isinstance(scripts, dict) or scripts.get("agent-hub") != "agent_hub.cli:main":
@@ -135,6 +144,25 @@ def validate_pyproject_metadata(pyproject: dict[str, Any]) -> list[str]:
     build_requires = build_system.get("requires") if isinstance(build_system, dict) else []
     if not isinstance(build_requires, list) or not any(str(item).startswith("setuptools") for item in build_requires):
         failures.append("pyproject.toml build-system must require setuptools")
+    return failures
+
+
+def validate_extension_packaging_scripts(package: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    scripts = package.get("scripts") if isinstance(package, dict) else {}
+    if not isinstance(scripts, dict):
+        return ["vscode-extension/package.json scripts must be an object"]
+    for name in ("prepare-backend", "validate-backend-drift", "package", "publish", "vscode:prepublish"):
+        if not scripts.get(name):
+            failures.append(f"vscode-extension/package.json scripts is missing {name}")
+    for name in ("package", "publish", "vscode:prepublish"):
+        command = str(scripts.get(name) or "")
+        if "prepare-backend" not in command:
+            failures.append(f"vscode-extension/package.json {name} script must run prepare-backend")
+    for name in ("package", "vscode:prepublish"):
+        command = str(scripts.get(name) or "")
+        if "validate-backend-drift" not in command:
+            failures.append(f"vscode-extension/package.json {name} script must validate backend drift")
     return failures
 
 

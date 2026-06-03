@@ -93,6 +93,7 @@
     "install-extension": "node scripts/install-extension.js",
     "mount": "node scripts/install-extension.js",
     "prepare-backend": "node scripts/prepare-backend.js",
+    "vscode:prepublish": "npm run prepare-backend && npm run validate-backend-drift",
     "package": "npm run prepare-backend && npm run validate-backend-drift && npx @vscode/vsce package --allow-missing-repository && npm run check:vsix",
     "publish": "npm run prepare-backend && npm run validate-release && npx @vscode/vsce publish --allow-missing-repository"
   },
