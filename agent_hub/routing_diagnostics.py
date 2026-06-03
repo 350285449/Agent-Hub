@@ -139,6 +139,61 @@ def provider_health_body(config: Any, router: AgentRouter) -> dict[str, Any]:
     }
 
 
+def routing_memory_stats_body(config: Any, router: AgentRouter) -> dict[str, Any]:
+    del config
+    return router.routing_memory.stats()
+
+
+def routing_memory_recent_body(config: Any, router: AgentRouter, *, limit: int = 50) -> dict[str, Any]:
+    del config
+    recent = router.routing_memory.recent(limit=limit)
+    return {
+        "object": "agent_hub.routing_memory.recent",
+        "enabled": router.routing_memory.enabled,
+        "count": len(recent),
+        "data": recent,
+    }
+
+
+def routing_decision_by_id_body(config: Any, router: AgentRouter, request_id: str) -> dict[str, Any]:
+    request_ids = _request_id_aliases(request_id)
+    events = [
+        event
+        for event in recent_events(config.state_dir, "routing", limit=100)
+        if event.get("request_id") in request_ids
+    ]
+    decision_event = latest_routing_decision(events)
+    memory = [
+        row
+        for row in router.routing_memory.recent(limit=200)
+        if row.get("request_id") in request_ids
+    ]
+    decision = (
+        decision_event.get("routing_decision")
+        if isinstance(decision_event.get("routing_decision"), dict)
+        else {}
+    )
+    return {
+        "object": "agent_hub.routing_decision",
+        "request_id": request_id,
+        "request_id_aliases": sorted(request_ids),
+        "found": bool(events or memory),
+        "decision": decision_event,
+        "routing_decision": decision,
+        "memory_records": memory,
+        "events": events,
+    }
+
+
+def _request_id_aliases(value: str) -> set[str]:
+    text = str(value or "").strip()
+    aliases = {text} if text else set()
+    for prefix in ("chatcmpl-", "resp_", "msg_"):
+        if text.startswith(prefix):
+            aliases.add(text[len(prefix) :])
+    return aliases
+
+
 def routing_failures(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     failures: list[dict[str, Any]] = []
     for event in events:

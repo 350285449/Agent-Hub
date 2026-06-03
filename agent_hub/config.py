@@ -183,6 +183,9 @@ class HubConfig:
     adaptive_learning_enabled: bool = True
     adaptive_routing_enabled: bool = True
     adaptive_workflow_upgrades_enabled: bool = True
+    routing_memory_enabled: bool = True
+    routing_memory_store_prompts: bool = False
+    routing_memory_retention_days: int = 30
     auto_enable_available_providers: bool = True
     auto_detect_local_models: bool = True
     local_model_probe_timeout_seconds: float = 0.35
@@ -552,6 +555,9 @@ def free_local_config() -> HubConfig:
         adaptive_learning_enabled=True,
         adaptive_routing_enabled=True,
         adaptive_workflow_upgrades_enabled=True,
+        routing_memory_enabled=_env_bool("ROUTING_MEMORY_ENABLED", True),
+        routing_memory_store_prompts=_env_bool("ROUTING_MEMORY_STORE_PROMPTS", False),
+        routing_memory_retention_days=_env_int("ROUTING_MEMORY_RETENTION_DAYS", 30),
         auto_enable_available_providers=True,
         auto_detect_local_models=True,
         routing=dict(DEFAULT_ROUTING_CONFIG),
@@ -798,6 +804,21 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             raw.get("adaptive_workflow_upgrades_enabled"),
             True,
         ),
+        routing_memory_enabled=_bool_with_default(
+            raw.get("routing_memory_enabled", os.environ.get("ROUTING_MEMORY_ENABLED")),
+            True,
+        ),
+        routing_memory_store_prompts=_bool_with_default(
+            raw.get("routing_memory_store_prompts", os.environ.get("ROUTING_MEMORY_STORE_PROMPTS")),
+            False,
+        ),
+        routing_memory_retention_days=max(
+            1,
+            _int_with_default(
+                raw.get("routing_memory_retention_days", os.environ.get("ROUTING_MEMORY_RETENTION_DAYS")),
+                30,
+            ),
+        ),
         auto_enable_available_providers=_bool_with_default(
             raw.get("auto_enable_available_providers"),
             True,
@@ -950,6 +971,9 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "adaptive_learning_enabled": config.adaptive_learning_enabled,
         "adaptive_routing_enabled": config.adaptive_routing_enabled,
         "adaptive_workflow_upgrades_enabled": config.adaptive_workflow_upgrades_enabled,
+        "routing_memory_enabled": config.routing_memory_enabled,
+        "routing_memory_store_prompts": config.routing_memory_store_prompts,
+        "routing_memory_retention_days": config.routing_memory_retention_days,
         "auto_enable_available_providers": config.auto_enable_available_providers,
         "auto_detect_local_models": config.auto_detect_local_models,
         "local_model_probe_timeout_seconds": config.local_model_probe_timeout_seconds,
@@ -1119,6 +1143,19 @@ def _env_float(name: str, default: float) -> float:
 
     try:
         return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean env var, falling back when unset."""
+
+    return _bool_with_default(os.environ.get(name), default)
+
+
+def _int_with_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
     except (TypeError, ValueError):
         return default
 

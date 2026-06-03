@@ -34,6 +34,36 @@ def handle_get(handler: object, path: str) -> bool:
     if path == "/v1/provider-health":
         handler._send_diagnostics_json(server_module._provider_health_body(handler.server.config, handler.server.router))
         return True
+    if path == "/v1/routing-memory/stats":
+        handler._send_diagnostics_json(server_module._routing_memory_stats_body(handler.server.config, handler.server.router))
+        return True
+    if path == "/v1/routing-memory/recent":
+        limit = 50
+        try:
+            from .middleware import request_query
+
+            query = request_query(handler.path)
+            if query.get("limit"):
+                limit = max(1, min(500, int(query["limit"])))
+        except (TypeError, ValueError):
+            limit = 50
+        handler._send_diagnostics_json(
+            server_module._routing_memory_recent_body(
+                handler.server.config,
+                handler.server.router,
+                limit=limit,
+            )
+        )
+        return True
+    if path.startswith("/v1/routing-decision/"):
+        request_id = path.rsplit("/", 1)[-1]
+        body = server_module._routing_decision_by_id_body(
+            handler.server.config,
+            handler.server.router,
+            request_id,
+        )
+        handler._send_diagnostics_json(body)
+        return True
     if path in {"/models", "/v1/models", "/api/v1/models"}:
         handler._send_json(
             {

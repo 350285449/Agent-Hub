@@ -82,6 +82,9 @@ from .server_routes.diagnostics import (
     _client_sources_body,
     _routing_history_body,
     _provider_health_body,
+    _routing_memory_stats_body,
+    _routing_memory_recent_body,
+    _routing_decision_by_id_body,
     _status_body,
     _events_body,
     _tools_body,
@@ -116,6 +119,8 @@ from .server_routes.diagnostics import (
 
 DIAGNOSTIC_ENDPOINTS = {
     "/v1/provider-health",
+    "/v1/routing-memory/stats",
+    "/v1/routing-memory/recent",
     "/v1/routing/status",
     "/v1/routing/last-decision",
     "/v1/routing/test-failover",
@@ -181,7 +186,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self._send_common_headers()
         self.send_header(
             "Access-Control-Allow-Methods",
-            "GET, POST, OPTIONS",
+            "GET, POST, DELETE, OPTIONS",
         )
         self.send_header(
             "Access-Control-Allow-Headers",
@@ -203,6 +208,18 @@ class AgentHubHandler(BaseHTTPRequestHandler):
 
         path = _request_path(self.path)
         if handle_route_post(self, path, payload):
+            return
+        self._send_json({"error": "not found"}, status=404)
+
+    def do_DELETE(self) -> None:
+        path = _request_path(self.path)
+        if path == "/v1/routing-memory":
+            auth_error = _diagnostics_auth_error(self.server.config, self.headers)
+            if auth_error is not None:
+                body, status = auth_error
+                self._send_json(body, status=status)
+                return
+            self._send_json(self.server.router.routing_memory.reset())
             return
         self._send_json({"error": "not found"}, status=404)
 

@@ -1,8 +1,9 @@
 # Killer Feature: Smart Workspace-Aware Model Routing
 
 Agent-Hub routes by more than provider health or price. It inspects the task,
-repository context hints, file types, context size, risk level, and required
-capabilities before choosing a provider/model/workflow.
+repository context hints, repository size, file types, programming
+language/framework, context size, risk level, expected cost, permissions, review
+needs, and required capabilities before choosing a provider/model/workflow.
 
 The implementation lives in:
 
@@ -13,12 +14,22 @@ The implementation lives in:
 
 ## What It Looks At
 
-- Task type: general, simple explanation, coding, debug, review, research,
-  tool use, long context, local/private, or security-sensitive change.
+- Task type/category: general, explanation, code generation, refactor,
+  debugging, test generation, documentation, shell/tool operation, large-context
+  repository task, local/private, or security-sensitive operation.
+- Language/framework: file extensions, active files, and package/config hints.
+- Repository size: workspace scan or request metadata bucket.
 - File types: code, docs, config, dependency files, lockfiles, and environment
   files.
+- Complexity: low, medium, or high from task type, risk, file count, context,
+  and repo-size bucket.
 - Risk: file writes, deletes, config edits, installs, shell commands, secrets,
   and high-risk destructive patterns.
+- Expected cost: low, medium, or high from context size, complexity, and repo
+  size.
+- Reviewer need: high-risk edits, multi-file writes, and risky shell/file tasks.
+- Permission requirements: tool execution, shell command, file write,
+  config-write review, and security review.
 - Capabilities: coding score, reasoning score, speed, tool support, streaming,
   context window, cost metadata, provider health, and quota state.
 - Repository need: whether repo-map injection or context compression should be
@@ -47,8 +58,13 @@ Look for:
 
 - `selected_provider`
 - `selected_model`
+- `selected_workflow`
+- `candidate_scores[].original_routing_score`
+- `candidate_scores[].memory_adjustment`
+- `candidate_scores[].final_routing_score`
 - `routing_reason`
 - `task_classification`
+- `permission_requirements`
 - `cost_context_estimate`
 - `failover`
 

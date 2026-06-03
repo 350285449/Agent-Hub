@@ -82,6 +82,15 @@ def _routing_history_body(config: HubConfig) -> dict[str, Any]:
 def _provider_health_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
     return _routing_diagnostics_module().provider_health_body(config, router)
 
+def _routing_memory_stats_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
+    return _routing_diagnostics_module().routing_memory_stats_body(config, router)
+
+def _routing_memory_recent_body(config: HubConfig, router: AgentRouter, *, limit: int = 50) -> dict[str, Any]:
+    return _routing_diagnostics_module().routing_memory_recent_body(config, router, limit=limit)
+
+def _routing_decision_by_id_body(config: HubConfig, router: AgentRouter, request_id: str) -> dict[str, Any]:
+    return _routing_diagnostics_module().routing_decision_by_id_body(config, router, request_id)
+
 def _status_body(
     config: HubConfig,
     router: AgentRouter,
@@ -186,6 +195,7 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
     workflow_analytics = optimization.get("workflow_analytics") if isinstance(optimization.get("workflow_analytics"), list) else []
     workflows = optimization.get("workflow_patterns") if isinstance(optimization.get("workflow_patterns"), list) else []
     recent = optimization.get("recent_optimization_decisions") if isinstance(optimization.get("recent_optimization_decisions"), list) else []
+    routing_memory = optimization.get("routing_memory") if isinstance(optimization.get("routing_memory"), dict) else {}
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -280,6 +290,10 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
       {_provider_effectiveness_table_html(providers)}
     </section>
     <section>
+      <h2>Routing Memory</h2>
+      {_routing_memory_dashboard_html(routing_memory)}
+    </section>
+    <section>
       <h2>Workflow Analytics</h2>
       {_workflow_analytics_table_html(workflow_analytics)}
     </section>
@@ -295,6 +309,43 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
   </main>
 </body>
 </html>"""
+
+def _routing_memory_dashboard_html(memory: dict[str, Any]) -> str:
+    if not memory:
+        return '<p class="note">No routing memory samples yet.</p>'
+    fallback = memory.get("fallback_frequency") if isinstance(memory.get("fallback_frequency"), dict) else {}
+    winner = memory.get("cost_performance_winner") if isinstance(memory.get("cost_performance_winner"), dict) else {}
+    success = memory.get("most_successful_models_by_task_type") if isinstance(memory.get("most_successful_models_by_task_type"), list) else []
+    failure = memory.get("failure_prone_models_by_task_type") if isinstance(memory.get("failure_prone_models_by_task_type"), list) else []
+    latency = memory.get("average_latency_by_provider") if isinstance(memory.get("average_latency_by_provider"), list) else []
+    influence = memory.get("routing_memory_influence_per_request") if isinstance(memory.get("routing_memory_influence_per_request"), list) else []
+    return f"""
+      <div class="cards">
+        <div class="card"><strong>{_html(memory.get("total_records", 0))}</strong><span>metadata outcome records</span></div>
+        <div class="card"><strong>{_html(_percent_label(fallback.get("rate", 0)))}</strong><span>fallback frequency</span></div>
+        <div class="card"><strong>{_html(_model_label(winner))}</strong><span>cost/performance winner</span></div>
+      </div>
+      <div class="grid">
+        <div>
+          <h2>Successful Models By Task</h2>
+          {_memory_success_table_html(success)}
+        </div>
+        <div>
+          <h2>Failure-Prone Models By Task</h2>
+          {_memory_failure_table_html(failure)}
+        </div>
+      </div>
+      <div class="grid">
+        <div>
+          <h2>Provider Latency</h2>
+          {_memory_latency_table_html(latency)}
+        </div>
+        <div>
+          <h2>Memory Influence</h2>
+          {_memory_influence_table_html(influence)}
+        </div>
+      </div>
+    """
 
 def _task_winners_table_html(rows: dict[str, Any]) -> str:
     body = "".join(
@@ -368,6 +419,73 @@ def _provider_effectiveness_table_html(rows: list[Any]) -> str:
         ["Provider", "Success", "Samples", "Avg Latency", "Avg Cost", "Models"],
         body,
     )
+
+def _memory_success_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('task_type'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
+        f"<td>{_html(row.get('attempts', 0))}</td>"
+        f"<td>{_html(row.get('average_outcome_score'))}</td>"
+        "</tr>"
+        for row in rows[:12]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(
+        ["Task", "Provider", "Model", "Success", "Samples", "Score"],
+        body,
+    )
+
+def _memory_failure_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('task_type'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(_percent_label(row.get('failure_rate')))}</td>"
+        f"<td>{_html(_percent_label(row.get('timeout_rate')))}</td>"
+        f"<td>{_html(row.get('attempts', 0))}</td>"
+        "</tr>"
+        for row in rows[:12]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(
+        ["Task", "Provider", "Model", "Failure", "Timeout", "Samples"],
+        body,
+    )
+
+def _memory_latency_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(_ms_label(row.get('average_latency_ms')))}</td>"
+        f"<td>{_html(row.get('samples', 0))}</td>"
+        "</tr>"
+        for row in rows[:12]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(["Provider", "Avg Latency", "Samples"], body)
+
+def _memory_influence_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('request_id'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(row.get('memory_adjustment'))}</td>"
+        f"<td>{_html(row.get('outcome_score'))}</td>"
+        "</tr>"
+        for row in rows[:12]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(["Request", "Provider", "Model", "Adjustment", "Outcome"], body)
+
+def _model_label(row: dict[str, Any] | None) -> str:
+    if not isinstance(row, dict) or not row:
+        return "learning pending"
+    return " / ".join(str(row.get(key) or "") for key in ("provider", "model") if row.get(key)) or "learning pending"
 
 def _workflow_analytics_table_html(rows: list[Any]) -> str:
     body = "".join(
@@ -516,6 +634,9 @@ __all__ = [
     '_client_sources_body',
     '_routing_history_body',
     '_provider_health_body',
+    '_routing_memory_stats_body',
+    '_routing_memory_recent_body',
+    '_routing_decision_by_id_body',
     '_status_body',
     '_events_body',
     '_tools_body',

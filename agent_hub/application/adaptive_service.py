@@ -34,6 +34,7 @@ class AdaptiveApplicationService:
         summary["adaptive_workflow_upgrades_enabled"] = bool(
             self.config.adaptive_workflow_upgrades_enabled
         )
+        summary["routing_memory"] = self.router.routing_memory.stats()
         return summary
 
     def record_feedback_payload(self, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:

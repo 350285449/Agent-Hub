@@ -421,7 +421,7 @@ class WorkflowEngine:
                 f"Workflow stage {stage.name!r} timed out after {timeout_seconds:.2f}s"
             ) from exc
         finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            executor.shutdown(wait=True, cancel_futures=True)
 
     def _raise_if_cancelled(
         self,

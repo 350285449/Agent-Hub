@@ -72,6 +72,8 @@ BACKEND_FEATURES = {
     "context_engine_v2": True,
     "deterministic_workflows": True,
     "adaptive_learning_router": True,
+    "routing_memory": True,
+    "routing_memory_api": True,
     "auto_workflow_selection": True,
     "optimization_analytics": True,
     "optimization_dashboard": True,
@@ -142,6 +144,11 @@ class DiagnosticsApplicationService:
             "shell_command_policy": config.shell_command_policy,
             "approval_mode": config.approval_mode,
             "debug_echo_enabled": config.debug_echo_enabled,
+            "routing_memory": {
+                "enabled": config.routing_memory_enabled,
+                "store_prompts": config.routing_memory_store_prompts,
+                "retention_days": config.routing_memory_retention_days,
+            },
             "permission_policy": {
                 "approval_mode": config.approval_mode,
                 "safe_mode": config.approval_mode == "safe",

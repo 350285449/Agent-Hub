@@ -317,6 +317,7 @@ class ProviderAttemptExecutor:
                     provider_request,
                     failover_attempts=len(failover),
                     request_id=request_id,
+                    routing_mode=decision.routing_mode,
                 )
                 response = router._response_from_result(
                     request_id=request_id,

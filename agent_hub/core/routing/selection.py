@@ -30,6 +30,7 @@ from ...payloads import content_to_text, request_text
 from ...providers import Provider, ProviderError, create_provider
 from ...response_normalization import validate_provider_result
 from ...repository import repo_context_for_request
+from ...routing_memory import RoutingMemoryStore
 from ...security.provider_permissions import ProviderPermissionPolicy
 from ...session_store import SessionStore
 from ...streaming import normalize_stream_chunk
@@ -127,6 +128,16 @@ class RoutingDecision:
     fallback_chain: list[str] = field(default_factory=list)
     selected_agent: str | None = None
     task_type: str | None = None
+    task_category: str | None = None
+    language: str = "unknown"
+    framework: str = "unknown"
+    complexity: str = "low"
+    risk: str = "low"
+    context_estimate: str = "small"
+    selected_workflow: str = ""
+    permission_requirements: list[str] = field(default_factory=list)
+    routing_reasons: list[str] = field(default_factory=list)
+    memory_adjustments: list[dict[str, Any]] = field(default_factory=list)
     estimated_input_tokens: int = 0
     candidate_scores: list[dict[str, Any]] = field(default_factory=list)
     task_classification: dict[str, Any] = field(default_factory=dict)
@@ -138,8 +149,20 @@ class RoutingDecision:
             "selected_model": self.selected_model,
             "routing_mode": self.routing_mode,
             "task_type": self.task_type,
+            "task_category": self.task_category,
+            "language": self.language,
+            "framework": self.framework,
+            "complexity": self.complexity,
+            "risk": self.risk,
+            "context_estimate": self.context_estimate,
+            "selected_workflow": self.selected_workflow,
             "reason": self.reason,
+            "routing_reasons": list(self.routing_reasons),
             "fallback_chain": list(self.fallback_chain),
+            "fallback_candidates": list(self.fallback_chain[1:]),
+            "fallback_rejections": _fallback_rejections(self.candidate_scores),
+            "memory_adjustments": list(self.memory_adjustments),
+            "permission_requirements": list(self.permission_requirements),
             "estimated_input_tokens": self.estimated_input_tokens,
         }
         if self.task_classification:
@@ -217,7 +240,7 @@ class AgentRouter:
         self._health_path = config.state_dir / HEALTH_STATE_FILE
         self.health_tracker = ProviderHealthTracker(self._health_path)
         self._state_lock = RLock()
-        self.task_classifier = TaskClassifier()
+        self.task_classifier = TaskClassifier(config.workspace_dir)
         self._health: dict[str, ProviderHealth] = self._load_provider_health()
         self.preflight_policy = RouterPreflightPolicy(config, self._health)
         self.provider_permission_policy = ProviderPermissionPolicy(config)
@@ -272,6 +295,7 @@ class AgentRouter:
         )
         self.provider_scores = ProviderScoreStore(config.state_dir).load()
         self.adaptive_learning = AdaptiveLearningStore(config.state_dir)
+        self.routing_memory = RoutingMemoryStore.from_config(config)
         self.context_cache = ContextCache(
             config.state_dir / "context_cache.json",
             enabled=getattr(config, "context_cache_enabled", True),
@@ -620,6 +644,7 @@ class AgentRouter:
                 )
                 if isinstance(result.raw.get("agent_hub_stream"), dict)
                 else None,
+                routing_mode=decision.routing_mode,
             )
             response = self._response_from_result(
                 request_id=request_id,
@@ -1063,6 +1088,10 @@ class AgentRouter:
         agents = self._candidate_agent_pool(request, mode=mode)
         selected = agents[0] if agents else None
         candidate_scores = self._routing_candidate_scorecards(request, agents)
+        reviewer_signal = self.routing_memory.reviewer_signal(classification)
+        selected_workflow = classification.workflow_hint
+        if reviewer_signal.get("required") and not selected_workflow:
+            selected_workflow = "reviewer_memory_gate"
         reason = self._routing_decision_reason(
             mode=mode,
             task_type=task_type,
@@ -1072,14 +1101,49 @@ class AgentRouter:
         adaptive_reason = _adaptive_route_reason(candidate_scores)
         if adaptive_reason and mode != "manual":
             reason = f"{reason} {adaptive_reason}"
+        memory_reason = _routing_memory_route_reason(candidate_scores)
+        if memory_reason and mode != "manual":
+            reason = f"{reason} {memory_reason}"
+        if reviewer_signal.get("reason"):
+            reason = f"{reason} {reviewer_signal['reason']}"
+        routing_reasons = [reason, *classification.reasons[:8]]
+        if memory_reason:
+            routing_reasons.append(memory_reason)
+        if reviewer_signal.get("reason"):
+            routing_reasons.append(str(reviewer_signal["reason"]))
+        memory_adjustments = [
+            {
+                "agent": row.get("agent"),
+                "provider": row.get("provider"),
+                "model": row.get("model"),
+                "original_routing_score": row.get("original_routing_score"),
+                "memory_adjustment": row.get("memory_adjustment"),
+                "final_routing_score": row.get("final_routing_score"),
+                "summary": (row.get("routing_memory") or {}).get("summary")
+                if isinstance(row.get("routing_memory"), dict)
+                else "",
+            }
+            for row in candidate_scores
+            if abs(float(row.get("memory_adjustment") or 0.0)) > 0.0001
+        ]
         return RoutingDecision(
             selected_agent=selected.name if selected else None,
             selected_provider=selected.provider if selected else "",
             selected_model=selected.model if selected else "",
             routing_mode=mode,
             task_type=task_type,
+            task_category=classification.task_category,
+            language=classification.language,
+            framework=classification.framework,
+            complexity=classification.complexity,
+            risk=classification.risk_level,
+            context_estimate=classification.context_estimate,
+            selected_workflow=selected_workflow,
             reason=reason,
+            routing_reasons=routing_reasons,
             fallback_chain=[agent.name for agent in agents],
+            permission_requirements=list(classification.permission_requirements),
+            memory_adjustments=memory_adjustments,
             estimated_input_tokens=classification.estimated_input_tokens,
             candidate_scores=candidate_scores,
             task_classification=classification.to_dict(),
@@ -1305,6 +1369,18 @@ class AgentRouter:
                     "adaptive_bonus": 0.0,
                     "summary": "Adaptive routing is disabled by configuration.",
                 }
+            original_routing_score = self._routing_score(
+                agent,
+                request,
+                include_routing_memory=False,
+            )
+            routing_memory = self._routing_memory_signal(
+                agent,
+                request,
+                classification=classification,
+            )
+            memory_adjustment = float(routing_memory.get("adjustment", 0.0) or 0.0)
+            final_routing_score = original_routing_score + memory_adjustment
             rows.append(
                 {
                     "rank": rank,
@@ -1312,7 +1388,10 @@ class AgentRouter:
                     "provider": agent.provider,
                     "provider_type": agent.provider_type or normalize_provider(agent.provider),
                     "model": agent.model,
-                    "routing_score": round(self._routing_score(agent, request), 3),
+                    "original_routing_score": round(original_routing_score, 3),
+                    "memory_adjustment": round(memory_adjustment, 3),
+                    "final_routing_score": round(final_routing_score, 3),
+                    "routing_score": round(final_routing_score, 3),
                     "why": _recommendation_reason(agent, text=request_text(request), prefer=None, index=rank - 1),
                     "task_classification": classification.to_dict(),
                     "estimated_input_tokens": estimated_input,
@@ -1323,6 +1402,7 @@ class AgentRouter:
                         output_tokens=int(output_budget.effective),
                     ),
                     "adaptive": adaptive,
+                    "routing_memory": routing_memory,
                     "health": {
                         "success_count": health.success_count if health else 0,
                         "failure_count": health.failure_count if health else 0,
@@ -1724,7 +1804,13 @@ class AgentRouter:
             )
         ]
 
-    def _routing_score(self, agent: AgentConfig, request: HubRequest | None = None) -> float:
+    def _routing_score(
+        self,
+        agent: AgentConfig,
+        request: HubRequest | None = None,
+        *,
+        include_routing_memory: bool = True,
+    ) -> float:
         score = float(agent.priority or 0.0)
         capabilities = agent_capabilities(agent)
         has_tools = _request_has_tools(request) if request is not None else False
@@ -1808,6 +1894,9 @@ class AgentRouter:
                     workflow_pattern=_request_workflow_pattern(request),
                     workflow_role=_request_workflow_role(request),
                 )
+            if include_routing_memory:
+                signal = self._routing_memory_signal(agent, request)
+                score += float(signal.get("adjustment", 0.0) or 0.0)
         evaluation = self.provider_scores.get(agent.name) if isinstance(self.provider_scores, dict) else None
         if isinstance(evaluation, dict):
             try:
@@ -1815,6 +1904,37 @@ class AgentRouter:
             except (TypeError, ValueError):
                 pass
         return score
+
+    def _routing_memory_signal(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        *,
+        classification: Any | None = None,
+    ) -> dict[str, Any]:
+        if not getattr(self.config, "routing_memory_enabled", True):
+            return {
+                "active": False,
+                "agent": agent.name,
+                "provider": agent.provider,
+                "model": agent.model,
+                "adjustment": 0.0,
+                "summary": "Routing memory is disabled by configuration.",
+                "similar_outcomes": [],
+            }
+        try:
+            classification = classification or self.task_classifier.classify(request)
+            return self.routing_memory.routing_signal(agent, classification)
+        except Exception:
+            return {
+                "active": False,
+                "agent": agent.name,
+                "provider": agent.provider,
+                "model": agent.model,
+                "adjustment": 0.0,
+                "summary": "Routing memory was unavailable.",
+                "similar_outcomes": [],
+            }
 
     def _performance_failover_reason(
         self,
@@ -1873,6 +1993,7 @@ class AgentRouter:
         failover_attempts: int = 0,
         request_id: str | None = None,
         first_token_latency_seconds: float | None = None,
+        routing_mode: str | None = None,
     ) -> None:
         with self._state_lock:
             health = self._health.setdefault(agent.name, ProviderHealth())
@@ -1934,6 +2055,7 @@ class AgentRouter:
                 input_tokens=tokens_in,
                 output_tokens=tokens_out,
             ),
+            routing_mode=routing_mode or "",
             final=True,
         )
 
@@ -2040,6 +2162,7 @@ class AgentRouter:
                 output_tokens=0,
             ),
             error_type=normalized_error_type,
+            routing_mode=routing_mode or "",
             final=False,
         )
 
@@ -2069,19 +2192,75 @@ class AgentRouter:
         output_tokens: int,
         estimated_cost_usd: float | None,
         error_type: str | None = None,
+        routing_mode: str = "",
         final: bool = False,
     ) -> None:
         if request is None:
             return
-        if not self.config.adaptive_learning_enabled:
+        if self.config.adaptive_learning_enabled:
+            try:
+                self.adaptive_learning.record_outcome(
+                    request_id=request_id,
+                    route=request.route or "",
+                    task_type=self._classify_task(request),
+                    workflow_pattern=_request_workflow_pattern(request),
+                    workflow_role=_request_workflow_role(request),
+                    agent=agent,
+                    model=model,
+                    success=success,
+                    latency_seconds=latency_seconds,
+                    failover_attempts=failover_attempts,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    estimated_cost_usd=estimated_cost_usd,
+                    error_type=error_type,
+                    retry_count=failover_attempts,
+                    final=final,
+                )
+            except Exception:
+                pass
+        self._record_routing_memory_outcome(
+            request_id=request_id,
+            request=request,
+            agent=agent,
+            model=model,
+            success=success,
+            latency_seconds=latency_seconds,
+            failover_attempts=failover_attempts,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            estimated_cost_usd=estimated_cost_usd,
+            error_type=error_type,
+            routing_mode=routing_mode,
+            final=final,
+        )
+
+    def _record_routing_memory_outcome(
+        self,
+        *,
+        request_id: str | None,
+        request: HubRequest,
+        agent: AgentConfig,
+        model: str,
+        success: bool,
+        latency_seconds: float | None,
+        failover_attempts: int,
+        input_tokens: int,
+        output_tokens: int,
+        estimated_cost_usd: float | None,
+        error_type: str | None = None,
+        routing_mode: str = "",
+        final: bool = False,
+    ) -> None:
+        if not getattr(self.config, "routing_memory_enabled", True):
             return
         try:
-            self.adaptive_learning.record_outcome(
+            classification = self.task_classifier.classify(request)
+            signal = self.routing_memory.routing_signal(agent, classification)
+            self.routing_memory.record_outcome(
                 request_id=request_id,
-                route=request.route or "",
-                task_type=self._classify_task(request),
-                workflow_pattern=_request_workflow_pattern(request),
-                workflow_role=_request_workflow_role(request),
+                request=request,
+                classification=classification,
                 agent=agent,
                 model=model,
                 success=success,
@@ -2093,6 +2272,8 @@ class AgentRouter:
                 error_type=error_type,
                 retry_count=failover_attempts,
                 final=final,
+                routing_mode=routing_mode,
+                memory_adjustment=float(signal.get("adjustment", 0.0) or 0.0),
             )
         except Exception:
             return
@@ -2841,6 +3022,55 @@ def _adaptive_route_reason(candidate_scores: list[dict[str, Any]]) -> str:
         f"Adaptive history {direction} {selected.get('agent')} by {bonus:+.2f} "
         f"from {scope} data ({attempts} sample(s), {success_rate * 100:.0f}% success)."
     )
+
+
+def _routing_memory_route_reason(candidate_scores: list[dict[str, Any]]) -> str:
+    if not candidate_scores:
+        return ""
+    selected = candidate_scores[0]
+    memory = selected.get("routing_memory")
+    if not isinstance(memory, dict):
+        return ""
+    adjustment = _optional_float(memory.get("adjustment")) or 0.0
+    if abs(adjustment) < 0.05:
+        return ""
+    summary = memory.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    direction = "boosted" if adjustment > 0 else "penalized"
+    return f"Routing memory {direction} {selected.get('agent')} by {adjustment:+.2f}."
+
+
+def _fallback_rejections(candidate_scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(candidate_scores) <= 1:
+        return []
+    selected = candidate_scores[0]
+    selected_score = _optional_float(selected.get("final_routing_score")) or _optional_float(selected.get("routing_score")) or 0.0
+    result: list[dict[str, Any]] = []
+    for row in candidate_scores[1:8]:
+        final_score = _optional_float(row.get("final_routing_score")) or _optional_float(row.get("routing_score")) or 0.0
+        memory_adjustment = _optional_float(row.get("memory_adjustment")) or 0.0
+        reasons: list[str] = []
+        if final_score < selected_score:
+            reasons.append(f"Lower final routing score ({final_score:.2f} vs {selected_score:.2f}).")
+        if memory_adjustment < -0.05:
+            reasons.append(f"Routing memory penalty {memory_adjustment:+.2f}.")
+        elif memory_adjustment > 0.05:
+            reasons.append(f"Routing memory boost {memory_adjustment:+.2f} was not enough to win.")
+        health = row.get("health") if isinstance(row.get("health"), dict) else {}
+        if health.get("degraded"):
+            reasons.append("Provider health is degraded.")
+        if not reasons:
+            reasons.append("Ranked behind selected provider by route priority, capability, health, or cost.")
+        result.append(
+            {
+                "agent": row.get("agent"),
+                "provider": row.get("provider"),
+                "model": row.get("model"),
+                "reason": " ".join(reasons),
+            }
+        )
+    return result
 
 
 __all__ = [

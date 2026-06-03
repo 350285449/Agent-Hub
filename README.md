@@ -67,6 +67,36 @@ See `/v1/routing/last-decision` or `/v1/status` for `selected_provider`,
 `cost_context_estimate`, fallback events, permission blocks, and workflow
 progress.
 
+## Killer Feature #2: Self-Improving Routing Memory
+
+Agent-Hub learns from real routing outcomes. Each routed request can add a
+metadata-only memory record with task type, language/framework, repo/context
+size bucket, risk, selected provider/model/workflow, latency, fallback count,
+success/failure, timeout, permission denial, reviewer/tool failure, final
+outcome, and an outcome score.
+
+Future decisions compare the new request with similar historical outcomes. A
+model that repeatedly succeeds on Python refactors is boosted for similar Python
+refactors. A model that times out on large TypeScript repositories is penalized
+for similar long-context tasks. Cheap models that perform well on explanation
+tasks can keep winning those requests.
+
+Inspect or reset memory:
+
+```sh
+curl http://127.0.0.1:8787/v1/routing-memory/stats
+curl http://127.0.0.1:8787/v1/routing-memory/recent
+curl -X DELETE http://127.0.0.1:8787/v1/routing-memory
+```
+
+## Why this is different
+
+Most AI gateways route by price, provider, or availability. Agent-Hub routes by
+workspace context, task risk, historical performance, and real outcomes. This
+makes routing adaptive instead of static: the gateway gets better as it sees
+which providers actually work for your repository, file types, risk profile,
+context size, and workflows.
+
 ## What It Runs
 
 - Local HTTP server on `127.0.0.1:8787`
@@ -112,10 +142,12 @@ Agent-Hub is organized around modular backend systems:
   adaptive optimization, retry recovery, and tool/workflow activity.
 
 More detail lives in `docs/why-agent-hub.md`, `docs/architecture.md`,
-`docs/killer-feature-smart-routing.md`, `docs/security-boundaries.md`,
-`docs/api-compatibility.md`, `docs/providers.md`, `docs/workflows.md`,
-`docs/tools.md`, `docs/mcp.md`, `docs/evaluation.md`, `docs/install-vsix.md`,
-`docs/plugins.md`, `docs/deployment.md`, and `docs/api.md`.
+`docs/killer-feature-smart-routing.md`, `docs/killer-feature-routing-memory.md`,
+`docs/routing-decision-explainability.md`, `docs/privacy-routing-memory.md`,
+`docs/security-boundaries.md`, `docs/api-compatibility.md`,
+`docs/providers.md`, `docs/workflows.md`, `docs/tools.md`, `docs/mcp.md`,
+`docs/evaluation.md`, `docs/install-vsix.md`, `docs/plugins.md`,
+`docs/deployment.md`, and `docs/api.md`.
 
 Dedicated setup docs are also available for [Cline](docs/CLINE.md),
 [Claude Code](docs/CLAUDE_CODE.md), [Continue](docs/continue.md), and
