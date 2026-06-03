@@ -81,6 +81,15 @@ ROUTING_PRESETS: dict[str, dict[str, Any]] = {
         "approval_mode": "ask",
         "free_first": True,
     },
+    "local-only": {
+        "name": "local-only",
+        "label": "Local only mode",
+        "description": "Use only local model servers and built-in local providers.",
+        "selector": "private",
+        "free_only": True,
+        "approval_mode": "ask",
+        "free_first": True,
+    },
     "fast": {
         "name": "fast",
         "label": "Fast mode",
@@ -306,12 +315,12 @@ def _apply_routing_preset(path: str, preset_name: str | None, *, as_json: bool) 
         routing["free_first"] = bool(preset["free_first"])
         if preset["name"] == "fallback-safe":
             routing["max_provider_attempts"] = max(3, int(routing.get("max_provider_attempts") or 3))
-    if preset["name"] == "private":
+    if preset["name"] in {"private", "local-only"}:
         data["auto_enable_available_providers"] = False
 
     for route_name in ("cloud-agent", "coding", "hybrid-agent"):
         _replace_route_agents(data, route_name, agent_names)
-    if preset["name"] in {"cheap-local", "private"}:
+    if preset["name"] in {"cheap-local", "private", "local-only"}:
         _replace_route_agents(data, "local-agent", agent_names)
 
     _write_config_dict(config_path, data)

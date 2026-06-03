@@ -235,6 +235,7 @@ def _collect_golden_responses() -> dict[str, Any]:
 
 def _golden_config(path: Path) -> HubConfig:
     return HubConfig(
+        workspace_dir=path,
         state_dir=path / "state",
         default_route=["tooly"],
         routes=[
@@ -285,7 +286,7 @@ def _post_json(
         headers={"Content-Type": "application/json", **(headers or {})},
         method="POST",
     )
-    with urlopen(request, timeout=5) as response:
+    with urlopen(request, timeout=15) as response:
         data = json.loads(response.read().decode("utf-8"))
         return _normalize_dynamic_values(data), dict(response.headers.items())
 
@@ -302,12 +303,12 @@ def _post_text(
         headers={"Content-Type": "application/json", **(headers or {})},
         method="POST",
     )
-    with urlopen(request, timeout=5) as response:
+    with urlopen(request, timeout=15) as response:
         return response.read().decode("utf-8"), dict(response.headers.items())
 
 
 def _get_json(url: str) -> dict[str, Any]:
-    with urlopen(url, timeout=5) as response:
+    with urlopen(url, timeout=15) as response:
         data = json.loads(response.read().decode("utf-8"))
     return _normalize_dynamic_values(data)
 

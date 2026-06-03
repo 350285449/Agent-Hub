@@ -326,6 +326,7 @@ class ProviderAttemptExecutor:
                     failover=failover,
                     decision=decision,
                     tool_loop_metadata=tool_loop["metadata"],
+                    latency_seconds=latency,
                 )
                 if provider_request.record_session:
                     router.session_store.record_turn(provider_request, response)

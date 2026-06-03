@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -54,31 +55,34 @@ class ContextCache:
         self.path = Path(path)
         self.enabled = enabled and max_entries > 0
         self.max_entries = max(0, int(max_entries))
+        self._lock = threading.RLock()
 
     def get(self, key: str) -> dict[str, Any] | None:
         if not self.enabled:
             return None
-        data = self._load()
-        entry = data.get(key)
-        if isinstance(entry, dict):
-            entry["last_used_at"] = time.time()
-            data[key] = entry
-            self._save(data)
-            return dict(entry)
-        return None
+        with self._lock:
+            data = self._load()
+            entry = data.get(key)
+            if isinstance(entry, dict):
+                entry["last_used_at"] = time.time()
+                data[key] = entry
+                self._save(data)
+                return dict(entry)
+            return None
 
     def put(self, key: str, value: dict[str, Any]) -> None:
         if not self.enabled:
             return
-        data = self._load()
-        data[key] = {"created_at": time.time(), "last_used_at": time.time(), **value}
-        if len(data) > self.max_entries:
-            ordered = sorted(
-                data.items(),
-                key=lambda item: float(item[1].get("last_used_at") or item[1].get("created_at") or 0.0),
-            )
-            data = dict(ordered[-self.max_entries :])
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            data[key] = {"created_at": time.time(), "last_used_at": time.time(), **value}
+            if len(data) > self.max_entries:
+                ordered = sorted(
+                    data.items(),
+                    key=lambda item: float(item[1].get("last_used_at") or item[1].get("created_at") or 0.0),
+                )
+                data = dict(ordered[-self.max_entries :])
+            self._save(data)
 
     def _load(self) -> dict[str, dict[str, Any]]:
         try:

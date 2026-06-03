@@ -595,6 +595,7 @@ class AgentRouter:
                 result=result,
                 failover=failover,
                 decision=decision,
+                latency_seconds=latency,
             )
             if stream_request.record_session:
                 self.session_store.record_turn(stream_request, response)
@@ -1401,6 +1402,7 @@ class AgentRouter:
         failover: list[FailoverEvent],
         decision: RoutingDecision | None = None,
         tool_loop_metadata: ToolLoopMetadata | None = None,
+        latency_seconds: float | None = None,
     ) -> HubResponse:
         raw = result.raw
         if tool_loop_metadata is not None and (
@@ -1442,6 +1444,13 @@ class AgentRouter:
             ]
             if decision is not None:
                 agent_metadata["routing_decision"] = decision.to_dict()
+            agent_metadata["routing_summary"] = _routing_transparency_metadata(
+                agent=agent,
+                result=result,
+                failover=failover,
+                decision=decision,
+                latency_seconds=latency_seconds,
+            )
             if tool_loop_metadata is not None:
                 agent_metadata.update(tool_loop_metadata.to_dict())
             raw["agent_hub"] = agent_metadata
@@ -2454,6 +2463,46 @@ def _agent_limit_metadata(agent: AgentConfig, health: dict[str, Any]) -> dict[st
         "cooldown_until": health.get("cooldown_until"),
         "unavailable_until": health.get("unavailable_until"),
     }
+
+
+def _routing_transparency_metadata(
+    *,
+    agent: AgentConfig,
+    result: ProviderResult,
+    failover: list[FailoverEvent],
+    decision: RoutingDecision | None,
+    latency_seconds: float | None,
+) -> dict[str, Any]:
+    input_tokens = _usage_int(result.usage, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_int(result.usage, "completion_tokens", "output_tokens")
+    if output_tokens <= 0:
+        output_tokens = _result_output_tokens(result)
+    fallback_reason = failover[-1].reason if failover else ""
+    summary: dict[str, Any] = {
+        "selected_agent": agent.name,
+        "selected_provider": agent.provider,
+        "selected_model": result.model or agent.model,
+        "why_provider_chosen": decision.reason if decision is not None else "Selected provider returned the response.",
+        "why_fallback_happened": fallback_reason,
+        "fallback_count": len(failover),
+        "fallback_happened": bool(failover),
+        "latency_ms": round(latency_seconds * 1000, 2) if latency_seconds is not None else None,
+        "estimated_cost_usd": estimate_known_cost_usd(
+            agent,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        ),
+        "error_reason": fallback_reason,
+    }
+    if decision is not None:
+        summary.update(
+            {
+                "routing_mode": decision.routing_mode,
+                "task_type": decision.task_type,
+                "fallback_chain": list(decision.fallback_chain),
+            }
+        )
+    return summary
 
 
 def _temporary_health_path(path: Path) -> Path:

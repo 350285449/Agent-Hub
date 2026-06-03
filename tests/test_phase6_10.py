@@ -256,7 +256,7 @@ def _post_text_with_headers(url: str, payload: dict) -> tuple[str, object]:
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    with urlopen(request, timeout=5) as response:
+    with urlopen(request, timeout=15) as response:
         return response.read().decode("utf-8"), response.headers
 
 

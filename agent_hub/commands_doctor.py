@@ -89,9 +89,15 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
                 f"{row['name']}: config looks usable; first request will confirm {row['base_url']} is running."
             )
 
-    local_servers = _local_endpoint_status()
-    install_checks = _doctor_install_checks(config, config_path, rows, local_servers)
     backend_status = _backend_reachability(config)
+    local_servers = _local_endpoint_status()
+    install_checks = _doctor_install_checks(
+        config,
+        config_path,
+        rows,
+        local_servers,
+        backend_status,
+    )
     likely_problems = _doctor_likely_problems(config, rows, local_servers, install_checks, backend_status)
     fixes = _doctor_exact_fixes(config, rows, likely_problems)
     return {
@@ -178,6 +184,7 @@ def _doctor_install_checks(
     config_path: str,
     rows: list[dict[str, Any]],
     local_servers: list[dict[str, Any]],
+    backend_status: dict[str, Any],
 ) -> list[dict[str, Any]]:
     root = Path(__file__).resolve().parents[1]
     config_file = Path(config_path)
@@ -203,19 +210,18 @@ def _doctor_install_checks(
             "ok": any(row["allowed"] and row["status"] in {"ready", "configured"} for row in rows),
             "detail": ", ".join(row["name"] for row in rows if row["enabled"]) or "no enabled providers",
         },
+        _provider_config_check(rows),
         _provider_reachability_check(config, rows, local_servers),
+        {
+            "id": "server_health",
+            "category": "server",
+            "ok": bool(backend_status.get("ok")),
+            "detail": f"{backend_status.get('url', '')}: {backend_status.get('detail', '')}",
+        },
     ]
     checks.extend(_dependency_checks(root))
     checks.append(_dependencies_installed_check(checks))
-    extension_manifest = root / "vscode-extension" / "package.json"
-    checks.append(
-        {
-            "id": "vscode_extension_manifest",
-            "category": "extension",
-            "ok": extension_manifest.exists(),
-            "detail": extension_manifest.as_posix(),
-        }
-    )
+    checks.extend(_vscode_extension_setup_checks(root))
     checks.append(_backend_snapshot_check(root))
     checks.append(_version_alignment_check(root))
     checks.append(_release_validation_check(root))
@@ -345,6 +351,89 @@ def _provider_reachability_check(
         "category": "provider",
         "ok": False,
         "detail": "no local provider endpoint responded and no remote provider is configured",
+    }
+
+
+def _provider_config_check(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    enabled = [row for row in rows if row.get("enabled")]
+    issues: list[str] = []
+    for row in enabled:
+        if not row.get("provider"):
+            issues.append(f"{row.get('name')}: missing provider")
+        if not row.get("model"):
+            issues.append(f"{row.get('name')}: missing model")
+        status = str(row.get("status") or "")
+        if status.startswith("missing"):
+            issues.append(f"{row.get('name')}: {status}")
+    return {
+        "id": "provider_config",
+        "category": "provider",
+        "ok": bool(enabled) and not issues,
+        "detail": (
+            "enabled provider configs have provider/model values"
+            if enabled and not issues
+            else "; ".join(issues[:5]) if issues else "no enabled providers"
+        ),
+    }
+
+
+def _vscode_extension_setup_checks(root: Path) -> list[dict[str, Any]]:
+    manifest_path = root / "vscode-extension" / "package.json"
+    extension_path = root / "vscode-extension" / "extension.js"
+    prepare_script = ""
+    prepublish_script = ""
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        manifest = {}
+    scripts = manifest.get("scripts") if isinstance(manifest, dict) else {}
+    if isinstance(scripts, dict):
+        prepare_script = str(scripts.get("prepare-backend") or "")
+        prepublish_script = str(scripts.get("vscode:prepublish") or "")
+    return [
+        {
+            "id": "vscode_extension_manifest",
+            "category": "extension",
+            "ok": manifest_path.exists() and bool(manifest),
+            "detail": manifest_path.as_posix(),
+        },
+        {
+            "id": "vscode_extension_entrypoint",
+            "category": "extension",
+            "ok": extension_path.exists(),
+            "detail": extension_path.as_posix(),
+        },
+        {
+            "id": "vscode_extension_prepare_backend",
+            "category": "extension",
+            "ok": "scripts/prepare-backend.js" in prepare_script,
+            "detail": prepare_script or "prepare-backend script missing",
+        },
+        {
+            "id": "vscode_extension_prepublish_backend",
+            "category": "extension",
+            "ok": "prepare-backend" in prepublish_script and "validate-backend-drift" in prepublish_script,
+            "detail": prepublish_script or "vscode:prepublish script missing",
+        },
+        _backend_gitignore_check(root),
+    ]
+
+
+def _backend_gitignore_check(root: Path) -> dict[str, Any]:
+    gitignore = root / ".gitignore"
+    try:
+        patterns = {
+            line.strip().replace("\\", "/")
+            for line in gitignore.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+    except OSError:
+        patterns = set()
+    return {
+        "id": "vscode_backend_gitignored",
+        "category": "extension",
+        "ok": "vscode-extension/backend/" in patterns or "vscode-extension/backend" in patterns,
+        "detail": "vscode-extension/backend/ is generated during packaging",
     }
 
 

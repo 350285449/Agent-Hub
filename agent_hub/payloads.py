@@ -448,6 +448,7 @@ def _hub_metadata(response: HubResponse) -> dict[str, Any]:
             "context_usage",
             "token_budget",
             "confidence",
+            "routing_summary",
         ):
             if key in raw_metadata:
                 data[key] = raw_metadata[key]

@@ -98,6 +98,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue(any(row["id"] == "python_version" for row in data["install_checks"]))
             self.assertTrue(any(row["id"] == "runtime_dependency_audit" for row in data["dependency_checks"]))
             self.assertTrue(any(row["id"] == "release_dependency:packaging" for row in data["dependency_checks"]))
+            self.assertTrue(any(row["id"] == "provider_config" for row in data["install_checks"]))
+            self.assertTrue(any(row["id"] == "server_health" for row in data["install_checks"]))
+            self.assertTrue(any(row["id"] == "vscode_extension_prepare_backend" for row in data["install_checks"]))
+            self.assertTrue(any(row["id"] == "vscode_backend_gitignored" for row in data["install_checks"]))
             self.assertTrue(data["backend_reachable"]["ok"])
             self.assertTrue(any("Cline:" in fix for fix in data["exact_fixes"]))
 
@@ -193,6 +197,51 @@ class CliTests(unittest.TestCase):
             names = {agent["name"] for agent in data["agents"]}
             self.assertIn("groq-qwen3-32b", names)
             self.assertIn("openrouter-deepseek-free", names)
+
+    def test_local_only_routing_preset_keeps_private_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "default_route": ["remote", "local"],
+                        "routes": [
+                            {"name": "cloud-agent", "agents": ["remote", "local"]},
+                            {"name": "local-agent", "agents": ["local"]},
+                        ],
+                        "agents": [
+                            {
+                                "name": "remote",
+                                "provider": "openai-compatible",
+                                "provider_type": "groq",
+                                "model": "remote-test",
+                                "base_url": "https://api.groq.com/openai/v1",
+                                "enabled": True,
+                                "free": False,
+                            },
+                            {
+                                "name": "local",
+                                "provider": "openai-compatible",
+                                "provider_type": "lm-studio",
+                                "model": "local-test",
+                                "base_url": "http://127.0.0.1:1234",
+                                "enabled": True,
+                                "free": True,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                code = main(["--config", str(path), "presets", "apply", "Local Only Mode"])
+
+            self.assertEqual(code, 0)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data["default_route"], ["local"])
+            self.assertTrue(data["free_only"])
+            self.assertFalse(data["auto_enable_available_providers"])
 
     def test_recommend_command_prints_model_suggestions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

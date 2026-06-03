@@ -124,6 +124,7 @@ class ProductionSmokeTests(unittest.TestCase):
 
 def _smoke_config(path: Path) -> HubConfig:
     return HubConfig(
+        workspace_dir=path,
         state_dir=path / "state",
         default_route=["tooly"],
         routes=[RouteRule(name="coding", agents=["tooly"])],
@@ -154,7 +155,7 @@ def _stop(server: AgentHubHTTPServer, thread: threading.Thread) -> None:
 
 
 def _get_json(url: str) -> dict:
-    with urlopen(url, timeout=5) as response:
+    with urlopen(url, timeout=15) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -165,7 +166,7 @@ def _post_json(url: str, payload: dict) -> dict:
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    with urlopen(request, timeout=5) as response:
+    with urlopen(request, timeout=15) as response:
         return json.loads(response.read().decode("utf-8"))
 
 

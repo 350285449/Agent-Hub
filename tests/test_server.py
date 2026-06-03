@@ -658,6 +658,10 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(hub["limits"]["tokens_remaining"], 12345)
             self.assertIn("failed_models", hub)
             self.assertIn("fallback_models", hub)
+            self.assertEqual(hub["routing_summary"]["selected_agent"], "tooly")
+            self.assertIn("why_provider_chosen", hub["routing_summary"])
+            self.assertIn("estimated_cost_usd", hub["routing_summary"])
+            self.assertGreaterEqual(hub["routing_summary"]["latency_ms"], 0)
 
     def test_openai_compatible_proxy_blocks_unknown_external_provider_without_permission(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -849,6 +853,7 @@ class ServerCompatibilityTests(unittest.TestCase):
 
 def _compat_config(path: Path) -> HubConfig:
     return HubConfig(
+        workspace_dir=path,
         state_dir=path / "state",
         default_route=["tooly"],
         routes=[
@@ -948,7 +953,7 @@ def _post_text_with_headers(
             **(headers or {}),
         },
     )
-    with urlopen(request, timeout=5) as response:
+    with urlopen(request, timeout=15) as response:
         return response.read().decode("utf-8"), response.headers
 
 

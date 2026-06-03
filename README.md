@@ -1,5 +1,7 @@
 # Agent-Hub
 
+[![CI](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml/badge.svg)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
+
 Agent-Hub is a local routing layer and lightweight workspace agent for LLM
 requests. It accepts JSON, chooses a configured agent/model, can run a small
 tool-using agent loop, and fails over to the next agent when a provider is out
@@ -346,6 +348,11 @@ Useful commands:
 ```powershell
 python -m agent_hub providers
 python -m agent_hub presets
+python -m agent_hub presets apply private
+python -m agent_hub presets apply fast
+python -m agent_hub presets apply cheap
+python -m agent_hub presets apply best-coding
+python -m agent_hub presets apply local-only
 python -m agent_hub add-provider groq --model llama-3.3-70b-versatile --api-key-env GROQ_API_KEY --enabled
 python -m agent_hub add-free-presets
 python -m agent_hub recommend --route cloud-agent --needs-tools "fix a failing test"
@@ -446,12 +453,15 @@ agent-hub doctor
 ```
 
 The doctor report includes config path, backend version, Python runtime,
-install checks, dependency checks, config status, backend reachability, bundled
-backend snapshot status, enabled providers, missing API keys, local model
+install checks, dependency checks, provider config, backend reachability/server
+health, bundled backend snapshot status, backend/extension version alignment,
+VS Code extension setup, enabled providers, missing API keys, local model
 servers, Cline/Claude endpoints, approval mode, safe mode, token optimization
 mode, context diagnostics, likely problems, and exact fixes.
 Use `agent-hub doctor --json` for issue reports or automation; dependency
-checks distinguish the runtime import audit from optional release tooling.
+checks distinguish the runtime import audit from optional release tooling. The
+runtime dependency audit currently reports `packaging` as the only non-stdlib
+runtime import because provider transport uses Python stdlib HTTP modules.
 
 Router/provider errors also expose structured categories internally
 (`configuration`, `provider`, `rate_limit`, `quota`, `context_limit`,
@@ -460,7 +470,7 @@ provider failures from user-fixable configuration problems.
 
 Further docs:
 
-- [Architecture](docs/ARCHITECTURE.md)
+- [Architecture](docs/architecture.md)
 - [Permissions](docs/PERMISSIONS.md)
 - [Cline setup](docs/CLINE.md)
 - [Claude Code setup](docs/CLAUDE_CODE.md)
@@ -492,13 +502,36 @@ Diagnostics:
 python -m agent_hub health --route cloud-agent
 python -m agent_hub metrics --route cloud-agent
 python -m agent_hub doctor
+agent-hub debug-bundle --output agent-hub-debug-bundle.zip
 ```
 
 `health` summarizes live availability and current best route candidates.
 `metrics` includes persisted latency, streaming-speed estimates, tool-call
 success/failure counts, token usage, and recent failover history. `doctor`
 combines config readiness with the same provider-health and recommendation
-signals.
+signals. `debug-bundle` exports recent status, config shape, logs, routing,
+provider health, and other diagnostics with secret-like values redacted.
+
+Test proof:
+
+```powershell
+python -m pip install -e ".[test,release]"
+python -m compileall -q agent_hub scripts
+Push-Location vscode-extension; npm ci; npm run prepare-backend; Pop-Location
+python scripts/validate_release.py
+python -m pytest -m packaging
+python -m pytest -m unit --durations=20
+```
+
+Optional slower lanes:
+
+```powershell
+python -m pytest --run-integration -m integration --durations=20
+python -m pytest --run-integration --run-stress -m "integration or stress" --durations=20
+cd vscode-extension
+npm run check
+npm run check:version
+```
 
 Additional visibility endpoints:
 
@@ -546,8 +579,9 @@ The installer packages the extension, bundles the Python backend, finds the
 `code`/`code-insiders`/`codium` CLI, installs the VSIX with `--force`, and warns
 if Python 3.11+ is missing. It needs Node.js 20 or newer to build the VSIX.
 
-`vscode-extension/backend` is generated during packaging and is intentionally
-gitignored. To regenerate the backend snapshot without packaging a VSIX, run:
+`vscode-extension/backend` is generated during packaging, intentionally
+gitignored, and should not be committed. To regenerate the backend snapshot
+without packaging a VSIX, run:
 
 ```sh
 cd vscode-extension && npm run prepare-backend
