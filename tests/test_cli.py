@@ -88,7 +88,19 @@ class CliTests(unittest.TestCase):
             _write_minimal_config(path)
             buffer = io.StringIO()
 
-            with patch("agent_hub.cli._backend_reachability") as backend, redirect_stdout(buffer):
+            release_check = {
+                "id": "release_validation",
+                "category": "release",
+                "ok": True,
+                "detail": "passed",
+                "failures": [],
+            }
+            with (
+                patch("agent_hub.cli._backend_reachability") as backend,
+                patch("agent_hub.commands_doctor._validate_backend_snapshot", return_value=[]),
+                patch("agent_hub.commands_doctor._release_validation_check", return_value=release_check),
+                redirect_stdout(buffer),
+            ):
                 backend.return_value = {"ok": True, "url": "http://127.0.0.1:8787/health", "detail": "HTTP 200"}
                 code = main(["--config", str(path), "doctor", "--json"])
 
@@ -421,7 +433,13 @@ class CliTests(unittest.TestCase):
             output = Path(tmp) / "debug.zip"
             buffer = io.StringIO()
 
-            with redirect_stdout(buffer):
+            doctor_output = {"object": "agent_hub.doctor", "ok": True}
+            validation_result = {"object": "agent_hub.release_validation", "ok": True, "failures": []}
+            with (
+                patch("agent_hub.commands_server._debug_doctor_output", return_value=doctor_output),
+                patch("agent_hub.commands_server._debug_validation_result", return_value=validation_result),
+                redirect_stdout(buffer),
+            ):
                 code = main(["--config", str(path), "debug-bundle", "--output", str(output)])
 
             self.assertEqual(code, 0)

@@ -1,7 +1,7 @@
 # Agent-Hub
 
 [![CI passing](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=CI%20passing)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
-[![tests passing](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=tests%20passing)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
+[![packaging tests](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=packaging%20tests)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 [![release validation passing](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=release%20validation%20passing)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 
 Agent-Hub is a local routing layer and lightweight workspace agent for LLM

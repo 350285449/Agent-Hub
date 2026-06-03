@@ -4,11 +4,17 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_hub.config import AgentConfig, HubConfig, RouteRule
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.providers import ProviderError
 from agent_hub.core.router import AgentRouter, RouterError
+
+
+class _NoRepoContext:
+    def to_message(self) -> None:
+        return None
 
 
 class _FakeProvider:
@@ -24,6 +30,14 @@ class _FakeProvider:
 
 
 class RouterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = patch(
+            "agent_hub.core.routing.selection.repo_context_for_request",
+            return_value=_NoRepoContext(),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_failover_preserves_request_and_records_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             calls: list[str] = []

@@ -8,6 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.request import Request, urlopen
 
+import pytest
+
 from agent_hub.config import AgentConfig, HubConfig, RouteRule
 from agent_hub.core.context import ContextEngine, RepositoryMemory
 from agent_hub.core.health import ProviderHealth, ProviderHealthManager, calculate_provider_score
@@ -49,6 +51,7 @@ class NativeStreamingTests(unittest.TestCase):
         self.assertEqual([chunk.text for chunk in chunks], ["hel", "lo"])
         self.assertEqual(chunks[-1].finish_reason, "stop")
 
+    @pytest.mark.integration
     def test_openai_sse_uses_native_stream_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             server = AgentHubHTTPServer(("127.0.0.1", 0), _stream_config(Path(tmp), streaming=True))
@@ -71,6 +74,7 @@ class NativeStreamingTests(unittest.TestCase):
         self.assertIn('"content": "lo"', text)
         self.assertIn("data: [DONE]", text)
 
+    @pytest.mark.integration
     def test_streaming_falls_back_to_compatibility_when_native_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             server = AgentHubHTTPServer(("127.0.0.1", 0), _stream_config(Path(tmp), streaming=False))
@@ -134,6 +138,7 @@ class HealthContextWorkflowToolTests(unittest.TestCase):
             calls: list[str] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                repo_context_enabled=False,
                 default_route=["agent"],
                 routes=[RouteRule(name="coding", agents=["agent"])],
                 agents={

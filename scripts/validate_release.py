@@ -85,8 +85,9 @@ def validate_release(
     failures.extend(validate_extension_packaging_scripts(package))
     failures.extend(validate_backend_generation_documented(root))
     failures.extend(validate_backend_snapshot_generation(root))
-    failures.extend(validate_no_forbidden_media_references(root))
-    failures.extend(validate_no_dangerous_shell_true(root))
+    text_files = _iter_text_files(root)
+    failures.extend(validate_no_forbidden_media_references(root, text_files=text_files))
+    failures.extend(validate_no_dangerous_shell_true(root, text_files=text_files))
     failures.extend(
         validate_version_consistency(
             release=release,
@@ -337,9 +338,9 @@ def validate_backend_snapshot_generation(root: Path) -> list[str]:
     return failures
 
 
-def validate_no_forbidden_media_references(root: Path) -> list[str]:
+def validate_no_forbidden_media_references(root: Path, *, text_files: list[Path] | None = None) -> list[str]:
     failures: list[str] = []
-    for path in _iter_text_files(root):
+    for path in text_files if text_files is not None else _iter_text_files(root):
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -353,9 +354,9 @@ def validate_no_forbidden_media_references(root: Path) -> list[str]:
     return failures
 
 
-def validate_no_dangerous_shell_true(root: Path) -> list[str]:
+def validate_no_dangerous_shell_true(root: Path, *, text_files: list[Path] | None = None) -> list[str]:
     failures: list[str] = []
-    for path in _iter_text_files(root):
+    for path in text_files if text_files is not None else _iter_text_files(root):
         if path.suffix.lower() != ".py":
             continue
         try:
