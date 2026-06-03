@@ -81,6 +81,7 @@ from .server_routes.diagnostics import (
     _routing_test_failover_body,
     _client_sources_body,
     _routing_history_body,
+    _routing_intelligence_body,
     _provider_health_body,
     _routing_memory_stats_body,
     _routing_memory_recent_body,
@@ -93,6 +94,7 @@ from .server_routes.diagnostics import (
     _enterprise_audit_body,
     _provider_row_html,
     _optimization_dashboard_html,
+    _routing_intelligence_dashboard_html,
     _task_winners_table_html,
     _role_winners_table_html,
     _model_win_rates_table_html,
@@ -123,6 +125,7 @@ DIAGNOSTIC_ENDPOINTS = {
     "/v1/routing-memory/recent",
     "/v1/routing/status",
     "/v1/routing/last-decision",
+    "/v1/routing-intelligence",
     "/v1/routing/test-failover",
     "/v1/limits",
     "/v1/usage",
@@ -848,6 +851,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       <a href="/v1/status">Status JSON</a> |
       <a href="/v1/routing-history">Routing History</a> |
       <a href="/v1/provider-scores">Provider Scores</a> |
+      <a href="/dashboard/routing-intelligence">Routing Intelligence</a> |
       <a href="/dashboard/optimization">Optimization Dashboard</a> |
       <a href="/v1/optimization">Optimization JSON</a>
     </p>

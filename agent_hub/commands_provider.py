@@ -21,6 +21,7 @@ from .config import (
 )
 from .core.router import AgentRouter, RouterError
 from .evaluation import BenchmarkRunner, ProviderScoreStore, default_benchmark_tasks
+from .evaluation.benchmark_suite import BenchmarkSuiteRunner
 from .payloads import request_from_payload
 from .provider_presets import (
     FREE_PROVIDER_PRESETS,
@@ -1026,6 +1027,34 @@ def _benchmark(config: HubConfig, *, route: str, prompt: str, as_json: bool) -> 
                 f"avg_latency={health['average_latency_seconds']}s"
             )
     return 0
+
+
+def _benchmark_suite(
+    config: HubConfig,
+    *,
+    route: str,
+    limit: int,
+    as_json: bool,
+    output: str | None = None,
+) -> int:
+    report = BenchmarkSuiteRunner(config).run(route=route, limit=limit)
+    if output:
+        target = Path(output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        report["report_path"] = str(target)
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(f"Benchmark suite for route {route}")
+        print(f"Report: {report.get('report_path')}")
+        print("Static routing:")
+        _print_table([report["static_routing"]], ["task_count", "success_rate", "average_score", "average_latency_ms", "failover_frequency", "average_cost_usd"])
+        print("Adaptive routing:")
+        _print_table([report["adaptive_routing"]], ["task_count", "success_rate", "average_score", "average_latency_ms", "failover_frequency", "average_cost_usd"])
+        print("Comparison:")
+        _print_table([report["comparison"]], ["winner", "success_rate_delta", "average_score_delta", "latency_delta_ms", "failover_frequency_delta", "cost_savings_usd"])
+    return 0 if report.get("comparison", {}).get("winner") else 1
 
 
 def _eval_providers(config: HubConfig, *, route: str, limit: int, as_json: bool) -> int:

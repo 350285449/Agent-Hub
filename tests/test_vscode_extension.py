@@ -102,6 +102,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
             "<h2>Setup</h2>",
             "<h2>Permissions</h2>",
             "<h2>Models</h2>",
+            "<h2>Routing Intelligence</h2>",
             "<h2>Limits</h2>",
             "<h2>Tokens</h2>",
             "<h2>Recent Activity</h2>",
@@ -112,6 +113,10 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertIn("createStatusBarItem", source)
         self.assertIn('id="routingChain"', source)
+        self.assertIn('id="routingSummaryGrid"', source)
+        self.assertIn('id="routingReasonList"', source)
+        self.assertIn("function sidebarRoutingExplanation", source)
+        self.assertIn("function renderRoutingIntelligence", source)
         self.assertIn('id="onboardingList"', source)
         self.assertIn('id="contextDiagnostics"', source)
         self.assertIn('id="heroHealthScore"', source)

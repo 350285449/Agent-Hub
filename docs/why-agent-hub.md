@@ -1,42 +1,117 @@
-# Why Agent-Hub?
+# Why Agent-Hub
 
-Agent-Hub is a local AI gateway for developers who want provider choice,
-auditable coding workflows, and a single safety boundary for tools.
+Agent-Hub is an Adaptive AI Orchestration Platform for developer workspaces. It
+is not only an AI gateway and not only a provider router. It classifies tasks,
+understands repository context, assesses risk, selects workflows, ranks
+providers, executes with failover, records outcomes, and uses that history to
+improve future routing.
 
-Use it when you want:
+## Positioning
 
-- One local OpenAI/Anthropic/OpenRouter-compatible API for many AI tools.
-- Provider choice without hard-wiring every editor, script, or workflow to one
-  vendor.
-- Automatic routing to cheaper, faster, longer-context, or more reliable models
-  based on the task.
-- Lower cost through smart routing, context compression, and repo-map injection.
-- Higher reliability through health tracking, cooldowns, retries, and provider
-  fallback.
-- Centralized safety checks before file writes, deletes, installs, shell
-  commands, config edits, and external provider calls.
-- Local, auditable coding workflows with request, routing, permission, tool, and
-  workflow JSONL logs.
-- Visibility into selected provider/model, why it was selected, context/cost
-  estimates, fallbacks, blocked permissions, and workflow progress.
+Most AI gateways optimize the transport layer: keys, quotas, retries, logging,
+and provider abstraction. Agent-Hub includes those gateway responsibilities, but
+its differentiator is Adaptive Workspace Intelligence™.
 
-Agent-Hub is not trying to hide provider differences. It makes them explicit,
-routes around failures, and keeps client-facing compatibility schemas stable.
+Agent-Hub answers:
 
-## Common Uses
+- What kind of task is this?
+- Which files, languages, frameworks, and repository signals matter?
+- How risky is the request?
+- Which workflow should run?
+- Which provider/model is best for this task right now?
+- Why were the other candidates rejected?
+- What did prior outcomes teach the router?
 
-- Point Cline, Continue, Claude Code, VS Code, and scripts at one local
-  endpoint.
-- Run free/local models first and fall back to cloud providers only when needed.
-- Keep high-risk workspace operations behind one permission policy.
-- Route large coding tasks to long-context coding models while routing simple
-  explanations to cheaper fast models.
-- Debug provider failures with `/v1/routing/status`, `/v1/provider-health`, and
-  `/dashboard/optimization`.
+## Competitive Comparison
 
-## Differentiator
+| Capability | Agent-Hub | OpenRouter | Cloudflare AI Gateway | Kong AI Gateway | LiteLLM | Portkey |
+| --- | --- | --- | --- | --- | --- | --- |
+| Multi-provider API routing | Yes | Yes | Yes | Yes | Yes | Yes |
+| OpenAI-compatible gateway | Yes | Yes | Yes | Via gateway configuration | Yes | Yes |
+| Provider health and failover | Yes | Partial | Yes | Yes | Yes | Yes |
+| Cost/latency observability | Yes | Partial | Yes | Yes | Yes | Yes |
+| Workspace-aware task classification | Yes | No | No | No | No | No |
+| Repository/file/language intelligence | Yes | No | No | No | No | No |
+| Risk-aware permission gates | Yes | No | No | Gateway policy only | No | Policy oriented |
+| Workflow routing | Yes | No | No | No | No | Limited orchestration |
+| Planner/worker/reviewer workflows | Yes | No | No | No | No | No |
+| Adaptive learning from outcomes | Yes | No | No | No | Partial custom callbacks | Evaluation/observability oriented |
+| Routing memory by task/repo pattern | Yes | No | No | No | No | No |
+| Per-decision explanation object | Yes | Limited | Limited | Policy logs | Limited | Logs/traces |
+| Local VS Code intelligence panel | Yes | No | No | No | No | No |
+| Local-first workspace agent tools | Yes | No | No | No | No | No |
 
-The main differentiator is Smart Workspace-Aware Model Routing. Agent-Hub
-classifies the request, repository hints, file types, risk level, required
-capabilities, and context size before selecting a model. The routing decision is
-logged with a human-readable reason so developers can see why a model was used.
+## Where Agent-Hub Wins
+
+### Workspace Awareness
+
+Agent-Hub classifies the request using task text, referenced files, file types,
+language/framework hints, repository size, context size, and required
+capabilities. That makes routing decisions specific to the workspace instead of
+generic provider availability.
+
+Key code:
+
+- `agent_hub/core/task_classifier.py`
+- `agent_hub/repository.py`
+- `agent_hub/core/context_preparation.py`
+
+### Adaptive Learning
+
+Agent-Hub records outcome metadata and uses it to influence future routing.
+Models that succeed on similar tasks can be boosted; models that time out or
+fail on similar large-context tasks can be penalized.
+
+Key code:
+
+- `agent_hub/adaptive.py`
+- `agent_hub/routing_memory.py`
+- `agent_hub/core/routing/selection.py`
+
+### Workflow Routing
+
+Agent-Hub can choose direct routing, single-worker, planned-worker,
+reviewed-worker, and team-reviewed patterns. Workflow outcomes feed adaptive
+analytics and future workflow upgrades.
+
+Key code:
+
+- `agent_hub/workflows/selector.py`
+- `agent_hub/workflows/engine.py`
+- `agent_hub/application/adaptive_service.py`
+
+### Repository Intelligence
+
+Agent-Hub can add compact repository context, preserve active file/task
+signals, estimate context pressure, and route large repository work toward
+models and workflows that can handle it.
+
+Key code:
+
+- `agent_hub/repository.py`
+- `agent_hub/context.py`
+- `agent_hub/token_optimizer.py`
+
+### Explainability
+
+Every routing decision now includes `RoutingDecisionExplanation`: selected
+model, selected workflow, risk, reasons, rejected candidates, provider/model
+rankings, adaptive signals, routing-memory signals, cost comparison, and
+context optimization.
+
+Surfaces:
+
+- `GET /v1/routing-intelligence`
+- `GET /dashboard/routing-intelligence`
+- `GET /v1/routing/last-decision`
+- `GET /v1/routing-decision/{request_id}`
+- VS Code Routing Intelligence panel
+
+## When to Choose Agent-Hub
+
+Choose Agent-Hub when you want a local orchestration layer for coding tools,
+repository-aware agents, safety gates, workflows, adaptive learning, and
+explainable routing.
+
+Choose a pure gateway when you only need vendor abstraction, traffic logging, or
+centralized key management and do not need workspace intelligence.

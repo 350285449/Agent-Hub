@@ -120,6 +120,7 @@ curl http://127.0.0.1:8787/v1/status
 curl http://127.0.0.1:8787/v1/routing/status
 curl http://127.0.0.1:8787/v1/routing/last-decision
 curl http://127.0.0.1:8787/v1/routing/test-failover
+curl http://127.0.0.1:8787/v1/routing-intelligence
 curl -X POST http://127.0.0.1:8787/v1/routing/simulate \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"large architecture migration"}]}'
@@ -150,6 +151,9 @@ errors, audit rows, and plugin metadata should keep useful context while
 masking API keys, bearer tokens, auth headers, and secret-looking strings.
 
 `/dashboard` renders the same core provider status in lightweight HTML.
+`/dashboard/routing-intelligence` renders selected model, selected workflow,
+risk level, routing reasons, rejected candidates, provider/model rankings,
+failover events, context optimization, and success-rate trends.
 `/dashboard/optimization` renders adaptive routing, routing memory, workflow,
 model, provider, cost, latency, retry, and recovery analytics. It includes
 per-workflow rows such as best planner, best worker, average cost, average time,
@@ -169,10 +173,13 @@ fallbacks, stream failures, context truncation, and tool execution.
 
 ```sh
 python -m agent_hub eval --route coding --json
+python -m agent_hub benchmark-suite --route coding --json
 ```
 
 The command runs benchmark task types for coding, reasoning, summarization,
 tool calling, long context, and latency, then stores scores in local state.
+The benchmark suite compares static routing against adaptive routing and writes
+a JSON report under `.agent-hub/state/benchmark_reports`.
 
 ## Cline
 

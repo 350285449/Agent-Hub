@@ -5,16 +5,23 @@
 [![packaging](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=packaging)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 [![fresh install](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=fresh%20install)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 
-Agent-Hub is a local routing layer and lightweight workspace agent for LLM
-requests. It accepts JSON, chooses a configured agent/model, can run a small
-tool-using agent loop, and fails over to the next agent when a provider is out
-of quota, rate limited, overloaded, or cannot handle the context size.
+Agent-Hub is an Adaptive AI Orchestration Platform for developer workspaces. It
+accepts local OpenAI, Anthropic, Responses, OpenRouter-style, VS Code, Cline,
+Claude Code, and native requests; classifies the task; understands repository
+signals; assesses risk; selects a workflow; ranks provider/model candidates;
+executes with failover; records outcomes; and learns from the result.
+
+The core feature is Adaptive Workspace Intelligence™: Agent-Hub makes its model
+choice visible and explainable. It can show the selected model, selected
+workflow, task classification, risk level, repository analysis, routing reasons,
+fallback options, cost/context estimates, and the adaptive learning signals that
+will improve future routing.
 
 It can also act as a transparent OpenAI endpoint, Anthropic endpoint, Cline
 backend, Claude Code backend, OpenRouter-style endpoint, VS Code workspace
-agent, and universal provider router. Risky shell, install, file-write,
-delete, config, provider, upload, and process actions go through centralized
-permission policy.
+agent, and universal provider router. Risky shell, install, file-write, delete,
+config, provider, upload, and process actions go through centralized permission
+policy.
 
 It uses the `cloud-agent` route by default for the model calls that plan and
 assign workspace actions. Fresh configs put Ollama cloud model IDs first on that
@@ -23,12 +30,13 @@ Hosted API-key providers remain available as configurable fallbacks. It does not
 automate bypassing free-tier limits, scraping web UIs, or downloading
 proprietary vendor models.
 
-## Why Use Agent-Hub?
+## Why Agent-Hub Exists
 
-Agent-Hub gives local AI tooling one gateway instead of one-off vendor
-integrations. Use OpenAI, Anthropic, OpenRouter-style, Ollama, local, and custom
-OpenAI-compatible providers behind the same local API, then change providers
-without rewriting every coding tool.
+Developer AI tools usually pick one static model and hide why it was chosen.
+Agent-Hub exists to make model orchestration adaptive, local, auditable, and
+understandable. Use OpenAI, Anthropic, OpenRouter-style, Ollama, local, and
+custom OpenAI-compatible providers behind the same local API, then change
+providers without rewriting every coding tool.
 
 - Avoid vendor lock-in with one local compatibility layer for many providers.
 - Use one gateway for Cline, Claude Code, Continue, VS Code, scripts, and local
@@ -46,7 +54,7 @@ without rewriting every coding tool.
 - Give developers visibility into selected models, routing reasons, fallback
   events, cost/context estimates, permission blocks, and workflow progress.
 
-## Killer Feature: Smart Workspace-Aware Model Routing
+## Adaptive Workspace Intelligence™
 
 Agent-Hub does more than route by price or uptime. It classifies the task,
 repository hints, file types, risk level, context size, and required
@@ -62,12 +70,13 @@ Examples:
 - Large repo tasks use context compression and repo-map injection.
 - High-risk shell commands are blocked or require approval before execution.
 
-See `/v1/routing/last-decision` or `/v1/status` for `selected_provider`,
+See `/v1/routing-intelligence`, `/dashboard/routing-intelligence`,
+`/v1/routing/last-decision`, or `/v1/status` for `selected_provider`,
 `selected_model`, `routing_reason`, `task_classification`,
-`cost_context_estimate`, fallback events, permission blocks, and workflow
-progress.
+`cost_context_estimate`, fallback events, permission blocks, workflow progress,
+and rejected-candidate explanations.
 
-## Killer Feature #2: Self-Improving Routing Memory
+## How Learning Works
 
 Agent-Hub learns from real routing outcomes. Each routed request can add a
 metadata-only memory record with task type, language/framework, repo/context
@@ -89,7 +98,59 @@ curl http://127.0.0.1:8787/v1/routing-memory/recent
 curl -X DELETE http://127.0.0.1:8787/v1/routing-memory
 ```
 
-## Why this is different
+## Routing Explainability
+
+Every routing decision includes a `RoutingDecisionExplanation` object derived
+from the real candidate scorecards. It includes selected model, selected
+workflow, risk level, reasons, rejected candidates, provider/model rankings,
+adaptive learning signals, routing-memory signals, cost comparison, and context
+optimization.
+
+Surfaces:
+
+- `GET /v1/routing-intelligence`
+- `GET /dashboard/routing-intelligence`
+- `GET /v1/routing/last-decision`
+- `GET /v1/routing-decision/{request_id}`
+- `.agent-hub/state/routing_decisions.jsonl`
+- VS Code Routing Intelligence panel
+
+## Workflow Intelligence
+
+Agent-Hub tracks direct routing, single-worker, planned-worker,
+reviewed-worker, and team-reviewed workflows. Adaptive analytics report success
+rate, latency, token usage, cost, retries, failovers, and best planner/worker
+models per workflow task.
+
+## Enterprise Governance
+
+Agent-Hub keeps provider usage, permissions, tools, workflow events, and audit
+records behind one local policy boundary. Enterprise audit endpoints and
+permission gates help centralize provider approval, shell/file safety, and
+workspace controls.
+
+## Cost Optimization
+
+Routing scorecards include known provider costs, context estimates, free/local
+preferences, quota state, and routing-memory outcomes. The routing intelligence
+dashboard shows estimated candidate cost savings when comparable candidate costs
+are available.
+
+## Repository Awareness
+
+Repository context, active files, file types, language/framework hints, context
+pressure, and repo size feed classification and routing. Large or risky coding
+tasks can be routed toward long-context, tool-capable, review-capable models and
+workflows.
+
+## Competitive Comparison
+
+Most AI gateways route by price, provider, or availability. Agent-Hub routes by
+workspace context, task risk, historical performance, and real outcomes. See
+`docs/why-agent-hub.md` for a comparison with OpenRouter, Cloudflare AI
+Gateway, Kong AI Gateway, LiteLLM, and Portkey.
+
+## Why This Is Different
 
 Most AI gateways route by price, provider, or availability. Agent-Hub routes by
 workspace context, task risk, historical performance, and real outcomes. This
@@ -137,11 +198,14 @@ Agent-Hub is organized around modular backend systems:
 - Plugin SDK foundation: discovers local manifest-only provider, tool,
   workflow, router-strategy, and memory/context plugins without executing
   third-party code.
-- Dashboard: `/dashboard`, `/dashboard/optimization`, `/v1/status`,
-  `/v1/routing-history`, and `/v1/provider-scores` explain model selection,
-  adaptive optimization, retry recovery, and tool/workflow activity.
+- Dashboard: `/dashboard`, `/dashboard/routing-intelligence`,
+  `/dashboard/optimization`, `/v1/status`, `/v1/routing-history`, and
+  `/v1/provider-scores` explain model selection, rejected candidates, adaptive
+  optimization, retry recovery, and tool/workflow activity.
 
 More detail lives in `docs/why-agent-hub.md`, `docs/architecture.md`,
+`docs/adaptive-workspace-intelligence.md`,
+`docs/architecture-audit-routing-intelligence.md`,
 `docs/killer-feature-smart-routing.md`, `docs/killer-feature-routing-memory.md`,
 `docs/routing-decision-explainability.md`, `docs/privacy-routing-memory.md`,
 `docs/security-boundaries.md`, `docs/api-compatibility.md`,
@@ -592,6 +656,7 @@ Diagnostics:
 python -m agent_hub health --route cloud-agent
 python -m agent_hub metrics --route cloud-agent
 agent-hub route-diagnose --route cloud-agent --needs-tools "fix a failing test"
+agent-hub benchmark-suite --route cloud-agent --json
 python -m agent_hub doctor
 agent-hub debug-bundle --output agent-hub-debug-bundle.zip
 ```
@@ -602,6 +667,8 @@ success/failure counts, token usage, and recent failover history. `doctor`
 combines config readiness with the same provider-health and recommendation
 signals. `route-diagnose` shows the selected provider, selected model, skipped
 providers, fallback reason, latency, and estimated cost when configured.
+`benchmark-suite` compares static routing with adaptive routing and writes a
+JSON report under `.agent-hub/state/benchmark_reports`.
 `debug-bundle` exports sanitized version info, config, logs, doctor output,
 provider status, and release validation results with secret-like values
 redacted.
@@ -639,6 +706,7 @@ Additional visibility endpoints:
 - `GET /v1/routing/status`
 - `GET /v1/routing/last-decision`
 - `GET /v1/routing/test-failover`
+- `GET /v1/routing-intelligence`
 - `GET /v1/limits`
 - `GET /v1/usage`
 - `GET /v1/client-sources`
@@ -699,6 +767,10 @@ After installing, reload VS Code, open any workspace, and use:
 - `Agent Hub: Research Web`
 - `Agent Hub: Explain Selection`
 - `Agent Hub: Explain Current File`
+
+The sidebar includes a Routing Intelligence panel showing selected model,
+selected workflow, risk level, repository/context signal, routing reasons, and
+fallback options from `/v1/routing-intelligence`.
 
 The extension uses the same local server as the CLI. Packaged VSIX builds
 include the Agent Hub Python backend and start it from the opened workspace with

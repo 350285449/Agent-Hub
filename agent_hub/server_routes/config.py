@@ -15,11 +15,30 @@ def handle_get(handler: object, path: str) -> bool:
     if path == "/dashboard/optimization":
         handler._send_html(server_module._optimization_dashboard_html(handler.server.adaptive_service.optimization_summary()))
         return True
+    if path == "/dashboard/routing-intelligence":
+        optimization = handler.server.adaptive_service.optimization_summary()
+        intelligence = server_module._routing_intelligence_body(
+            handler.server.config,
+            handler.server.router,
+            optimization=optimization,
+        )
+        handler._send_html(server_module._routing_intelligence_dashboard_html(intelligence))
+        return True
     if path == "/v1/events":
         handler._send_diagnostics_json(server_module._events_body(handler.server.config))
         return True
     if path == "/v1/optimization":
         handler._send_diagnostics_json(handler.server.adaptive_service.optimization_summary())
+        return True
+    if path == "/v1/routing-intelligence":
+        optimization = handler.server.adaptive_service.optimization_summary()
+        handler._send_diagnostics_json(
+            server_module._routing_intelligence_body(
+                handler.server.config,
+                handler.server.router,
+                optimization=optimization,
+            )
+        )
         return True
     if path == "/v1/tools":
         handler._send_diagnostics_json(server_module._tools_body(handler.server.router))

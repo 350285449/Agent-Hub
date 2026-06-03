@@ -169,7 +169,41 @@ class RoutingDecision:
             data["task_classification"] = dict(self.task_classification)
         if self.candidate_scores:
             data["candidate_scores"] = list(self.candidate_scores)
+        data["explanation"] = _routing_decision_explanation(self).to_dict()
         return data
+
+
+@dataclass(slots=True)
+class RoutingDecisionExplanation:
+    """Product-facing explanation derived from the existing routing scorecards."""
+
+    summary: str
+    selected: dict[str, Any]
+    reasons: list[dict[str, Any]] = field(default_factory=list)
+    rejected: list[dict[str, Any]] = field(default_factory=list)
+    provider_rankings: list[dict[str, Any]] = field(default_factory=list)
+    model_rankings: list[dict[str, Any]] = field(default_factory=list)
+    adaptive_learning: dict[str, Any] = field(default_factory=dict)
+    routing_memory: dict[str, Any] = field(default_factory=dict)
+    cost_savings: dict[str, Any] = field(default_factory=dict)
+    context_optimization: dict[str, Any] = field(default_factory=dict)
+    lifecycle: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "object": "agent_hub.routing_decision_explanation",
+            "summary": self.summary,
+            "selected": dict(self.selected),
+            "reasons": list(self.reasons),
+            "rejected": list(self.rejected),
+            "provider_rankings": list(self.provider_rankings),
+            "model_rankings": list(self.model_rankings),
+            "adaptive_learning": dict(self.adaptive_learning),
+            "routing_memory": dict(self.routing_memory),
+            "cost_savings": dict(self.cost_savings),
+            "context_optimization": dict(self.context_optimization),
+            "lifecycle": list(self.lifecycle),
+        }
 
 
 @dataclass(slots=True)
@@ -3041,6 +3075,378 @@ def _routing_memory_route_reason(candidate_scores: list[dict[str, Any]]) -> str:
     return f"Routing memory {direction} {selected.get('agent')} by {adjustment:+.2f}."
 
 
+def _routing_decision_explanation(decision: RoutingDecision) -> RoutingDecisionExplanation:
+    selected = _selected_scorecard(decision)
+    selected_agent = selected.get("agent") or decision.selected_agent or ""
+    selected_provider = selected.get("provider") or decision.selected_provider
+    selected_model = selected.get("model") or decision.selected_model
+    selected_score = _optional_float(selected.get("final_routing_score")) or _optional_float(selected.get("routing_score"))
+    selected_cost = _optional_float(selected.get("estimated_cost_usd"))
+    classification = decision.task_classification if isinstance(decision.task_classification, dict) else {}
+    capabilities = selected.get("capabilities") if isinstance(selected.get("capabilities"), dict) else {}
+    health = selected.get("health") if isinstance(selected.get("health"), dict) else {}
+    adaptive = selected.get("adaptive") if isinstance(selected.get("adaptive"), dict) else {}
+    memory = selected.get("routing_memory") if isinstance(selected.get("routing_memory"), dict) else {}
+    summary = (
+        f"Selected {selected_provider}/{selected_model}"
+        if selected_provider or selected_model
+        else "No provider selected"
+    )
+    if decision.reason:
+        summary = f"{summary}: {decision.reason}"
+    reasons = _routing_explanation_reasons(
+        decision,
+        selected=selected,
+        classification=classification,
+        capabilities=capabilities,
+        health=health,
+        adaptive=adaptive,
+        memory=memory,
+    )
+    provider_rankings = _routing_explanation_rankings(decision.candidate_scores, by="provider")
+    model_rankings = _routing_explanation_rankings(decision.candidate_scores, by="model")
+    return RoutingDecisionExplanation(
+        summary=summary,
+        selected={
+            "agent": selected_agent,
+            "provider": selected_provider,
+            "model": selected_model,
+            "workflow": decision.selected_workflow,
+            "routing_mode": decision.routing_mode,
+            "task_type": decision.task_type,
+            "task_category": decision.task_category,
+            "risk_level": decision.risk,
+            "complexity": decision.complexity,
+            "final_routing_score": round(selected_score, 3) if selected_score is not None else None,
+        },
+        reasons=reasons,
+        rejected=_fallback_rejections(decision.candidate_scores),
+        provider_rankings=provider_rankings,
+        model_rankings=model_rankings,
+        adaptive_learning=_routing_explanation_adaptive(decision.candidate_scores, adaptive),
+        routing_memory=_routing_explanation_memory(decision, memory),
+        cost_savings=_routing_explanation_cost_savings(decision.candidate_scores, selected_cost),
+        context_optimization=_routing_explanation_context(decision, selected, classification, capabilities),
+        lifecycle=[
+            "User request",
+            "Task classification",
+            "Workspace analysis",
+            "Risk assessment",
+            "Workflow selection",
+            "Provider selection",
+            "Execution",
+            "Outcome analysis",
+            "Adaptive learning",
+            "Future routing improvement",
+        ],
+    )
+
+
+def _selected_scorecard(decision: RoutingDecision) -> dict[str, Any]:
+    for row in decision.candidate_scores:
+        if not isinstance(row, dict):
+            continue
+        if row.get("agent") == decision.selected_agent:
+            return row
+    first = decision.candidate_scores[0] if decision.candidate_scores else {}
+    return dict(first) if isinstance(first, dict) else {}
+
+
+def _routing_explanation_reasons(
+    decision: RoutingDecision,
+    *,
+    selected: dict[str, Any],
+    classification: dict[str, Any],
+    capabilities: dict[str, Any],
+    health: dict[str, Any],
+    adaptive: dict[str, Any],
+    memory: dict[str, Any],
+) -> list[dict[str, Any]]:
+    reasons: list[dict[str, Any]] = []
+    _append_reason(
+        reasons,
+        "Routing policy",
+        decision.reason or "Selected the highest-ranked compatible candidate.",
+        "AgentRouter.decide",
+    )
+    category = " / ".join(
+        str(value)
+        for value in (
+            decision.task_type,
+            decision.task_category,
+            decision.complexity,
+        )
+        if value
+    )
+    if category:
+        _append_reason(reasons, "Task classification", category, "TaskClassifier")
+    workspace_bits = []
+    if decision.language != "unknown":
+        workspace_bits.append(decision.language)
+    if decision.framework != "unknown":
+        workspace_bits.append(decision.framework)
+    repo_size = classification.get("repo_size_bucket")
+    if repo_size and repo_size != "unknown":
+        workspace_bits.append(f"{repo_size} repository")
+    file_types = classification.get("file_types")
+    if isinstance(file_types, list) and file_types:
+        workspace_bits.append("files " + ", ".join(str(item) for item in file_types[:5]))
+    if workspace_bits:
+        _append_reason(reasons, "Workspace analysis", "; ".join(workspace_bits), "TaskClassifier")
+    if decision.risk and decision.risk != "low":
+        detail = f"{decision.risk} risk"
+        if decision.permission_requirements:
+            detail = f"{detail}; permissions: {', '.join(decision.permission_requirements)}"
+        _append_reason(reasons, "Risk assessment", detail, "TaskClassifier")
+    if decision.selected_workflow:
+        _append_reason(
+            reasons,
+            "Workflow selection",
+            decision.selected_workflow,
+            "WorkflowSelector / routing memory",
+        )
+    if capabilities:
+        capability_bits = []
+        if capabilities.get("supports_tools"):
+            capability_bits.append("tool-capable")
+        if capabilities.get("supports_streaming"):
+            capability_bits.append("streaming")
+        if capabilities.get("context_window"):
+            capability_bits.append(f"context {capabilities.get('context_window')}")
+        if capability_bits:
+            _append_reason(reasons, "Capability match", ", ".join(capability_bits), "agent capabilities")
+    if health:
+        reliability = _optional_float(health.get("reliability_score"))
+        latency = _optional_float(health.get("average_latency_ms"))
+        parts = []
+        if reliability is not None:
+            parts.append(f"reliability {reliability:.2f}")
+        if latency and latency > 0:
+            parts.append(f"avg latency {latency:.0f} ms")
+        if health.get("degraded"):
+            parts.append("degraded")
+        if parts:
+            _append_reason(reasons, "Provider health", ", ".join(parts), "provider_health.json")
+    if adaptive:
+        summary = str(adaptive.get("summary") or "").strip()
+        if summary:
+            _append_reason(reasons, "Adaptive learning", summary, "adaptive_learning.json")
+    if memory:
+        summary = str(memory.get("summary") or "").strip()
+        if summary:
+            _append_reason(reasons, "Routing memory", summary, "routing_memory.jsonl")
+    estimated_cost = selected.get("estimated_cost_usd")
+    if estimated_cost is not None:
+        _append_reason(
+            reasons,
+            "Cost estimate",
+            f"estimated ${float(estimated_cost):.6f} for the selected candidate",
+            "candidate scorecard",
+        )
+    for detail in decision.routing_reasons[:8]:
+        text = str(detail or "").strip()
+        if text:
+            _append_reason(reasons, "Additional signal", text, "routing_reasons")
+    return _dedupe_reason_rows(reasons)[:14]
+
+
+def _append_reason(rows: list[dict[str, Any]], label: str, detail: str, source: str) -> None:
+    rows.append(
+        {
+            "label": label,
+            "detail": detail,
+            "source": source,
+        }
+    )
+
+
+def _dedupe_reason_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        key = (str(row.get("label") or ""), str(row.get("detail") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+    return result
+
+
+def _routing_explanation_rankings(
+    candidate_scores: list[dict[str, Any]],
+    *,
+    by: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in candidate_scores[:10]:
+        if not isinstance(row, dict):
+            continue
+        health = row.get("health") if isinstance(row.get("health"), dict) else {}
+        capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
+        ranking = {
+            "rank": row.get("rank"),
+            "agent": row.get("agent"),
+            "provider": row.get("provider"),
+            "model": row.get("model"),
+            "score": row.get("final_routing_score", row.get("routing_score")),
+            "original_score": row.get("original_routing_score"),
+            "memory_adjustment": row.get("memory_adjustment"),
+            "estimated_cost_usd": row.get("estimated_cost_usd"),
+            "estimated_input_tokens": row.get("estimated_input_tokens"),
+            "estimated_output_tokens": row.get("estimated_output_tokens"),
+            "reliability_score": health.get("reliability_score"),
+            "average_latency_ms": health.get("average_latency_ms"),
+            "supports_tools": capabilities.get("supports_tools"),
+            "context_window": capabilities.get("context_window"),
+            "why": row.get("why"),
+        }
+        if by == "provider":
+            key = f"{row.get('provider')}"
+        else:
+            key = f"{row.get('provider')}/{row.get('model')}"
+        ranking["key"] = key
+        rows.append(ranking)
+    return rows
+
+
+def _routing_explanation_adaptive(
+    candidate_scores: list[dict[str, Any]],
+    selected_adaptive: dict[str, Any],
+) -> dict[str, Any]:
+    signals = []
+    for row in candidate_scores[:10]:
+        adaptive = row.get("adaptive") if isinstance(row.get("adaptive"), dict) else {}
+        if not adaptive:
+            continue
+        signals.append(
+            {
+                "agent": row.get("agent"),
+                "provider": row.get("provider"),
+                "model": row.get("model"),
+                "active": bool(adaptive.get("active")),
+                "scope": adaptive.get("scope"),
+                "attempts": adaptive.get("attempts", 0),
+                "samples_needed": adaptive.get("samples_needed", 0),
+                "adaptive_bonus": adaptive.get("adaptive_bonus", 0.0),
+                "summary": adaptive.get("summary", ""),
+                "scorecard": adaptive.get("scorecard", {}),
+            }
+        )
+    return {
+        "selected_signal": _compact_adaptive_signal(selected_adaptive),
+        "candidate_signals": signals,
+        "active": bool(selected_adaptive.get("active")),
+    }
+
+
+def _routing_explanation_memory(
+    decision: RoutingDecision,
+    selected_memory: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "selected_signal": _compact_memory_signal(selected_memory),
+        "memory_adjustments": list(decision.memory_adjustments),
+        "active": bool(selected_memory.get("active")) if selected_memory else False,
+    }
+
+
+def _compact_adaptive_signal(signal: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(signal, dict):
+        return {}
+    return {
+        key: signal.get(key)
+        for key in (
+            "agent",
+            "active",
+            "scope",
+            "attempts",
+            "samples_needed",
+            "adaptive_bonus",
+            "summary",
+            "scorecard",
+        )
+        if key in signal
+    }
+
+
+def _compact_memory_signal(signal: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(signal, dict):
+        return {}
+    return {
+        key: signal.get(key)
+        for key in (
+            "active",
+            "agent",
+            "provider",
+            "model",
+            "adjustment",
+            "attempts",
+            "success_rate",
+            "average_outcome_score",
+            "timeout_rate",
+            "fallback_frequency",
+            "similar_outcomes_count",
+            "summary",
+        )
+        if key in signal
+    }
+
+
+def _routing_explanation_cost_savings(
+    candidate_scores: list[dict[str, Any]],
+    selected_cost: float | None,
+) -> dict[str, Any]:
+    costs = [
+        (row, _optional_float(row.get("estimated_cost_usd")))
+        for row in candidate_scores
+        if isinstance(row, dict)
+    ]
+    costs = [(row, cost) for row, cost in costs if cost is not None]
+    if selected_cost is None or not costs:
+        return {
+            "estimated_selected_cost_usd": selected_cost,
+            "estimated_savings_usd": None,
+            "comparison": "No comparable candidate cost data.",
+        }
+    highest_row, highest_cost = max(costs, key=lambda item: item[1] or 0.0)
+    savings = max(0.0, float(highest_cost or 0.0) - selected_cost)
+    return {
+        "estimated_selected_cost_usd": round(selected_cost, 8),
+        "estimated_savings_usd": round(savings, 8),
+        "comparison": "vs_most_expensive_ranked_candidate",
+        "baseline": {
+            "agent": highest_row.get("agent"),
+            "provider": highest_row.get("provider"),
+            "model": highest_row.get("model"),
+            "estimated_cost_usd": round(float(highest_cost or 0.0), 8),
+        },
+    }
+
+
+def _routing_explanation_context(
+    decision: RoutingDecision,
+    selected: dict[str, Any],
+    classification: dict[str, Any],
+    capabilities: dict[str, Any],
+) -> dict[str, Any]:
+    estimated_input = _optional_int(selected.get("estimated_input_tokens")) or decision.estimated_input_tokens
+    estimated_output = _optional_int(selected.get("estimated_output_tokens")) or 0
+    context_window = _optional_int(capabilities.get("context_window"))
+    required_total = max(0, int(estimated_input or 0)) + max(0, int(estimated_output or 0))
+    fits_context = None if context_window is None else context_window >= required_total
+    return {
+        "estimated_input_tokens": estimated_input,
+        "estimated_output_tokens": estimated_output,
+        "estimated_total_tokens": required_total,
+        "context_estimate": decision.context_estimate,
+        "context_strategy": classification.get("context_strategy"),
+        "repo_size_bucket": classification.get("repo_size_bucket"),
+        "repository_context_needed": classification.get("repository_context_needed"),
+        "selected_context_window": context_window,
+        "fits_selected_context_window": fits_context,
+    }
+
+
 def _fallback_rejections(candidate_scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(candidate_scores) <= 1:
         return []
@@ -3084,6 +3490,7 @@ __all__ = [
     "DEFAULT_ROUTING_MODE",
     "LONG_CONTEXT_TOKEN_THRESHOLD",
     "RoutingDecision",
+    "RoutingDecisionExplanation",
     "StreamingRoute",
     "RouterError",
     "AgentRouter",

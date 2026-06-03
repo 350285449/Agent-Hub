@@ -7,6 +7,8 @@ from pathlib import Path
 from agent_hub.adaptive import AdaptiveLearningStore, estimate_known_cost_usd
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.core.router import AgentRouter
+from agent_hub.evaluation import BenchmarkTask
+from agent_hub.evaluation.benchmark_suite import BenchmarkSuiteRunner
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.workflows.selector import WorkflowSelector
 
@@ -421,6 +423,34 @@ class AdaptiveLearningTests(unittest.TestCase):
             self.assertTrue(selection.adaptive_upgrade)
             self.assertEqual(selection.baseline_pattern, "single_worker")
             self.assertEqual(override.pattern, "single_worker")
+
+    def test_benchmark_suite_compares_static_and_adaptive_routing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _router_config(Path(tmp))
+            config.expose_routing_details = True
+            calls: list[str] = []
+            report = BenchmarkSuiteRunner(
+                config,
+                provider_factory=lambda agent: _Provider(agent, calls),
+            ).run(
+                route="",
+                limit=1,
+                tasks=[
+                    BenchmarkTask(
+                        "latency",
+                        "Reply with ok.",
+                        ["ok"],
+                        route="",
+                    )
+                ],
+            )
+
+            self.assertEqual(report["object"], "agent_hub.benchmark_suite")
+            self.assertEqual(report["static_routing"]["task_count"], 1)
+            self.assertEqual(report["adaptive_routing"]["task_count"], 1)
+            self.assertIn(report["comparison"]["winner"], {"adaptive", "static", "tie"})
+            self.assertTrue(Path(report["report_path"]).exists())
+            self.assertEqual(calls, ["bad", "bad"])
 
 
 class _Provider:

@@ -129,6 +129,49 @@ def routing_history_body(config: Any) -> dict[str, Any]:
     }
 
 
+def routing_intelligence_body(
+    config: Any,
+    router: AgentRouter,
+    *,
+    optimization: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compose the product-facing routing intelligence view from existing state."""
+
+    health = router.health_snapshot(include_history=True)
+    routing = recent_events(config.state_dir, "routing", limit=100)
+    latest = latest_routing_decision(routing)
+    latest_decision = latest.get("routing_decision") if isinstance(latest.get("routing_decision"), dict) else {}
+    latest_explanation = (
+        latest_decision.get("explanation")
+        if isinstance(latest_decision.get("explanation"), dict)
+        else {}
+    )
+    optimization = optimization if isinstance(optimization, dict) else router.adaptive_learning.optimization_summary()
+    routing_memory = router.routing_memory.stats()
+    candidates = latest_decision.get("candidate_scores") if isinstance(latest_decision.get("candidate_scores"), list) else []
+    provider_rankings = _provider_rankings(router, health, latest_explanation, candidates)
+    model_rankings = _model_rankings(optimization, latest_explanation, candidates)
+    workflow_rankings = _workflow_rankings(optimization)
+    failovers = routing_failures(routing)
+    return {
+        "object": "agent_hub.routing_intelligence",
+        "feature": "Adaptive Workspace Intelligence",
+        "latest_decision": latest,
+        "latest_explanation": latest_explanation,
+        "routing_decisions": _recent_decision_rows(routing),
+        "provider_rankings": provider_rankings,
+        "model_rankings": model_rankings,
+        "workflow_rankings": workflow_rankings,
+        "adaptive_learning_trends": _adaptive_learning_trends(optimization),
+        "failover_events": failovers,
+        "cost_savings": _cost_savings_summary(latest_explanation, routing_memory),
+        "context_optimization": _context_optimization_summary(latest, latest_explanation, health),
+        "success_rate_trends": _success_rate_trends(health, optimization),
+        "routing_explanations": _recent_explanations(routing),
+        "routing_memory": routing_memory,
+    }
+
+
 def provider_health_body(config: Any, router: AgentRouter) -> dict[str, Any]:
     health = router.health_snapshot(include_history=True)
     return {
@@ -180,6 +223,7 @@ def routing_decision_by_id_body(config: Any, router: AgentRouter, request_id: st
         "found": bool(events or memory),
         "decision": decision_event,
         "routing_decision": decision,
+        "explanation": decision.get("explanation") if isinstance(decision.get("explanation"), dict) else {},
         "memory_records": memory,
         "events": events,
     }
@@ -303,6 +347,209 @@ def _cost_context_estimate(event: dict[str, Any]) -> dict[str, Any]:
             else None
         ),
     }
+
+
+def _provider_rankings(
+    router: AgentRouter,
+    health: dict[str, dict[str, Any]],
+    latest_explanation: dict[str, Any],
+    candidates: list[Any],
+) -> list[dict[str, Any]]:
+    rows = latest_explanation.get("provider_rankings") if isinstance(latest_explanation, dict) else None
+    if isinstance(rows, list) and rows:
+        return [row for row in rows if isinstance(row, dict)][:12]
+    if candidates:
+        return [
+            {
+                "rank": row.get("rank"),
+                "agent": row.get("agent"),
+                "provider": row.get("provider"),
+                "model": row.get("model"),
+                "score": row.get("final_routing_score", row.get("routing_score")),
+                "why": row.get("why"),
+            }
+            for row in candidates[:12]
+            if isinstance(row, dict)
+        ]
+    return sorted(
+        (
+            {
+                "rank": 0,
+                "agent": row.get("agent") or name,
+                "provider": row.get("provider"),
+                "model": row.get("model"),
+                "score": row.get("score"),
+                "success_rate": row.get("success_rate"),
+                "average_latency_ms": row.get("average_latency_ms"),
+                "available": row.get("available"),
+            }
+            for name, row in health.items()
+        ),
+        key=lambda row: (
+            not bool(row.get("available")),
+            -_safe_float(row.get("score"), 0.0),
+            str(row.get("agent") or ""),
+        ),
+    )[:12]
+
+
+def _model_rankings(
+    optimization: dict[str, Any],
+    latest_explanation: dict[str, Any],
+    candidates: list[Any],
+) -> list[dict[str, Any]]:
+    rows = latest_explanation.get("model_rankings") if isinstance(latest_explanation, dict) else None
+    if isinstance(rows, list) and rows:
+        return [row for row in rows if isinstance(row, dict)][:12]
+    model_rates = optimization.get("model_win_rates") if isinstance(optimization.get("model_win_rates"), list) else []
+    if model_rates:
+        return [row for row in model_rates if isinstance(row, dict)][:12]
+    return [
+        {
+            "rank": row.get("rank"),
+            "agent": row.get("agent"),
+            "provider": row.get("provider"),
+            "model": row.get("model"),
+            "score": row.get("final_routing_score", row.get("routing_score")),
+        }
+        for row in candidates[:12]
+        if isinstance(row, dict)
+    ]
+
+
+def _workflow_rankings(optimization: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = optimization.get("workflow_analytics") if isinstance(optimization.get("workflow_analytics"), list) else []
+    if rows:
+        return [row for row in rows if isinstance(row, dict)][:12]
+    patterns = optimization.get("workflow_patterns") if isinstance(optimization.get("workflow_patterns"), list) else []
+    return [row for row in patterns if isinstance(row, dict)][:12]
+
+
+def _adaptive_learning_trends(optimization: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "recent": optimization.get("recent_optimization_decisions", []),
+        "model_scorecards": optimization.get("model_scorecards", []),
+        "model_win_rates": optimization.get("model_win_rates", []),
+        "workflow_success_rate": optimization.get("workflow_success_rate", {}),
+        "average_latency_ms": optimization.get("average_latency_ms"),
+        "average_known_cost_usd": optimization.get("average_known_cost_usd"),
+        "average_retries": optimization.get("average_retries"),
+    }
+
+
+def _recent_decision_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for event in events[-25:]:
+        decision = event.get("routing_decision") if isinstance(event.get("routing_decision"), dict) else {}
+        rows.append(
+            {
+                "time": event.get("time"),
+                "request_id": event.get("request_id"),
+                "type": event.get("type"),
+                "agent": event.get("agent") or decision.get("selected_agent"),
+                "provider": event.get("provider") or decision.get("selected_provider"),
+                "model": event.get("model") or decision.get("selected_model"),
+                "workflow": decision.get("selected_workflow"),
+                "task_type": decision.get("task_type"),
+                "risk": decision.get("risk"),
+                "reason": decision.get("reason") or event.get("reason") or event.get("message"),
+                "failover_count": len(event.get("failover") or []),
+            }
+        )
+    return rows
+
+
+def _recent_explanations(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for event in events[-25:]:
+        decision = event.get("routing_decision") if isinstance(event.get("routing_decision"), dict) else {}
+        explanation = decision.get("explanation") if isinstance(decision.get("explanation"), dict) else {}
+        if explanation:
+            rows.append(
+                {
+                    "time": event.get("time"),
+                    "request_id": event.get("request_id"),
+                    "summary": explanation.get("summary"),
+                    "selected": explanation.get("selected", {}),
+                    "reasons": explanation.get("reasons", [])[:6],
+                    "rejected": explanation.get("rejected", [])[:6],
+                }
+            )
+    return rows[-10:]
+
+
+def _cost_savings_summary(explanation: dict[str, Any], routing_memory: dict[str, Any]) -> dict[str, Any]:
+    cost = explanation.get("cost_savings") if isinstance(explanation, dict) else {}
+    if not isinstance(cost, dict):
+        cost = {}
+    winner = routing_memory.get("cost_performance_winner") if isinstance(routing_memory.get("cost_performance_winner"), dict) else {}
+    return {
+        **cost,
+        "routing_memory_cost_performance_winner": winner,
+    }
+
+
+def _context_optimization_summary(
+    latest: dict[str, Any],
+    explanation: dict[str, Any],
+    health: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    context = explanation.get("context_optimization") if isinstance(explanation, dict) else {}
+    context = dict(context) if isinstance(context, dict) else {}
+    context.update({k: v for k, v in _cost_context_estimate(latest).items() if v is not None})
+    compactions = []
+    for row in health.values():
+        usage = row.get("last_context_compaction_usage")
+        if isinstance(usage, dict) and usage:
+            compactions.append(
+                {
+                    "agent": row.get("agent"),
+                    "provider": row.get("provider"),
+                    "model": row.get("model"),
+                    "tokens_saved": usage.get("tokens_saved"),
+                    "compression_ratio": usage.get("compression_ratio"),
+                    "context_reduced": usage.get("context_reduced"),
+                    "context_cache_hit": usage.get("context_cache_hit"),
+                }
+            )
+    context["recent_compactions"] = compactions[-10:]
+    return context
+
+
+def _success_rate_trends(
+    health: dict[str, dict[str, Any]],
+    optimization: dict[str, Any],
+) -> dict[str, Any]:
+    provider_rows = [
+        {
+            "agent": row.get("agent") or name,
+            "provider": row.get("provider"),
+            "model": row.get("model"),
+            "success_rate": row.get("success_rate"),
+            "success_count": row.get("success_count"),
+            "failure_count": row.get("failure_count"),
+            "timeout_count": row.get("timeout_count"),
+        }
+        for name, row in health.items()
+    ]
+    return {
+        "providers": sorted(
+            provider_rows,
+            key=lambda row: (
+                -_safe_float(row.get("success_rate"), 0.0),
+                str(row.get("agent") or ""),
+            ),
+        ),
+        "workflows": optimization.get("workflow_patterns", []),
+        "models": optimization.get("model_win_rates", []),
+    }
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def event_source(event: dict[str, Any]) -> str:

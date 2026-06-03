@@ -31,6 +31,7 @@ from .commands_provider import (
     _agent_rows,
     _apply_routing_preset,
     _benchmark,
+    _benchmark_suite,
     _enable_cloud_provider,
     _estimate,
     _eval_providers,
@@ -284,6 +285,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     benchmark_parser.add_argument("--route", default="cloud-agent")
     benchmark_parser.add_argument("--prompt", default="Reply with one short sentence.")
     benchmark_parser.add_argument("--json", action="store_true")
+
+    benchmark_suite_parser = subparsers.add_parser(
+        "benchmark-suite",
+        help="Compare static routing with adaptive routing and write a benchmark report.",
+    )
+    benchmark_suite_parser.add_argument("--route", default="cloud-agent")
+    benchmark_suite_parser.add_argument("--limit", type=int, default=6)
+    benchmark_suite_parser.add_argument("--output", default="")
+    benchmark_suite_parser.add_argument("--json", action="store_true")
 
     eval_parser = subparsers.add_parser("eval", help="Evaluate configured providers and store provider scores.")
     eval_parser.add_argument("--route", default="cloud-agent")
@@ -587,6 +597,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if command == "benchmark":
         return _benchmark(config, route=args.route, prompt=args.prompt, as_json=args.json)
+    if command == "benchmark-suite":
+        return _benchmark_suite(
+            config,
+            route=args.route,
+            limit=args.limit,
+            output=args.output or None,
+            as_json=args.json,
+        )
     if command == "eval":
         return _eval_providers(config, route=args.route, limit=args.limit, as_json=args.json)
     if command == "route-test":

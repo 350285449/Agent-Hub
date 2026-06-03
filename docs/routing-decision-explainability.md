@@ -8,6 +8,7 @@ enabled and always records compact routing events in
 
 The routing decision includes:
 
+- `explanation`, a product-facing `RoutingDecisionExplanation` object
 - `task_type`, `task_category`, `language`, `framework`, `complexity`, `risk`,
   and `context_estimate`
 - `selected_provider`, `selected_model`, `selected_workflow`, and
@@ -36,7 +37,33 @@ Example:
   "routing_reasons": [
     "Prompt was classified as coding-related and ranked by coding/tool capability.",
     "Routing memory boosted claude by +4.10 from 8 similar sample(s), 92% success."
-  ]
+  ],
+  "explanation": {
+    "object": "agent_hub.routing_decision_explanation",
+    "summary": "Selected anthropic/claude-sonnet: high-complexity TypeScript refactor.",
+    "selected": {
+      "agent": "claude",
+      "provider": "anthropic",
+      "model": "claude-sonnet",
+      "workflow": "planner_coder_reviewer",
+      "risk_level": "medium"
+    },
+    "reasons": [
+      {
+        "label": "Workspace analysis",
+        "detail": "typescript; react; large repository",
+        "source": "TaskClassifier"
+      }
+    ],
+    "rejected": [
+      {
+        "agent": "mini",
+        "provider": "openai",
+        "model": "gpt-mini",
+        "reason": "Lower final routing score."
+      }
+    ]
+  }
 }
 ```
 
@@ -44,9 +71,27 @@ Example:
 
 ```sh
 curl http://127.0.0.1:8787/v1/routing/last-decision
+curl http://127.0.0.1:8787/v1/routing-intelligence
 curl http://127.0.0.1:8787/v1/routing-decision/hub-request-id
 curl http://127.0.0.1:8787/v1/status
 ```
 
 OpenAI-compatible response IDs such as `chatcmpl-hub-...` are accepted by the
 decision lookup endpoint and mapped back to the underlying `hub-...` request ID.
+
+## Surfaces
+
+- API: `/v1/routing-intelligence`, `/v1/routing/last-decision`,
+  `/v1/routing-decision/{request_id}`, `/v1/status`, and `/v1/routing-history`
+- Dashboard: `/dashboard/routing-intelligence`
+- Logs: `.agent-hub/state/routing_decisions.jsonl`
+- VS Code: Routing Intelligence sidebar panel
+
+## What the Explanation Answers
+
+- Which model and workflow were selected?
+- Which task, workspace, risk, capability, health, adaptive, and memory signals
+  influenced the decision?
+- Which providers/models were ranked behind the winner?
+- What cost/context estimates were used?
+- What fallback options or rejection reasons are available?

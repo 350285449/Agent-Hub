@@ -1,7 +1,8 @@
-# Agent Hub - Multi-Provider AI Router
+# Agent Hub - Adaptive AI Orchestration
 
 Use OpenAI, Claude, Gemini, Ollama, OpenRouter, local models, Cline, Roo Code,
-Continue, and coding agents through one local API.
+Continue, and coding agents through one local API with routing intelligence,
+workflow selection, failover, and local workspace safety.
 
 ## Why Use Agent Hub?
 
@@ -10,11 +11,13 @@ Continue, and coding agents through one local API.
 - Keep workspace tool use behind approvals, path limits, and command safety checks.
 - Preserve Cline, Roo Code, Continue, and Claude Code tool/context payloads.
 - Inspect provider health, token usage, routing decisions, limits, and logs in VS Code.
+- See the Routing Intelligence panel for selected model, selected workflow,
+  risk level, repository/context signal, routing reasons, and fallback options.
 
 ## Competitive Features
 
 - Provider health dashboard with latency, quota, reliability, and cooldown state.
-- Routing explanation logs so you can see why a model won or failed over.
+- Routing Intelligence panel and logs so you can see why a model won or failed over.
 - Cost and latency estimates for adaptive routing and workflow optimization.
 - Presets for Private, Fast, Cheap, and Best Coding routing modes.
 - Exportable debug bundle for Cline, provider, routing, and backend diagnostics.

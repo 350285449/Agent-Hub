@@ -79,6 +79,9 @@ def _client_sources_body(config: HubConfig, router: AgentRouter) -> dict[str, An
 def _routing_history_body(config: HubConfig) -> dict[str, Any]:
     return _routing_diagnostics_module().routing_history_body(config)
 
+def _routing_intelligence_body(config: HubConfig, router: AgentRouter, *, optimization: dict[str, Any] | None = None) -> dict[str, Any]:
+    return _routing_diagnostics_module().routing_intelligence_body(config, router, optimization=optimization)
+
 def _provider_health_body(config: HubConfig, router: AgentRouter) -> dict[str, Any]:
     return _routing_diagnostics_module().provider_health_body(config, router)
 
@@ -305,6 +308,145 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
       <h2>Recent Adaptive Decisions</h2>
       {_recent_adaptive_table_html(recent)}
       <p class="note">Use <code>POST /v1/routing/simulate</code> to preview routing and workflow choices without making a provider call.</p>
+    </section>
+  </main>
+</body>
+</html>"""
+
+def _routing_intelligence_dashboard_html(intelligence: dict[str, Any]) -> str:
+    latest = intelligence.get("latest_explanation") if isinstance(intelligence.get("latest_explanation"), dict) else {}
+    selected = latest.get("selected") if isinstance(latest.get("selected"), dict) else {}
+    reasons = latest.get("reasons") if isinstance(latest.get("reasons"), list) else []
+    rejected = latest.get("rejected") if isinstance(latest.get("rejected"), list) else []
+    provider_rankings = intelligence.get("provider_rankings") if isinstance(intelligence.get("provider_rankings"), list) else []
+    model_rankings = intelligence.get("model_rankings") if isinstance(intelligence.get("model_rankings"), list) else []
+    workflow_rankings = intelligence.get("workflow_rankings") if isinstance(intelligence.get("workflow_rankings"), list) else []
+    decisions = intelligence.get("routing_decisions") if isinstance(intelligence.get("routing_decisions"), list) else []
+    failovers = intelligence.get("failover_events") if isinstance(intelligence.get("failover_events"), list) else []
+    cost = intelligence.get("cost_savings") if isinstance(intelligence.get("cost_savings"), dict) else {}
+    context = intelligence.get("context_optimization") if isinstance(intelligence.get("context_optimization"), dict) else {}
+    trends = intelligence.get("success_rate_trends") if isinstance(intelligence.get("success_rate_trends"), dict) else {}
+    adaptive = intelligence.get("adaptive_learning_trends") if isinstance(intelligence.get("adaptive_learning_trends"), dict) else {}
+    provider_label = " / ".join(
+        str(selected.get(key) or "")
+        for key in ("provider", "model")
+        if selected.get(key)
+    ) or "No routing decision yet"
+    workflow_label = selected.get("workflow") or "direct route"
+    risk_label = selected.get("risk_level") or "--"
+    savings = cost.get("estimated_savings_usd")
+    savings_label = _money_label(savings) if savings is not None else "--"
+    context_label = context.get("estimated_total_tokens") or context.get("estimated_input_tokens") or "--"
+    workflow_rate = adaptive.get("workflow_success_rate") if isinstance(adaptive.get("workflow_success_rate"), dict) else {}
+    workflow_success = _percent_label(workflow_rate.get("rate")) if workflow_rate else "--"
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Hub Routing Intelligence</title>
+  <style>
+    body {{
+      margin: 0;
+      padding: 28px;
+      color: #202124;
+      background: #f6f7f9;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }}
+    main {{ max-width: 1220px; margin: 0 auto; }}
+    header {{ margin-bottom: 18px; }}
+    h1 {{ margin: 0 0 6px; font-size: 28px; }}
+    h2 {{ margin: 28px 0 10px; font-size: 18px; }}
+    p {{ margin: 0 0 14px; color: #5f6368; }}
+    a {{ color: #0b57d0; }}
+    .cards {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 12px;
+      margin: 16px 0 8px;
+    }}
+    .card {{
+      border: 1px solid #d8dde6;
+      border-radius: 8px;
+      padding: 14px;
+      background: #fff;
+    }}
+    .card strong {{ display: block; font-size: 22px; color: #111827; overflow-wrap: anywhere; }}
+    .card span {{ display: block; margin-top: 3px; color: #5f6368; font-size: 13px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+      border: 1px solid #d8dde6;
+      border-radius: 8px;
+      overflow: hidden;
+    }}
+    th, td {{
+      padding: 9px 10px;
+      border-bottom: 1px solid #e7eaf0;
+      text-align: left;
+      font-size: 13px;
+      vertical-align: top;
+    }}
+    th {{ color: #374151; background: #eef2f7; font-weight: 650; }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .note {{ color: #5f6368; font-size: 13px; margin-top: 8px; }}
+    code {{ padding: 2px 5px; border-radius: 4px; background: #eef2f7; }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Routing Intelligence</h1>
+      <p>Why Agent Hub made a decision, which options it rejected, and what it is learning from outcomes.</p>
+      <p><a href="/dashboard">Back to Agent Hub</a> | <a href="/v1/routing-intelligence">JSON</a> | <a href="/dashboard/optimization">Optimization Dashboard</a></p>
+    </header>
+    <section class="cards">
+      <div class="card"><strong>{_html(provider_label)}</strong><span>selected model</span></div>
+      <div class="card"><strong>{_html(workflow_label)}</strong><span>selected workflow</span></div>
+      <div class="card"><strong>{_html(risk_label)}</strong><span>risk level</span></div>
+      <div class="card"><strong>{_html(savings_label)}</strong><span>estimated candidate cost savings</span></div>
+      <div class="card"><strong>{_html(context_label)}</strong><span>estimated context tokens</span></div>
+      <div class="card"><strong>{_html(workflow_success)}</strong><span>learned workflow success</span></div>
+    </section>
+    <section>
+      <h2>Routing Explanation</h2>
+      {_reasons_table_html(reasons)}
+    </section>
+    <section>
+      <h2>Rejected Candidates</h2>
+      {_rejected_candidates_table_html(rejected)}
+    </section>
+    <section class="grid">
+      <div>
+        <h2>Provider Rankings</h2>
+        {_ranking_table_html(provider_rankings)}
+      </div>
+      <div>
+        <h2>Model Rankings</h2>
+        {_ranking_table_html(model_rankings)}
+      </div>
+    </section>
+    <section>
+      <h2>Workflow Rankings</h2>
+      {_workflow_analytics_table_html(workflow_rankings)}
+    </section>
+    <section class="grid">
+      <div>
+        <h2>Routing Decisions</h2>
+        {_routing_decisions_table_html(decisions)}
+      </div>
+      <div>
+        <h2>Failover Events</h2>
+        {_failover_events_table_html(failovers)}
+      </div>
+    </section>
+    <section>
+      <h2>Success Rate Trends</h2>
+      {_success_rate_table_html(trends.get("providers") if isinstance(trends.get("providers"), list) else [])}
+      <p class="note">This page is composed from routing decisions, provider health, adaptive learning, routing memory, and workflow analytics.</p>
     </section>
   </main>
 </body>
@@ -554,6 +696,91 @@ def _recommendation_list_html(rows: list[Any]) -> str:
     ]
     return "<ul>" + "".join(items) + "</ul>" if items else "<p>No optimization recommendations yet.</p>"
 
+def _reasons_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('label'))}</td>"
+        f"<td>{_html(row.get('detail'))}</td>"
+        f"<td>{_html(row.get('source'))}</td>"
+        "</tr>"
+        for row in rows[:14]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(["Signal", "Detail", "Source"], body)
+
+def _rejected_candidates_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('agent'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(row.get('reason'))}</td>"
+        "</tr>"
+        for row in rows[:12]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(["Agent", "Provider", "Model", "Reason"], body)
+
+def _ranking_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('rank'))}</td>"
+        f"<td>{_html(row.get('agent'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(row.get('score'))}</td>"
+        f"<td>{_html(row.get('why'))}</td>"
+        "</tr>"
+        for row in rows[:12]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(["Rank", "Agent", "Provider", "Model", "Score", "Why"], body)
+
+def _routing_decisions_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('request_id'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(row.get('task_type'))}</td>"
+        f"<td>{_html(row.get('workflow'))}</td>"
+        f"<td>{_html(row.get('reason'))}</td>"
+        "</tr>"
+        for row in rows[-12:]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(["Request", "Provider", "Model", "Task", "Workflow", "Reason"], body)
+
+def _failover_events_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('agent'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(row.get('error_type'))}</td>"
+        f"<td>{_html(row.get('reason') or row.get('message'))}</td>"
+        "</tr>"
+        for row in rows[-12:]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(["Agent", "Provider", "Model", "Type", "Reason"], body)
+
+def _success_rate_table_html(rows: list[Any]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('agent'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(_percent_label(row.get('success_rate')))}</td>"
+        f"<td>{_html(row.get('success_count', 0))}</td>"
+        f"<td>{_html(row.get('failure_count', 0))}</td>"
+        f"<td>{_html(row.get('timeout_count', 0))}</td>"
+        "</tr>"
+        for row in rows[:12]
+        if isinstance(row, dict)
+    )
+    return _table_or_empty(["Agent", "Provider", "Model", "Success", "OK", "Failed", "Timeouts"], body)
+
 def _table_or_empty(headers: list[str], body: str) -> str:
     if not body:
         return "<p>No samples yet.</p>"
@@ -633,6 +860,7 @@ __all__ = [
     '_routing_test_failover_body',
     '_client_sources_body',
     '_routing_history_body',
+    '_routing_intelligence_body',
     '_provider_health_body',
     '_routing_memory_stats_body',
     '_routing_memory_recent_body',
@@ -645,6 +873,7 @@ __all__ = [
     '_enterprise_audit_body',
     '_provider_row_html',
     '_optimization_dashboard_html',
+    '_routing_intelligence_dashboard_html',
     '_task_winners_table_html',
     '_role_winners_table_html',
     '_model_win_rates_table_html',
@@ -653,6 +882,12 @@ __all__ = [
     '_workflow_patterns_table_html',
     '_recent_adaptive_table_html',
     '_recommendation_list_html',
+    '_reasons_table_html',
+    '_rejected_candidates_table_html',
+    '_ranking_table_html',
+    '_routing_decisions_table_html',
+    '_failover_events_table_html',
+    '_success_rate_table_html',
     '_table_or_empty',
     '_percent_label',
     '_money_label',

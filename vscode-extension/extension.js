@@ -594,6 +594,8 @@ async function sidebarDashboardState() {
     contextDiagnostics: {},
     statistics: sidebarStatistics(null, null, null, null, [], [], null),
     optimization: null,
+    routingIntelligence: null,
+    routingExplanation: null,
     insights: [],
     activity: [],
     routingChain: [],
@@ -607,6 +609,7 @@ async function sidebarDashboardState() {
     let permissions = null;
     let metrics = null;
     let optimization = null;
+    let routingIntelligence = null;
     let debugContext = null;
     try {
       limits = await requestJson("GET", "/limits");
@@ -634,6 +637,11 @@ async function sidebarDashboardState() {
       optimization = metrics && metrics.optimization ? metrics.optimization : null;
     }
     try {
+      routingIntelligence = await requestJson("GET", "/v1/routing-intelligence");
+    } catch (_error) {
+      routingIntelligence = null;
+    }
+    try {
       debugContext = await requestJson("GET", "/debug/context");
     } catch (_error) {
       debugContext = null;
@@ -649,6 +657,8 @@ async function sidebarDashboardState() {
     dashboard.tokenUsage = sidebarTokenUsage(usage, dashboard.limits);
     dashboard.contextDiagnostics = sidebarContextDiagnostics(debugContext);
     dashboard.optimization = optimization || (metrics && metrics.optimization) || null;
+    dashboard.routingIntelligence = routingIntelligence;
+    dashboard.routingExplanation = sidebarRoutingExplanation(routingIntelligence, health, limits);
     if (metrics && dashboard.optimization) {
       metrics.optimization = dashboard.optimization;
     }
@@ -1019,6 +1029,48 @@ function sidebarRoutingChain(health, limits) {
   }));
 }
 
+function sidebarRoutingExplanation(intelligence, health, limits) {
+  const latest = intelligence && intelligence.latest_explanation && typeof intelligence.latest_explanation === "object"
+    ? intelligence.latest_explanation
+    : {};
+  const selected = latest.selected && typeof latest.selected === "object" ? latest.selected : {};
+  const context = latest.context_optimization && typeof latest.context_optimization === "object"
+    ? latest.context_optimization
+    : intelligence && intelligence.context_optimization && typeof intelligence.context_optimization === "object"
+      ? intelligence.context_optimization
+      : {};
+  const cost = latest.cost_savings && typeof latest.cost_savings === "object"
+    ? latest.cost_savings
+    : intelligence && intelligence.cost_savings && typeof intelligence.cost_savings === "object"
+      ? intelligence.cost_savings
+      : {};
+  const rejected = Array.isArray(latest.rejected)
+    ? latest.rejected
+    : intelligence && Array.isArray(intelligence.failover_events)
+      ? intelligence.failover_events
+      : [];
+  const reasons = Array.isArray(latest.reasons) ? latest.reasons : [];
+  const fallbackOptions = Array.isArray(latest.provider_rankings)
+    ? latest.provider_rankings.slice(1, 5)
+    : sidebarRoutingChain(health, limits).slice(1, 5);
+  return {
+    summary: latest.summary || "",
+    selectedProvider: selected.provider || "",
+    selectedModel: selected.model || "",
+    selectedAgent: selected.agent || "",
+    selectedWorkflow: selected.workflow || "direct route",
+    riskLevel: selected.risk_level || "",
+    taskType: selected.task_type || "",
+    contextStrategy: context.context_strategy || "",
+    contextTokens: Number(context.estimated_total_tokens || context.estimated_input_tokens || 0),
+    repoSize: context.repo_size_bucket || "",
+    costSavings: cost.estimated_savings_usd,
+    reasons: reasons.slice(0, 6),
+    rejected: rejected.slice(0, 4),
+    fallbackOptions
+  };
+}
+
 async function sidebarOnboardingState(config, health) {
   const workspace = workspaceRoot();
   const configPath = workspace ? resolveConfigPath(config.configPath, workspace) : "";
@@ -1316,6 +1368,41 @@ function sidebarHtml(webview, logoPath) {
 
     .stat-grid + .list {
       margin-top: 10px;
+    }
+
+    .routing-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .routing-summary-item {
+      min-width: 0;
+      border: 1px solid var(--subtle-border);
+      border-radius: 7px;
+      padding: 7px;
+      background: var(--card);
+    }
+
+    .routing-summary-item span,
+    .routing-summary-item strong {
+      display: block;
+      overflow-wrap: anywhere;
+    }
+
+    .routing-summary-item span {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.25;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .routing-summary-item strong {
+      color: var(--app-fg);
+      font-size: 12px;
+      line-height: 1.3;
     }
 
     .help-menu {
@@ -1886,6 +1973,15 @@ function sidebarHtml(webview, logoPath) {
     </details>
     <details class="panel">
       <summary class="section-head">
+        <h2>Routing Intelligence</h2>
+      </summary>
+      <div class="routing-summary-grid" id="routingSummaryGrid"></div>
+      <div class="detail" id="routingExplanation">No routing decision yet</div>
+      <ul class="list" id="routingReasonList"></ul>
+      <ul class="list" id="routingRejectedList"></ul>
+    </details>
+    <details class="panel">
+      <summary class="section-head">
         <h2>Limits</h2>
       </summary>
       <ul class="list" id="limitList"></ul>
@@ -1950,6 +2046,10 @@ function sidebarHtml(webview, logoPath) {
     const activeModel = document.getElementById("activeModel");
     const routingChain = document.getElementById("routingChain");
     const providerList = document.getElementById("providerList");
+    const routingSummaryGrid = document.getElementById("routingSummaryGrid");
+    const routingExplanation = document.getElementById("routingExplanation");
+    const routingReasonList = document.getElementById("routingReasonList");
+    const routingRejectedList = document.getElementById("routingRejectedList");
     const permissionDetail = document.getElementById("permissionDetail");
     const permissionList = document.getElementById("permissionList");
     const limitList = document.getElementById("limitList");
@@ -1986,6 +2086,7 @@ function sidebarHtml(webview, logoPath) {
       setText(activeModel, activeModelText(dashboard.activeModel));
       renderRoutingChain(dashboard.routingChain || []);
       renderProviderRows(dashboard.providers || []);
+      renderRoutingIntelligence(dashboard.routingExplanation || {});
       renderPermissions(dashboard.permissions || {});
       renderLimitRows(dashboard.limits || []);
       setText(tokenUsage, tokenUsageText(dashboard.tokenUsage || {}));
@@ -2333,6 +2434,89 @@ function sidebarHtml(webview, logoPath) {
           [row.available ? "active candidate" : "fallback candidate", row.reason || ""].filter(Boolean).join(" - ")
         ));
       }
+    }
+
+    function renderRoutingIntelligence(row) {
+      routingSummaryGrid.textContent = "";
+      routingReasonList.textContent = "";
+      routingRejectedList.textContent = "";
+      const selectedModel = [row.selectedProvider, row.selectedModel].filter(Boolean).join(" / ");
+      if (!selectedModel && !row.summary) {
+        routingExplanation.textContent = "No routing decision yet";
+        routingReasonList.append(emptyRow("Send a request to collect routing intelligence"));
+        return;
+      }
+      routingExplanation.textContent = row.summary || "Routing decision recorded";
+      const cards = [
+        ["Model", selectedModel || row.selectedAgent || "--"],
+        ["Workflow", row.selectedWorkflow || "direct route"],
+        ["Risk", row.riskLevel || "--"],
+        ["Task", row.taskType || "--"],
+        ["Context", routingContextText(row)],
+        ["Savings", routingSavingsText(row)]
+      ];
+      for (const card of cards) {
+        routingSummaryGrid.append(routingSummaryItem(card[0], card[1]));
+      }
+      const reasons = Array.isArray(row.reasons) ? row.reasons : [];
+      if (reasons.length) {
+        for (const reason of reasons.slice(0, 6)) {
+          routingReasonList.append(rowElement(
+            reason.label || "signal",
+            [reason.detail || "", reason.source ? "source " + reason.source : ""].filter(Boolean).join(" - ")
+          ));
+        }
+      } else {
+        routingReasonList.append(emptyRow("No explanation signals yet"));
+      }
+      const rejected = Array.isArray(row.rejected) && row.rejected.length
+        ? row.rejected
+        : Array.isArray(row.fallbackOptions)
+          ? row.fallbackOptions
+          : [];
+      if (rejected.length) {
+        for (const item of rejected.slice(0, 4)) {
+          routingRejectedList.append(rowElement(
+            [item.provider || item.agent || "fallback", item.model || ""].filter(Boolean).join(" / "),
+            item.reason || item.why || (item.available ? "fallback option" : "not selected")
+          ));
+        }
+      } else {
+        routingRejectedList.append(emptyRow("No fallback options recorded"));
+      }
+    }
+
+    function routingSummaryItem(label, value) {
+      const item = document.createElement("div");
+      item.className = "routing-summary-item";
+      const labelEl = document.createElement("span");
+      labelEl.textContent = label;
+      const valueEl = document.createElement("strong");
+      valueEl.textContent = value || "--";
+      item.append(labelEl, valueEl);
+      return item;
+    }
+
+    function routingContextText(row) {
+      const parts = [];
+      if (row.contextTokens) {
+        parts.push(compactNumber(row.contextTokens) + " tokens");
+      }
+      if (row.contextStrategy) {
+        parts.push(row.contextStrategy);
+      }
+      if (row.repoSize) {
+        parts.push(row.repoSize + " repo");
+      }
+      return parts.join(" / ") || "--";
+    }
+
+    function routingSavingsText(row) {
+      if (row.costSavings === null || row.costSavings === undefined || row.costSavings === "") {
+        return "--";
+      }
+      const value = Number(row.costSavings || 0);
+      return Number.isFinite(value) ? "$" + value.toFixed(4) : "--";
     }
 
     function renderOnboarding(rows) {

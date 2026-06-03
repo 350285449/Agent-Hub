@@ -616,6 +616,39 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("Workflow Analytics", dashboard)
             self.assertIn("Model Win Rates", dashboard)
 
+    def test_routing_intelligence_endpoint_and_dashboard_are_exposed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            server.router.provider_factory = _QuotaProvider
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                _post_json(
+                    f"{base}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "messages": [{"role": "user", "content": "Fix src/app.py"}],
+                    },
+                )
+                intelligence = _get_json(f"{base}/v1/routing-intelligence")
+                dashboard = _get_text(f"{base}/dashboard/routing-intelligence")
+                last = _get_json(f"{base}/v1/routing/last-decision")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(intelligence["object"], "agent_hub.routing_intelligence")
+            self.assertEqual(intelligence["feature"], "Adaptive Workspace Intelligence")
+            self.assertIn("latest_explanation", intelligence)
+            self.assertTrue(intelligence["latest_explanation"]["reasons"])
+            self.assertEqual(
+                intelligence["latest_explanation"]["object"],
+                "agent_hub.routing_decision_explanation",
+            )
+            self.assertIn("Routing Intelligence", dashboard)
+            self.assertIn("Provider Rankings", dashboard)
+            self.assertIn("explanation", last["decision"]["routing_decision"])
+
     def test_health_exposes_capability_graph_and_token_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _compat_config(Path(tmp))
