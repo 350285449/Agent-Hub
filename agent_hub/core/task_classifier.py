@@ -58,6 +58,12 @@ class TaskClassification:
     permission_requirements: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     estimated_input_tokens: int = 0
+    repository_profile_id: str = ""
+    repository_project: str = ""
+    repository_architecture: str = ""
+    repository_code_style: str = ""
+    repository_testing: str = ""
+    repository_risk_areas: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +87,12 @@ class TaskClassification:
             "permission_requirements": list(self.permission_requirements),
             "reasons": list(self.reasons),
             "estimated_input_tokens": self.estimated_input_tokens,
+            "repository_profile_id": self.repository_profile_id,
+            "repository_project": self.repository_project,
+            "repository_architecture": self.repository_architecture,
+            "repository_code_style": self.repository_code_style,
+            "repository_testing": self.repository_testing,
+            "repository_risk_areas": list(self.repository_risk_areas),
         }
 
     def reason_sentence(self) -> str:

@@ -40,6 +40,21 @@ def handle_get(handler: object, path: str) -> bool:
             )
         )
         return True
+    if path == "/v1/repository-dna":
+        dna = handler.server.router.repository_intelligence.repository_dna()
+        handler._send_diagnostics_json(dna.to_dict())
+        return True
+    if path == "/v1/workspace-memory":
+        handler._send_diagnostics_json(handler.server.router.repository_intelligence.workspace_memory())
+        return True
+    if path == "/v1/night-mode":
+        from ..repository_intelligence import build_autonomous_night_mode_plan
+
+        dna = handler.server.router.repository_intelligence.repository_dna()
+        handler._send_diagnostics_json(
+            build_autonomous_night_mode_plan(dna=dna, config=handler.server.config)
+        )
+        return True
     if path == "/v1/tools":
         handler._send_diagnostics_json(server_module._tools_body(handler.server.router))
         return True

@@ -31,6 +31,12 @@ from ...payloads import content_to_text, request_text
 from ...providers import Provider, ProviderError, create_provider
 from ...response_normalization import validate_provider_result
 from ...repository import repo_context_for_request
+from ...repository_intelligence import (
+    RepositoryDNA,
+    RepositoryIntelligenceStore,
+    build_failure_prediction,
+    repository_routing_signal,
+)
 from ...routing_memory import RoutingMemoryStore, outcome_score
 from ...security.provider_permissions import ProviderPermissionPolicy
 from ...session_store import SessionStore
@@ -142,6 +148,9 @@ class RoutingDecision:
     estimated_input_tokens: int = 0
     candidate_scores: list[dict[str, Any]] = field(default_factory=list)
     task_classification: dict[str, Any] = field(default_factory=dict)
+    repository_dna: dict[str, Any] = field(default_factory=dict)
+    workspace_memory: dict[str, Any] = field(default_factory=dict)
+    failure_prediction: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = {
@@ -168,6 +177,12 @@ class RoutingDecision:
         }
         if self.task_classification:
             data["task_classification"] = dict(self.task_classification)
+        if self.repository_dna:
+            data["repository_dna"] = dict(self.repository_dna)
+        if self.workspace_memory:
+            data["workspace_memory"] = dict(self.workspace_memory)
+        if self.failure_prediction:
+            data["failure_prediction"] = dict(self.failure_prediction)
         if self.candidate_scores:
             data["candidate_scores"] = list(self.candidate_scores)
         data["explanation"] = _routing_decision_explanation(self).to_dict()
@@ -186,6 +201,7 @@ class RoutingDecisionExplanation:
     model_rankings: list[dict[str, Any]] = field(default_factory=list)
     adaptive_learning: dict[str, Any] = field(default_factory=dict)
     routing_memory: dict[str, Any] = field(default_factory=dict)
+    repository_dna: dict[str, Any] = field(default_factory=dict)
     cost_savings: dict[str, Any] = field(default_factory=dict)
     context_optimization: dict[str, Any] = field(default_factory=dict)
     lifecycle: list[str] = field(default_factory=list)
@@ -201,6 +217,7 @@ class RoutingDecisionExplanation:
             "model_rankings": list(self.model_rankings),
             "adaptive_learning": dict(self.adaptive_learning),
             "routing_memory": dict(self.routing_memory),
+            "repository_dna": dict(self.repository_dna),
             "cost_savings": dict(self.cost_savings),
             "context_optimization": dict(self.context_optimization),
             "lifecycle": list(self.lifecycle),
@@ -332,6 +349,7 @@ class AgentRouter:
         self.provider_scores = self.provider_score_store.load()
         self.adaptive_learning = AdaptiveLearningStore(config.state_dir)
         self.routing_memory = RoutingMemoryStore.from_config(config)
+        self.repository_intelligence = RepositoryIntelligenceStore.from_config(config)
         self.context_cache = ContextCache(
             config.state_dir / "context_cache.json",
             enabled=getattr(config, "context_cache_enabled", True),
@@ -1118,7 +1136,7 @@ class AgentRouter:
     def decide(self, request: HubRequest) -> RoutingDecision:
         """Choose a ranked fallback chain before execution."""
 
-        classification = self.task_classifier.classify(request)
+        classification = self._classify_request(request)
         mode = self._routing_mode(request)
         task_type = classification.task_type
         agents = self._candidate_agent_pool(request, mode=mode)
@@ -1147,6 +1165,10 @@ class AgentRouter:
             routing_reasons.append(memory_reason)
         if reviewer_signal.get("reason"):
             routing_reasons.append(str(reviewer_signal["reason"]))
+        dna = self._repository_dna()
+        workspace_memory = self._workspace_memory()
+        if dna is not None:
+            routing_reasons.append(f"Repository DNA: {dna.summary}")
         memory_adjustments = [
             {
                 "agent": row.get("agent"),
@@ -1162,7 +1184,7 @@ class AgentRouter:
             for row in candidate_scores
             if abs(float(row.get("memory_adjustment") or 0.0)) > 0.0001
         ]
-        return RoutingDecision(
+        decision = RoutingDecision(
             selected_agent=selected.name if selected else None,
             selected_provider=selected.provider if selected else "",
             selected_model=selected.model if selected else "",
@@ -1183,7 +1205,12 @@ class AgentRouter:
             estimated_input_tokens=classification.estimated_input_tokens,
             candidate_scores=candidate_scores,
             task_classification=classification.to_dict(),
+            repository_dna=dna.to_dict() if dna is not None else {},
+            workspace_memory=workspace_memory,
         )
+        if getattr(self.config, "failure_prediction_enabled", True):
+            decision.failure_prediction = build_failure_prediction(decision=decision, config=self.config)
+        return decision
 
     def _candidate_agents(
         self,
@@ -1276,10 +1303,58 @@ class AgentRouter:
             return "manual"
         if _privacy_requested(request):
             return "local_private"
-        return self.task_classifier.classify(request).routing_mode
+        return self._classify_request(request).routing_mode
 
     def _classify_task(self, request: HubRequest) -> str:
-        return self.task_classifier.classify(request).task_type
+        return self._classify_request(request).task_type
+
+    def _classify_request(self, request: HubRequest) -> Any:
+        classification = self.task_classifier.classify(request)
+        dna = self._repository_dna()
+        if dna is None:
+            return classification
+        reasons = list(classification.reasons)
+        reasons.append(f"Repository DNA: {dna.summary}")
+        language = classification.language if classification.language != "unknown" else dna.language
+        framework = classification.framework
+        if framework == "unknown" and dna.frameworks:
+            framework = dna.frameworks[0]
+        complexity = classification.complexity
+        if (
+            complexity == "low"
+            and dna.testing.lower() == "weak"
+            and classification.task_type in {"coding", "debug", "tool_use", "test_generation"}
+        ):
+            complexity = "medium"
+        return replace(
+            classification,
+            language=language,
+            framework=framework,
+            complexity=complexity,
+            repository_profile_id=dna.profile_id,
+            repository_project=dna.project,
+            repository_architecture=dna.architecture,
+            repository_code_style=dna.code_style,
+            repository_testing=dna.testing,
+            repository_risk_areas=list(dna.risk_areas),
+            reasons=reasons[:12],
+        )
+
+    def _repository_dna(self) -> RepositoryDNA | None:
+        if not getattr(self.config, "repository_dna_enabled", True):
+            return None
+        try:
+            return self.repository_intelligence.repository_dna()
+        except Exception:
+            return None
+
+    def _workspace_memory(self) -> dict[str, Any]:
+        if not getattr(self.config, "workspace_memory_enabled", True):
+            return {}
+        try:
+            return self.repository_intelligence.workspace_memory()
+        except Exception:
+            return {}
 
     def _rank_agents_for_mode(
         self,
@@ -1362,7 +1437,7 @@ class AgentRouter:
             default=False,
         ):
             return None
-        classification = self.task_classifier.classify(request)
+        classification = self._classify_request(request)
         if classification.task_type != "simple_explanation" or classification.risk_level != "low":
             return None
         if _request_has_tools(request) or _requires_tool_capable_model(request):
@@ -1508,12 +1583,13 @@ class AgentRouter:
         request: HubRequest,
         agents: list[AgentConfig],
     ) -> list[dict[str, Any]]:
-        classification = self.task_classifier.classify(request)
+        classification = self._classify_request(request)
         task_type = classification.task_type
         workflow_pattern = _request_workflow_pattern(request)
         workflow_role = _request_workflow_role(request)
         estimated_input = classification.estimated_input_tokens
         rows: list[dict[str, Any]] = []
+        repository_dna = self._repository_dna()
         for rank, agent in enumerate(agents[:8], start=1):
             health = self._health.get(agent.name)
             output_budget = output_token_budget(
@@ -1548,6 +1624,11 @@ class AgentRouter:
                 request,
                 classification=classification,
             )
+            repository_signal = self._repository_routing_signal(
+                agent,
+                classification,
+                repository_dna,
+            )
             memory_adjustment = float(routing_memory.get("adjustment", 0.0) or 0.0)
             final_routing_score = original_routing_score + memory_adjustment
             rows.append(
@@ -1559,6 +1640,10 @@ class AgentRouter:
                     "model": agent.model,
                     "original_routing_score": round(original_routing_score, 3),
                     "memory_adjustment": round(memory_adjustment, 3),
+                    "repository_dna_adjustment": round(
+                        float(repository_signal.get("adjustment", 0.0) or 0.0),
+                        3,
+                    ),
                     "final_routing_score": round(final_routing_score, 3),
                     "routing_score": round(final_routing_score, 3),
                     "why": _recommendation_reason(agent, text=request_text(request), prefer=None, index=rank - 1),
@@ -1572,6 +1657,7 @@ class AgentRouter:
                     ),
                     "adaptive": adaptive,
                     "routing_memory": routing_memory,
+                    "repository_dna": repository_signal,
                     "health": {
                         "success_count": health.success_count if health else 0,
                         "failure_count": health.failure_count if health else 0,
@@ -1612,7 +1698,7 @@ class AgentRouter:
             return "Privacy/local mode was requested, so only local/private providers were considered."
         if request.stream and selected.supports_streaming:
             return "Selected best available streaming-capable route candidate."
-        classification = self.task_classifier.classify(request)
+        classification = self._classify_request(request)
         if classification.task_type == "security_sensitive_change":
             return (
                 "Security-sensitive workspace change detected; selected a coding/review-capable "
@@ -2063,6 +2149,12 @@ class AgentRouter:
                     workflow_pattern=_request_workflow_pattern(request),
                     workflow_role=_request_workflow_role(request),
                 )
+            repository_signal = self._repository_routing_signal(
+                agent,
+                self._classify_request(request),
+                self._repository_dna(),
+            )
+            score += float(repository_signal.get("adjustment", 0.0) or 0.0)
             if include_routing_memory:
                 signal = self._routing_memory_signal(agent, request)
                 score += float(signal.get("adjustment", 0.0) or 0.0)
@@ -2092,7 +2184,7 @@ class AgentRouter:
                 "similar_outcomes": [],
             }
         try:
-            classification = classification or self.task_classifier.classify(request)
+            classification = classification or self._classify_request(request)
             return self.routing_memory.routing_signal(agent, classification)
         except Exception:
             return {
@@ -2103,6 +2195,37 @@ class AgentRouter:
                 "adjustment": 0.0,
                 "summary": "Routing memory was unavailable.",
                 "similar_outcomes": [],
+            }
+
+    def _repository_routing_signal(
+        self,
+        agent: AgentConfig,
+        classification: Any,
+        dna: RepositoryDNA | None = None,
+    ) -> dict[str, Any]:
+        if not getattr(self.config, "repository_dna_enabled", True):
+            return {
+                "active": False,
+                "agent": agent.name,
+                "provider": agent.provider,
+                "model": agent.model,
+                "adjustment": 0.0,
+                "summary": "Repository DNA routing is disabled by configuration.",
+            }
+        try:
+            return repository_routing_signal(
+                agent,
+                classification,
+                dna if dna is not None else self._repository_dna(),
+            )
+        except Exception:
+            return {
+                "active": False,
+                "agent": agent.name,
+                "provider": agent.provider,
+                "model": agent.model,
+                "adjustment": 0.0,
+                "summary": "Repository DNA could not be applied.",
             }
 
     def _performance_failover_reason(
@@ -2371,7 +2494,7 @@ class AgentRouter:
         classification = None
         if self.config.adaptive_learning_enabled:
             try:
-                classification = self.task_classifier.classify(request)
+                classification = self._classify_request(request)
                 self.adaptive_learning.record_outcome(
                     request_id=request_id,
                     route=request.route or "",
@@ -2394,7 +2517,7 @@ class AgentRouter:
                 pass
         try:
             if classification is None:
-                classification = self.task_classifier.classify(request)
+                classification = self._classify_request(request)
             timeout = str(error_type or "").lower() in {"timeout", "provider_timeout", "timed_out"}
             tool_failure = "tool" in str(error_type or "").lower()
             score = outcome_score(
@@ -2454,7 +2577,7 @@ class AgentRouter:
         if not getattr(self.config, "routing_memory_enabled", True):
             return
         try:
-            classification = self.task_classifier.classify(request)
+            classification = self._classify_request(request)
             signal = self.routing_memory.routing_signal(agent, classification)
             self.routing_memory.record_outcome(
                 request_id=request_id,
@@ -3362,6 +3485,7 @@ def _routing_decision_explanation(decision: RoutingDecision) -> RoutingDecisionE
     health = selected.get("health") if isinstance(selected.get("health"), dict) else {}
     adaptive = selected.get("adaptive") if isinstance(selected.get("adaptive"), dict) else {}
     memory = selected.get("routing_memory") if isinstance(selected.get("routing_memory"), dict) else {}
+    repository_dna = selected.get("repository_dna") if isinstance(selected.get("repository_dna"), dict) else {}
     summary = (
         f"Selected {selected_provider}/{selected_model}"
         if selected_provider or selected_model
@@ -3377,6 +3501,7 @@ def _routing_decision_explanation(decision: RoutingDecision) -> RoutingDecisionE
         health=health,
         adaptive=adaptive,
         memory=memory,
+        repository_dna=repository_dna,
     )
     provider_rankings = _routing_explanation_rankings(decision.candidate_scores, by="provider")
     model_rankings = _routing_explanation_rankings(decision.candidate_scores, by="model")
@@ -3400,6 +3525,7 @@ def _routing_decision_explanation(decision: RoutingDecision) -> RoutingDecisionE
         model_rankings=model_rankings,
         adaptive_learning=_routing_explanation_adaptive(decision.candidate_scores, adaptive),
         routing_memory=_routing_explanation_memory(decision, memory),
+        repository_dna=_routing_explanation_repository_dna(decision, repository_dna),
         cost_savings=_routing_explanation_cost_savings(decision.candidate_scores, selected_cost),
         context_optimization=_routing_explanation_context(decision, selected, classification, capabilities),
         lifecycle=[
@@ -3436,6 +3562,7 @@ def _routing_explanation_reasons(
     health: dict[str, Any],
     adaptive: dict[str, Any],
     memory: dict[str, Any],
+    repository_dna: dict[str, Any],
 ) -> list[dict[str, Any]]:
     reasons: list[dict[str, Any]] = []
     _append_reason(
@@ -3510,6 +3637,10 @@ def _routing_explanation_reasons(
         summary = str(memory.get("summary") or "").strip()
         if summary:
             _append_reason(reasons, "Routing memory", summary, "routing_memory.jsonl")
+    if repository_dna:
+        summary = str(repository_dna.get("summary") or "").strip()
+        if summary:
+            _append_reason(reasons, "Repository DNA", summary, "repository_intelligence.json")
     estimated_cost = selected.get("estimated_cost_usd")
     if estimated_cost is not None:
         _append_reason(
@@ -3558,6 +3689,7 @@ def _routing_explanation_rankings(
             continue
         health = row.get("health") if isinstance(row.get("health"), dict) else {}
         capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
+        repository_signal = row.get("repository_dna") if isinstance(row.get("repository_dna"), dict) else {}
         ranking = {
             "rank": row.get("rank"),
             "agent": row.get("agent"),
@@ -3566,6 +3698,7 @@ def _routing_explanation_rankings(
             "score": row.get("final_routing_score", row.get("routing_score")),
             "original_score": row.get("original_routing_score"),
             "memory_adjustment": row.get("memory_adjustment"),
+            "repository_dna_adjustment": row.get("repository_dna_adjustment"),
             "estimated_cost_usd": row.get("estimated_cost_usd"),
             "estimated_input_tokens": row.get("estimated_input_tokens"),
             "estimated_output_tokens": row.get("estimated_output_tokens"),
@@ -3573,6 +3706,7 @@ def _routing_explanation_rankings(
             "average_latency_ms": health.get("average_latency_ms"),
             "supports_tools": capabilities.get("supports_tools"),
             "context_window": capabilities.get("context_window"),
+            "repository_dna_summary": repository_signal.get("summary"),
             "why": row.get("why"),
         }
         if by == "provider":
@@ -3625,6 +3759,31 @@ def _routing_explanation_memory(
     }
 
 
+def _routing_explanation_repository_dna(
+    decision: RoutingDecision,
+    selected_signal: dict[str, Any],
+) -> dict[str, Any]:
+    dna = dict(decision.repository_dna or {})
+    return {
+        "repository": {
+            key: dna.get(key)
+            for key in (
+                "profile_id",
+                "project",
+                "language",
+                "architecture",
+                "code_style",
+                "testing",
+                "risk_areas",
+                "summary",
+            )
+            if key in dna
+        },
+        "selected_signal": _compact_repository_signal(selected_signal),
+        "active": bool(selected_signal.get("active")) if selected_signal else False,
+    }
+
+
 def _compact_adaptive_signal(signal: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(signal, dict):
         return {}
@@ -3661,6 +3820,29 @@ def _compact_memory_signal(signal: dict[str, Any]) -> dict[str, Any]:
             "timeout_rate",
             "fallback_frequency",
             "similar_outcomes_count",
+            "summary",
+        )
+        if key in signal
+    }
+
+
+def _compact_repository_signal(signal: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(signal, dict):
+        return {}
+    return {
+        key: signal.get(key)
+        for key in (
+            "active",
+            "agent",
+            "provider",
+            "model",
+            "model_family",
+            "adjustment",
+            "repository_profile_id",
+            "project",
+            "language",
+            "architecture",
+            "rules",
             "summary",
         )
         if key in signal
@@ -3738,6 +3920,9 @@ def _fallback_rejections(candidate_scores: list[dict[str, Any]]) -> list[dict[st
             reasons.append(f"Routing memory penalty {memory_adjustment:+.2f}.")
         elif memory_adjustment > 0.05:
             reasons.append(f"Routing memory boost {memory_adjustment:+.2f} was not enough to win.")
+        repository_adjustment = _optional_float(row.get("repository_dna_adjustment")) or 0.0
+        if repository_adjustment > 0.05:
+            reasons.append(f"Repository DNA boost {repository_adjustment:+.2f} was not enough to win.")
         health = row.get("health") if isinstance(row.get("health"), dict) else {}
         if health.get("degraded"):
             reasons.append("Provider health is degraded.")

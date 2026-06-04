@@ -185,7 +185,7 @@ def with_workflow_selection_raw(request: HubRequest, selection: WorkflowSelectio
     if selection.pattern == "team_reviewed":
         group = dict(raw.get("group_agent") or {})
         group.setdefault("plan_candidates", 2)
-        group.setdefault("worker_candidates", 2)
+        group.setdefault("worker_candidates", 4)
         raw["group_agent"] = group
     raw.setdefault("agent_hub", {})
     if isinstance(raw["agent_hub"], dict):

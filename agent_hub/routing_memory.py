@@ -333,6 +333,9 @@ def pattern_from_classification(classification: Any) -> dict[str, Any]:
         "complexity": str(data.get("complexity") or "low"),
         "risk_level": str(data.get("risk_level") or data.get("risk") or "low"),
         "repo_size_bucket": str(data.get("repo_size_bucket") or "unknown"),
+        "repository_profile_id": str(data.get("repository_profile_id") or ""),
+        "repository_project": str(data.get("repository_project") or ""),
+        "repository_architecture": str(data.get("repository_architecture") or ""),
         "context_size_bucket": str(data.get("context_estimate") or data.get("context_size_bucket") or "small"),
         "file_types": [
             str(item)
@@ -392,6 +395,9 @@ def similarity_score(pattern: dict[str, Any], row: dict[str, Any]) -> float:
         "complexity": 1.0,
         "risk_level": 1.0,
         "repo_size_bucket": 1.0,
+        "repository_profile_id": 1.25,
+        "repository_project": 0.75,
+        "repository_architecture": 0.5,
         "context_size_bucket": 1.0,
     }
     for key, weight in weights.items():
@@ -470,6 +476,9 @@ def _public_similar(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "language",
                 "framework",
                 "repo_size_bucket",
+                "repository_profile_id",
+                "repository_project",
+                "repository_architecture",
                 "context_size_bucket",
                 "risk_level",
                 "agent",

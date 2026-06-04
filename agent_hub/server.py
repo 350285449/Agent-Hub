@@ -853,7 +853,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       <a href="/v1/provider-scores">Provider Scores</a> |
       <a href="/dashboard/routing-intelligence">Routing Intelligence</a> |
       <a href="/dashboard/optimization">Optimization Dashboard</a> |
-      <a href="/v1/optimization">Optimization JSON</a>
+      <a href="/v1/optimization">Optimization JSON</a> |
+      <a href="/v1/repository-dna">Repository DNA</a> |
+      <a href="/v1/workspace-memory">Workspace Memory</a> |
+      <a href="/v1/night-mode">Night Mode</a>
     </p>
     <p>
       <a href="/health">Health JSON</a> ·

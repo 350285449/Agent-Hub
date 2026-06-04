@@ -327,6 +327,9 @@ def _routing_intelligence_dashboard_html(intelligence: dict[str, Any]) -> str:
     context = intelligence.get("context_optimization") if isinstance(intelligence.get("context_optimization"), dict) else {}
     trends = intelligence.get("success_rate_trends") if isinstance(intelligence.get("success_rate_trends"), dict) else {}
     adaptive = intelligence.get("adaptive_learning_trends") if isinstance(intelligence.get("adaptive_learning_trends"), dict) else {}
+    repository_dna = intelligence.get("repository_dna") if isinstance(intelligence.get("repository_dna"), dict) else {}
+    prediction = intelligence.get("failure_prediction") if isinstance(intelligence.get("failure_prediction"), dict) else {}
+    cost_optimizer = intelligence.get("cost_optimizer") if isinstance(intelligence.get("cost_optimizer"), dict) else {}
     provider_label = " / ".join(
         str(selected.get(key) or "")
         for key in ("provider", "model")
@@ -336,6 +339,15 @@ def _routing_intelligence_dashboard_html(intelligence: dict[str, Any]) -> str:
     risk_label = selected.get("risk_level") or "--"
     savings = cost.get("estimated_savings_usd")
     savings_label = _money_label(savings) if savings is not None else "--"
+    saved_today = cost_optimizer.get("saved_today_usd")
+    saved_month = cost_optimizer.get("saved_this_month_usd")
+    repository_label = " / ".join(
+        str(repository_dna.get(key) or "")
+        for key in ("project", "language")
+        if repository_dna.get(key)
+    ) or "--"
+    success_label = _percent_label(prediction.get("chance_of_success")) if prediction else "--"
+    eta_label = _seconds_label(prediction.get("estimated_time_seconds")) if prediction else "--"
     context_label = context.get("estimated_total_tokens") or context.get("estimated_input_tokens") or "--"
     workflow_rate = adaptive.get("workflow_success_rate") if isinstance(adaptive.get("workflow_success_rate"), dict) else {}
     workflow_success = _percent_label(workflow_rate.get("rate")) if workflow_rate else "--"
@@ -405,11 +417,20 @@ def _routing_intelligence_dashboard_html(intelligence: dict[str, Any]) -> str:
     </header>
     <section class="cards">
       <div class="card"><strong>{_html(provider_label)}</strong><span>selected model</span></div>
+      <div class="card"><strong>{_html(repository_label)}</strong><span>repository DNA</span></div>
+      <div class="card"><strong>{_html(success_label)}</strong><span>predicted success</span></div>
+      <div class="card"><strong>{_html(eta_label)}</strong><span>estimated time</span></div>
       <div class="card"><strong>{_html(workflow_label)}</strong><span>selected workflow</span></div>
       <div class="card"><strong>{_html(risk_label)}</strong><span>risk level</span></div>
       <div class="card"><strong>{_html(savings_label)}</strong><span>estimated candidate cost savings</span></div>
+      <div class="card"><strong>{_html(_money_label(saved_today))}</strong><span>saved today</span></div>
+      <div class="card"><strong>{_html(_money_label(saved_month))}</strong><span>saved this month</span></div>
       <div class="card"><strong>{_html(context_label)}</strong><span>estimated context tokens</span></div>
       <div class="card"><strong>{_html(workflow_success)}</strong><span>learned workflow success</span></div>
+    </section>
+    <section>
+      <h2>Repository DNA</h2>
+      {_repository_dna_table_html(repository_dna)}
     </section>
     <section>
       <h2>Routing Explanation</h2>
@@ -488,6 +509,26 @@ def _routing_memory_dashboard_html(memory: dict[str, Any]) -> str:
         </div>
       </div>
     """
+
+def _repository_dna_table_html(row: dict[str, Any]) -> str:
+    if not row:
+        return '<p class="note">Repository DNA has not been generated yet.</p>'
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(label)}</td>"
+        f"<td>{_html(value)}</td>"
+        "</tr>"
+        for label, value in (
+            ("Project", row.get("project")),
+            ("Language", row.get("language")),
+            ("Architecture", row.get("architecture")),
+            ("Code Style", row.get("code_style")),
+            ("Testing", row.get("testing")),
+            ("Frameworks", ", ".join(row.get("frameworks", [])[:8]) if isinstance(row.get("frameworks"), list) else ""),
+            ("Risk Areas", ", ".join(row.get("risk_areas", [])[:8]) if isinstance(row.get("risk_areas"), list) else ""),
+        )
+    )
+    return _table_or_empty(["Signal", "Value"], body)
 
 def _task_winners_table_html(rows: dict[str, Any]) -> str:
     body = "".join(
@@ -805,6 +846,13 @@ def _ms_label(value: Any) -> str:
     except (TypeError, ValueError):
         return "--"
 
+def _seconds_label(value: Any) -> str:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return "--"
+    return f"{seconds:.1f}s" if seconds < 60 else f"{seconds / 60:.1f}m"
+
 def _role_label(row: Any) -> str:
     if not isinstance(row, dict):
         return ""
@@ -878,6 +926,7 @@ __all__ = [
     '_role_winners_table_html',
     '_model_win_rates_table_html',
     '_provider_effectiveness_table_html',
+    '_repository_dna_table_html',
     '_workflow_analytics_table_html',
     '_workflow_patterns_table_html',
     '_recent_adaptive_table_html',
@@ -892,6 +941,7 @@ __all__ = [
     '_percent_label',
     '_money_label',
     '_ms_label',
+    '_seconds_label',
     '_role_label',
     '_html',
     '_limits_body',

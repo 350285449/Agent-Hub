@@ -1135,6 +1135,19 @@ function sidebarRoutingExplanation(intelligence, health, limits) {
     : intelligence && intelligence.cost_savings && typeof intelligence.cost_savings === "object"
       ? intelligence.cost_savings
       : {};
+  const repository = intelligence && intelligence.repository_dna && typeof intelligence.repository_dna === "object"
+    ? intelligence.repository_dna
+    : latest.repository_dna && typeof latest.repository_dna === "object"
+      ? latest.repository_dna
+      : {};
+  const prediction = latest.failure_prediction && typeof latest.failure_prediction === "object"
+    ? latest.failure_prediction
+    : intelligence && intelligence.failure_prediction && typeof intelligence.failure_prediction === "object"
+      ? intelligence.failure_prediction
+      : {};
+  const costOptimizer = intelligence && intelligence.cost_optimizer && typeof intelligence.cost_optimizer === "object"
+    ? intelligence.cost_optimizer
+    : {};
   const rejected = Array.isArray(latest.rejected)
     ? latest.rejected
     : intelligence && Array.isArray(intelligence.failover_events)
@@ -1145,12 +1158,14 @@ function sidebarRoutingExplanation(intelligence, health, limits) {
     ? latest.provider_rankings.slice(1, 5)
     : sidebarRoutingChain(health, limits).slice(1, 5);
   const costEstimate = firstNumber(
+    prediction.estimated_cost_usd,
     cost.estimated_selected_cost_usd,
     cost.estimated_cost_usd,
     context.estimated_cost_usd,
     latestDecision.estimated_cost_usd
   );
   const latencyMs = firstNumber(
+    prediction.estimated_time_seconds ? Number(prediction.estimated_time_seconds) * 1000 : null,
     latestDecision.latency_ms,
     selected.latency_ms,
     selected.average_latency_ms
@@ -1172,8 +1187,18 @@ function sidebarRoutingExplanation(intelligence, health, limits) {
     contextTokens: Number(context.estimated_total_tokens || context.estimated_input_tokens || 0),
     repoSize: context.repo_size_bucket || "",
     costSavings: cost.estimated_savings_usd,
+    savedToday: costOptimizer.saved_today_usd,
+    savedMonth: costOptimizer.saved_this_month_usd,
     costEstimate,
     latencyMs,
+    successChance: firstNumber(
+      prediction.chance_of_success_percent,
+      prediction.chance_of_success ? Number(prediction.chance_of_success) * 100 : null
+    ),
+    repositoryProject: repository.project || "",
+    repositoryLanguage: repository.language || "",
+    repositoryArchitecture: repository.architecture || "",
+    repositoryTesting: repository.testing || "",
     fallbackCount,
     reasons: reasons.slice(0, 6),
     rejected: rejected.slice(0, 4),
@@ -3154,11 +3179,15 @@ function sidebarHtml(webview, logoPath) {
       routingExplanation.textContent = row.summary || "Routing decision recorded";
       const cards = [
         ["Model", selectedModel || row.selectedAgent || "--"],
+        ["Repository", routingRepositoryText(row)],
+        ["Success", routingSuccessText(row)],
         ["Workflow", row.selectedWorkflow || "direct route"],
         ["Risk", row.riskLevel || "--"],
         ["Task", row.taskType || "--"],
         ["Context", routingContextText(row)],
         ["Cost", routingCostText(row)],
+        ["Saved Today", routingMoneyText(row.savedToday)],
+        ["Saved Month", routingMoneyText(row.savedMonth)],
         ["Time", routingTimeText(row)],
         ["Fallbacks", routingFallbackText(row)]
       ];
@@ -3216,6 +3245,36 @@ function sidebarHtml(webview, logoPath) {
         parts.push(row.repoSize + " repo");
       }
       return parts.join(" / ") || "--";
+    }
+
+    function routingRepositoryText(row) {
+      const parts = [];
+      if (row.repositoryProject) {
+        parts.push(row.repositoryProject);
+      }
+      if (row.repositoryLanguage) {
+        parts.push(row.repositoryLanguage);
+      }
+      if (row.repositoryArchitecture) {
+        parts.push(row.repositoryArchitecture);
+      }
+      return parts.join(" / ") || "--";
+    }
+
+    function routingSuccessText(row) {
+      const value = Number(row.successChance);
+      if (!Number.isFinite(value) || value <= 0) {
+        return "--";
+      }
+      return Math.round(value) + "%";
+    }
+
+    function routingMoneyText(value) {
+      if (value === null || value === undefined || value === "") {
+        return "--";
+      }
+      const number = Number(value || 0);
+      return Number.isFinite(number) ? "$" + number.toFixed(2) : "--";
     }
 
     function routingSavingsText(row) {

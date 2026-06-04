@@ -186,6 +186,11 @@ class HubConfig:
     routing_memory_enabled: bool = True
     routing_memory_store_prompts: bool = False
     routing_memory_retention_days: int = 30
+    repository_dna_enabled: bool = True
+    workspace_memory_enabled: bool = True
+    failure_prediction_enabled: bool = True
+    cost_optimizer_enabled: bool = True
+    autonomous_night_mode_enabled: bool = False
     auto_enable_available_providers: bool = True
     auto_detect_local_models: bool = True
     local_model_probe_timeout_seconds: float = 0.35
@@ -582,6 +587,11 @@ def free_local_config() -> HubConfig:
         routing_memory_enabled=_env_bool("ROUTING_MEMORY_ENABLED", True),
         routing_memory_store_prompts=_env_bool("ROUTING_MEMORY_STORE_PROMPTS", False),
         routing_memory_retention_days=_env_int("ROUTING_MEMORY_RETENTION_DAYS", 30),
+        repository_dna_enabled=True,
+        workspace_memory_enabled=True,
+        failure_prediction_enabled=True,
+        cost_optimizer_enabled=True,
+        autonomous_night_mode_enabled=False,
         auto_enable_available_providers=True,
         auto_detect_local_models=True,
         routing=dict(DEFAULT_ROUTING_CONFIG),
@@ -843,6 +853,11 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
                 30,
             ),
         ),
+        repository_dna_enabled=_bool_with_default(raw.get("repository_dna_enabled"), True),
+        workspace_memory_enabled=_bool_with_default(raw.get("workspace_memory_enabled"), True),
+        failure_prediction_enabled=_bool_with_default(raw.get("failure_prediction_enabled"), True),
+        cost_optimizer_enabled=_bool_with_default(raw.get("cost_optimizer_enabled"), True),
+        autonomous_night_mode_enabled=_bool_with_default(raw.get("autonomous_night_mode_enabled"), False),
         auto_enable_available_providers=_bool_with_default(
             raw.get("auto_enable_available_providers"),
             True,
@@ -1002,6 +1017,11 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "routing_memory_enabled": config.routing_memory_enabled,
         "routing_memory_store_prompts": config.routing_memory_store_prompts,
         "routing_memory_retention_days": config.routing_memory_retention_days,
+        "repository_dna_enabled": config.repository_dna_enabled,
+        "workspace_memory_enabled": config.workspace_memory_enabled,
+        "failure_prediction_enabled": config.failure_prediction_enabled,
+        "cost_optimizer_enabled": config.cost_optimizer_enabled,
+        "autonomous_night_mode_enabled": config.autonomous_night_mode_enabled,
         "auto_enable_available_providers": config.auto_enable_available_providers,
         "auto_detect_local_models": config.auto_detect_local_models,
         "local_model_probe_timeout_seconds": config.local_model_probe_timeout_seconds,

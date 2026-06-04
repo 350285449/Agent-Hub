@@ -5,6 +5,12 @@ from typing import Any
 from .core.router import AgentRouter
 from .models import HubRequest
 from .observability import metrics_snapshot, recent_events
+from .repository_intelligence import (
+    build_autonomous_night_mode_plan,
+    build_cost_optimizer_summary,
+    build_failure_prediction,
+    build_model_performance_database,
+)
 
 
 def routing_status_body(config: Any, router: AgentRouter) -> dict[str, Any]:
@@ -153,9 +159,33 @@ def routing_intelligence_body(
     model_rankings = _model_rankings(optimization, latest_explanation, candidates)
     workflow_rankings = _workflow_rankings(optimization)
     failovers = routing_failures(routing)
+    repository_dna = latest_decision.get("repository_dna") if isinstance(latest_decision.get("repository_dna"), dict) else {}
+    if not repository_dna:
+        repository_dna = optimization.get("repository_dna") if isinstance(optimization.get("repository_dna"), dict) else {}
+    workspace_memory = latest_decision.get("workspace_memory") if isinstance(latest_decision.get("workspace_memory"), dict) else {}
+    if not workspace_memory:
+        workspace_memory = optimization.get("workspace_memory") if isinstance(optimization.get("workspace_memory"), dict) else {}
+    failure_prediction = latest_decision.get("failure_prediction") if isinstance(latest_decision.get("failure_prediction"), dict) else {}
+    if not failure_prediction and latest_decision:
+        failure_prediction = build_failure_prediction(decision=latest_decision, config=config)
+    model_performance = build_model_performance_database(
+        optimization=optimization,
+        routing_memory=routing_memory,
+        dna=repository_dna,
+    )
+    cost_optimizer = build_cost_optimizer_summary(
+        decision=latest_decision,
+        routing_events=routing,
+    )
     return {
         "object": "agent_hub.routing_intelligence",
         "feature": "Adaptive Workspace Intelligence",
+        "repository_dna": repository_dna,
+        "workspace_memory": workspace_memory,
+        "failure_prediction": failure_prediction,
+        "model_performance_database": model_performance,
+        "cost_optimizer": cost_optimizer,
+        "autonomous_night_mode": build_autonomous_night_mode_plan(dna=repository_dna, config=config),
         "latest_decision": latest,
         "latest_explanation": latest_explanation,
         "routing_decisions": _recent_decision_rows(routing),
@@ -164,7 +194,7 @@ def routing_intelligence_body(
         "workflow_rankings": workflow_rankings,
         "adaptive_learning_trends": _adaptive_learning_trends(optimization),
         "failover_events": failovers,
-        "cost_savings": _cost_savings_summary(latest_explanation, routing_memory),
+        "cost_savings": _cost_savings_summary(latest_explanation, routing_memory, cost_optimizer),
         "context_optimization": _context_optimization_summary(latest, latest_explanation, health),
         "success_rate_trends": _success_rate_trends(health, optimization),
         "routing_explanations": _recent_explanations(routing),
@@ -478,13 +508,18 @@ def _recent_explanations(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows[-10:]
 
 
-def _cost_savings_summary(explanation: dict[str, Any], routing_memory: dict[str, Any]) -> dict[str, Any]:
+def _cost_savings_summary(
+    explanation: dict[str, Any],
+    routing_memory: dict[str, Any],
+    cost_optimizer: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     cost = explanation.get("cost_savings") if isinstance(explanation, dict) else {}
     if not isinstance(cost, dict):
         cost = {}
     winner = routing_memory.get("cost_performance_winner") if isinstance(routing_memory.get("cost_performance_winner"), dict) else {}
     return {
         **cost,
+        **(cost_optimizer or {}),
         "routing_memory_cost_performance_winner": winner,
     }
 

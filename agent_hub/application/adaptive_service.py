@@ -6,6 +6,13 @@ from typing import Any
 
 from ..config import HubConfig
 from ..models import HubRequest
+from ..observability import recent_events
+from ..repository_intelligence import (
+    build_autonomous_night_mode_plan,
+    build_cost_optimizer_summary,
+    build_failure_prediction,
+    build_model_performance_database,
+)
 from ..workflows import WorkflowSelector, with_workflow_selection_raw
 
 
@@ -35,6 +42,22 @@ class AdaptiveApplicationService:
             self.config.adaptive_workflow_upgrades_enabled
         )
         summary["routing_memory"] = self.router.routing_memory.stats()
+        try:
+            dna = self.router.repository_intelligence.repository_dna()
+            summary["repository_dna"] = dna.to_dict()
+            summary["workspace_memory"] = self.router.repository_intelligence.workspace_memory()
+            summary["model_performance_database"] = build_model_performance_database(
+                optimization=summary,
+                routing_memory=summary["routing_memory"],
+                dna=dna,
+            )
+            summary["autonomous_night_mode"] = build_autonomous_night_mode_plan(
+                dna=dna,
+                config=self.config,
+            )
+        except Exception:
+            summary["repository_dna"] = {}
+            summary["workspace_memory"] = {}
         return summary
 
     def record_feedback_payload(self, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -96,6 +119,25 @@ class AdaptiveApplicationService:
             }
             for role in _workflow_role_plan(selection.pattern)
         ]
+        optimization = self.optimization_summary()
+        dna = optimization.get("repository_dna") if isinstance(optimization.get("repository_dna"), dict) else {}
+        routing_events = recent_events(self.config.state_dir, "routing", limit=250)
+        failure_prediction = build_failure_prediction(
+            decision=decision,
+            workflow_selection=selection.to_dict(),
+            config=self.config,
+        )
+        debate_plan = _debate_plan(role_plan, selection.pattern)
+        repair_loop = _repair_loop_plan(self.config)
+        cost_optimizer = build_cost_optimizer_summary(
+            decision=decision,
+            routing_events=routing_events,
+        )
+        model_performance = build_model_performance_database(
+            optimization=optimization,
+            routing_memory=optimization.get("routing_memory", {}),
+            dna=dna,
+        )
         return {
             "object": "agent_hub.routing_simulation",
             "dry_run": True,
@@ -103,9 +145,19 @@ class AdaptiveApplicationService:
             "route": auto_request.route,
             "workflow_selection": selection.to_dict(),
             "routing_decision": decision.to_dict(),
+            "repository_dna": dna,
+            "workspace_memory": optimization.get("workspace_memory", {}),
+            "failure_prediction": failure_prediction,
+            "debate_plan": debate_plan,
+            "multi_agent_debate": debate_plan,
+            "auto_repair_loop": repair_loop,
+            "cost_optimizer": cost_optimizer,
+            "model_performance_database": model_performance,
+            "autonomous_night_mode": build_autonomous_night_mode_plan(dna=dna, config=self.config),
+            "ai_team_visualization": _ai_team_visualization(role_plan, failure_prediction),
             "recommendations": recommendations,
             "role_plan": role_plan,
-            "optimization": self.optimization_summary(),
+            "optimization": optimization,
         }
 
     def execute_auto(self, request: HubRequest) -> Any:
@@ -219,6 +271,92 @@ def _role_request(request: HubRequest, role: str, prefer: str) -> HubRequest:
     raw["workflow_role"] = role
     raw["prefer"] = prefer
     return replace(request, raw=raw, preferred_agent=None)
+
+
+def _debate_plan(role_plan: list[dict[str, Any]], pattern: str) -> dict[str, Any]:
+    worker = next((role for role in role_plan if role.get("role") == "worker_candidate"), None)
+    candidates = worker.get("candidates") if isinstance(worker, dict) and isinstance(worker.get("candidates"), list) else []
+    judge = next((role for role in role_plan if role.get("role") == "judge"), None)
+    judge_candidates = judge.get("candidates") if isinstance(judge, dict) and isinstance(judge.get("candidates"), list) else []
+    judge_model = judge_candidates[0] if judge_candidates else {}
+    return {
+        "enabled": pattern == "team_reviewed",
+        "candidate_count": len(candidates),
+        "candidates": [
+            {
+                "agent": row.get("agent"),
+                "provider": row.get("provider"),
+                "model": row.get("model"),
+                "score": row.get("score"),
+                "available": row.get("available"),
+            }
+            for row in candidates[:4]
+            if isinstance(row, dict)
+        ],
+        "judge": {
+            "agent": judge_model.get("agent"),
+            "provider": judge_model.get("provider"),
+            "model": judge_model.get("model"),
+        },
+        "selection_policy": "4 candidates -> automatic code review -> best implementation returned",
+    }
+
+
+def _repair_loop_plan(config: HubConfig) -> dict[str, Any]:
+    return {
+        "enabled": bool(config.auto_validate_after_edits),
+        "pattern": "Generate -> Verify -> Repair",
+        "max_attempts": int(config.validation_repair_attempts or 0),
+        "validation_mode": config.validation_mode,
+        "validation_commands": list(config.validation_commands),
+        "rollback_on_validation_failure": bool(config.rollback_on_validation_failure),
+    }
+
+
+def _ai_team_visualization(role_plan: list[dict[str, Any]], prediction: dict[str, Any]) -> dict[str, Any]:
+    role_labels = {
+        "planner": "Planner",
+        "researcher": "Researcher",
+        "worker_candidate": "Debate",
+        "judge": "Judge",
+        "coder": "Coder",
+        "reviewer": "Reviewer",
+        "finalizer": "Finalizer",
+        "worker": "Worker",
+    }
+    steps = []
+    for index, role in enumerate(role_plan, start=1):
+        candidates = role.get("candidates") if isinstance(role.get("candidates"), list) else []
+        selected = candidates[0] if candidates else {}
+        steps.append(
+            {
+                "index": index,
+                "role": role.get("role"),
+                "label": role_labels.get(str(role.get("role")), str(role.get("role") or "Role").title()),
+                "status": "planned",
+                "candidate_count": len(candidates),
+                "agent": selected.get("agent") if isinstance(selected, dict) else "",
+                "provider": selected.get("provider") if isinstance(selected, dict) else "",
+                "model": selected.get("model") if isinstance(selected, dict) else "",
+            }
+        )
+    if not steps:
+        steps.append(
+            {
+                "index": 1,
+                "role": "router",
+                "label": "Router",
+                "status": "planned",
+                "candidate_count": 1,
+            }
+        )
+    return {
+        "object": "agent_hub.ai_team_visualization",
+        "steps": steps,
+        "estimated_time_seconds": prediction.get("estimated_time_seconds"),
+        "estimated_cost_usd": prediction.get("estimated_cost_usd"),
+        "chance_of_success": prediction.get("chance_of_success"),
+    }
 
 
 __all__ = ["AdaptiveApplicationService"]
