@@ -133,6 +133,17 @@ PROVIDER_METADATA: dict[str, ProviderMetadata] = {
         supports_streaming=True,
         supports_json=True,
     ),
+    "codex-cli": ProviderMetadata(
+        provider_type="codex-cli",
+        display_name="Codex CLI authenticated with ChatGPT",
+        provider="codex-cli",
+        free=True,
+        supports_tools=False,
+        supports_json=True,
+        supports_streaming=False,
+        supports_vision=True,
+        notes="Runs `codex exec` locally and reuses the Codex CLI login instead of an OpenAI API key.",
+    ),
     "groq": ProviderMetadata(
         provider_type="groq",
         display_name="Groq",

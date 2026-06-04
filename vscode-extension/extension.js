@@ -39,6 +39,11 @@ const DEFAULT_GITHUB_MODELS_MODEL = "qwen/qwen3-coder-30b-a3b-instruct";
 const DEFAULT_HUGGINGFACE_MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct";
 const DEFAULT_NVIDIA_MODEL = "nvidia/llama-3.1-nemotron-70b-instruct";
 const DEFAULT_CLOUDFLARE_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+const MAX_TOKEN_SAVE_CONTEXT_BUDGET = 4000;
+const MAX_TOKEN_SAVE_OUTPUT_TOKENS = 800;
+const MAX_TOKEN_SAVE_AGENT_STEPS = 8;
+const MAX_TOKEN_SAVE_REPO_FILES = 2;
+const MAX_TOKEN_SAVE_REPO_CHARS = 3000;
 const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
 const HOSTED_CLOUD_AGENT_NAMES = ["codex", "claude", "gemini", "chatgpt"];
@@ -3870,6 +3875,11 @@ async function handleChatMessage(panel, message) {
     return;
   }
 
+  if (message.type === "enableMaxTokenSave") {
+    await enableMaxTokenSaveModeFromWebview(panel, message.settings);
+    return;
+  }
+
   if (message.type === "openSettings") {
     await vscode.commands.executeCommand("workbench.action.openSettings", "Agent Hub");
     return;
@@ -4062,6 +4072,82 @@ async function saveChatSettingsFromWebview(panel, rawSettings) {
     postChatSettings(panel, `Saved user settings.${migrationNote}${configNote}${restartNote}`);
   } catch (error) {
     postChatSettings(panel, `Could not save settings: ${error.message}`);
+  }
+}
+
+async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
+  try {
+    const profileInput = {
+      ...(rawSettings && typeof rawSettings === "object" ? rawSettings : {}),
+      agentProviderMode: "cloud",
+      cloudRouteMode: "ollama-cloud",
+      apiKeyModelsEnabled: false,
+      freeCloudPresetsEnabled: false,
+      freeOnly: true,
+      enableLoadBalancing: true,
+      maxTokens: MAX_TOKEN_SAVE_OUTPUT_TOKENS,
+      agentMaxSteps: MAX_TOKEN_SAVE_AGENT_STEPS,
+      groupPlanCandidates: 1
+    };
+    const next = normalizeChatSettingsInput(profileInput);
+    const workspace = workspaceRoot();
+    const resource = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
+      : "VS Code user settings";
+    if (!(await requestPermission({
+      category: "config_edit",
+      description: "Agent Hub wants to enable maximum token save mode for Ollama Cloud control.",
+      resource,
+      risk: "medium",
+      detail: "This switches control to Ollama Cloud, disables API-key cloud priority, enables compaction, and lowers context/output budgets."
+    }))) {
+      postChatSettings(panel, "Maximum token save mode was cancelled.");
+      return;
+    }
+
+    const target = vscode.ConfigurationTarget.Global;
+    const config = vscode.workspace.getConfiguration("agentHub");
+    for (const [key, value] of Object.entries(next.workspaceSettings)) {
+      await config.update(key, value, target);
+    }
+    await config.update("agentContextBudgetTokens", MAX_TOKEN_SAVE_CONTEXT_BUDGET, target);
+    await config.update("agentContextCompactionEnabled", true, target);
+    await config.update("contextMode", "minimal", target);
+
+    const clearKeys = [
+      ...Object.keys(next.workspaceSettings),
+      "agentContextBudgetTokens",
+      "agentContextCompactionEnabled",
+      "contextMode"
+    ];
+    const clearedWorkspaceSettings = workspace
+      ? await clearWorkspaceAgentHubSettings(config, clearKeys)
+      : false;
+    const configPath = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
+      : "";
+    const configChanged = configPath
+      ? await saveCloudModelSettingsToConfig(configPath, {
+        ...next.cloudSettings,
+        cloudRouteMode: "ollama-cloud",
+        apiKeyModelsEnabled: false,
+        freeCloudPresetsEnabled: false,
+        freeOnly: true,
+        enableLoadBalancing: true,
+        maxTokenSaveMode: true,
+        agentContextBudgetTokens: MAX_TOKEN_SAVE_CONTEXT_BUDGET
+      }, {
+        workspaceDir: generatedConfigWorkspaceDir(next.workspaceSettings.configPath, workspace)
+      })
+      : false;
+    const restartNote = serverProcess || (await isServerOnline())
+      ? " Restart Agent Hub to use the updated config defaults."
+      : "";
+    const configNote = configChanged ? " Updated Agent Hub routing and token budgets." : "";
+    const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
+    postChatSettings(panel, `Maximum token save mode is on for Ollama Cloud.${migrationNote}${configNote}${restartNote}`);
+  } catch (error) {
+    postChatSettings(panel, `Could not enable maximum token save mode: ${error.message}`);
   }
 }
 
@@ -5441,6 +5527,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
               <label class="settings-check"><input id="settingRoutingDetails" type="checkbox"> Routing details</label>
             </div>
             <div class="settings-actions">
+              <button class="secondary" id="maxTokenSave" type="button">Max Token Save</button>
               <button id="saveSettings" type="button">Save Settings</button>
               <button class="secondary" id="openSettings" type="button">Open VS Code Settings</button>
             </div>
@@ -6168,6 +6255,23 @@ ${apiKeyFieldsHtml()}
       settingsMessage.textContent = "Saving settings...";
       vscode.postMessage({
         type: "saveChatSettings",
+        settings: collectChatSettings()
+      });
+    });
+
+    document.getElementById("maxTokenSave").addEventListener("click", () => {
+      controlMode.value = "cloud";
+      settingInputs.cloudRouteMode.value = "ollama-cloud";
+      settingInputs.apiKeyModelsEnabled.checked = false;
+      settingInputs.freeCloudPresetsEnabled.checked = false;
+      settingInputs.freeOnly.checked = true;
+      settingInputs.enableLoadBalancing.checked = true;
+      settingInputs.maxTokens.value = String(${MAX_TOKEN_SAVE_OUTPUT_TOKENS});
+      settingInputs.agentMaxSteps.value = String(${MAX_TOKEN_SAVE_AGENT_STEPS});
+      settingInputs.groupPlanCandidates.value = "1";
+      settingsMessage.textContent = "Turning on maximum token save mode...";
+      vscode.postMessage({
+        type: "enableMaxTokenSave",
         settings: collectChatSettings()
       });
     });
@@ -7055,6 +7159,9 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
     api_key_models_enabled: !!cloudSettings.apiKeyModelsEnabled,
     free_cloud_presets_enabled: !!cloudSettings.freeCloudPresetsEnabled
   };
+  if (cloudSettings.maxTokenSaveMode) {
+    applyMaxTokenSaveModeToConfig(data, cloudSettings);
+  }
 
   for (const source of cloudModelSources(cloudSettings)) {
     upsertAgentConfig(data.agents, cloudModelAgentConfig(source));
@@ -7074,6 +7181,29 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
   fs.writeFileSync(configPath, nextText, "utf8");
   output.appendLine(`Configured cloud route mode: ${data.cloud_control_selection.route_mode}.`);
   return true;
+}
+
+function applyMaxTokenSaveModeToConfig(data, settings = {}) {
+  const budget = cleanSettingInteger(
+    settings.agentContextBudgetTokens,
+    MAX_TOKEN_SAVE_CONTEXT_BUDGET,
+    1000,
+    200000
+  );
+  data.agent_context_budget_tokens = budget;
+  data.agent_context_compaction_enabled = true;
+  data.context_mode = "minimal";
+  data.max_context_tokens = budget;
+  data.repo_context_max_files = MAX_TOKEN_SAVE_REPO_FILES;
+  data.repo_context_max_chars = MAX_TOKEN_SAVE_REPO_CHARS;
+  data.compatibility_mode = {
+    ...(data.compatibility_mode && typeof data.compatibility_mode === "object" && !Array.isArray(data.compatibility_mode)
+      ? data.compatibility_mode
+      : {}),
+    minimal_tool_schema: true,
+    reduced_repo_context: true,
+    max_context_tokens: budget
+  };
 }
 
 function stableConfigText(text) {

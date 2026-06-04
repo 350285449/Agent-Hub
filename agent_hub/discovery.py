@@ -198,6 +198,8 @@ def _is_free_cloud_agent(agent: AgentConfig) -> bool:
     provider_type = (agent.provider_type or agent.provider).lower()
     if provider_type == "ollama-cloud":
         return True
+    if provider_type == "codex-cli":
+        return True
     provider = normalize_provider(agent.provider)
     if provider in {"openai", "anthropic", "gemini"}:
         return True

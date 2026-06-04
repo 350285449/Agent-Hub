@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import unittest
+import subprocess
 from unittest.mock import patch
+from pathlib import Path
 
 import agent_hub.providers as provider_facade
 from agent_hub.config import AgentConfig
 from agent_hub.models import HubRequest
 from agent_hub.providers import (
     AnthropicMessagesProvider,
+    CodexCliProvider,
     OpenAIChatProvider,
     GeminiProvider,
     LocalResearchProvider,
@@ -40,6 +43,17 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(
             provider_registry_key(AgentConfig(name="openai", provider="chatgpt", model="m")),
             "openai-chat",
+        )
+        self.assertEqual(
+            provider_registry_key(
+                AgentConfig(
+                    name="codex-cli",
+                    provider="codex-cli",
+                    provider_type="codex-cli",
+                    model="m",
+                )
+            ),
+            "codex-cli",
         )
         self.assertEqual(
             provider_registry_key(
@@ -147,6 +161,12 @@ class ProviderTests(unittest.TestCase):
     def test_provider_aliases_are_accepted(self) -> None:
         self.assertEqual(
             create_provider(
+                AgentConfig(name="codex-cli", provider="codex-cli", provider_type="codex-cli", model="model")
+            ).__class__.__name__,
+            "CodexCliProvider",
+        )
+        self.assertEqual(
+            create_provider(
                 AgentConfig(name="chatgpt", provider="chatgpt", model="model")
             ).__class__.__name__,
             "OpenAIChatProvider",
@@ -179,6 +199,44 @@ class ProviderTests(unittest.TestCase):
             ).__class__.__name__,
             "LocalResearchProvider",
         )
+
+    def test_codex_cli_provider_runs_codex_exec_without_api_key(self) -> None:
+        agent = AgentConfig(
+            name="codex-cli",
+            provider="codex-cli",
+            provider_type="codex-cli",
+            model="gpt-test",
+            timeout_seconds=5,
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "Reply done"}],
+        )
+        captured: dict[str, object] = {}
+
+        def fake_run(command, *, input, capture_output, timeout, cwd):
+            captured["command"] = command
+            captured["input"] = input
+            captured["timeout"] = timeout
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            output_path.write_text("Done", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout=b"log", stderr=b"")
+
+        with patch("agent_hub.providers.codex_cli.subprocess.run", side_effect=fake_run):
+            result = CodexCliProvider(agent).complete(request)
+
+        command = captured["command"]
+        self.assertIsInstance(command, list)
+        self.assertIn("exec", command)
+        self.assertIn("--ephemeral", command)
+        self.assertIn("--model", command)
+        self.assertIn("gpt-test", command)
+        self.assertEqual(captured["timeout"], 5)
+        self.assertIsInstance(captured["input"], bytes)
+        self.assertIn("Reply done", captured["input"].decode("utf-8"))
+        self.assertNotIn("OPENAI_API_KEY", captured["input"].decode("utf-8"))
+        self.assertEqual(result.text, "Done")
+        self.assertEqual(result.model, "gpt-test")
 
     def test_openai_compatible_cloud_provider_headers_are_created(self) -> None:
         agent = AgentConfig(

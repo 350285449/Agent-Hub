@@ -34,7 +34,7 @@ class ConfigTests(unittest.TestCase):
             free_local_agent_names().index("ollama-qwen3"),
             free_local_agent_names().index("custom-local"),
         )
-        self.assertEqual(cloud_agent_names(), ["codex", "claude", "gemini", "chatgpt"])
+        self.assertEqual(cloud_agent_names(), ["codex", "codex-cli", "claude", "gemini", "chatgpt"])
         self.assertIn("custom-local", config.agents)
         self.assertEqual(
             set(config.agents),
@@ -61,18 +61,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.agent_context_budget_tokens, 32_000)
         self.assertTrue(is_free_agent(config.agents["local-research"]))
         self.assertTrue(is_free_agent(config.agents["codex"]))
+        self.assertTrue(is_free_agent(config.agents["codex-cli"]))
         self.assertTrue(is_free_agent(config.agents["claude"]))
         self.assertTrue(is_free_agent(config.agents["gemini"]))
         self.assertTrue(is_free_agent(config.agents["chatgpt"]))
         self.assertFalse(config.agents["codex"].enabled)
+        self.assertFalse(config.agents["codex-cli"].enabled)
         self.assertFalse(config.agents["claude"].enabled)
         self.assertFalse(config.agents["gemini"].enabled)
         self.assertFalse(config.agents["chatgpt"].enabled)
         self.assertEqual(config.agents["codex"].provider, "openai")
+        self.assertEqual(config.agents["codex-cli"].provider, "codex-cli")
         self.assertEqual(config.agents["claude"].provider, "anthropic")
         self.assertEqual(config.agents["gemini"].provider, "gemini")
         self.assertEqual(config.agents["chatgpt"].provider, "openai")
         self.assertEqual(config.agents["codex"].model, "gpt-4o-mini")
+        self.assertEqual(config.agents["codex-cli"].model, "gpt-5.5")
         self.assertEqual(config.agents["claude"].model, "claude-3-5-haiku-latest")
         self.assertEqual(config.agents["gemini"].model, "gemini-2.0-flash")
         self.assertEqual(config.agents["chatgpt"].model, "gpt-4o-mini")
@@ -235,6 +239,7 @@ class ConfigTests(unittest.TestCase):
             "os.environ",
             {
                 "AGENT_HUB_CODEX_MODEL": "codex-cloud-model",
+                "AGENT_HUB_CODEX_CLI_MODEL": "codex-cli-model",
                 "AGENT_HUB_CLAUDE_MODEL": "claude-cloud-model",
                 "AGENT_HUB_GEMINI_MODEL": "gemini-cloud-model",
                 "AGENT_HUB_CHATGPT_MODEL": "chatgpt-cloud-model",
@@ -244,6 +249,7 @@ class ConfigTests(unittest.TestCase):
             config = free_local_config()
 
         self.assertEqual(config.agents["codex"].model, "codex-cloud-model")
+        self.assertEqual(config.agents["codex-cli"].model, "codex-cli-model")
         self.assertEqual(config.agents["claude"].model, "claude-cloud-model")
         self.assertEqual(config.agents["gemini"].model, "gemini-cloud-model")
         self.assertEqual(config.agents["chatgpt"].model, "chatgpt-cloud-model")
@@ -310,6 +316,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_provider_names_are_normalized_for_friendly_aliases(self) -> None:
         self.assertEqual(normalize_provider("codex"), "openai")
+        self.assertEqual(normalize_provider("codex-cli"), "codex-cli")
         self.assertEqual(normalize_provider("chatgpt"), "openai")
         self.assertEqual(normalize_provider("claude"), "anthropic")
         self.assertEqual(normalize_provider("google"), "gemini")

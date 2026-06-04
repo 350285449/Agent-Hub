@@ -33,6 +33,8 @@ class ProviderRegistry(Generic[ProviderT]):
 def provider_registry_key(agent: AgentConfig) -> str:
     provider = normalize_provider(agent.provider)
     provider_type = (agent.provider_type or agent.provider).lower()
+    if provider_type == "codex-cli" or provider == "codex-cli":
+        return "codex-cli"
     if provider_type in {"ollama", "ollama-local"}:
         return "ollama"
     if provider_type == "groq":

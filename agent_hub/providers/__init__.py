@@ -72,6 +72,8 @@ class Provider(ProviderAdapter, Protocol):
 
 
 _PROVIDER_EXPORTS = {
+    "CodexCliProvider": ("codex_cli", "CodexCliProvider"),
+    "CodexCLIProvider": ("codex_cli", "CodexCLIProvider"),
     "EchoProvider": ("echo", "EchoProvider"),
     "OpenAIChatProvider": ("openai_chat", "OpenAIChatProvider"),
     "LocalResearchProvider": ("local_research", "LocalResearchProvider"),
@@ -127,6 +129,7 @@ def create_provider(agent: AgentConfig) -> Provider:
 
 def _provider_registry() -> ProviderRegistry[Provider]:
     registry = ProviderRegistry[Provider]()
+    registry.register("codex-cli", _load_provider_export("CodexCliProvider"))
     registry.register("ollama", _create_ollama_provider)
     registry.register("groq", _create_groq_provider)
     registry.register("openrouter", _create_openrouter_provider)
@@ -160,6 +163,8 @@ __all__ = [
     "ChatMessage",
     "ChatRequest",
     "ChatResponse",
+    "CodexCLIProvider",
+    "CodexCliProvider",
     "CONTEXT_LIMIT_TEXT_MARKERS",
     "ERROR_TYPE_ALIASES",
     "EchoProvider",

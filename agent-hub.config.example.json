@@ -128,6 +128,18 @@
       "supports_tools": false
     },
     {
+      "name": "codex-cli",
+      "provider": "codex-cli",
+      "provider_type": "codex-cli",
+      "model": "gpt-5.5",
+      "enabled": false,
+      "free": true,
+      "timeout_seconds": 300,
+      "context_window": 400000,
+      "supports_streaming": false,
+      "supports_tools": false
+    },
+    {
       "name": "openai-compatible-example",
       "provider": "openai-compatible",
       "provider_type": "openai-compatible",

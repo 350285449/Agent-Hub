@@ -450,6 +450,9 @@ Cloud control starts with Ollama cloud model IDs in fresh VS Code configs. Those
 models run through Ollama Cloud, not on your local CPU/GPU. To put hosted API-key
 models first, open the chat `Settings` menu, set `Cloud route` to `API-key
 models first`, save provider keys, and restart Agent Hub.
+Use `Max Token Save` in the same chat `Settings` menu when you want the
+Codex-style Agent-Hub chat to stay on Ollama Cloud while using minimal context,
+aggressive compaction, and a small output cap.
 
 Manual start without installing into a virtual environment:
 
@@ -520,6 +523,29 @@ When an API key environment variable is already available, Agent-Hub also adds
 matching free provider presets at runtime and inserts them into the cloud/coding
 routes. For example, setting `GROQ_API_KEY` is enough for the Groq free presets
 to become eligible on the next start; no config edit is required.
+
+## Codex CLI Without an API Key
+
+Agent-Hub can also route to the local Codex CLI instead of the OpenAI API. This
+uses your existing `codex login` / ChatGPT-authenticated Codex CLI session, so
+there is no `OPENAI_API_KEY` to set:
+
+```powershell
+codex doctor
+python -m agent_hub add-provider codex-cli --model gpt-5.5 --name codex-cli --route cloud-agent --enabled
+python -m agent_hub route-test --route cloud-agent "reply with one short sentence"
+```
+
+The `codex-cli` provider shells out to `codex exec` with a read-only sandbox by
+default. You can override the command, sandbox, approval mode, profile, model,
+and timeout with `AGENT_HUB_CODEX_CLI_COMMAND`,
+`AGENT_HUB_CODEX_CLI_SANDBOX`, `AGENT_HUB_CODEX_CLI_APPROVAL`,
+`AGENT_HUB_CODEX_CLI_PROFILE`, `AGENT_HUB_CODEX_CLI_MODEL`, and
+`AGENT_HUB_CODEX_CLI_TIMEOUT_SECONDS`. For direct chat, use:
+
+```powershell
+python -m agent_hub chat --route cloud-agent --no-agent
+```
 
 To customize routes, model names, token windows, or shell tools, copy and edit
 the example config:
@@ -1188,6 +1214,8 @@ Supported providers:
 - `local-research` for free local extractive web research with citations and
   search results, using no cloud LLM or paid API
 - `gemma` as a friendly alias for a local OpenAI-compatible Gemma/Gemma-like agent
+- `codex-cli` for a locally installed Codex CLI that is already signed in with
+  ChatGPT; Agent-Hub invokes `codex exec` instead of requiring `OPENAI_API_KEY`
 - `ollama-cloud`, `groq`, `openrouter`, `cerebras`, `together`, `fireworks`,
   `deepinfra`, `mistral`, `sambanova`, `nvidia-nim`, `github-models`,
   `google-ai-studio`, `huggingface`, `cloudflare-workers-ai`, `hyperbolic`,

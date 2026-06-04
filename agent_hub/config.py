@@ -452,6 +452,30 @@ def free_local_config() -> HubConfig:
             supports_vision=False,
             supports_function_calling=True,
         ),
+        "codex-cli": AgentConfig(
+            name="codex-cli",
+            provider="codex-cli",
+            provider_type="codex-cli",
+            model=os.environ.get(
+                "AGENT_HUB_CODEX_CLI_MODEL",
+                os.environ.get("AGENT_HUB_CODEX_MODEL", "gpt-5.5"),
+            ),
+            enabled=_env_bool("AGENT_HUB_CODEX_CLI_ENABLED", False),
+            free=True,
+            timeout_seconds=_env_float("AGENT_HUB_CODEX_CLI_TIMEOUT_SECONDS", 300.0),
+            max_tokens=None,
+            cooldown_seconds=30.0,
+            context_window=400_000,
+            coding_score=0.9,
+            reasoning_score=0.9,
+            speed_score=0.55,
+            supports_tools=False,
+            supports_json=True,
+            supports_streaming=False,
+            supports_vision=True,
+            supports_function_calling=False,
+            priority=80,
+        ),
         "claude": AgentConfig(
             name="claude",
             provider="anthropic",
@@ -621,9 +645,9 @@ def ollama_cloud_agent_names() -> list[str]:
 
 
 def cloud_agent_names() -> list[str]:
-    """Hosted providers that usually need API key environment variables."""
+    """Hosted providers that use API keys or a local authenticated CLI."""
 
-    return ["codex", "claude", "gemini", "chatgpt"]
+    return ["codex", "codex-cli", "claude", "gemini", "chatgpt"]
 
 
 def cloud_route_agent_names() -> list[str]:
@@ -896,6 +920,8 @@ def is_free_agent(agent: AgentConfig) -> bool:
         return True
     if provider_type == "ollama-cloud":
         return True
+    if provider_type == "codex-cli":
+        return True
     if normalize_provider(provider) != "openai-compatible":
         return False
     return _is_local_or_private_url(agent.base_url)
@@ -909,6 +935,8 @@ def normalize_provider(provider: str) -> str:
         return "openai-compatible"
     if lowered in {"codex", "chatgpt", "openai-chat", "gpt"}:
         return "openai"
+    if lowered in {"codex-cli", "codex_cli", "codex-login"}:
+        return "codex-cli"
     if lowered in {"claude", "anthropic-messages"}:
         return "anthropic"
     if lowered in {"google", "google-gemini", "generative-language"}:

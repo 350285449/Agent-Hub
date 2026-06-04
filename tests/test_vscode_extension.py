@@ -171,6 +171,19 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("applyOptionalMaxTokens", source)
         self.assertNotIn("max_tokens: config.maxTokens", source)
 
+    def test_chat_settings_include_max_token_save_button(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="maxTokenSave"', source)
+        self.assertIn('type: "enableMaxTokenSave"', source)
+        self.assertIn("enableMaxTokenSaveModeFromWebview", source)
+        self.assertIn("MAX_TOKEN_SAVE_CONTEXT_BUDGET", source)
+        self.assertIn('agentProviderMode: "cloud"', source)
+        self.assertIn('cloudRouteMode: "ollama-cloud"', source)
+        self.assertIn("apiKeyModelsEnabled: false", source)
+        self.assertIn('data.context_mode = "minimal"', source)
+        self.assertIn("data.agent_context_compaction_enabled = true", source)
+
     def test_commit_message_generation_keeps_small_output_cap(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
         helper_start = source.index("function applyOptionalMaxTokens")

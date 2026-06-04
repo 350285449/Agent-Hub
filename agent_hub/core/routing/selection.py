@@ -1980,6 +1980,8 @@ class AgentRouter:
     ) -> str | None:
         if not _routing_bool(self.config, "auto_failover", True):
             return None
+        if (agent.provider_type or agent.provider).lower() == "codex-cli":
+            return None
         slow_threshold = _routing_float(self.config, "slow_first_token_timeout_seconds", 20.0)
         if slow_threshold > 0 and latency_seconds > slow_threshold:
             return (

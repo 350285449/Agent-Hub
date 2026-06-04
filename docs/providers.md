@@ -34,3 +34,15 @@ incremental chunks.
 Provider plugins can be described with a manifest under `.agent-hub/plugins`,
 but Agent Hub currently treats plugins as manifest-only metadata and does not
 execute third-party plugin code. See `docs/plugins.md`.
+
+## Codex CLI Provider
+
+`provider_type: "codex-cli"` is not an OpenAI-compatible HTTP endpoint. It
+invokes `codex exec` locally and reuses the Codex CLI's cached ChatGPT login.
+Use it when you want Codex access without `OPENAI_API_KEY`; keep the existing
+`codex` / `openai` provider for standard API-key routing.
+
+By default the adapter runs with `--sandbox read-only`,
+`--ask-for-approval never`, and `--ephemeral`. Override those with
+`AGENT_HUB_CODEX_CLI_SANDBOX`, `AGENT_HUB_CODEX_CLI_APPROVAL`, and
+`AGENT_HUB_CODEX_CLI_PROFILE` when needed.

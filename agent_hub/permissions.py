@@ -26,6 +26,7 @@ TRUSTED_CLOUD_PROVIDER_TYPES = {
     "openrouter",
     "groq",
     "ollama-cloud",
+    "codex-cli",
 }
 KNOWN_IDE_CLIENT_MARKERS = {
     "cline",
