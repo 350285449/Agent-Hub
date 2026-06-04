@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.3
+
+- Adds Token Safe Mode and Codex CLI Mode commands to the VS Code extension.
+- Documents no-key Codex CLI setup and compact token-saving routing in the Marketplace README.
+- Packages Codex CLI prompt compaction and provider token-budget limits in the bundled backend.
+
 ## 0.8.2
 
 - Adds max token-save free-cloud exploration with Codex fallback scoring.

@@ -135,6 +135,7 @@
       "enabled": false,
       "free": true,
       "timeout_seconds": 300,
+      "max_tokens": 500,
       "context_window": 400000,
       "supports_streaming": false,
       "supports_tools": false

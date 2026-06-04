@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub - Multi-Provider AI Router",
   "description": "Use OpenAI, Claude, Gemini, Ollama, OpenRouter and local models through one OpenAI-compatible router for VS Code, Cline and coding agents.",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
@@ -62,6 +62,8 @@
     "onCommand:agentHub.restartServer",
     "onCommand:agentHub.checkHealth",
     "onCommand:agentHub.openSettings",
+    "onCommand:agentHub.enableTokenSafeMode",
+    "onCommand:agentHub.enableCodexCliMode",
     "onCommand:agentHub.status",
     "onCommand:agentHub.ask",
     "onCommand:agentHub.codeAgent",
@@ -120,6 +122,14 @@
           {
             "name": "research",
             "description": "Research the web with local synthesis"
+          },
+          {
+            "name": "token-safe",
+            "description": "Enable token safe mode"
+          },
+          {
+            "name": "codex-cli",
+            "description": "Use Codex CLI without an API key"
           }
         ]
       }
@@ -148,6 +158,16 @@
       {
         "command": "agentHub.openSettings",
         "title": "Agent Hub: Open Settings"
+      },
+      {
+        "command": "agentHub.enableTokenSafeMode",
+        "title": "Agent Hub: Enable Token Safe Mode",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "agentHub.enableCodexCliMode",
+        "title": "Agent Hub: Use Codex CLI Without API Key",
+        "icon": "$(terminal)"
       },
       {
         "command": "agentHub.status",

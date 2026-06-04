@@ -450,9 +450,12 @@ Cloud control starts with Ollama cloud model IDs in fresh VS Code configs. Those
 models run through Ollama Cloud, not on your local CPU/GPU. To put hosted API-key
 models first, open the chat `Settings` menu, set `Cloud route` to `API-key
 models first`, save provider keys, and restart Agent Hub.
-Use `Max Token Save` in the same chat `Settings` menu when you want the
+Use `Token Safe Mode` in the same chat `Settings` menu when you want the
 Codex-style Agent-Hub chat to stay on Ollama Cloud while using minimal context,
 aggressive compaction, and a small output cap.
+Use `Codex CLI Mode` when you want Codex through your existing `codex login`
+session instead of an `OPENAI_API_KEY`; it enables the `codex-cli` route,
+disables API-key fallbacks, and applies a smaller Codex prompt/output budget.
 
 Manual start without installing into a virtual environment:
 
@@ -541,7 +544,14 @@ default. You can override the command, sandbox, approval mode, profile, model,
 and timeout with `AGENT_HUB_CODEX_CLI_COMMAND`,
 `AGENT_HUB_CODEX_CLI_SANDBOX`, `AGENT_HUB_CODEX_CLI_APPROVAL`,
 `AGENT_HUB_CODEX_CLI_PROFILE`, `AGENT_HUB_CODEX_CLI_MODEL`, and
-`AGENT_HUB_CODEX_CLI_TIMEOUT_SECONDS`. For direct chat, use:
+`AGENT_HUB_CODEX_CLI_TIMEOUT_SECONDS`.
+
+In VS Code, the easiest path is `Agent Hub: Use Codex CLI Without API Key` or
+the sidebar/chat `Codex CLI Mode` button. That writes the `codex-cli` route for
+you, keeps API-key model fallbacks off, and caps Codex requests to compact
+context by default.
+
+For direct chat, use:
 
 ```powershell
 python -m agent_hub chat --route cloud-agent --no-agent

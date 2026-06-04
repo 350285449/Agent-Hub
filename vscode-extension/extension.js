@@ -39,13 +39,20 @@ const DEFAULT_GITHUB_MODELS_MODEL = "qwen/qwen3-coder-30b-a3b-instruct";
 const DEFAULT_HUGGINGFACE_MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct";
 const DEFAULT_NVIDIA_MODEL = "nvidia/llama-3.1-nemotron-70b-instruct";
 const DEFAULT_CLOUDFLARE_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+const DEFAULT_CODEX_CLI_MODEL = "gpt-5.5";
 const MAX_TOKEN_SAVE_CONTEXT_BUDGET = 4000;
 const MAX_TOKEN_SAVE_OUTPUT_TOKENS = 800;
 const MAX_TOKEN_SAVE_AGENT_STEPS = 8;
 const MAX_TOKEN_SAVE_REPO_FILES = 2;
 const MAX_TOKEN_SAVE_REPO_CHARS = 3000;
+const CODEX_CLI_CONTEXT_BUDGET = 2400;
+const CODEX_CLI_OUTPUT_TOKENS = 500;
+const CODEX_CLI_AGENT_STEPS = 6;
+const CODEX_CLI_REPO_FILES = 1;
+const CODEX_CLI_REPO_CHARS = 1800;
 const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
+const CODEX_CLI_AGENT_NAME = "codex-cli";
 const HOSTED_CLOUD_AGENT_NAMES = ["codex", "claude", "gemini", "chatgpt"];
 const FREE_CLOUD_AGENT_NAMES = [
   "groq-qwen3-32b",
@@ -395,6 +402,8 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.restartServer", restartServer),
     vscode.commands.registerCommand("agentHub.checkHealth", checkHealth),
     vscode.commands.registerCommand("agentHub.openSettings", openAgentHubSettings),
+    vscode.commands.registerCommand("agentHub.enableTokenSafeMode", enableTokenSafeModeCommand),
+    vscode.commands.registerCommand("agentHub.enableCodexCliMode", enableCodexCliModeCommand),
     vscode.commands.registerCommand("agentHub.status", showStatus),
     vscode.commands.registerCommand("agentHub.ask", askAgent),
     vscode.commands.registerCommand("agentHub.codeAgent", runCodingAgent),
@@ -478,6 +487,16 @@ class AgentHubSidebarProvider {
     }
     if (message.type === "applyTrustPreset") {
       await applySidebarTrustPreset(message.preset);
+      await this.refresh();
+      return;
+    }
+    if (message.type === "enableTokenSafeMode") {
+      await enableTokenSafeModeCommand({ refreshSidebar: false });
+      await this.refresh();
+      return;
+    }
+    if (message.type === "enableCodexCliMode") {
+      await enableCodexCliModeCommand({ refreshSidebar: false });
       await this.refresh();
       return;
     }
@@ -611,6 +630,7 @@ function updateStatusBar(dashboard = {}) {
 
 async function sidebarDashboardState() {
   const config = settings();
+  const cloudSettings = cloudModelSettingsPayload(config);
   const dashboard = {
     status: serverLifecycleState,
     statusText: lastServerMessage || "Agent Hub is not running.",
@@ -618,6 +638,8 @@ async function sidebarDashboardState() {
     agentProviderMode: config.agentProviderMode,
     agentMode: config.agentMode,
     approvalMode: config.approvalMode,
+    tokenSafeMode: isMaxTokenSaveMode(config) && cloudSettings.cloudRouteMode !== "codex-cli",
+    codexCliMode: isMaxTokenSaveMode(config) && cloudSettings.cloudRouteMode === "codex-cli",
     autoStart: config.autoStart,
     extensionVersion: EXTENSION_VERSION,
     activeModel: null,
@@ -2465,6 +2487,14 @@ function sidebarHtml(webview, logoPath) {
           <span class="button-main">Settings</span>
           <span class="button-meta">Models</span>
         </button>
+        <button class="command-button" id="quickTokenSafeMode" type="button" title="Enable Token Safe Mode">
+          <span class="button-main">Token Safe</span>
+          <span class="button-meta">Save context</span>
+        </button>
+        <button class="command-button" id="quickCodexCliMode" type="button" title="Use Codex CLI without an API key">
+          <span class="button-main">Codex CLI</span>
+          <span class="button-meta">No API key</span>
+        </button>
         <button class="command-button" id="codeAgent" type="button" title="Run the coding agent">
           <span class="button-main">Code</span>
           <span class="button-meta">Edit files</span>
@@ -2587,6 +2617,10 @@ function sidebarHtml(webview, logoPath) {
       </summary>
       <div class="detail" id="tokenUsage">No token usage yet</div>
       <div class="detail" id="contextDiagnostics"></div>
+      <div class="actions">
+        <button id="tokenSafeMode" type="button">Token Safe Mode</button>
+      </div>
+      <div class="detail" id="tokenSafeModeDetail">Token Safe Mode: Off</div>
     </details>
     <details class="panel">
       <summary class="section-head">
@@ -2656,6 +2690,7 @@ function sidebarHtml(webview, logoPath) {
     const limitList = document.getElementById("limitList");
     const tokenUsage = document.getElementById("tokenUsage");
     const contextDiagnostics = document.getElementById("contextDiagnostics");
+    const tokenSafeModeDetail = document.getElementById("tokenSafeModeDetail");
     const activityList = document.getElementById("activityList");
     const logDetail = document.getElementById("logDetail");
     const settingsDetail = document.getElementById("settingsDetail");
@@ -2694,6 +2729,7 @@ function sidebarHtml(webview, logoPath) {
       renderLimitRows(dashboard.limits || []);
       setText(tokenUsage, tokenUsageText(dashboard.tokenUsage || {}));
       setText(contextDiagnostics, contextDiagnosticsText(dashboard.contextDiagnostics || {}));
+      setText(tokenSafeModeDetail, tokenSafeModeText(dashboard));
       renderActivityRows(dashboard.activity || []);
       setText(logDetail, dashboard.logs || "Open the output channel for live logs.");
       setText(settingsDetail, "Mode: " + (dashboard.agentProviderMode || "cloud") + " / " + (dashboard.agentMode || "agent") + ". Approval: " + (dashboard.approvalMode || "ask") + ". Auto-start: " + (dashboard.autoStart ? "on" : "off") + ".");
@@ -3368,6 +3404,15 @@ function sidebarHtml(webview, logoPath) {
       return warnings.length ? base + " Warning: " + warnings.join(", ") + "." : base;
     }
 
+    function tokenSafeModeText(dashboard) {
+      if (dashboard.codexCliMode) {
+        return "Codex CLI Mode: On. No OpenAI API key fallback, compacted workspace, 500-token output cap.";
+      }
+      return dashboard.tokenSafeMode
+        ? "Token Safe Mode: On. Minimal context, compacted workspace, free cloud first, API-key fallback."
+        : "Token Safe Mode: Off. Uses the current token and context settings.";
+    }
+
     function renderActivityRows(rows) {
       activityList.textContent = "";
       if (!rows.length) {
@@ -3470,12 +3515,15 @@ function sidebarHtml(webview, logoPath) {
     });
     document.getElementById("openChat").addEventListener("click", () => post("openChat"));
     document.getElementById("quickSettings").addEventListener("click", () => post("openSettings"));
+    document.getElementById("quickTokenSafeMode").addEventListener("click", () => post("enableTokenSafeMode"));
+    document.getElementById("quickCodexCliMode").addEventListener("click", () => post("enableCodexCliMode"));
     document.getElementById("codeAgent").addEventListener("click", () => post("codeAgent"));
     document.getElementById("explainFile").addEventListener("click", () => post("explainFile"));
     document.getElementById("killerWorkflow").addEventListener("click", () => runWorkflowPrompt("Run the issue-to-PR workflow. Take the current issue or selected prompt through the full Agent Hub loop: plan the work, edit the needed files, run the most relevant tests, fix failures once, and summarize a pull request with files changed, validation, and risks. If no issue is selected, inspect the workspace first and choose the highest-impact actionable issue."));
     document.getElementById("stopServer").addEventListener("click", () => post("stopServer"));
     document.getElementById("restartServer").addEventListener("click", () => post("restartServer"));
     document.getElementById("checkHealth").addEventListener("click", () => post("checkHealth"));
+    document.getElementById("tokenSafeMode").addEventListener("click", () => post("enableTokenSafeMode"));
     document.getElementById("openOutput").addEventListener("click", () => post("openOutput"));
     document.getElementById("openSettings").addEventListener("click", () => post("openSettings"));
     document.getElementById("copyClineConfig").addEventListener("click", () => post("copyClineConfig"));
@@ -3536,6 +3584,19 @@ function registerChatParticipant(context) {
 
 async function handleParticipantRequest(request, chatContext, stream, token) {
   const prompt = (request && typeof request.prompt === "string" ? request.prompt : "").trim();
+  const command = request && typeof request.command === "string" ? request.command : "agent";
+  if (command === "token-safe") {
+    stream.progress("Turning on Token Safe Mode...");
+    const result = await enableTokenSafeModeCommand();
+    stream.markdown(result.message);
+    return { metadata: { command, ok: !!result.ok, cancelled: !!result.cancelled } };
+  }
+  if (command === "codex-cli") {
+    stream.progress("Turning on Codex CLI Mode...");
+    const result = await enableCodexCliModeCommand();
+    stream.markdown(result.message);
+    return { metadata: { command, ok: !!result.ok, cancelled: !!result.cancelled } };
+  }
   if (!prompt) {
     stream.markdown("Tell Agent Hub what to inspect, explain, research, or change.");
     return {};
@@ -3543,7 +3604,6 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
 
   const config = settings();
   const workspace = workspaceRoot();
-  const command = request.command || "agent";
   const agentMode = command !== "research";
   const selectedAgentMode = agentMode ? normalizeAgentMode(config.agentMode) : "route";
   const route = command === "research" ? config.researchRoute : codingAgentRoute(config);
@@ -3885,6 +3945,11 @@ async function handleChatMessage(panel, message) {
     return;
   }
 
+  if (message.type === "enableCodexCliMode") {
+    await enableCodexCliModeFromWebview(panel, message.settings);
+    return;
+  }
+
   if (message.type === "openSettings") {
     await vscode.commands.executeCommand("workbench.action.openSettings", "Agent Hub");
     return;
@@ -4081,9 +4146,154 @@ async function saveChatSettingsFromWebview(panel, rawSettings) {
   }
 }
 
+async function enableTokenSafeModeCommand(options = {}) {
+  const result = await applyTokenSafeModeSettings(options.rawSettings);
+  if (result.ok) {
+    vscode.window.showInformationMessage(result.message);
+    postChatSettings(chatPanel, result.message);
+    if (sidebarProvider && options.refreshSidebar !== false) {
+      await sidebarProvider.refresh();
+    }
+  } else if (result.cancelled) {
+    vscode.window.showInformationMessage(result.message);
+  } else {
+    vscode.window.showErrorMessage(result.message);
+  }
+  return result;
+}
+
 async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
+  const result = await applyTokenSafeModeSettings(rawSettings);
+  postChatSettings(panel, result.message);
+  if (result.ok && sidebarProvider) {
+    await sidebarProvider.refresh();
+  }
+  return result;
+}
+
+async function enableCodexCliModeCommand(options = {}) {
+  const result = await applyCodexCliModeSettings(options.rawSettings);
+  if (result.ok) {
+    vscode.window.showInformationMessage(result.message);
+    postChatSettings(chatPanel, result.message);
+    if (sidebarProvider && options.refreshSidebar !== false) {
+      await sidebarProvider.refresh();
+    }
+  } else if (result.cancelled) {
+    vscode.window.showInformationMessage(result.message);
+  } else {
+    vscode.window.showErrorMessage(result.message);
+  }
+  return result;
+}
+
+async function enableCodexCliModeFromWebview(panel, rawSettings) {
+  const result = await applyCodexCliModeSettings(rawSettings);
+  postChatSettings(panel, result.message);
+  if (result.ok && sidebarProvider) {
+    await sidebarProvider.refresh();
+  }
+  return result;
+}
+
+async function applyCodexCliModeSettings(rawSettings) {
   try {
+    const baseSettings = chatSettingsPayload(settings());
     const profileInput = {
+      ...baseSettings,
+      ...(rawSettings && typeof rawSettings === "object" ? rawSettings : {}),
+      agentProviderMode: "cloud",
+      cloudRouteMode: "codex-cli",
+      codexCliEnabled: true,
+      apiKeyModelsEnabled: false,
+      freeCloudPresetsEnabled: false,
+      freeOnly: true,
+      enableLoadBalancing: false,
+      maxTokens: CODEX_CLI_OUTPUT_TOKENS,
+      agentMaxSteps: CODEX_CLI_AGENT_STEPS,
+      groupPlanCandidates: 1
+    };
+    const next = normalizeChatSettingsInput(profileInput);
+    const workspace = workspaceRoot();
+    const resource = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
+      : "VS Code user settings";
+    if (!(await requestPermission({
+      category: "config_edit",
+      description: "Agent Hub wants to enable Codex CLI Mode without an OpenAI API key.",
+      resource,
+      risk: "medium",
+      detail: "This uses the locally logged-in Codex CLI, disables API-key model fallbacks, and applies a smaller context/output budget for Codex requests."
+    }))) {
+      return {
+        ok: false,
+        cancelled: true,
+        message: "Codex CLI Mode was cancelled."
+      };
+    }
+
+    const target = vscode.ConfigurationTarget.Global;
+    const config = vscode.workspace.getConfiguration("agentHub");
+    for (const [key, value] of Object.entries(next.workspaceSettings)) {
+      await config.update(key, value, target);
+    }
+    await config.update("agentContextBudgetTokens", CODEX_CLI_CONTEXT_BUDGET, target);
+    await config.update("agentContextCompactionEnabled", true, target);
+    await config.update("contextMode", "minimal", target);
+
+    const clearKeys = [
+      ...Object.keys(next.workspaceSettings),
+      "agentContextBudgetTokens",
+      "agentContextCompactionEnabled",
+      "contextMode"
+    ];
+    const clearedWorkspaceSettings = workspace
+      ? await clearWorkspaceAgentHubSettings(config, clearKeys)
+      : false;
+    const configPath = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
+      : "";
+    const configChanged = configPath
+      ? await saveCloudModelSettingsToConfig(configPath, {
+        ...next.cloudSettings,
+        cloudRouteMode: "codex-cli",
+        codexCliEnabled: true,
+        apiKeyModelsEnabled: false,
+        freeCloudPresetsEnabled: false,
+        freeOnly: true,
+        enableLoadBalancing: false,
+        codexCliMode: true,
+        codexCliTokenOptimized: true,
+        agentContextBudgetTokens: CODEX_CLI_CONTEXT_BUDGET
+      }, {
+        workspaceDir: generatedConfigWorkspaceDir(next.workspaceSettings.configPath, workspace),
+        storageDir: generatedConfigStorageDir(next.workspaceSettings.configPath, workspace)
+      })
+      : false;
+    const restartNote = serverProcess || (await isServerOnline())
+      ? " Restart Agent Hub to use the Codex CLI route."
+      : "";
+    const configNote = configChanged ? " Updated Agent Hub routing and Codex token budgets." : "";
+    const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
+    return {
+      ok: true,
+      cancelled: false,
+      message: `Codex CLI Mode is on: codex-cli first, no OpenAI API key fallback, compact context.${migrationNote}${configNote}${restartNote}`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      cancelled: false,
+      message: `Could not enable Codex CLI Mode: ${error.message}`
+    };
+  }
+}
+
+async function applyTokenSafeModeSettings(rawSettings) {
+  try {
+    const baseSettings = chatSettingsPayload(settings());
+    const profileInput = {
+      ...baseSettings,
       ...(rawSettings && typeof rawSettings === "object" ? rawSettings : {}),
       agentProviderMode: "cloud",
       cloudRouteMode: "ollama-cloud",
@@ -4102,13 +4312,16 @@ async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
       : "VS Code user settings";
     if (!(await requestPermission({
       category: "config_edit",
-      description: "Agent Hub wants to enable maximum token save mode for free cloud offload.",
+      description: "Agent Hub wants to enable Token Safe Mode for free cloud offload.",
       resource,
       risk: "medium",
-      detail: "This routes free cloud models first for simple work, keeps API-key models as fallback, enables compaction, and lowers context/output budgets."
+      detail: "This enables the maximum token save profile: free cloud models first for simple work, API-key models as fallback, context compaction, and lower context/output budgets."
     }))) {
-      postChatSettings(panel, "Maximum token save mode was cancelled.");
-      return;
+      return {
+        ok: false,
+        cancelled: true,
+        message: "Token Safe Mode was cancelled."
+      };
     }
 
     const target = vscode.ConfigurationTarget.Global;
@@ -4152,9 +4365,17 @@ async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
       : "";
     const configNote = configChanged ? " Updated Agent Hub routing and token budgets." : "";
     const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
-    postChatSettings(panel, `Maximum token save mode is on: free cloud models first, API-key models as fallback.${migrationNote}${configNote}${restartNote}`);
+    return {
+      ok: true,
+      cancelled: false,
+      message: `Token Safe Mode is on: free cloud models first, API-key models as fallback.${migrationNote}${configNote}${restartNote}`
+    };
   } catch (error) {
-    postChatSettings(panel, `Could not enable maximum token save mode: ${error.message}`);
+    return {
+      ok: false,
+      cancelled: false,
+      message: `Could not enable Token Safe Mode: ${error.message}`
+    };
   }
 }
 
@@ -4200,6 +4421,8 @@ function normalizeChatSettingsInput(value) {
       enableLoadBalancing: !!input.enableLoadBalancing,
       exposeRoutingDetails: !!input.exposeRoutingDetails,
       codexModel: cleanSettingString(input.codexModel, DEFAULT_CODEX_MODEL),
+      codexCliEnabled: normalizeCloudRouteMode(input.cloudRouteMode || current.cloudRouteMode) === "codex-cli" || !!input.codexCliEnabled,
+      codexCliModel: cleanSettingString(input.codexCliModel, DEFAULT_CODEX_CLI_MODEL),
       claudeModel: cleanSettingString(input.claudeModel, DEFAULT_CLAUDE_MODEL),
       geminiModel: cleanSettingString(input.geminiModel, DEFAULT_GEMINI_MODEL),
       chatgptModel: cleanSettingString(input.chatgptModel, DEFAULT_CHATGPT_MODEL),
@@ -4280,6 +4503,8 @@ function agentHubRequestOptions(config, extra = {}) {
     options.context_mode = "minimal";
     options.minimal_tool_schema = true;
     options.reduced_repo_context = true;
+    options.codex_cli_token_optimized = true;
+    options.codex_cli_prompt_budget_tokens = config.agentContextBudgetTokens;
     options.max_context_tokens = config.agentContextBudgetTokens;
     options.context_budget_tokens = config.agentContextBudgetTokens;
   }
@@ -4305,7 +4530,7 @@ function normalizeCloudRouteMode(value) {
   if (mode === "local") {
     return "ollama-cloud";
   }
-  return ["ollama-cloud", "api-key"].includes(mode) ? mode : "ollama-cloud";
+  return ["ollama-cloud", "api-key", "codex-cli"].includes(mode) ? mode : "ollama-cloud";
 }
 
 function cloudModelSettingsPayload(config) {
@@ -4317,6 +4542,7 @@ function cloudModelSettingsPayload(config) {
     enableLoadBalancing: true,
     exposeRoutingDetails: false,
     codexModel: DEFAULT_CODEX_MODEL,
+    codexCliModel: DEFAULT_CODEX_CLI_MODEL,
     claudeModel: DEFAULT_CLAUDE_MODEL,
     geminiModel: DEFAULT_GEMINI_MODEL,
     chatgptModel: DEFAULT_CHATGPT_MODEL,
@@ -4352,6 +4578,7 @@ function cloudModelSettingsPayload(config) {
       enableLoadBalancing: raw.enable_load_balancing !== false,
       exposeRoutingDetails: raw.expose_routing_details === true,
       codexModel: modelForAgent(raw, "codex", DEFAULT_CODEX_MODEL),
+      codexCliModel: modelForAgent(raw, CODEX_CLI_AGENT_NAME, DEFAULT_CODEX_CLI_MODEL),
       claudeModel: modelForAgent(raw, "claude", DEFAULT_CLAUDE_MODEL),
       geminiModel: modelForAgent(raw, "gemini", DEFAULT_GEMINI_MODEL),
       chatgptModel: modelForAgent(raw, "chatgpt", DEFAULT_CHATGPT_MODEL),
@@ -5478,6 +5705,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
                 <span>Cloud route</span>
                 <select id="settingCloudRouteMode">
                   <option value="ollama-cloud">Ollama cloud models first</option>
+                  <option value="codex-cli">Codex CLI without API key</option>
                   <option value="api-key">API-key models first</option>
                 </select>
               </label>
@@ -5520,6 +5748,10 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
               <label class="settings-field">
                 <span>OpenAI / Codex model</span>
                 <input id="settingCodexModel" type="text" autocomplete="off">
+              </label>
+              <label class="settings-field">
+                <span>Codex CLI model</span>
+                <input id="settingCodexCliModel" type="text" autocomplete="off">
               </label>
               <label class="settings-field">
                 <span>Claude model</span>
@@ -5576,7 +5808,8 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
               <label class="settings-check"><input id="settingRoutingDetails" type="checkbox"> Routing details</label>
             </div>
             <div class="settings-actions">
-              <button class="secondary" id="maxTokenSave" type="button">Max Token Save</button>
+              <button class="secondary" id="codexCliMode" type="button">Codex CLI Mode</button>
+              <button class="secondary" id="maxTokenSave" type="button">Token Safe Mode</button>
               <button id="saveSettings" type="button">Save Settings</button>
               <button class="secondary" id="openSettings" type="button">Open VS Code Settings</button>
             </div>
@@ -5671,6 +5904,7 @@ ${apiKeyFieldsHtml()}
       agentMaxSteps: document.getElementById("settingAgentMaxSteps"),
       groupPlanCandidates: document.getElementById("settingGroupPlanCandidates"),
       codexModel: document.getElementById("settingCodexModel"),
+      codexCliModel: document.getElementById("settingCodexCliModel"),
       claudeModel: document.getElementById("settingClaudeModel"),
       geminiModel: document.getElementById("settingGeminiModel"),
       chatgptModel: document.getElementById("settingChatgptModel"),
@@ -5751,6 +5985,7 @@ ${apiKeyFieldsHtml()}
       settingInputs.agentMaxSteps.value = next.agentMaxSteps || "";
       settingInputs.groupPlanCandidates.value = next.groupPlanCandidates || "";
       settingInputs.codexModel.value = next.codexModel || "";
+      settingInputs.codexCliModel.value = next.codexCliModel || "";
       settingInputs.claudeModel.value = next.claudeModel || "";
       settingInputs.geminiModel.value = next.geminiModel || "";
       settingInputs.chatgptModel.value = next.chatgptModel || "";
@@ -5790,6 +6025,7 @@ ${apiKeyFieldsHtml()}
         agentMaxSteps: settingInputs.agentMaxSteps.value,
         groupPlanCandidates: settingInputs.groupPlanCandidates.value,
         codexModel: settingInputs.codexModel.value,
+        codexCliModel: settingInputs.codexCliModel.value,
         claudeModel: settingInputs.claudeModel.value,
         geminiModel: settingInputs.geminiModel.value,
         chatgptModel: settingInputs.chatgptModel.value,
@@ -6308,6 +6544,23 @@ ${apiKeyFieldsHtml()}
       });
     });
 
+    document.getElementById("codexCliMode").addEventListener("click", () => {
+      controlMode.value = "cloud";
+      settingInputs.cloudRouteMode.value = "codex-cli";
+      settingInputs.apiKeyModelsEnabled.checked = false;
+      settingInputs.freeCloudPresetsEnabled.checked = false;
+      settingInputs.freeOnly.checked = true;
+      settingInputs.enableLoadBalancing.checked = false;
+      settingInputs.maxTokens.value = String(${CODEX_CLI_OUTPUT_TOKENS});
+      settingInputs.agentMaxSteps.value = String(${CODEX_CLI_AGENT_STEPS});
+      settingInputs.groupPlanCandidates.value = "1";
+      settingsMessage.textContent = "Turning on Codex CLI Mode...";
+      vscode.postMessage({
+        type: "enableCodexCliMode",
+        settings: collectChatSettings()
+      });
+    });
+
     document.getElementById("maxTokenSave").addEventListener("click", () => {
       controlMode.value = "cloud";
       settingInputs.cloudRouteMode.value = "ollama-cloud";
@@ -6318,7 +6571,7 @@ ${apiKeyFieldsHtml()}
       settingInputs.maxTokens.value = String(${MAX_TOKEN_SAVE_OUTPUT_TOKENS});
       settingInputs.agentMaxSteps.value = String(${MAX_TOKEN_SAVE_AGENT_STEPS});
       settingInputs.groupPlanCandidates.value = "1";
-      settingsMessage.textContent = "Turning on maximum token save mode...";
+      settingsMessage.textContent = "Turning on Token Safe Mode...";
       vscode.postMessage({
         type: "enableMaxTokenSave",
         settings: collectChatSettings()
@@ -7113,6 +7366,7 @@ function cloudModelSettingsFromConfig(raw) {
     enableLoadBalancing: raw.enable_load_balancing !== false,
     exposeRoutingDetails: raw.expose_routing_details === true,
     codexModel: modelForAgent(raw, "codex", DEFAULT_CODEX_MODEL),
+    codexCliModel: modelForAgent(raw, CODEX_CLI_AGENT_NAME, DEFAULT_CODEX_CLI_MODEL),
     claudeModel: modelForAgent(raw, "claude", DEFAULT_CLAUDE_MODEL),
     geminiModel: modelForAgent(raw, "gemini", DEFAULT_GEMINI_MODEL),
     chatgptModel: modelForAgent(raw, "chatgpt", DEFAULT_CHATGPT_MODEL),
@@ -7222,6 +7476,9 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
   if (cloudSettings.maxTokenSaveMode) {
     applyMaxTokenSaveModeToConfig(data, cloudSettings);
   }
+  if (cloudSettings.codexCliMode) {
+    applyCodexCliModeToConfig(data, cloudSettings);
+  }
 
   for (const source of cloudModelSources(cloudSettings)) {
     upsertAgentConfig(data.agents, cloudModelAgentConfig(source));
@@ -7274,6 +7531,42 @@ function applyMaxTokenSaveModeToConfig(data, settings = {}) {
     minimal_tool_schema: true,
     reduced_repo_context: true,
     max_context_tokens: budget
+  };
+}
+
+function applyCodexCliModeToConfig(data, settings = {}) {
+  const budget = cleanSettingInteger(
+    settings.agentContextBudgetTokens,
+    CODEX_CLI_CONTEXT_BUDGET,
+    800,
+    200000
+  );
+  data.agent_context_budget_tokens = budget;
+  data.agent_context_compaction_enabled = true;
+  data.context_mode = "minimal";
+  data.max_context_tokens = budget;
+  data.repo_context_max_files = CODEX_CLI_REPO_FILES;
+  data.repo_context_max_chars = CODEX_CLI_REPO_CHARS;
+  data.free_only = true;
+  data.enable_load_balancing = false;
+  data.routing = {
+    ...(data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)
+      ? data.routing
+      : {}),
+    free_first: true,
+    prefer_available_quota: true,
+    max_tokens_mode: "explicit",
+    simple_cloud_exploration_enabled: false
+  };
+  data.compatibility_mode = {
+    ...(data.compatibility_mode && typeof data.compatibility_mode === "object" && !Array.isArray(data.compatibility_mode)
+      ? data.compatibility_mode
+      : {}),
+    minimal_tool_schema: true,
+    reduced_repo_context: true,
+    max_context_tokens: budget,
+    codex_cli_prompt_optimized: true,
+    codex_cli_prompt_budget_tokens: budget
   };
 }
 
@@ -7355,10 +7648,26 @@ function setRouteAgents(routes, name, keywords, agents) {
 function cloudRouteAgentsForConfig(data, mode) {
   const ollamaCloudAgents = ollamaCloudAgentNames(data);
   const hostedAgents = hostedCloudAgentNames(data);
-  const ordered = normalizeCloudRouteMode(mode) === "api-key"
+  const routeMode = normalizeCloudRouteMode(mode);
+  const codexCliAgents = codexCliAgentNames(data);
+  const ordered = routeMode === "codex-cli"
+    ? [...codexCliAgents, ...ollamaCloudAgents, ...hostedAgents.filter((name) => name !== CODEX_CLI_AGENT_NAME)]
+    : routeMode === "api-key"
     ? [...hostedAgents, ...ollamaCloudAgents]
     : [...ollamaCloudAgents, ...hostedAgents];
   return uniqueAgentNames(ordered);
+}
+
+function codexCliAgentNames(data) {
+  const agents = Array.isArray(data && data.agents) ? data.agents : [];
+  return agents.some((agent) => (
+    agent &&
+    typeof agent === "object" &&
+    agent.name === CODEX_CLI_AGENT_NAME &&
+    agent.enabled === true
+  ))
+    ? [CODEX_CLI_AGENT_NAME]
+    : [];
 }
 
 function ollamaCloudAgentNames(data) {
@@ -7376,6 +7685,7 @@ function hostedCloudAgentNames(data) {
       typeof agent.name === "string" &&
       agent.enabled === true &&
       (
+        agent.name === CODEX_CLI_AGENT_NAME ||
         HOSTED_CLOUD_AGENT_NAMES.includes(agent.name) ||
         CLOUD_PROVIDER_TYPES.has(String(agent.provider_type || "").toLowerCase())
       )
@@ -7403,6 +7713,9 @@ function configCloudRouteMode(data) {
   const firstAgent = route && Array.isArray(route.agents)
     ? route.agents.find((name) => name && name !== "echo")
     : "";
+  if (firstAgent === CODEX_CLI_AGENT_NAME) {
+    return "codex-cli";
+  }
   return OLLAMA_CLOUD_AGENT_NAMES.includes(firstAgent) ? "ollama-cloud" : "api-key";
 }
 
@@ -7461,7 +7774,13 @@ function localConfigForLocalModels(sources, options = {}) {
   const localAgents = localSources.map((source) => source.name);
   const cloudRouteMode = normalizeCloudRouteMode(options.cloudRouteMode || "ollama-cloud");
   const cloudRouteAgents = uniqueAgentNames(
-    cloudRouteMode === "api-key"
+    cloudRouteMode === "codex-cli"
+      ? [
+        ...cloudAgents.filter((name) => name === CODEX_CLI_AGENT_NAME),
+        ...ollamaCloudAgents,
+        ...cloudAgents.filter((name) => name !== CODEX_CLI_AGENT_NAME)
+      ]
+      : cloudRouteMode === "api-key"
       ? [...cloudAgents, ...ollamaCloudAgents]
       : [...ollamaCloudAgents, ...cloudAgents]
   );
@@ -7538,6 +7857,28 @@ function localConfigForLocalModels(sources, options = {}) {
 }
 
 function cloudModelSources(settings = {}) {
+  const codexCli = {
+    name: CODEX_CLI_AGENT_NAME,
+    label: "Codex CLI",
+    provider: "codex-cli",
+    providerType: "codex-cli",
+    enabled: normalizeCloudRouteMode(settings.cloudRouteMode) === "codex-cli" || !!settings.codexCliEnabled,
+    free: true,
+    model: cleanSettingString(settings.codexCliModel, process.env.AGENT_HUB_CODEX_CLI_MODEL || DEFAULT_CODEX_CLI_MODEL),
+    contextWindow: 400000,
+    timeoutSeconds: 300,
+    cooldownSeconds: 30,
+    maxTokens: CODEX_CLI_OUTPUT_TOKENS,
+    priority: 90,
+    codingScore: 0.9,
+    reasoningScore: 0.9,
+    speedScore: 0.55,
+    supportsTools: false,
+    supportsJson: true,
+    supportsStreaming: false,
+    supportsVision: true,
+    supportsFunctionCalling: false
+  };
   const hosted = [
     {
       name: "codex",
@@ -7584,7 +7925,7 @@ function cloudModelSources(settings = {}) {
       contextWindow: 128000
     }
   ];
-  return [...hosted, ...freeCloudPresetSources(settings)];
+  return [codexCli, ...hosted, ...freeCloudPresetSources(settings)];
 }
 
 function freeCloudPresetSources(settings = {}) {
@@ -7761,7 +8102,8 @@ function cloudModelAgentConfig(source) {
     free: source.free !== false,
     api_key_env: source.apiKeyEnv,
     context_window: source.contextWindow,
-    timeout_seconds: 60,
+    timeout_seconds: source.timeoutSeconds || 60,
+    max_tokens: source.maxTokens,
     cooldown_seconds: source.cooldownSeconds || 30,
     coding_score: source.codingScore,
     reasoning_score: source.reasoningScore,
@@ -7873,7 +8215,9 @@ function describeCloudSources(localSources = fallbackLocalModelSources()) {
   const ollamaCloud = ollamaCloudModelSources()
     .map((source) => `${source.label} (${source.model})`);
   const apiKey = cloudModelSources()
-    .map((source) => `${source.label} (${source.model}, ${source.apiKeyEnv}, disabled until enabled in settings)`);
+    .map((source) => source.apiKeyEnv
+      ? `${source.label} (${source.model}, ${source.apiKeyEnv}, disabled until enabled in settings)`
+      : `${source.label} (${source.model}, no API key, disabled until enabled in settings)`);
   return [...ollamaCloud, ...apiKey]
     .join(", ");
 }

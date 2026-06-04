@@ -238,6 +238,53 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result.text, "Done")
         self.assertEqual(result.model, "gpt-test")
 
+    def test_codex_cli_provider_compacts_token_optimized_prompt(self) -> None:
+        agent = AgentConfig(
+            name="codex-cli",
+            provider="codex-cli",
+            provider_type="codex-cli",
+            model="gpt-test",
+            timeout_seconds=5,
+        )
+        old_messages = [
+            {"role": "user", "content": f"old turn {index} " + ("noise " * 400)}
+            for index in range(6)
+        ]
+        request = HubRequest(
+            session_id="s",
+            messages=[
+                {"role": "system", "content": "system rules"},
+                *old_messages,
+                {"role": "user", "content": "latest request keep this " + ("detail " * 400)},
+            ],
+            context="OPENAI_API_KEY=sk-" + ("a" * 32) + "\n" + ("large context " * 1000),
+            max_tokens=80,
+            raw={
+                "agent_hub": {
+                    "codex_cli_token_optimized": True,
+                    "codex_cli_prompt_budget_tokens": 600,
+                }
+            },
+        )
+        captured: dict[str, object] = {}
+
+        def fake_run(command, *, input, capture_output, timeout, cwd):
+            captured["input"] = input
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            output_path.write_text("Compact done", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout=b"log", stderr=b"")
+
+        with patch("agent_hub.providers.codex_cli.subprocess.run", side_effect=fake_run):
+            result = CodexCliProvider(agent).complete(request)
+
+        prompt = captured["input"].decode("utf-8")
+        self.assertLessEqual(len(prompt), 2600)
+        self.assertIn("latest request keep this", prompt)
+        self.assertNotIn("old turn 0", prompt)
+        self.assertNotIn("sk-" + ("a" * 32), prompt)
+        self.assertIn("[redacted secret]", prompt)
+        self.assertEqual(result.raw["prompt_optimized"], True)
+
     def test_openai_compatible_cloud_provider_headers_are_created(self) -> None:
         agent = AgentConfig(
             name="openrouter-free",

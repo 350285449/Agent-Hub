@@ -46,3 +46,9 @@ By default the adapter runs with `--sandbox read-only`,
 `--ask-for-approval never`, and `--ephemeral`. Override those with
 `AGENT_HUB_CODEX_CLI_SANDBOX`, `AGENT_HUB_CODEX_CLI_APPROVAL`, and
 `AGENT_HUB_CODEX_CLI_PROFILE` when needed.
+
+For the easiest no-key setup in VS Code, run
+`Agent Hub: Use Codex CLI Without API Key` or click `Codex CLI Mode` in Agent
+Hub. That enables `codex-cli`, disables API-key fallbacks, caps output, and uses
+compact Codex prompts. Set `AGENT_HUB_CODEX_CLI_PROMPT_TOKENS` to override the
+provider-side prompt budget.
