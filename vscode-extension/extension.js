@@ -289,6 +289,7 @@ const SENSITIVE_PERMISSION_CATEGORIES = new Set([
   "cloud_provider",
   "config_edit",
   "file_write",
+  "model_exploration",
   "model_download",
   "process_control",
   "secret_edit",
@@ -3579,7 +3580,11 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
       source: "vscode-chat-participant",
       command,
       agent_mode: selectedAgentMode
-    }
+    },
+    agent_hub: agentHubRequestOptions(config, {
+      classification_text: prompt,
+      user_task: prompt
+    })
   };
   applyOptionalMaxTokens(body, config);
 
@@ -4061,7 +4066,8 @@ async function saveChatSettingsFromWebview(panel, rawSettings) {
       : "";
     const configChanged = configPath
       ? await saveCloudModelSettingsToConfig(configPath, next.cloudSettings, {
-        workspaceDir: generatedConfigWorkspaceDir(next.workspaceSettings.configPath, workspace)
+        workspaceDir: generatedConfigWorkspaceDir(next.workspaceSettings.configPath, workspace),
+        storageDir: generatedConfigStorageDir(next.workspaceSettings.configPath, workspace)
       })
       : false;
     const restartNote = serverProcess || (await isServerOnline())
@@ -4081,9 +4087,9 @@ async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
       ...(rawSettings && typeof rawSettings === "object" ? rawSettings : {}),
       agentProviderMode: "cloud",
       cloudRouteMode: "ollama-cloud",
-      apiKeyModelsEnabled: false,
-      freeCloudPresetsEnabled: false,
-      freeOnly: true,
+      apiKeyModelsEnabled: true,
+      freeCloudPresetsEnabled: true,
+      freeOnly: false,
       enableLoadBalancing: true,
       maxTokens: MAX_TOKEN_SAVE_OUTPUT_TOKENS,
       agentMaxSteps: MAX_TOKEN_SAVE_AGENT_STEPS,
@@ -4096,10 +4102,10 @@ async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
       : "VS Code user settings";
     if (!(await requestPermission({
       category: "config_edit",
-      description: "Agent Hub wants to enable maximum token save mode for Ollama Cloud control.",
+      description: "Agent Hub wants to enable maximum token save mode for free cloud offload.",
       resource,
       risk: "medium",
-      detail: "This switches control to Ollama Cloud, disables API-key cloud priority, enables compaction, and lowers context/output budgets."
+      detail: "This routes free cloud models first for simple work, keeps API-key models as fallback, enables compaction, and lowers context/output budgets."
     }))) {
       postChatSettings(panel, "Maximum token save mode was cancelled.");
       return;
@@ -4130,14 +4136,15 @@ async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
       ? await saveCloudModelSettingsToConfig(configPath, {
         ...next.cloudSettings,
         cloudRouteMode: "ollama-cloud",
-        apiKeyModelsEnabled: false,
-        freeCloudPresetsEnabled: false,
-        freeOnly: true,
+        apiKeyModelsEnabled: true,
+        freeCloudPresetsEnabled: true,
+        freeOnly: false,
         enableLoadBalancing: true,
         maxTokenSaveMode: true,
         agentContextBudgetTokens: MAX_TOKEN_SAVE_CONTEXT_BUDGET
       }, {
-        workspaceDir: generatedConfigWorkspaceDir(next.workspaceSettings.configPath, workspace)
+        workspaceDir: generatedConfigWorkspaceDir(next.workspaceSettings.configPath, workspace),
+        storageDir: generatedConfigStorageDir(next.workspaceSettings.configPath, workspace)
       })
       : false;
     const restartNote = serverProcess || (await isServerOnline())
@@ -4145,7 +4152,7 @@ async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
       : "";
     const configNote = configChanged ? " Updated Agent Hub routing and token budgets." : "";
     const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
-    postChatSettings(panel, `Maximum token save mode is on for Ollama Cloud.${migrationNote}${configNote}${restartNote}`);
+    postChatSettings(panel, `Maximum token save mode is on: free cloud models first, API-key models as fallback.${migrationNote}${configNote}${restartNote}`);
   } catch (error) {
     postChatSettings(panel, `Could not enable maximum token save mode: ${error.message}`);
   }
@@ -4241,6 +4248,42 @@ function applyOptionalMaxTokens(body, config) {
     body.max_tokens = Math.floor(value);
   }
   return body;
+}
+
+function isMaxTokenSaveMode(config) {
+  if (!config || normalizeContextMode(config.contextMode) !== "minimal") {
+    return false;
+  }
+  const budget = Number(config.agentContextBudgetTokens);
+  const outputTokens = Number(config.maxTokens);
+  const steps = Number(config.agentMaxSteps);
+  return (
+    Number.isFinite(budget) &&
+    budget > 0 &&
+    budget <= 4000 &&
+    Number.isFinite(outputTokens) &&
+    outputTokens > 0 &&
+    outputTokens <= 800 &&
+    Number.isFinite(steps) &&
+    steps > 0 &&
+    steps <= 8
+  );
+}
+
+function agentHubRequestOptions(config, extra = {}) {
+  const options = { ...(extra && typeof extra === "object" ? extra : {}) };
+  if (isMaxTokenSaveMode(config)) {
+    options.max_token_save_mode = true;
+    options.free_cloud_offload = true;
+    options.prefer_free_cloud = true;
+    options.allow_cloud_exploration = true;
+    options.context_mode = "minimal";
+    options.minimal_tool_schema = true;
+    options.reduced_repo_context = true;
+    options.max_context_tokens = config.agentContextBudgetTokens;
+    options.context_budget_tokens = config.agentContextBudgetTokens;
+  }
+  return options;
 }
 
 function normalizeServerUrl(value, fallback) {
@@ -4550,7 +4593,8 @@ async function saveLocalModelChoice(panel, source, options = {}) {
     const config = settings();
     const configPath = resolveConfigPath(config.configPath, workspace);
     const changed = applyLocalModelSelectionToConfig(configPath, source, {
-      workspaceDir: generatedConfigWorkspaceDir(config.configPath, workspace)
+      workspaceDir: generatedConfigWorkspaceDir(config.configPath, workspace),
+      storageDir: generatedConfigStorageDir(config.configPath, workspace)
     });
     const restartNote = serverProcess
       ? " Restart Agent Hub to use it."
@@ -4680,6 +4724,10 @@ async function sendChatTurn(panel, message) {
     agent_context_compaction_enabled: config.agentContextCompactionEnabled,
     context_mode: config.contextMode,
     cline_compatibility_mode: config.clineCompatibilityMode,
+    agent_hub: agentHubRequestOptions(config, {
+      classification_text: text,
+      user_task: text
+    }),
     group_agent: {
       plan_candidates: config.groupPlanCandidates
     },
@@ -4730,6 +4778,7 @@ async function sendChatTurn(panel, message) {
           stream: true,
           approval_granted: true,
           agent_hub: {
+            ...(body.agent_hub && typeof body.agent_hub === "object" ? body.agent_hub : {}),
             approval_granted: true
           }
         },
@@ -6262,9 +6311,9 @@ ${apiKeyFieldsHtml()}
     document.getElementById("maxTokenSave").addEventListener("click", () => {
       controlMode.value = "cloud";
       settingInputs.cloudRouteMode.value = "ollama-cloud";
-      settingInputs.apiKeyModelsEnabled.checked = false;
-      settingInputs.freeCloudPresetsEnabled.checked = false;
-      settingInputs.freeOnly.checked = true;
+      settingInputs.apiKeyModelsEnabled.checked = true;
+      settingInputs.freeCloudPresetsEnabled.checked = true;
+      settingInputs.freeOnly.checked = false;
       settingInputs.enableLoadBalancing.checked = true;
       settingInputs.maxTokens.value = String(${MAX_TOKEN_SAVE_OUTPUT_TOKENS});
       settingInputs.agentMaxSteps.value = String(${MAX_TOKEN_SAVE_AGENT_STEPS});
@@ -6850,13 +6899,14 @@ function prependEnvPath(env, name, value) {
 async function ensureLocalConfig(config, workspace) {
   const configPath = resolveConfigPath(config.configPath, workspace);
   const workspaceDir = generatedConfigWorkspaceDir(config.configPath, workspace);
+  const storageDir = generatedConfigStorageDir(config.configPath, workspace);
   if (fs.existsSync(configPath)) {
-    return repairGeneratedLocalConfig(configPath, { workspaceDir });
+    return repairGeneratedLocalConfig(configPath, { workspaceDir, storageDir });
   }
 
   const sources = await detectLocalModelSources();
   const selectedSources = sources.length ? sources : fallbackLocalModelSources();
-  const data = localConfigForLocalModels(selectedSources, { workspaceDir });
+  const data = localConfigForLocalModels(selectedSources, { workspaceDir, storageDir });
   ensureConfigDirectory(configPath);
   fs.writeFileSync(configPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   output.appendLine(`Created Agent Hub config at ${configPath}.`);
@@ -6870,6 +6920,7 @@ async function ensureLocalConfig(config, workspace) {
 
 async function repairGeneratedLocalConfig(configPath, options = {}) {
   const workspaceDir = normalizeWorkspaceDirOption(options.workspaceDir);
+  const storageDir = normalizeWorkspaceDirOption(options.storageDir);
   let raw;
   let usedLenientParser = false;
   try {
@@ -6881,7 +6932,7 @@ async function repairGeneratedLocalConfig(configPath, options = {}) {
     const sources = await detectLocalModelSources();
     const selectedSources = sources.length ? sources : fallbackLocalModelSources();
     const backupPath = backupConfigFile(configPath);
-    fs.writeFileSync(configPath, `${JSON.stringify(localConfigForLocalModels(selectedSources, { workspaceDir }), null, 2)}\n`, "utf8");
+    fs.writeFileSync(configPath, `${JSON.stringify(localConfigForLocalModels(selectedSources, { workspaceDir, storageDir }), null, 2)}\n`, "utf8");
     output.appendLine(`Backed up unreadable Agent Hub config to ${backupPath}.`);
     output.appendLine(`Created a fresh local Agent Hub config at ${configPath}.`);
     output.appendLine(`Configured cloud control agents: ${describeCloudSources(selectedSources)}`);
@@ -6943,7 +6994,8 @@ async function repairGeneratedLocalConfig(configPath, options = {}) {
     const repaired = localConfigForLocalModels(selectedSources, {
       cloudRouteMode: configCloudRouteMode(raw),
       cloudSettings: cloudModelSettingsFromConfig(raw),
-      workspaceDir
+      workspaceDir,
+      storageDir
     });
     if (explicitLocalSources.length) {
       repaired.local_model_selection = raw.local_model_selection;
@@ -6965,11 +7017,14 @@ async function repairGeneratedLocalConfig(configPath, options = {}) {
     }
   }
 
-  if (workspaceDir && raw.workspace_dir !== workspaceDir) {
+  const statePathsChanged = applyGeneratedStoragePaths(raw, storageDir, workspaceDir);
+  if ((workspaceDir && raw.workspace_dir !== workspaceDir) || statePathsChanged) {
     const backupPath = backupConfigFile(configPath);
-    raw.workspace_dir = workspaceDir;
+    if (workspaceDir) {
+      raw.workspace_dir = workspaceDir;
+    }
     fs.writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
-    output.appendLine(`Updated Agent Hub workspace_dir for ${configPath}.`);
+    output.appendLine(`Updated Agent Hub workspace/state paths for ${configPath}.`);
     output.appendLine(`Original config was backed up to ${backupPath}.`);
     return true;
   }
@@ -7082,6 +7137,7 @@ function localModelSelection(source) {
 
 function applyLocalModelSelectionToConfig(configPath, source, options = {}) {
   const workspaceDir = normalizeWorkspaceDirOption(options.workspaceDir);
+  const storageDir = normalizeWorkspaceDirOption(options.storageDir);
   const existingText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
   let data;
   let backedUpExisting = false;
@@ -7096,11 +7152,12 @@ function applyLocalModelSelectionToConfig(configPath, source, options = {}) {
   }
 
   if (!data || typeof data !== "object" || Array.isArray(data)) {
-    data = localConfigForLocalModels([source], { workspaceDir });
+    data = localConfigForLocalModels([source], { workspaceDir, storageDir });
   } else {
     if (workspaceDir) {
       data.workspace_dir = workspaceDir;
     }
+    applyGeneratedStoragePaths(data, storageDir, workspaceDir);
     data.agents = Array.isArray(data.agents) ? data.agents : [];
     data.routes = Array.isArray(data.routes) ? data.routes : [];
     upsertAgentConfig(data.agents, localModelAgentConfig(source));
@@ -7124,6 +7181,7 @@ function applyLocalModelSelectionToConfig(configPath, source, options = {}) {
 
 async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options = {}) {
   const workspaceDir = normalizeWorkspaceDirOption(options.workspaceDir);
+  const storageDir = normalizeWorkspaceDirOption(options.storageDir);
   const existingText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
   let data;
   let backedUpExisting = false;
@@ -7142,13 +7200,15 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
     data = localConfigForLocalModels(sources.length ? sources : fallbackLocalModelSources(), {
       cloudRouteMode: cloudSettings.cloudRouteMode,
       cloudSettings,
-      workspaceDir
+      workspaceDir,
+      storageDir
     });
   }
 
   if (workspaceDir) {
     data.workspace_dir = workspaceDir;
   }
+  applyGeneratedStoragePaths(data, storageDir, workspaceDir);
   data.agents = Array.isArray(data.agents) ? data.agents : [];
   data.routes = Array.isArray(data.routes) ? data.routes : [];
   data.free_only = cloudSettings.freeOnly !== false;
@@ -7196,6 +7256,17 @@ function applyMaxTokenSaveModeToConfig(data, settings = {}) {
   data.max_context_tokens = budget;
   data.repo_context_max_files = MAX_TOKEN_SAVE_REPO_FILES;
   data.repo_context_max_chars = MAX_TOKEN_SAVE_REPO_CHARS;
+  data.routing = {
+    ...(data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)
+      ? data.routing
+      : {}),
+    free_first: true,
+    prefer_available_quota: true,
+    simple_cloud_exploration_enabled: true,
+    simple_cloud_exploration_rate: 0.35,
+    simple_cloud_min_relative_score: 0.82,
+    simple_cloud_min_samples: 3
+  };
   data.compatibility_mode = {
     ...(data.compatibility_mode && typeof data.compatibility_mode === "object" && !Array.isArray(data.compatibility_mode)
       ? data.compatibility_mode
@@ -7395,13 +7466,14 @@ function localConfigForLocalModels(sources, options = {}) {
       : [...ollamaCloudAgents, ...cloudAgents]
   );
   const hybridAgents = cloudRouteAgents;
+  const storagePaths = generatedStoragePaths(options.storageDir);
   return {
     host: "127.0.0.1",
     port: 8787,
-    state_dir: ".agent-hub/state",
-    inbox_dir: ".agent-hub/inbox",
-    outbox_dir: ".agent-hub/outbox",
-    archive_dir: ".agent-hub/archive",
+    state_dir: storagePaths.stateDir,
+    inbox_dir: storagePaths.inboxDir,
+    outbox_dir: storagePaths.outboxDir,
+    archive_dir: storagePaths.archiveDir,
     workspace_dir: normalizeWorkspaceDirOption(options.workspaceDir) || ".",
     agent_max_steps: 8,
     agent_context_budget_tokens: 32000,
@@ -7472,6 +7544,7 @@ function cloudModelSources(settings = {}) {
       label: "Codex",
       provider: "openai",
       enabled: !!settings.apiKeyModelsEnabled,
+      free: settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.codexModel, process.env.AGENT_HUB_CODEX_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CODEX_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CODEX_API_KEY_ENV || "OPENAI_API_KEY",
       baseUrl: process.env.AGENT_HUB_CODEX_BASE_URL || process.env.OPENAI_BASE_URL || "",
@@ -7482,6 +7555,7 @@ function cloudModelSources(settings = {}) {
       label: "Claude",
       provider: "anthropic",
       enabled: !!settings.apiKeyModelsEnabled,
+      free: settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.claudeModel, process.env.AGENT_HUB_CLAUDE_MODEL || DEFAULT_CLAUDE_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CLAUDE_API_KEY_ENV || "ANTHROPIC_API_KEY",
       baseUrl: process.env.AGENT_HUB_CLAUDE_BASE_URL || "",
@@ -7492,6 +7566,7 @@ function cloudModelSources(settings = {}) {
       label: "Gemini",
       provider: "gemini",
       enabled: !!settings.apiKeyModelsEnabled,
+      free: settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.geminiModel, process.env.AGENT_HUB_GEMINI_MODEL || DEFAULT_GEMINI_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_GEMINI_API_KEY_ENV || "GEMINI_API_KEY",
       baseUrl: process.env.AGENT_HUB_GEMINI_BASE_URL || "",
@@ -7502,6 +7577,7 @@ function cloudModelSources(settings = {}) {
       label: "ChatGPT",
       provider: "openai",
       enabled: !!settings.apiKeyModelsEnabled,
+      free: settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.chatgptModel, process.env.AGENT_HUB_CHATGPT_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CHATGPT_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CHATGPT_API_KEY_ENV || "OPENAI_API_KEY",
       baseUrl: process.env.AGENT_HUB_CHATGPT_BASE_URL || process.env.OPENAI_BASE_URL || "",
@@ -7682,7 +7758,7 @@ function cloudModelAgentConfig(source) {
     provider_type: source.providerType,
     model: source.model,
     enabled: !!source.enabled,
-    free: true,
+    free: source.free !== false,
     api_key_env: source.apiKeyEnv,
     context_window: source.contextWindow,
     timeout_seconds: 60,
@@ -8371,7 +8447,7 @@ async function askAgent() {
   if (!task) {
     return;
   }
-  await sendAgentRequest({ task, context: editorContext({ preferSelection: true }) });
+  await sendAgentRequest({ task, context: editorContext({ preferSelection: true }), routingText: task });
 }
 
 async function runCodingAgent() {
@@ -8401,6 +8477,7 @@ async function runCodingAgent() {
     ].join("\n"),
     context: selectedEditorContext() || activeEditorReferenceContext(),
     route,
+    routingText: task,
     agentMode: true,
     extra: {
       allow_shell_tools: config.allowShellTools,
@@ -8487,6 +8564,10 @@ async function requestCommitMessage(diffContext) {
     context_mode: config.contextMode,
     cline_compatibility_mode: config.clineCompatibilityMode,
     max_tokens: 160,
+    agent_hub: agentHubRequestOptions(config, {
+      classification_text: "Generate a concise Git commit message for the provided diff.",
+      routing_mode: isMaxTokenSaveMode(config) ? "cheapest" : undefined
+    }),
     metadata: {
       source: "vscode-scm",
       command: "generateCommitMessage",
@@ -8797,6 +8878,7 @@ async function researchWeb() {
     ].join("\n"),
     context: selectedEditorContext(),
     route: config.researchRoute,
+    routingText: query,
     agentMode: false,
     extra: {
       query,
@@ -8814,7 +8896,8 @@ async function explainSelection() {
   const selected = editor.document.getText(editor.selection);
   await sendAgentRequest({
     task: "Explain this selected code or text clearly and point out anything important.",
-    context: contextForDocument(editor.document, selected)
+    context: contextForDocument(editor.document, selected),
+    routingText: "Explain this selected code or text clearly."
   });
 }
 
@@ -8826,11 +8909,12 @@ async function explainFile() {
   }
   await sendAgentRequest({
     task: "Explain this file clearly. Describe what it does, important functions/classes, and any likely gotchas.",
-    context: contextForDocument(editor.document, editor.document.getText())
+    context: contextForDocument(editor.document, editor.document.getText()),
+    routingText: "Explain this file clearly."
   });
 }
 
-async function sendAgentRequest({ task, context, route, agentMode = true, extra = {} }) {
+async function sendAgentRequest({ task, context, route, routingText, agentMode = true, extra = {} }) {
   const config = settings();
   if (!(await approveModelRequest({
     providerMode: config.agentProviderMode,
@@ -8846,8 +8930,9 @@ async function sendAgentRequest({ task, context, route, agentMode = true, extra 
   }
 
   const selectedAgentMode = agentMode ? normalizeAgentMode(config.agentMode) : "route";
+  const { agent_hub: extraAgentHub, ...extraBody } = extra && typeof extra === "object" ? extra : {};
   const body = {
-    ...extra,
+    ...extraBody,
     session_id: `vscode-${Date.now()}`,
     mode: selectedAgentMode,
     route: route || config.route,
@@ -8862,6 +8947,11 @@ async function sendAgentRequest({ task, context, route, agentMode = true, extra 
     group_agent: {
       plan_candidates: config.groupPlanCandidates
     },
+    agent_hub: agentHubRequestOptions(config, {
+      ...(extraAgentHub && typeof extraAgentHub === "object" ? extraAgentHub : {}),
+      classification_text: routingText || task,
+      user_task: routingText || task
+    }),
     metadata: {
       source: "vscode",
       agent_mode: selectedAgentMode
@@ -9327,7 +9417,8 @@ function controlAgentSummary(providerMode) {
 }
 
 async function approveModelRequest({ providerMode, contextText, source }) {
-  const mode = normalizeAgentProviderMode(providerMode || settings().agentProviderMode);
+  const config = settings();
+  const mode = normalizeAgentProviderMode(providerMode || config.agentProviderMode);
   if (mode === "local") {
     return true;
   }
@@ -9350,9 +9441,12 @@ async function approveModelRequest({ providerMode, contextText, source }) {
       sendsWorkspace
         ? "Workspace/file context may be included in the model request."
         : "The request may use an external provider depending on routing.",
+      isMaxTokenSaveMode(config)
+        ? "Maximum token save mode may randomly try compatible free cloud models for simple tasks, compare stored model feedback against Codex-like fallback performance, and use the fallback when learned quality is not close enough."
+        : "",
       secretWarning,
       "Provider API usage may consume quota or credits."
-    ].join(" ")
+    ].filter(Boolean).join(" ")
   });
 }
 
@@ -9509,10 +9603,14 @@ function isDefaultConfigSetting(configPath) {
 }
 
 function defaultExtensionConfigPath(workspace) {
+  return path.join(defaultExtensionWorkspaceStorageDir(workspace), DEFAULT_CONFIG_FILENAME);
+}
+
+function defaultExtensionWorkspaceStorageDir(workspace) {
   const storageRoot = extensionContext && extensionContext.globalStorageUri
     ? extensionContext.globalStorageUri.fsPath
     : path.join(workspace || process.cwd(), ".agent-hub", "vscode");
-  return path.join(storageRoot, "workspaces", workspaceStorageKey(workspace), DEFAULT_CONFIG_FILENAME);
+  return path.join(storageRoot, "workspaces", workspaceStorageKey(workspace));
 }
 
 function workspaceStorageKey(workspace) {
@@ -9527,6 +9625,97 @@ function generatedConfigWorkspaceDir(configPath, workspace) {
     return "";
   }
   return path.resolve(workspace);
+}
+
+function generatedConfigStorageDir(configPath, workspace) {
+  if (!workspace || !isDefaultConfigSetting(configPath)) {
+    return "";
+  }
+  return path.join(defaultExtensionWorkspaceStorageDir(workspace), "runtime");
+}
+
+function generatedStoragePaths(storageDir) {
+  const root = normalizeWorkspaceDirOption(storageDir);
+  if (!root) {
+    return {
+      stateDir: ".agent-hub/state",
+      inboxDir: ".agent-hub/inbox",
+      outboxDir: ".agent-hub/outbox",
+      archiveDir: ".agent-hub/archive"
+    };
+  }
+  return {
+    stateDir: path.join(root, "state"),
+    inboxDir: path.join(root, "inbox"),
+    outboxDir: path.join(root, "outbox"),
+    archiveDir: path.join(root, "archive")
+  };
+}
+
+function applyGeneratedStoragePaths(data, storageDir, workspaceDir = "") {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return false;
+  }
+  const paths = generatedStoragePaths(storageDir);
+  if (!normalizeWorkspaceDirOption(storageDir)) {
+    return false;
+  }
+  const previous = {
+    state_dir: data.state_dir,
+    inbox_dir: data.inbox_dir,
+    outbox_dir: data.outbox_dir,
+    archive_dir: data.archive_dir
+  };
+  let changed = false;
+  for (const [key, value] of Object.entries({
+    state_dir: paths.stateDir,
+    inbox_dir: paths.inboxDir,
+    outbox_dir: paths.outboxDir,
+    archive_dir: paths.archiveDir
+  })) {
+    if (data[key] !== value) {
+      data[key] = value;
+      changed = true;
+    }
+  }
+  migrateGeneratedStateDirectory(previous.state_dir, paths.stateDir, workspaceDir);
+  migrateGeneratedStateDirectory(previous.inbox_dir, paths.inboxDir, workspaceDir);
+  migrateGeneratedStateDirectory(previous.outbox_dir, paths.outboxDir, workspaceDir);
+  migrateGeneratedStateDirectory(previous.archive_dir, paths.archiveDir, workspaceDir);
+  return changed;
+}
+
+function migrateGeneratedStateDirectory(previousPath, nextPath, workspaceDir = "") {
+  if (!previousPath || !nextPath) {
+    return;
+  }
+  const source = resolveRuntimeStatePath(previousPath, workspaceDir);
+  const target = resolveRuntimeStatePath(nextPath, workspaceDir);
+  if (!source || !target || path.resolve(source) === path.resolve(target)) {
+    return;
+  }
+  try {
+    if (!fs.existsSync(source) || fs.existsSync(target)) {
+      return;
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.cpSync(source, target, { recursive: true, errorOnExist: false, force: false });
+    output.appendLine(`Migrated Agent Hub state from ${source} to ${target}.`);
+  } catch (error) {
+    output.appendLine(`Could not migrate Agent Hub state from ${source} to ${target}: ${error.message}`);
+  }
+}
+
+function resolveRuntimeStatePath(value, workspaceDir = "") {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) {
+    return "";
+  }
+  const expanded = expandHomePath(text);
+  if (path.isAbsolute(expanded)) {
+    return expanded;
+  }
+  return path.resolve(workspaceDir || process.cwd(), expanded);
 }
 
 function normalizeWorkspaceDirOption(value) {

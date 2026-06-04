@@ -75,12 +75,37 @@ class ProviderScoreStore:
         for agent, rows in grouped.items():
             current = existing.get(agent, {})
             task_scores = dict(current.get("task_scores") or {})
-            latencies = []
+            task_sample_counts = _int_mapping(current.get("task_sample_counts"))
+            latency_count = int(current.get("latency_sample_count", 0) or 0)
+            average_latency = float(current.get("average_latency_ms", 0) or 0)
+            successes = int(current.get("successes", 0) or 0)
+            failures = int(current.get("failures", 0) or 0)
             for row in rows:
-                task_scores[row.task_type] = row.score
+                task_type = row.task_type or "general"
+                previous_count = max(0, int(task_sample_counts.get(task_type, 0)))
+                previous_score = float(task_scores.get(task_type, 0.0) or 0.0)
+                task_scores[task_type] = round(
+                    ((previous_score * previous_count) + float(row.score)) / (previous_count + 1),
+                    4,
+                )
+                task_sample_counts[task_type] = previous_count + 1
                 if row.latency_ms:
-                    latencies.append(row.latency_ms)
-            overall = sum(float(value) for value in task_scores.values()) / max(1, len(task_scores))
+                    average_latency = (
+                        (average_latency * latency_count) + float(row.latency_ms)
+                    ) / (latency_count + 1)
+                    latency_count += 1
+                if row.ok:
+                    successes += 1
+                else:
+                    failures += 1
+            total_samples = sum(max(0, int(value)) for value in task_sample_counts.values())
+            if total_samples:
+                overall = sum(
+                    float(task_scores.get(task_type, 0.0) or 0.0) * max(0, int(count))
+                    for task_type, count in task_sample_counts.items()
+                ) / total_samples
+            else:
+                overall = sum(float(value) for value in task_scores.values()) / max(1, len(task_scores))
             existing[agent] = {
                 **current,
                 "agent": agent,
@@ -88,8 +113,12 @@ class ProviderScoreStore:
                 "model": rows[-1].model,
                 "overall_score": round(max(0.0, min(1.0, overall)), 4),
                 "task_scores": task_scores,
-                "average_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else current.get("average_latency_ms", 0),
+                "task_sample_counts": task_sample_counts,
+                "average_latency_ms": round(average_latency, 2) if latency_count else 0,
+                "latency_sample_count": latency_count,
                 "sample_count": int(current.get("sample_count", 0)) + len(rows),
+                "successes": successes,
+                "failures": failures,
                 "last_evaluated_at": now,
             }
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +127,31 @@ class ProviderScoreStore:
             encoding="utf-8",
         )
         return existing
+
+    def record_outcome(
+        self,
+        *,
+        agent: str,
+        provider: str,
+        model: str,
+        task_type: str,
+        score: float,
+        latency_ms: float,
+        ok: bool,
+    ) -> dict[str, dict[str, Any]]:
+        return self.save_results(
+            [
+                BenchmarkResult(
+                    agent=agent,
+                    provider=provider,
+                    model=model,
+                    task_type=task_type or "general",
+                    score=round(max(0.0, min(1.0, float(score or 0.0))), 4),
+                    latency_ms=round(max(0.0, float(latency_ms or 0.0)), 2),
+                    ok=bool(ok),
+                )
+            ]
+        )
 
 
 class BenchmarkRunner:
@@ -182,3 +236,17 @@ __all__ = [
     "ProviderScoreStore",
     "default_benchmark_tasks",
 ]
+
+
+def _int_mapping(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            continue
+        try:
+            result[key] = max(0, int(item))
+        except (TypeError, ValueError):
+            continue
+    return result

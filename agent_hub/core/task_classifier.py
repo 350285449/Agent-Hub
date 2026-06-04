@@ -179,6 +179,16 @@ def classify_task(request: HubRequest) -> TaskClassification:
 
 
 def _classification_text(request: HubRequest) -> str:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    for source in (hub, raw, metadata):
+        if not isinstance(source, dict):
+            continue
+        for key in ("classification_text", "routing_text", "user_task"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
     parts = [request.task or "", request.context or ""]
     for message in request.messages:
         if not isinstance(message, dict):
@@ -328,10 +338,10 @@ def _task_type(
         return "review"
     if _looks_like_research_task(text):
         return "research"
-    if _looks_like_coding_task(text) or any(ext in CODE_EXTENSIONS for ext in file_types):
-        return "coding"
     if _looks_like_simple_explanation(text, estimated_tokens):
         return "simple_explanation"
+    if _looks_like_coding_task(text) or any(ext in CODE_EXTENSIONS for ext in file_types):
+        return "coding"
     return "general"
 
 
@@ -613,12 +623,17 @@ def _permission_requirements(request: HubRequest, text: str, file_types: list[st
 
 
 def _looks_like_simple_explanation(text: str, estimated_tokens: int) -> bool:
-    if estimated_tokens > 3000:
+    if estimated_tokens > 16_000:
         return False
     return bool(
         re.search(r"\b(explain|what is|what are|why|summarize|describe)\b", text)
-        and not _looks_like_coding_task(text)
-        and not _tool_task_requested(text)
+        and not _looks_like_mutating_task(text)
+        and not _looks_like_debug_task(text)
+        and not _looks_like_test_generation_task(text)
+        and not _looks_like_review_task(text)
+        and not _looks_like_research_task(text)
+        and not _looks_like_shell_task(text)
+        and not _looks_like_security_task(text)
     )
 
 

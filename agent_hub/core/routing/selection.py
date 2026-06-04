@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 import uuid
 from dataclasses import dataclass, field, fields, replace
@@ -30,7 +31,7 @@ from ...payloads import content_to_text, request_text
 from ...providers import Provider, ProviderError, create_provider
 from ...response_normalization import validate_provider_result
 from ...repository import repo_context_for_request
-from ...routing_memory import RoutingMemoryStore
+from ...routing_memory import RoutingMemoryStore, outcome_score
 from ...security.provider_permissions import ProviderPermissionPolicy
 from ...session_store import SessionStore
 from ...streaming import normalize_stream_chunk
@@ -327,7 +328,8 @@ class AgentRouter:
             record_tool_result=self.record_tool_result,
             record_event=self._record_route_event,
         )
-        self.provider_scores = ProviderScoreStore(config.state_dir).load()
+        self.provider_score_store = ProviderScoreStore(config.state_dir)
+        self.provider_scores = self.provider_score_store.load()
         self.adaptive_learning = AdaptiveLearningStore(config.state_dir)
         self.routing_memory = RoutingMemoryStore.from_config(config)
         self.context_cache = ContextCache(
@@ -1310,6 +1312,9 @@ class AgentRouter:
                 ),
             )
         if mode == "cheapest":
+            exploration_order = self._simple_cloud_exploration_order(agents, request)
+            if exploration_order is not None:
+                return exploration_order
             return self._rank_by_key(
                 agents,
                 request,
@@ -1339,6 +1344,136 @@ class AgentRouter:
                 ),
             )
         return self._balanced_agents(agents, request)
+
+    def _simple_cloud_exploration_order(
+        self,
+        agents: list[AgentConfig],
+        request: HubRequest,
+    ) -> list[AgentConfig] | None:
+        if not agents or not self.config.enable_load_balancing:
+            return None
+        if not _routing_bool(self.config, "simple_cloud_exploration_enabled", True):
+            return None
+        if not _request_bool_option(
+            request,
+            "allow_cloud_exploration",
+            "simple_cloud_exploration",
+            "free_cloud_offload",
+            default=False,
+        ):
+            return None
+        classification = self.task_classifier.classify(request)
+        if classification.task_type != "simple_explanation" or classification.risk_level != "low":
+            return None
+        if _request_has_tools(request) or _requires_tool_capable_model(request):
+            return None
+
+        codex = _codex_efficiency_reference_agent(agents)
+        cloud_candidates = [agent for agent in agents if _free_remote_cloud_agent(agent)]
+        if codex is None or not cloud_candidates:
+            return None
+
+        codex_score, _codex_samples = self._model_efficiency_score(codex, request, classification)
+        if codex_score is None:
+            codex_score = _routing_float(self.config, "simple_cloud_codex_baseline_score", 0.82)
+        min_relative = _bounded_float(
+            _routing_float(self.config, "simple_cloud_min_relative_score", 0.82),
+            0.1,
+            1.5,
+        )
+        min_samples = _routing_int(self.config, "simple_cloud_min_samples", 3)
+        explore_rate = _bounded_float(
+            _routing_float(self.config, "simple_cloud_exploration_rate", 0.35),
+            0.0,
+            1.0,
+        )
+
+        close: list[tuple[AgentConfig, float]] = []
+        unknown: list[AgentConfig] = []
+        below: list[tuple[AgentConfig, float]] = []
+        threshold = codex_score * min_relative
+        for agent in cloud_candidates:
+            score, samples = self._model_efficiency_score(agent, request, classification)
+            if score is None or samples < min_samples:
+                unknown.append(agent)
+            elif score >= threshold:
+                close.append((agent, score))
+            else:
+                below.append((agent, score))
+
+        selected: AgentConfig | None = None
+        if close:
+            selected = random.choice([agent for agent, _score in close])
+        elif unknown and random.random() < explore_rate:
+            selected = random.choice(unknown)
+
+        if selected is None:
+            ordered = [
+                codex,
+                *[agent for agent, _score in sorted(close, key=lambda item: item[1], reverse=True)],
+                *unknown,
+                *[agent for agent, _score in sorted(below, key=lambda item: item[1], reverse=True)],
+            ]
+        else:
+            ordered = [
+                selected,
+                *[agent for agent, _score in sorted(close, key=lambda item: item[1], reverse=True) if agent.name != selected.name],
+                codex,
+                *[agent for agent in unknown if agent.name != selected.name],
+                *[agent for agent, _score in sorted(below, key=lambda item: item[1], reverse=True)],
+            ]
+
+        return _dedupe_agents([*ordered, *agents])
+
+    def _model_efficiency_score(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        classification: Any,
+    ) -> tuple[float | None, int]:
+        scores: list[tuple[float, int]] = []
+        row = self.provider_scores.get(agent.name) if isinstance(self.provider_scores, dict) else None
+        if isinstance(row, dict):
+            task_scores = row.get("task_scores") if isinstance(row.get("task_scores"), dict) else {}
+            task_counts = row.get("task_sample_counts") if isinstance(row.get("task_sample_counts"), dict) else {}
+            for key in _score_task_aliases(classification):
+                if key in task_scores:
+                    count = max(1, int(task_counts.get(key, 1) or 1))
+                    scores.append((_bounded_float(_optional_float(task_scores.get(key)) or 0.0, 0.0, 1.0), count))
+                    break
+            else:
+                if row.get("overall_score") is not None:
+                    scores.append(
+                        (
+                            _bounded_float(_optional_float(row.get("overall_score")) or 0.0, 0.0, 1.0),
+                            max(1, int(row.get("sample_count", 1) or 1)),
+                        )
+                    )
+            if not scores and row.get("overall_score") is not None:
+                scores.append(
+                    (
+                        _bounded_float(_optional_float(row.get("overall_score")) or 0.0, 0.0, 1.0),
+                        max(1, int(row.get("sample_count", 1) or 1)),
+                    )
+                )
+        try:
+            signal = self.routing_memory.routing_signal(agent, classification)
+            attempts = int(signal.get("attempts", 0) or 0)
+            memory_score = _optional_float(signal.get("average_outcome_score"))
+            if attempts > 0 and memory_score is not None:
+                scores.append((_bounded_float(memory_score, 0.0, 1.0), attempts))
+        except Exception:
+            pass
+        health = self._health.get(agent.name)
+        if health is not None:
+            attempts = int(health.success_count + health.failure_count)
+            if attempts > 0:
+                scores.append((_bounded_float(health.reliability_score, 0.0, 1.0), attempts))
+        if not scores:
+            return None, 0
+        total_weight = sum(min(12, max(1, samples)) for _score, samples in scores)
+        weighted = sum(score * min(12, max(1, samples)) for score, samples in scores) / max(1, total_weight)
+        return round(_bounded_float(weighted, 0.0, 1.0), 4), sum(max(0, samples) for _score, samples in scores)
 
     def _rank_by_key(
         self,
@@ -2233,12 +2368,14 @@ class AgentRouter:
     ) -> None:
         if request is None:
             return
+        classification = None
         if self.config.adaptive_learning_enabled:
             try:
+                classification = self.task_classifier.classify(request)
                 self.adaptive_learning.record_outcome(
                     request_id=request_id,
                     route=request.route or "",
-                    task_type=self._classify_task(request),
+                    task_type=classification.task_type,
                     workflow_pattern=_request_workflow_pattern(request),
                     workflow_role=_request_workflow_role(request),
                     agent=agent,
@@ -2255,6 +2392,32 @@ class AgentRouter:
                 )
             except Exception:
                 pass
+        try:
+            if classification is None:
+                classification = self.task_classifier.classify(request)
+            timeout = str(error_type or "").lower() in {"timeout", "provider_timeout", "timed_out"}
+            tool_failure = "tool" in str(error_type or "").lower()
+            score = outcome_score(
+                success=success,
+                latency_seconds=latency_seconds,
+                fallback_count=failover_attempts,
+                timeout=timeout,
+                tool_failure=tool_failure,
+                reviewer_pass=True,
+                user_cancellation="cancel" in str(error_type or "").lower(),
+                token_efficiency=_token_efficiency_for_score(input_tokens, output_tokens),
+            )
+            self.provider_scores = self.provider_score_store.record_outcome(
+                agent=agent.name,
+                provider=agent.provider,
+                model=model or agent.model,
+                task_type=classification.task_type,
+                score=score,
+                latency_ms=max(0.0, float(latency_seconds or 0.0)) * 1000,
+                ok=success,
+            )
+        except Exception:
+            pass
         self._record_routing_memory_outcome(
             request_id=request_id,
             request=request,
@@ -2417,6 +2580,97 @@ def _request_option(request: HubRequest, *keys: str) -> Any:
     return None
 
 
+def _request_bool_option(request: HubRequest, *keys: str, default: bool = False) -> bool:
+    value = _request_option(request, *keys)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"0", "false", "no", "off", "disabled"}:
+            return False
+        if lowered in {"1", "true", "yes", "on", "enabled"}:
+            return True
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _free_remote_cloud_agent(agent: AgentConfig) -> bool:
+    if not is_free_agent(agent):
+        return False
+    provider_type = (agent.provider_type or agent.provider).lower()
+    if provider_type in {"codex-cli", "echo"}:
+        return False
+    if normalize_provider(agent.provider) == "local-research":
+        return False
+    if provider_type == "ollama-cloud":
+        return True
+    if normalize_provider(agent.provider) != "openai-compatible":
+        return False
+    return not _is_local_or_private_agent(agent)
+
+
+def _codex_efficiency_reference_agent(agents: list[AgentConfig]) -> AgentConfig | None:
+    explicit = [
+        agent
+        for agent in agents
+        if agent.name.lower() in {"codex", "chatgpt", "codex-fallback", "chatgpt-fallback"}
+        or (normalize_provider(agent.provider) == "openai" and not is_free_agent(agent))
+    ]
+    if explicit:
+        return sorted(
+            explicit,
+            key=lambda agent: (
+                float(agent.coding_score or 0.0) + float(agent.reasoning_score or 0.0),
+                float(agent.context_window or 0),
+            ),
+            reverse=True,
+        )[0]
+    paid = [agent for agent in agents if not is_free_agent(agent)]
+    if not paid:
+        return None
+    return sorted(
+        paid,
+        key=lambda agent: (
+            float(agent.coding_score or 0.0) + float(agent.reasoning_score or 0.0),
+            float(agent.context_window or 0),
+        ),
+        reverse=True,
+    )[0]
+
+
+def _score_task_aliases(classification: Any) -> list[str]:
+    data = classification.to_dict() if hasattr(classification, "to_dict") else {}
+    task_type = str(data.get("task_type") or "general")
+    task_category = str(data.get("task_category") or task_type)
+    aliases = [task_type, task_category]
+    if task_type == "simple_explanation" or task_category == "explanation":
+        aliases.extend(["summarization", "reasoning", "general"])
+    return _dedupe_strings([alias for alias in aliases if alias])
+
+
+def _dedupe_agents(agents: list[AgentConfig]) -> list[AgentConfig]:
+    seen: set[str] = set()
+    result: list[AgentConfig] = []
+    for agent in agents:
+        if agent.name in seen:
+            continue
+        seen.add(agent.name)
+        result.append(agent)
+    return result
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
 def _routing_value(config: HubConfig, key: str, default: Any) -> Any:
     routing = getattr(config, "routing", {}) or {}
     if isinstance(routing, dict) and routing.get(key) not in (None, ""):
@@ -2445,6 +2699,25 @@ def _routing_float(config: HubConfig, key: str, default: float) -> float:
         return max(0.0, float(_routing_value(config, key, default)))
     except (TypeError, ValueError):
         return default
+
+
+def _bounded_float(value: Any, minimum: float, maximum: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = minimum
+    return max(minimum, min(maximum, number))
+
+
+def _token_efficiency_for_score(input_tokens: int, output_tokens: int) -> float | None:
+    try:
+        input_count = max(0, int(input_tokens or 0))
+        output_count = max(0, int(output_tokens or 0))
+    except (TypeError, ValueError):
+        return None
+    if input_count <= 0:
+        return None
+    return output_count / input_count
 
 
 def _request_is_cline(request: HubRequest) -> bool:

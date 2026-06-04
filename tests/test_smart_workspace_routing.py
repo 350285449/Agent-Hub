@@ -10,6 +10,7 @@ from agent_hub.config import AgentConfig, HubConfig, RouteRule
 from agent_hub.core.context_preparation import ContextPreparationService
 from agent_hub.core.router import AgentRouter
 from agent_hub.core.task_classifier import TaskClassifier
+from agent_hub.evaluation import BenchmarkResult, ProviderScoreStore
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.payloads import openai_chat_response, openai_response_response
 from agent_hub.tools import create_builtin_registry
@@ -54,6 +55,144 @@ class SmartWorkspaceRoutingTests(unittest.TestCase):
         self.assertEqual(large.selected_agent, "long")
         self.assertIn("task_classification", large.to_dict())
         self.assertIn("reason", large.to_dict())
+
+    def test_token_save_routing_hint_offloads_simple_wrapped_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / ".agent-hub" / "state",
+                free_only=False,
+                enable_load_balancing=True,
+                default_route=["free-cloud", "codex-fallback"],
+                routes=[RouteRule(name="cloud-agent", agents=["free-cloud", "codex-fallback"])],
+                agents={
+                    "free-cloud": AgentConfig(
+                        name="free-cloud",
+                        provider="openai-compatible",
+                        provider_type="groq",
+                        model="free-qwen",
+                        base_url="https://example.invalid/v1",
+                        free=True,
+                        speed_score=1.0,
+                        coding_score=0.2,
+                        context_window=128_000,
+                    ),
+                    "codex-fallback": AgentConfig(
+                        name="codex-fallback",
+                        provider="openai",
+                        provider_type="openai",
+                        model="codex-like",
+                        free=False,
+                        coding_score=1.0,
+                        reasoning_score=1.0,
+                        supports_tools=True,
+                        context_window=128_000,
+                    ),
+                },
+            )
+            router = AgentRouter(config, provider_factory=_OkProvider)
+            wrapped_task = "\n".join(
+                [
+                    "Use workspace tools when inspection or edits are useful.",
+                    "Use the current file path from context.",
+                    "Explain this selected code clearly.",
+                ]
+            )
+
+            simple = router.decide(
+                HubRequest(
+                    session_id="s",
+                    route="cloud-agent",
+                    task=wrapped_task,
+                    context="File: app.py\n" + ("def run(): pass\n" * 1000),
+                    messages=[{"role": "user", "content": wrapped_task}],
+                    raw={"agent_hub": {"classification_text": "Explain this selected code clearly."}},
+                )
+            )
+            coding = router.decide(
+                HubRequest(
+                    session_id="s",
+                    route="cloud-agent",
+                    task=wrapped_task,
+                    context="File: app.py\n",
+                    messages=[{"role": "user", "content": wrapped_task}],
+                    raw={"agent_hub": {"classification_text": "Fix the bug in app.py and update tests."}},
+                )
+            )
+
+        self.assertEqual(simple.routing_mode, "cheapest")
+        self.assertEqual(simple.selected_agent, "free-cloud")
+        self.assertEqual(coding.routing_mode, "coding")
+        self.assertEqual(coding.selected_agent, "codex-fallback")
+
+    def test_cloud_exploration_uses_codex_when_cloud_score_is_not_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _cloud_exploration_config(root)
+            store = ProviderScoreStore(config.state_dir)
+            store.save_results(
+                [
+                    BenchmarkResult("free-cloud", "openai-compatible", "free-qwen", "simple_explanation", 0.40, 10, True),
+                    BenchmarkResult("free-cloud", "openai-compatible", "free-qwen", "simple_explanation", 0.44, 10, True),
+                    BenchmarkResult("free-cloud", "openai-compatible", "free-qwen", "simple_explanation", 0.46, 10, True),
+                    BenchmarkResult("codex-fallback", "openai", "codex-like", "simple_explanation", 0.92, 15, True),
+                    BenchmarkResult("codex-fallback", "openai", "codex-like", "simple_explanation", 0.94, 15, True),
+                    BenchmarkResult("codex-fallback", "openai", "codex-like", "simple_explanation", 0.93, 15, True),
+                ]
+            )
+
+            decision = AgentRouter(config, provider_factory=_OkProvider).decide(
+                HubRequest(
+                    session_id="s",
+                    route="cloud-agent",
+                    messages=[{"role": "user", "content": "Explain this selected code clearly."}],
+                    raw={
+                        "agent_hub": {
+                            "classification_text": "Explain this selected code clearly.",
+                            "allow_cloud_exploration": True,
+                        }
+                    },
+                )
+            )
+
+        self.assertEqual(decision.routing_mode, "cheapest")
+        self.assertEqual(decision.selected_agent, "codex-fallback")
+
+    def test_live_routed_outcomes_update_provider_score_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / ".agent-hub" / "state",
+                approval_mode="auto",
+                repo_context_enabled=False,
+                default_route=["agent"],
+                routes=[RouteRule(name="cloud-agent", agents=["agent"])],
+                agents={
+                    "agent": AgentConfig(
+                        name="agent",
+                        provider="openai-compatible",
+                        model="free-qwen",
+                        base_url="https://example.invalid/v1",
+                        free=True,
+                    )
+                },
+            )
+
+            AgentRouter(config, provider_factory=_OkProvider).route(
+                HubRequest(
+                    session_id="s",
+                    route="cloud-agent",
+                    messages=[{"role": "user", "content": "Explain what a context window is."}],
+                    raw={"provider_approval_granted": True},
+                )
+            )
+            scores = ProviderScoreStore(config.state_dir).load()
+
+        self.assertIn("agent", scores)
+        self.assertIn("simple_explanation", scores["agent"]["task_scores"])
+        self.assertGreater(scores["agent"]["sample_count"], 0)
 
     def test_router_decide_does_not_prepare_context_or_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,6 +350,48 @@ def _smart_config(root: Path) -> HubConfig:
                 free=False,
                 coding_score=0.5,
                 context_window=256_000,
+            ),
+        },
+    )
+
+
+def _cloud_exploration_config(root: Path) -> HubConfig:
+    return HubConfig(
+        workspace_dir=root,
+        state_dir=root / ".agent-hub" / "state",
+        free_only=False,
+        enable_load_balancing=True,
+        repo_context_enabled=False,
+        routing={
+            "simple_cloud_exploration_enabled": True,
+            "simple_cloud_exploration_rate": 1.0,
+            "simple_cloud_min_relative_score": 0.82,
+            "simple_cloud_min_samples": 3,
+        },
+        default_route=["free-cloud", "codex-fallback"],
+        routes=[RouteRule(name="cloud-agent", agents=["free-cloud", "codex-fallback"])],
+        agents={
+            "free-cloud": AgentConfig(
+                name="free-cloud",
+                provider="openai-compatible",
+                provider_type="groq",
+                model="free-qwen",
+                base_url="https://example.invalid/v1",
+                free=True,
+                speed_score=1.0,
+                coding_score=0.2,
+                context_window=128_000,
+            ),
+            "codex-fallback": AgentConfig(
+                name="codex-fallback",
+                provider="openai",
+                provider_type="openai",
+                model="codex-like",
+                free=False,
+                coding_score=1.0,
+                reasoning_score=1.0,
+                supports_tools=True,
+                context_window=128_000,
             ),
         },
     )
