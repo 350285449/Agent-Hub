@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.1
+
+- Syncs extension and backend release metadata for the next package.
+- Adds install verification, packaging checks, and command-runner hardening.
+
 ## 0.8.0
 
 - Syncs extension and backend release metadata for the next package.

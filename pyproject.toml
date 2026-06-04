@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-hub"
-version = "0.8.0"
+version = "0.8.1"
 description = "Local routing hub with Codex-style workspace chat, provider failover, and team-agent orchestration."
 readme = "README.md"
 requires-python = ">=3.11"
