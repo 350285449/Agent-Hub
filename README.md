@@ -450,12 +450,16 @@ Cloud control starts with Ollama cloud model IDs in fresh VS Code configs. Those
 models run through Ollama Cloud, not on your local CPU/GPU. To put hosted API-key
 models first, open the chat `Settings` menu, set `Cloud route` to `API-key
 models first`, save provider keys, and restart Agent Hub.
-Use `Token Safe Mode` in the same chat `Settings` menu when you want the
-Codex-style Agent-Hub chat to stay on Ollama Cloud while using minimal context,
-aggressive compaction, and a small output cap.
+Use `Token Safe Mode` in the same chat `Settings` menu when you want free cloud
+models to try first while Codex CLI and API-key models stay available as
+full-strength fallback. Token Safe caps the free-provider attempts, not the
+Codex fallback.
 Use `Codex CLI Mode` when you want Codex through your existing `codex login`
 session instead of an `OPENAI_API_KEY`; it enables the `codex-cli` route,
 disables API-key fallbacks, and applies a smaller Codex prompt/output budget.
+If `codex` is missing, run `Agent Hub: Install Codex CLI` from VS Code first;
+the extension opens a terminal that installs the official `@openai/codex`
+package and starts the login flow.
 
 Manual start without installing into a virtual environment:
 
@@ -546,10 +550,11 @@ and timeout with `AGENT_HUB_CODEX_CLI_COMMAND`,
 `AGENT_HUB_CODEX_CLI_PROFILE`, `AGENT_HUB_CODEX_CLI_MODEL`, and
 `AGENT_HUB_CODEX_CLI_TIMEOUT_SECONDS`.
 
-In VS Code, the easiest path is `Agent Hub: Use Codex CLI Without API Key` or
-the sidebar/chat `Codex CLI Mode` button. That writes the `codex-cli` route for
-you, keeps API-key model fallbacks off, and caps Codex requests to compact
-context by default.
+In VS Code, the easiest path is `Agent Hub: Install Codex CLI` if needed,
+followed by `Agent Hub: Use Codex CLI Without API Key` or the sidebar/chat
+`Codex CLI Mode` button. That writes the `codex-cli` route for you, keeps
+API-key model fallbacks off, and caps Codex requests to compact context by
+default.
 
 For direct chat, use:
 

@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub - Multi-Provider AI Router",
   "description": "Use OpenAI, Claude, Gemini, Ollama, OpenRouter and local models through one OpenAI-compatible router for VS Code, Cline and coding agents.",
-  "version": "0.8.3",
+  "version": "0.8.5",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
@@ -64,6 +64,7 @@
     "onCommand:agentHub.openSettings",
     "onCommand:agentHub.enableTokenSafeMode",
     "onCommand:agentHub.enableCodexCliMode",
+    "onCommand:agentHub.installCodexCli",
     "onCommand:agentHub.status",
     "onCommand:agentHub.ask",
     "onCommand:agentHub.codeAgent",
@@ -168,6 +169,11 @@
         "command": "agentHub.enableCodexCliMode",
         "title": "Agent Hub: Use Codex CLI Without API Key",
         "icon": "$(terminal)"
+      },
+      {
+        "command": "agentHub.installCodexCli",
+        "title": "Agent Hub: Install Codex CLI",
+        "icon": "$(cloud-download)"
       },
       {
         "command": "agentHub.status",

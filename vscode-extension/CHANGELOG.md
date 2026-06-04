@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.5
+
+- Changes Token Safe Mode to route free cloud models first without shrinking Codex CLI/API-key fallback context or output.
+- Adds per-free-provider output caps so free attempts stay small while Codex remains full-strength.
+- Separates Token Safe routing hints from Codex CLI prompt optimization.
+
+## 0.8.4
+
+- Adds `Agent Hub: Install Codex CLI` to install the official `@openai/codex` package from VS Code.
+- Prompts to install Codex CLI when Codex CLI Mode is selected and `codex` is missing.
+- Adds a sidebar Codex CLI setup button and updates the Marketplace setup instructions.
+- Keeps Token Safe as free-cloud-first routing while preserving full Codex/API-key fallback budgets.
+
 ## 0.8.3
 
 - Adds Token Safe Mode and Codex CLI Mode commands to the VS Code extension.

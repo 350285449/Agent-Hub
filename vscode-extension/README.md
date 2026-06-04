@@ -61,9 +61,10 @@ Good first tasks:
 - `Fix the failing test`
 - `Add a small feature`
 
-Use `Token Safe Mode` when you want compact context, smaller outputs, and free
-cloud routing first. Use `Codex CLI Mode` when you want Agent Hub to route
-through your existing `codex login` session without an `OPENAI_API_KEY`.
+Use `Token Safe Mode` when you want free cloud models to try first while Codex
+CLI and API-key models stay available as full-strength fallback. Use `Codex CLI
+Mode` when you want Agent Hub to route directly through your existing
+`codex login` session without an `OPENAI_API_KEY`.
 
 ## Models
 
@@ -71,7 +72,7 @@ Pick one path:
 
 - Open `Settings` and save an OpenAI, Claude, Gemini, Groq, OpenRouter, or other API key.
 - Start Ollama or LM Studio locally and let Agent Hub route to the local endpoint.
-- Run `Agent Hub: Use Codex CLI Without API Key` to use your local Codex CLI login.
+- Run `Agent Hub: Install Codex CLI`, sign in, then use `Agent Hub: Use Codex CLI Without API Key`.
 - Connect Cline, Roo Code, Continue, Claude Code, or another OpenAI-compatible tool.
 
 ## Comparison
@@ -111,7 +112,7 @@ Local routes use `http://127.0.0.1:11434`. Hosted Ollama Cloud entries require
 
 - Ollama: install Ollama, pull a model, then start Agent Hub. Local routes use `http://127.0.0.1:11434`.
 - LM Studio: start the local server, load a model, then use Settings to select the endpoint.
-- Codex CLI: install the Codex CLI, run `codex login`, then choose `Codex CLI Mode` in Agent Hub.
+- Codex CLI: run `Agent Hub: Install Codex CLI`, sign in, then choose `Codex CLI Mode` in Agent Hub.
 - OpenAI, Claude, Gemini, Groq, OpenRouter: save the provider API key in Settings and keep `approval_mode` at `ask` or `auto` based on your workflow.
 
 ## Safety

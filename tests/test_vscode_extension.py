@@ -33,6 +33,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(commands["agentHub.openSettings"], "Agent Hub: Open Settings")
         self.assertEqual(commands["agentHub.enableTokenSafeMode"], "Agent Hub: Enable Token Safe Mode")
         self.assertEqual(commands["agentHub.enableCodexCliMode"], "Agent Hub: Use Codex CLI Without API Key")
+        self.assertEqual(commands["agentHub.installCodexCli"], "Agent Hub: Install Codex CLI")
         self.assertEqual(commands["agentHub.checkHealth"], "Agent Hub: Check Health")
         self.assertEqual(commands["agentHub.generateCommitMessage"], "Agent Hub: Generate Commit Message")
         self.assertEqual(commands["agentHub.copyClineConfig"], "Agent Hub: Copy Cline Config")
@@ -184,15 +185,23 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn(">Token Safe Mode</button>", source)
         self.assertIn('id="quickTokenSafeMode"', source)
         self.assertIn('id="quickCodexCliMode"', source)
+        self.assertIn('id="quickInstallCodexCli"', source)
         self.assertIn('id="tokenSafeMode"', source)
         self.assertIn('"enableTokenSafeMode"', source)
         self.assertIn('"enableCodexCliMode"', source)
+        self.assertIn('"installCodexCli"', source)
         self.assertIn("enableTokenSafeModeCommand", source)
         self.assertIn("enableCodexCliModeCommand", source)
+        self.assertIn("installCodexCliCommand", source)
+        self.assertIn("codexCliStatus", source)
+        self.assertIn("CODEX_CLI_NPM_PACKAGE", source)
+        self.assertIn("@openai/codex@latest", source)
         self.assertIn("applyCodexCliModeSettings", source)
         self.assertIn("Codex CLI Mode is on", source)
         self.assertIn('value="codex-cli"', source)
         self.assertIn("CODEX_CLI_CONTEXT_BUDGET", source)
+        self.assertIn("DEFAULT_AGENT_CONTEXT_BUDGET", source)
+        self.assertIn("isFreeCloudSavingsMode", source)
         self.assertIn('cloudRouteMode: "codex-cli"', source)
         self.assertIn("codexCliEnabled: true", source)
         self.assertIn("apiKeyModelsEnabled: false", source)
@@ -204,9 +213,10 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("Token Safe Mode is on", source)
         self.assertIn("onCommand:agentHub.enableTokenSafeMode", package["activationEvents"])
         self.assertIn("onCommand:agentHub.enableCodexCliMode", package["activationEvents"])
+        self.assertIn("onCommand:agentHub.installCodexCli", package["activationEvents"])
         self.assertIn("token-safe", json.dumps(package["contributes"]["chatParticipants"]))
         self.assertIn("codex-cli", json.dumps(package["contributes"]["chatParticipants"]))
-        self.assertIn("MAX_TOKEN_SAVE_CONTEXT_BUDGET", source)
+        self.assertIn("MAX_TOKEN_SAVE_OUTPUT_TOKENS", source)
         self.assertIn('agentProviderMode: "cloud"', source)
         self.assertIn('cloudRouteMode: "ollama-cloud"', source)
         self.assertIn("apiKeyModelsEnabled: true", source)
@@ -221,6 +231,47 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("free_first: true", source)
         self.assertIn("simple_cloud_exploration_enabled: true", source)
         self.assertIn("free: source.free !== false", source)
+
+    def test_token_safe_preserves_full_codex_fallback_budget(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        token_safe_start = source.index("async function applyTokenSafeModeSettings")
+        token_safe_end = source.index("function normalizeChatSettingsInput", token_safe_start)
+        token_safe_source = source[token_safe_start:token_safe_end]
+
+        self.assertIn("maxTokens: null", token_safe_source)
+        self.assertIn("agentMaxSteps: DEFAULT_AGENT_MAX_STEPS", token_safe_source)
+        self.assertIn("codexCliEnabled: true", token_safe_source)
+        self.assertIn("DEFAULT_AGENT_CONTEXT_BUDGET", token_safe_source)
+        self.assertIn('config.update("contextMode", "balanced"', token_safe_source)
+        self.assertIn("freeCloudSavingsMode: true", token_safe_source)
+        self.assertNotIn("CODEX_CLI_CONTEXT_BUDGET", token_safe_source)
+
+        request_options_start = source.index("function agentHubRequestOptions")
+        request_options_end = source.index("function normalizeServerUrl", request_options_start)
+        request_options_source = source[request_options_start:request_options_end]
+        free_branch = request_options_source[
+            request_options_source.index("if (isFreeCloudSavingsMode(config))"):
+            request_options_source.index("if (isCodexCliTokenOptimizedMode(config))")
+        ]
+        self.assertIn('options.routing_mode = "cheapest"', free_branch)
+        self.assertIn("options.free_cloud_offload = true", free_branch)
+        self.assertNotIn("max_context_tokens", free_branch)
+        self.assertNotIn("codex_cli_token_optimized", free_branch)
+
+        config_start = source.index("function applyMaxTokenSaveModeToConfig")
+        config_end = source.index("function applyCodexCliModeToConfig", config_start)
+        config_source = source[config_start:config_end]
+        self.assertIn("delete data.max_context_tokens", config_source)
+        self.assertIn("free_cloud_savings_mode: true", config_source)
+        self.assertIn('max_tokens_mode: "auto"', config_source)
+        self.assertNotIn("minimal_tool_schema: true", config_source)
+
+        cloud_sources_start = source.index("function cloudModelSources")
+        cloud_sources_end = source.index("function freeCloudPresetSources", cloud_sources_start)
+        cloud_sources_source = source[cloud_sources_start:cloud_sources_end]
+        self.assertIn('free: routeMode === "codex-cli"', cloud_sources_source)
+        self.assertIn('maxTokens: routeMode === "codex-cli" ? CODEX_CLI_OUTPUT_TOKENS : undefined', cloud_sources_source)
 
     def test_commit_message_generation_keeps_small_output_cap(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
