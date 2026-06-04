@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.2
+
+- Adds max token-save free-cloud exploration with Codex fallback scoring.
+- Persists model benchmark memory in upgrade-safe VS Code workspace storage.
+
 ## 0.8.1
 
 - Syncs extension and backend release metadata for the next package.
