@@ -19,13 +19,22 @@ class WorkflowStage:
 class WorkflowPlanner:
     """Deterministic workflow policy for stages, prompts, and local options."""
 
-    WORKFLOWS = {"code", "review", "debug", "explain", "refactor"}
+    WORKFLOWS = {"code", "review", "debug", "explain", "refactor", "issue-pr"}
+    WORKFLOW_ALIASES = {
+        "issue-to-pr": "issue-pr",
+        "issue_pr": "issue-pr",
+        "issue_to_pr": "issue-pr",
+        "pull-request": "issue-pr",
+        "pull_request": "issue-pr",
+        "pr": "issue-pr",
+    }
 
     def __init__(self, config: HubConfig) -> None:
         self.config = config
 
     def normalize(self, kind: str) -> str:
-        normalized = kind.strip().lower()
+        normalized = kind.strip().lower().replace("_", "-")
+        normalized = self.WORKFLOW_ALIASES.get(normalized, normalized)
         if normalized not in self.WORKFLOWS:
             raise ValueError(f"Unknown workflow {kind!r}")
         return normalized
@@ -37,6 +46,7 @@ class WorkflowPlanner:
             "debug": "coder",
             "explain": "explainer",
             "refactor": "coder",
+            "issue-pr": "coder",
         }[kind]
         return [
             WorkflowStage("plan", "planner", "reasoning"),
@@ -53,10 +63,21 @@ class WorkflowPlanner:
     def stage_prompt(self, kind: str, stage: WorkflowStage, request: HubRequest, memory: Any) -> str:
         task = request_text(request)
         prior = memory.prompt_context()
-        if stage.role == "planner":
+        if kind == "issue-pr" and stage.role == "planner":
+            instruction = (
+                "Plan the issue-to-PR workflow. Identify the issue, files to inspect or edit, validation "
+                "commands, likely failure modes, and the next concrete action. Do not edit; produce a concise plan."
+            )
+        elif stage.role == "planner":
             instruction = (
                 f"Plan the {kind} workflow. Identify files, risks, validation, and the next concrete action. "
                 "Do not edit; produce a concise plan."
+            )
+        elif kind == "issue-pr" and stage.role == "coder":
+            retry = " Address the blocking review feedback exactly once." if "retry" in stage.name else ""
+            instruction = (
+                "Execute the issue-to-PR workflow from the plan. Inspect and edit the needed files, keep changes "
+                f"scoped, and report exactly which validation should run or was run.{retry}"
             )
         elif stage.role == "coder":
             retry = " Address the blocking review feedback exactly once." if "retry" in stage.name else ""
@@ -70,6 +91,11 @@ class WorkflowPlanner:
             instruction = (
                 f"Validate the {kind} workflow result. Check tests, changed files, risks, and whether the "
                 "review feedback was resolved. Return pass/fail with evidence."
+            )
+        elif stage.role == "finalizer":
+            instruction = (
+                "Summarize the pull request. Include the issue addressed, important files changed, validation "
+                "evidence, fallback or retry attempts, and unresolved risks. Do not invent tests or file changes."
             )
         else:
             instruction = (
@@ -99,7 +125,8 @@ class WorkflowPlanner:
         return raw
 
     def role_agent(self, role: str) -> str | None:
-        for key in (role, "coder" if role == "explainer" else role):
+        fallback = "coder" if role == "explainer" else "reviewer" if role == "finalizer" else role
+        for key in (role, fallback):
             configured = self.config.group_roles.get(key)
             if configured in self.config.agents and self.config.agents[configured].enabled:
                 return configured
@@ -129,6 +156,16 @@ class WorkflowPlanner:
         value = raw.get("patch_summary")
         if value is None:
             value = hub.get("patch_summary", False)
+        return truthy(value)
+
+    def final_summary_requested(self, kind: str, request: HubRequest) -> bool:
+        if self.normalize(kind) == "issue-pr":
+            return True
+        raw = request.raw if isinstance(request.raw, dict) else {}
+        hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+        value = raw.get("final_summary")
+        if value is None:
+            value = hub.get("final_summary", False)
         return truthy(value)
 
     def review_blocks(self, memory: Any) -> bool:

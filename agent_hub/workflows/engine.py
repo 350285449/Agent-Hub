@@ -231,8 +231,24 @@ class WorkflowEngine:
                 timeout_seconds=timeout_seconds,
             )
 
-        if self.planner.patch_summary_requested(request):
+        patch_summary_needed = self.planner.patch_summary_requested(request) or normalized == "issue-pr"
+        if patch_summary_needed:
             self._add_patch_summary(memory)
+
+        if self.planner.final_summary_requested(normalized, request):
+            self._raise_if_cancelled(request, cancel_event, workflow_id, event_sink)
+            final_response = self._run_model_stage_with_controls(
+                normalized,
+                WorkflowStage("final", "finalizer", "reliable"),
+                request,
+                memory,
+                workflow_id,
+                len(memory.stage_results) + 1,
+                len(memory.stage_results) + 1,
+                event_sink,
+                failover,
+                timeout_seconds=timeout_seconds,
+            )
 
         assert final_response is not None
         state.files_touched = self.planner.files_touched(memory)
@@ -313,7 +329,7 @@ class WorkflowEngine:
             replace(
                 request,
                 messages=[{"role": "user", "content": self.planner.stage_prompt(normalized, stage, request, memory)}],
-                route="coding" if stage.role in {"coder", "reviewer", "validator"} else request.route,
+                route="coding" if stage.role in {"coder", "reviewer", "validator", "finalizer"} else request.route,
                 preferred_agent=self.planner.role_agent(stage.role),
                 stream=False,
                 use_session_history=False,

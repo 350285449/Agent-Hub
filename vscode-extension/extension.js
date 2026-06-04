@@ -464,9 +464,15 @@ class AgentHubSidebarProvider {
         openChat(this.context, {
           text,
           includeSelection: !!message.includeSelection,
-          providerMode: settings().agentProviderMode
+          providerMode: settings().agentProviderMode,
+          autoSend: message.autoSend !== false
         });
       }
+      return;
+    }
+    if (message.type === "applyTrustPreset") {
+      await applySidebarTrustPreset(message.preset);
+      await this.refresh();
       return;
     }
     if (message.type === "askAgent") {
@@ -547,6 +553,39 @@ function refreshSidebar() {
   });
 }
 
+async function applySidebarTrustPreset(preset) {
+  const profiles = {
+    safe: {
+      approvalMode: "safe",
+      allowShellTools: true,
+      label: "Safe approvals"
+    },
+    shellAsk: {
+      approvalMode: "shell-ask",
+      allowShellTools: true,
+      label: "Confirm shell"
+    },
+    readonly: {
+      approvalMode: "readonly",
+      allowShellTools: false,
+      label: "Read-only"
+    },
+    auto: {
+      approvalMode: "auto",
+      allowShellTools: true,
+      label: "Auto"
+    }
+  };
+  const profile = profiles[preset] || profiles.safe;
+  const config = vscode.workspace.getConfiguration("agentHub");
+  await config.update("approvalMode", profile.approvalMode, vscode.ConfigurationTarget.Global);
+  await config.update("allowShellTools", profile.allowShellTools, vscode.ConfigurationTarget.Global);
+  const restart = serverProcess || (await isServerOnline())
+    ? " Restart Agent Hub if an already-running backend should inherit this default."
+    : "";
+  vscode.window.showInformationMessage(`Agent Hub trust controls set to ${profile.label}.${restart}`);
+}
+
 function updateStatusBar(dashboard = {}) {
   if (!statusBarItem) {
     return;
@@ -596,6 +635,11 @@ async function sidebarDashboardState() {
     optimization: null,
     routingIntelligence: null,
     routingExplanation: null,
+    orchestrationFlow: sidebarOrchestrationFlow(null, null),
+    workflowTemplates: sidebarWorkflowTemplates(),
+    workspaceProfile: await sidebarWorkspaceProfile(config, null),
+    tools: [],
+    trustControls: sidebarTrustControls(config, null, []),
     insights: [],
     activity: [],
     routingChain: [],
@@ -611,6 +655,7 @@ async function sidebarDashboardState() {
     let optimization = null;
     let routingIntelligence = null;
     let debugContext = null;
+    let tools = null;
     try {
       limits = await requestJson("GET", "/limits");
     } catch (_error) {
@@ -646,6 +691,11 @@ async function sidebarDashboardState() {
     } catch (_error) {
       debugContext = null;
     }
+    try {
+      tools = await requestJson("GET", "/v1/tools");
+    } catch (_error) {
+      tools = null;
+    }
     dashboard.status = "Running";
     dashboard.statusText = `Running at ${config.serverUrl}`;
     dashboard.health = health;
@@ -656,6 +706,7 @@ async function sidebarDashboardState() {
     dashboard.permissions = sidebarPermissionState(health, permissions, config);
     dashboard.tokenUsage = sidebarTokenUsage(usage, dashboard.limits);
     dashboard.contextDiagnostics = sidebarContextDiagnostics(debugContext);
+    dashboard.tools = sidebarToolRows(tools);
     dashboard.optimization = optimization || (metrics && metrics.optimization) || null;
     dashboard.routingIntelligence = routingIntelligence;
     dashboard.routingExplanation = sidebarRoutingExplanation(routingIntelligence, health, limits);
@@ -665,6 +716,10 @@ async function sidebarDashboardState() {
     dashboard.statistics = sidebarStatistics(health, usage, metrics, permissions, dashboard.providers, dashboard.limits, debugContext, dashboard.optimization);
     dashboard.insights = sidebarInsightRows(dashboard, metrics);
     dashboard.onboarding = await sidebarOnboardingState(config, health);
+    dashboard.workspaceProfile = await sidebarWorkspaceProfile(config, health);
+    dashboard.orchestrationFlow = sidebarOrchestrationFlow(metrics, dashboard);
+    dashboard.workflowTemplates = sidebarWorkflowTemplates();
+    dashboard.trustControls = sidebarTrustControls(config, permissions, dashboard.tools);
     dashboard.activity = sidebarActivityRows(usage, metrics, dashboard.failedModels);
     dashboard.routingChain = sidebarRoutingChain(health, limits);
     dashboard.logs = "Open the Agent Hub output for live server logs.";
@@ -1033,6 +1088,9 @@ function sidebarRoutingExplanation(intelligence, health, limits) {
   const latest = intelligence && intelligence.latest_explanation && typeof intelligence.latest_explanation === "object"
     ? intelligence.latest_explanation
     : {};
+  const latestDecision = intelligence && intelligence.latest_decision && typeof intelligence.latest_decision === "object"
+    ? intelligence.latest_decision
+    : {};
   const selected = latest.selected && typeof latest.selected === "object" ? latest.selected : {};
   const context = latest.context_optimization && typeof latest.context_optimization === "object"
     ? latest.context_optimization
@@ -1053,6 +1111,22 @@ function sidebarRoutingExplanation(intelligence, health, limits) {
   const fallbackOptions = Array.isArray(latest.provider_rankings)
     ? latest.provider_rankings.slice(1, 5)
     : sidebarRoutingChain(health, limits).slice(1, 5);
+  const costEstimate = firstNumber(
+    cost.estimated_selected_cost_usd,
+    cost.estimated_cost_usd,
+    context.estimated_cost_usd,
+    latestDecision.estimated_cost_usd
+  );
+  const latencyMs = firstNumber(
+    latestDecision.latency_ms,
+    selected.latency_ms,
+    selected.average_latency_ms
+  );
+  const fallbackCount = firstNumber(
+    latestDecision.fallback_count,
+    Array.isArray(latestDecision.failover) ? latestDecision.failover.length : null,
+    rejected.length
+  );
   return {
     summary: latest.summary || "",
     selectedProvider: selected.provider || "",
@@ -1065,9 +1139,349 @@ function sidebarRoutingExplanation(intelligence, health, limits) {
     contextTokens: Number(context.estimated_total_tokens || context.estimated_input_tokens || 0),
     repoSize: context.repo_size_bucket || "",
     costSavings: cost.estimated_savings_usd,
+    costEstimate,
+    latencyMs,
+    fallbackCount,
     reasons: reasons.slice(0, 6),
     rejected: rejected.slice(0, 4),
     fallbackOptions
+  };
+}
+
+function firstNumber(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number)) {
+      return number;
+    }
+  }
+  return null;
+}
+
+function sidebarWorkflowTemplates() {
+  return [
+    {
+      id: "fixBug",
+      label: "Fix Bug",
+      meta: "debug + patch + test",
+      prompt: "Find the most likely bug behind the current failure. Plan the fix, edit the needed files, run the most relevant tests, fix any failures once, and summarize the change."
+    },
+    {
+      id: "addFeature",
+      label: "Add Feature",
+      meta: "plan + implement",
+      prompt: "Add the requested feature in this workspace. Identify the right files, implement the change, run targeted validation, and summarize the user-facing result."
+    },
+    {
+      id: "reviewCode",
+      label: "Review Code",
+      meta: "bugs first",
+      prompt: "Review the current selection or recent workspace changes. Prioritize bugs, regressions, security issues, and missing tests with file references."
+    },
+    {
+      id: "refactor",
+      label: "Refactor",
+      meta: "scoped cleanup",
+      prompt: "Refactor the relevant code while preserving behavior. Keep the change scoped, run targeted validation, and summarize what became simpler."
+    },
+    {
+      id: "writeTests",
+      label: "Write Tests",
+      meta: "coverage gap",
+      prompt: "Find the important untested behavior for this request, add focused tests, run them, and fix any failures caused by the new tests."
+    },
+    {
+      id: "explainRepo",
+      label: "Explain Repo",
+      meta: "architecture",
+      prompt: "Inspect this repository and explain how it is organized, where the main entry points are, and what a new contributor should read first."
+    },
+    {
+      id: "generatePr",
+      label: "Generate PR",
+      meta: "summary + risks",
+      prompt: "Run the issue-to-PR workflow for the current changes: inspect the diff, summarize the pull request, include validation, risks, and follow-up work."
+    }
+  ];
+}
+
+function sidebarOrchestrationFlow(metrics, dashboard) {
+  const events = metrics && Array.isArray(metrics.workflow_events) ? metrics.workflow_events : [];
+  const latestWorkflowId = latestWorkflowIdFromEvents(events);
+  const recent = latestWorkflowId
+    ? events.filter((event) => event && event.workflow_id === latestWorkflowId)
+    : [];
+  const workflowName = recent.find((event) => event && event.workflow)?.workflow || "workflow";
+  const finalEvent = [...recent].reverse().find((event) => event && event.type === "workflow_finished");
+  const cancelled = recent.some((event) => event && event.type === "workflow_cancelled");
+  const timedOut = recent.some((event) => event && event.type === "workflow_stage_timeout");
+  const live = recent.length > 0 && !finalEvent && !cancelled && !timedOut;
+  const steps = [
+    orchestrationStep("planner", "Planner", recent, (event) => event.role === "planner" || event.stage === "plan"),
+    orchestrationStep("worker", "Worker", recent, (event) => event.stage === "work" || event.role === "coder" || event.role === "explainer"),
+    orchestrationStep("reviewer", "Reviewer", recent, (event) => event.stage === "review" || event.role === "reviewer"),
+    orchestrationStep("fixer", "Fixer", recent, (event) => String(event.stage || "").includes("retry")),
+    {
+      id: "final",
+      label: "Final",
+      status: finalEvent ? "done" : live ? "pending" : "ready",
+      meta: finalEvent
+        ? (finalEvent.final_status || "summarized")
+        : live
+          ? "waiting"
+          : "ready"
+    }
+  ];
+  if (!recent.length) {
+    return {
+      status: dashboard && dashboard.status === "Running" ? "Ready" : "Offline",
+      detail: "planner > worker > reviewer > fixer > final",
+      steps
+    };
+  }
+  if (cancelled || timedOut) {
+    for (const step of steps) {
+      if (step.status === "active") {
+        step.status = "blocked";
+      }
+    }
+  }
+  return {
+    status: cancelled ? "Cancelled" : timedOut ? "Timed out" : finalEvent ? "Complete" : "Running",
+    detail: `${workflowName} ${latestWorkflowId}`.trim(),
+    steps
+  };
+}
+
+function latestWorkflowIdFromEvents(events) {
+  for (const event of [...events].reverse()) {
+    if (event && event.workflow_id) {
+      return event.workflow_id;
+    }
+  }
+  return "";
+}
+
+function orchestrationStep(id, label, events, match) {
+  const matching = events.filter((event) => event && match(event));
+  const started = matching.some((event) => event.type === "workflow_stage_started");
+  const finished = [...matching].reverse().find((event) => event.type === "workflow_stage_finished");
+  const timeout = matching.some((event) => event.type === "workflow_stage_timeout");
+  return {
+    id,
+    label,
+    status: timeout ? "blocked" : finished ? "done" : started ? "active" : "ready",
+    meta: finished
+      ? [finished.provider || finished.agent || "", finished.model || ""].filter(Boolean).join(" / ") || "done"
+      : started
+        ? "running"
+        : "ready"
+  };
+}
+
+function sidebarToolRows(toolsBody) {
+  const tools = toolsBody && Array.isArray(toolsBody.tools) ? toolsBody.tools : [];
+  return tools.slice(0, 24).map((tool) => ({
+    name: tool.name || "",
+    readOnly: tool.read_only === true,
+    permission: tool.permission || "",
+    description: tool.description || ""
+  }));
+}
+
+function sidebarTrustControls(config, permissions, tools) {
+  const approvalMode = normalizeApprovalMode(config.approvalMode || "ask");
+  const shellAllowed = !!config.allowShellTools;
+  const rows = [
+    {
+      label: "Shell commands",
+      state: shellAllowed
+        ? (approvalMode === "auto" ? "allowed automatically" : "confirmation enabled")
+        : "disabled",
+      ok: shellAllowed && approvalMode !== "auto"
+    },
+    {
+      label: "File deletes",
+      state: approvalMode === "readonly" || approvalMode === "deny"
+        ? "blocked"
+        : approvalMode === "auto"
+          ? "security-gated"
+          : "confirmation enabled",
+      ok: approvalMode !== "auto"
+    },
+    {
+      label: "Diff preview",
+      state: approvalMode === "auto" ? "high-risk edits only" : "shown before approval",
+      ok: approvalMode !== "auto"
+    },
+    {
+      label: "Tool list",
+      state: `${tools.length || 0} available`,
+      ok: tools.length > 0
+    }
+  ];
+  const recent = permissions && Array.isArray(permissions.recent) ? permissions.recent : [];
+  const denied = recent
+    .filter((item) => item && item.denied)
+    .map((item) => item.tool || item.category || item.type || "action")
+    .slice(-4);
+  const allowedTools = tools
+    .filter((tool) => tool && tool.name)
+    .map((tool) => tool.name)
+    .slice(0, 8);
+  const blockedTools = [
+    ...(!shellAllowed ? ["run_command"] : []),
+    ...denied
+  ].filter(Boolean);
+  return {
+    approvalMode,
+    shellAllowed,
+    rows,
+    allowedTools,
+    blockedTools,
+    presets: [
+      { id: "safe", label: "Safe" },
+      { id: "shellAsk", label: "Ask Shell" },
+      { id: "readonly", label: "Read Only" },
+      { id: "auto", label: "Auto" }
+    ]
+  };
+}
+
+async function sidebarWorkspaceProfile(config, health) {
+  const workspace = workspaceRoot();
+  const keyRows = await apiKeyStatusRows().catch(() => []);
+  const providerSignals = keyRows.filter((row) => row.saved || row.envPresent);
+  const mcp = detectMcpServers(config, workspace);
+  const workspaceType = detectWorkspaceType(workspace);
+  const providerCount = health && Array.isArray(health.agents) ? health.agents.length : 0;
+  const suggestedDefault = suggestedWorkingDefault({
+    providerSignals,
+    providerCount,
+    workspaceType,
+    mcp
+  });
+  return {
+    workspaceType,
+    providerSignals: providerSignals.map((row) => row.label),
+    providerSignalCount: providerSignals.length,
+    mcp,
+    suggestedDefault
+  };
+}
+
+function detectWorkspaceType(workspace) {
+  if (!workspace) {
+    return { label: "No workspace", detail: "Open a folder" };
+  }
+  const checks = [
+    { file: "pyproject.toml", label: "Python" },
+    { file: "requirements.txt", label: "Python" },
+    { file: "package.json", label: "Node" },
+    { file: path.join("vscode-extension", "package.json"), label: "VS Code extension" },
+    { file: "go.mod", label: "Go" },
+    { file: "Cargo.toml", label: "Rust" },
+    { file: "pom.xml", label: "Java" },
+    { file: "Dockerfile", label: "Docker" }
+  ];
+  const labels = [];
+  for (const check of checks) {
+    if (fs.existsSync(path.join(workspace, check.file)) && !labels.includes(check.label)) {
+      labels.push(check.label);
+    }
+  }
+  if (!labels.length) {
+    return { label: "Workspace", detail: path.basename(workspace) };
+  }
+  return {
+    label: labels.slice(0, 3).join(" + "),
+    detail: labels.length > 3 ? `${labels.length} project signals` : path.basename(workspace)
+  };
+}
+
+function detectMcpServers(config, workspace) {
+  const sources = [];
+  const configPath = workspace ? resolveConfigPath(config.configPath, workspace) : "";
+  if (configPath && fs.existsSync(configPath)) {
+    const count = mcpServerCountFromJsonFile(configPath);
+    if (count > 0) {
+      sources.push({ source: "Agent Hub config", count });
+    }
+  }
+  const workspaceFiles = workspace
+    ? [
+      ".mcp.json",
+      path.join(".vscode", "mcp.json"),
+      path.join(".cursor", "mcp.json")
+    ]
+    : [];
+  for (const relative of workspaceFiles) {
+    const filePath = path.join(workspace, relative);
+    const count = mcpServerCountFromJsonFile(filePath);
+    if (count > 0) {
+      sources.push({ source: relative, count });
+    }
+  }
+  const appData = process.env.APPDATA || "";
+  const claudeConfig = appData ? path.join(appData, "Claude", "claude_desktop_config.json") : "";
+  const claudeCount = mcpServerCountFromJsonFile(claudeConfig);
+  if (claudeCount > 0) {
+    sources.push({ source: "Claude Desktop", count: claudeCount });
+  }
+  const count = sources.reduce((total, row) => total + row.count, 0);
+  return {
+    count,
+    sources,
+    detail: sources.length
+      ? sources.map((row) => `${row.source}: ${row.count}`).join(" / ")
+      : "none detected"
+  };
+}
+
+function mcpServerCountFromJsonFile(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return 0;
+  }
+  try {
+    const data = parseJsonConfigText(fs.readFileSync(filePath, "utf8")).value;
+    if (!data || typeof data !== "object") {
+      return 0;
+    }
+    if (Array.isArray(data.mcp_servers)) {
+      return data.mcp_servers.filter((server) => server && server.enabled !== false).length;
+    }
+    const servers = data.mcpServers || data.servers;
+    if (servers && typeof servers === "object") {
+      return Object.keys(servers).length;
+    }
+  } catch (_error) {
+    return 0;
+  }
+  return 0;
+}
+
+function suggestedWorkingDefault({ providerSignals, providerCount, workspaceType, mcp }) {
+  if (providerCount > 0) {
+    return {
+      label: "Use current routing",
+      detail: `${providerCount} live provider route(s) are ready for ${workspaceType.label}.`
+    };
+  }
+  if (providerSignals.length > 0) {
+    return {
+      label: "Cloud control",
+      detail: `${providerSignals[0].label} is configured; start Agent Hub and use cloud mode.`
+    };
+  }
+  if (mcp.count > 0) {
+    return {
+      label: "Local setup first",
+      detail: `${mcp.count} MCP server(s) detected; add a model provider to activate them.`
+    };
+  }
+  return {
+    label: "Choose a local model",
+    detail: "Start Ollama or LM Studio, then choose Local control."
   };
 }
 
@@ -1077,12 +1491,21 @@ async function sidebarOnboardingState(config, health) {
   const backendRoot = backendSourceRoot(workspace);
   const keys = await apiKeyStatusRows().catch(() => []);
   const savedKeys = keys.filter((row) => row.saved).length;
+  const envKeys = keys.filter((row) => row.envPresent).length;
+  const availableKeys = keys.filter((row) => row.saved || row.envPresent).length;
   const localStatus = await sidebarLocalServerStatus();
   const localModelsReady = localStatus.some((row) => row.ok);
   const python = await detectPythonForOnboarding(config, workspace);
   const providers = health && Array.isArray(health.agents) ? health.agents.length : 0;
-  const providerReady = providers > 0 || savedKeys > 0 || localModelsReady;
+  const providerReady = providers > 0 || availableKeys > 0 || localModelsReady;
+  const workspaceProfile = await sidebarWorkspaceProfile(config, health);
   return [
+    {
+      label: "Workspace",
+      ok: !!workspace,
+      detail: workspace ? `${workspaceProfile.workspaceType.label} - ${workspaceProfile.workspaceType.detail}` : "open a workspace folder",
+      setupRequired: true
+    },
     {
       label: "Backend",
       ok: !!backendRoot,
@@ -1104,8 +1527,33 @@ async function sidebarOnboardingState(config, health) {
     {
       label: "Model provider",
       ok: providerReady,
-      detail: providers > 0 ? `${providers} ready` : savedKeys > 0 ? `${savedKeys} saved key(s)` : "save a key or start a local model",
+      detail: providers > 0
+        ? `${providers} ready`
+        : availableKeys > 0
+          ? `${savedKeys} saved key(s), ${envKeys} env key(s)`
+          : "save a key or start a local model",
       setupRequired: true
+    },
+    {
+      label: "Provider keys",
+      ok: availableKeys > 0,
+      detail: availableKeys > 0 ? `${availableKeys} detected` : "none detected",
+      optional: true,
+      setupRequired: false
+    },
+    {
+      label: "MCP servers",
+      ok: workspaceProfile.mcp.count > 0,
+      detail: workspaceProfile.mcp.detail,
+      optional: true,
+      setupRequired: false
+    },
+    {
+      label: "Working default",
+      ok: providerReady,
+      detail: `${workspaceProfile.suggestedDefault.label}: ${workspaceProfile.suggestedDefault.detail}`,
+      optional: true,
+      setupRequired: false
     },
     {
       label: "Local models",
@@ -1403,6 +1851,129 @@ function sidebarHtml(webview, logoPath) {
       color: var(--app-fg);
       font-size: 12px;
       line-height: 1.3;
+    }
+
+    .flow-strip {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 5px;
+      margin-bottom: 8px;
+    }
+
+    .flow-step {
+      min-width: 0;
+      border: 1px solid var(--subtle-border);
+      border-radius: 7px;
+      padding: 7px 5px;
+      text-align: center;
+      background: var(--card);
+    }
+
+    .flow-step strong,
+    .flow-step span {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .flow-step strong {
+      font-size: 11px;
+      line-height: 1.25;
+    }
+
+    .flow-step span {
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.2;
+      margin-top: 2px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .flow-step[data-status="active"] {
+      border-color: var(--button);
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--button) 30%, transparent);
+    }
+
+    .flow-step[data-status="done"] span {
+      color: var(--ok);
+    }
+
+    .flow-step[data-status="blocked"] span {
+      color: var(--error);
+    }
+
+    .template-grid,
+    .trust-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .template-button {
+      min-height: 40px;
+    }
+
+    .killer-button {
+      margin-top: 6px;
+      min-height: 34px;
+    }
+
+    .trust-row {
+      min-width: 0;
+      border: 1px solid var(--subtle-border);
+      border-radius: 7px;
+      padding: 7px;
+      background: var(--card);
+    }
+
+    .trust-row strong,
+    .trust-row span {
+      display: block;
+      overflow-wrap: anywhere;
+    }
+
+    .trust-row strong {
+      font-size: 11px;
+      line-height: 1.25;
+    }
+
+    .trust-row span {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.25;
+      margin-top: 2px;
+    }
+
+    .trust-row[data-ok="true"] span {
+      color: var(--ok);
+    }
+
+    .tool-chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 8px;
+    }
+
+    .tool-chip {
+      max-width: 100%;
+      border: 1px solid var(--subtle-border);
+      border-radius: 999px;
+      padding: 2px 7px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.4;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      background: transparent;
+    }
+
+    .tool-chip[data-kind="blocked"] {
+      color: var(--error);
     }
 
     .help-menu {
@@ -1898,6 +2469,16 @@ function sidebarHtml(webview, logoPath) {
         </button>
       </div>
     </section>
+    <section>
+      <div class="section-head">
+        <h2>Orchestration</h2>
+        <span class="status" id="flowStatus">Ready</span>
+      </div>
+      <div class="flow-strip" id="flowStrip"></div>
+      <div class="detail" id="flowDetail">planner &gt; worker &gt; reviewer &gt; fixer &gt; final</div>
+      <div class="template-grid" id="workflowTemplateList"></div>
+      <button class="primary killer-button" id="killerWorkflow" type="button">Take Issue &gt; PR</button>
+    </section>
     <details class="panel">
       <summary class="section-head">
         <h2>Health</h2>
@@ -1961,6 +2542,14 @@ function sidebarHtml(webview, logoPath) {
         <h2>Permissions</h2>
       </summary>
       <div class="detail" id="permissionDetail">Approval: ask</div>
+      <div class="trust-grid" id="trustControlGrid"></div>
+      <div class="actions">
+        <button class="trust-preset" data-preset="safe" type="button">Safe</button>
+        <button class="trust-preset" data-preset="shellAsk" type="button">Ask Shell</button>
+        <button class="trust-preset" data-preset="readonly" type="button">Read Only</button>
+        <button class="trust-preset" data-preset="auto" type="button">Auto</button>
+      </div>
+      <div class="tool-chip-list" id="toolControlList"></div>
       <ul class="list" id="permissionList"></ul>
     </details>
     <details class="panel">
@@ -2036,6 +2625,10 @@ function sidebarHtml(webview, logoPath) {
     const setupProgressFill = document.getElementById("setupProgressFill");
     const nextStepTitle = document.getElementById("nextStepTitle");
     const nextStepDetail = document.getElementById("nextStepDetail");
+    const flowStatus = document.getElementById("flowStatus");
+    const flowStrip = document.getElementById("flowStrip");
+    const flowDetail = document.getElementById("flowDetail");
+    const workflowTemplateList = document.getElementById("workflowTemplateList");
     const statsHealth = document.getElementById("statsHealth");
     const statsGrid = document.getElementById("statsGrid");
     const insightList = document.getElementById("insightList");
@@ -2051,6 +2644,8 @@ function sidebarHtml(webview, logoPath) {
     const routingReasonList = document.getElementById("routingReasonList");
     const routingRejectedList = document.getElementById("routingRejectedList");
     const permissionDetail = document.getElementById("permissionDetail");
+    const trustControlGrid = document.getElementById("trustControlGrid");
+    const toolControlList = document.getElementById("toolControlList");
     const permissionList = document.getElementById("permissionList");
     const limitList = document.getElementById("limitList");
     const tokenUsage = document.getElementById("tokenUsage");
@@ -2081,13 +2676,15 @@ function sidebarHtml(webview, logoPath) {
       setText(heroProviders, providerCountText(dashboard.statistics || {}));
       renderServerControls(status, dashboard);
       renderSetupSummary(dashboard);
+      renderOrchestration(dashboard.orchestrationFlow || {});
+      renderWorkflowTemplates(dashboard.workflowTemplates || []);
       renderStatistics(dashboard.statistics || {}, dashboard.insights || [], status);
       renderOnboarding(dashboard.onboarding || []);
       setText(activeModel, activeModelText(dashboard.activeModel));
       renderRoutingChain(dashboard.routingChain || []);
       renderProviderRows(dashboard.providers || []);
       renderRoutingIntelligence(dashboard.routingExplanation || {});
-      renderPermissions(dashboard.permissions || {});
+      renderPermissions(dashboard.permissions || {}, dashboard.trustControls || {});
       renderLimitRows(dashboard.limits || []);
       setText(tokenUsage, tokenUsageText(dashboard.tokenUsage || {}));
       setText(contextDiagnostics, contextDiagnosticsText(dashboard.contextDiagnostics || {}));
@@ -2183,6 +2780,9 @@ function sidebarHtml(webview, logoPath) {
       if (label === "Python") {
         return "Install Python 3.11 or newer, or set agentHub.pythonPath.";
       }
+      if (label === "Workspace") {
+        return "Open the repository folder you want Agent Hub to control.";
+      }
       if (label === "Config") {
         return "Open a workspace folder so Agent Hub can create or find its config.";
       }
@@ -2193,6 +2793,60 @@ function sidebarHtml(webview, logoPath) {
         return "Reinstall or rebuild the VSIX so the bundled backend is included.";
       }
       return row && row.detail ? row.detail : "Complete this setup step.";
+    }
+
+    function renderOrchestration(flow) {
+      flowStrip.textContent = "";
+      const status = flow.status || "Ready";
+      flowStatus.textContent = status;
+      flowStatus.dataset.state = status === "Complete" || status === "Ready" ? "Running" : status === "Running" ? "Starting" : status === "Offline" ? "Stopped" : "Error";
+      flowDetail.textContent = flow.detail || "planner > worker > reviewer > fixer > final";
+      const steps = Array.isArray(flow.steps) ? flow.steps : [];
+      for (const step of steps) {
+        const item = document.createElement("div");
+        item.className = "flow-step";
+        item.dataset.status = step.status || "ready";
+        const label = document.createElement("strong");
+        label.textContent = step.label || "Step";
+        const meta = document.createElement("span");
+        meta.textContent = step.status || step.meta || "ready";
+        meta.title = step.meta || "";
+        item.title = step.meta || step.label || "";
+        item.append(label, meta);
+        flowStrip.append(item);
+      }
+    }
+
+    function renderWorkflowTemplates(templates) {
+      workflowTemplateList.textContent = "";
+      for (const template of templates.slice(0, 8)) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "command-button template-button";
+        button.dataset.prompt = template.prompt || "";
+        const main = document.createElement("span");
+        main.className = "button-main";
+        main.textContent = template.label || "Workflow";
+        const meta = document.createElement("span");
+        meta.className = "button-meta";
+        meta.textContent = template.meta || "";
+        button.append(main, meta);
+        button.addEventListener("click", () => runWorkflowPrompt(template.prompt));
+        workflowTemplateList.append(button);
+      }
+    }
+
+    function runWorkflowPrompt(text) {
+      const cleanText = String(text || "").trim();
+      if (!cleanText) {
+        return;
+      }
+      vscode.postMessage({
+        type: "quickTask",
+        text: cleanText,
+        includeSelection: quickTaskIncludeSelection.checked,
+        autoSend: true
+      });
     }
 
     function renderStatistics(stats, insights, status) {
@@ -2453,7 +3107,9 @@ function sidebarHtml(webview, logoPath) {
         ["Risk", row.riskLevel || "--"],
         ["Task", row.taskType || "--"],
         ["Context", routingContextText(row)],
-        ["Savings", routingSavingsText(row)]
+        ["Cost", routingCostText(row)],
+        ["Time", routingTimeText(row)],
+        ["Fallbacks", routingFallbackText(row)]
       ];
       for (const card of cards) {
         routingSummaryGrid.append(routingSummaryItem(card[0], card[1]));
@@ -2519,6 +3175,32 @@ function sidebarHtml(webview, logoPath) {
       return Number.isFinite(value) ? "$" + value.toFixed(4) : "--";
     }
 
+    function routingCostText(row) {
+      if (row.costEstimate !== null && row.costEstimate !== undefined && row.costEstimate !== "") {
+        const value = Number(row.costEstimate || 0);
+        if (Number.isFinite(value)) {
+          return "$" + value.toFixed(value < 0.01 ? 6 : 4);
+        }
+      }
+      return routingSavingsText(row);
+    }
+
+    function routingTimeText(row) {
+      const value = Number(row.latencyMs);
+      if (!Number.isFinite(value) || value <= 0) {
+        return "--";
+      }
+      return value >= 1000 ? (value / 1000).toFixed(1) + "s" : Math.round(value) + "ms";
+    }
+
+    function routingFallbackText(row) {
+      const value = Number(row.fallbackCount);
+      if (!Number.isFinite(value) || value <= 0) {
+        return "0";
+      }
+      return String(Math.round(value));
+    }
+
     function renderOnboarding(rows) {
       onboardingList.textContent = "";
       if (!rows.length) {
@@ -2582,7 +3264,7 @@ function sidebarHtml(webview, logoPath) {
       }
     }
 
-    function renderPermissions(state) {
+    function renderPermissions(state, controls) {
       const flags = [];
       flags.push("Approval: " + (state.approvalMode || "ask"));
       if (state.safeMode) {
@@ -2598,6 +3280,7 @@ function sidebarHtml(webview, logoPath) {
         flags.push("command blocking");
       }
       setText(permissionDetail, flags.join(" - "));
+      renderTrustControls(controls || {});
       permissionList.textContent = "";
       const recent = Array.isArray(state.recent) ? state.recent.slice(-4).reverse() : [];
       if (!recent.length) {
@@ -2610,6 +3293,43 @@ function sidebarHtml(webview, logoPath) {
           [item.category || "", item.risk_level || "", item.allowed ? "allowed" : item.requires_approval ? "approval required" : item.denied ? "denied" : ""].filter(Boolean).join(" - ")
         ));
       }
+    }
+
+    function renderTrustControls(controls) {
+      trustControlGrid.textContent = "";
+      toolControlList.textContent = "";
+      const rows = Array.isArray(controls.rows) ? controls.rows : [];
+      for (const row of rows) {
+        const item = document.createElement("div");
+        item.className = "trust-row";
+        item.dataset.ok = row.ok ? "true" : "false";
+        const main = document.createElement("strong");
+        main.textContent = row.label || "Control";
+        const meta = document.createElement("span");
+        meta.textContent = row.state || "";
+        item.append(main, meta);
+        trustControlGrid.append(item);
+      }
+      const allowedTools = Array.isArray(controls.allowedTools) ? controls.allowedTools : [];
+      const blockedTools = Array.isArray(controls.blockedTools) ? controls.blockedTools : [];
+      for (const name of allowedTools.slice(0, 6)) {
+        toolControlList.append(toolChip(name, "allowed"));
+      }
+      for (const name of blockedTools.slice(0, 4)) {
+        toolControlList.append(toolChip(name, "blocked"));
+      }
+      if (!allowedTools.length && !blockedTools.length) {
+        toolControlList.append(toolChip("tools pending", "allowed"));
+      }
+    }
+
+    function toolChip(text, kind) {
+      const chip = document.createElement("span");
+      chip.className = "tool-chip";
+      chip.dataset.kind = kind;
+      chip.textContent = text;
+      chip.title = text;
+      return chip;
     }
 
     function tokenUsageText(row) {
@@ -2746,6 +3466,7 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("quickSettings").addEventListener("click", () => post("openSettings"));
     document.getElementById("codeAgent").addEventListener("click", () => post("codeAgent"));
     document.getElementById("explainFile").addEventListener("click", () => post("explainFile"));
+    document.getElementById("killerWorkflow").addEventListener("click", () => runWorkflowPrompt("Run the issue-to-PR workflow. Take the current issue or selected prompt through the full Agent Hub loop: plan the work, edit the needed files, run the most relevant tests, fix failures once, and summarize a pull request with files changed, validation, and risks. If no issue is selected, inspect the workspace first and choose the highest-impact actionable issue."));
     document.getElementById("stopServer").addEventListener("click", () => post("stopServer"));
     document.getElementById("restartServer").addEventListener("click", () => post("restartServer"));
     document.getElementById("checkHealth").addEventListener("click", () => post("checkHealth"));
@@ -2757,6 +3478,14 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("copyClaudeCodeConfig").addEventListener("click", () => post("copyClaudeCodeConfig"));
     document.getElementById("testAnthropicEndpoint").addEventListener("click", () => post("testAnthropicEndpoint"));
     document.getElementById("showClaudeCodeSetup").addEventListener("click", () => post("showClaudeCodeSetup"));
+    for (const button of document.querySelectorAll(".trust-preset")) {
+      button.addEventListener("click", () => {
+        vscode.postMessage({
+          type: "applyTrustPreset",
+          preset: button.getAttribute("data-preset") || "safe"
+        });
+      });
+    }
 
     window.addEventListener("message", (event) => {
       const message = event.data;
@@ -3556,6 +4285,7 @@ async function apiKeyStatusRows() {
       id: spec.id,
       label: spec.label,
       env: spec.env,
+      envPresent: !!process.env[spec.env],
       saved
     });
   }
@@ -4985,6 +5715,9 @@ ${apiKeyFieldsHtml()}
       if (options.sources && options.sources.length) {
         item.append(detailsBlock("Sources", options.sources));
       }
+      if (options.routingDetails && options.routingDetails.length) {
+        item.append(detailsBlock("Routing", options.routingDetails));
+      }
       messageList.append(item);
       transcript.scrollTop = transcript.scrollHeight;
       return item;
@@ -5030,6 +5763,9 @@ ${apiKeyFieldsHtml()}
       }
       if (options.sources && options.sources.length) {
         turn.item.append(detailsBlock("Sources", options.sources));
+      }
+      if (options.routingDetails && options.routingDetails.length) {
+        turn.item.append(detailsBlock("Routing", options.routingDetails));
       }
       if (options.feedbackRequestId && !options.error) {
         turn.item.append(feedbackControls(options.feedbackRequestId));
@@ -5104,6 +5840,57 @@ ${apiKeyFieldsHtml()}
       const model = row.model || row.agent || "routing";
       const provider = row.provider ? row.provider + " / " : "";
       return "Models: " + provider + model;
+    }
+
+    function routingDetailsLines(response) {
+      const lines = [];
+      const payload = response && typeof response === "object" ? response : {};
+      const agent = payload.agent && typeof payload.agent === "object" ? payload.agent : {};
+      const provider = payload.provider || agent.provider || "";
+      const model = payload.model || agent.model || "";
+      const agentName = payload.agent && typeof payload.agent === "string" ? payload.agent : agent.name || "";
+      if (provider || model || agentName) {
+        lines.push("chosen provider/model: " + [provider || agentName || "provider", model].filter(Boolean).join(" / "));
+      }
+      const metadata = payload.agent_hub && typeof payload.agent_hub === "object" ? payload.agent_hub : {};
+      const workflow = metadata.workflow && typeof metadata.workflow === "object" ? metadata.workflow : {};
+      if (workflow.kind || workflow.context && workflow.context.workflow_pattern) {
+        lines.push("workflow: " + [workflow.kind, workflow.context && workflow.context.workflow_pattern].filter(Boolean).join(" / "));
+      }
+      const usage = payload.usage && typeof payload.usage === "object" ? payload.usage : {};
+      const inputTokens = numberValue(usage.prompt_tokens, usage.input_tokens, metadata.input_tokens);
+      const outputTokens = numberValue(usage.completion_tokens, usage.output_tokens, metadata.output_tokens);
+      if (inputTokens !== null || outputTokens !== null) {
+        lines.push("tokens: " + [inputTokens !== null ? "in " + inputTokens : "", outputTokens !== null ? "out " + outputTokens : ""].filter(Boolean).join(", "));
+      }
+      const cost = numberValue(payload.estimated_cost_usd, usage.estimated_cost_usd, metadata.estimated_cost_usd);
+      if (cost !== null) {
+        lines.push("cost: $" + cost.toFixed(cost < 0.01 ? 6 : 4));
+      }
+      const latencyMs = numberValue(payload.latency_ms, metadata.latency_ms);
+      if (latencyMs !== null) {
+        lines.push("time: " + (latencyMs >= 1000 ? (latencyMs / 1000).toFixed(1) + "s" : Math.round(latencyMs) + "ms"));
+      }
+      const failover = Array.isArray(payload.failover) ? payload.failover : [];
+      if (failover.length) {
+        lines.push("fallback attempts: " + failover.length);
+        for (const event of failover.slice(0, 4)) {
+          lines.push("fallback: " + [event.agent || event.provider || "provider", event.model || "", event.reason || ""].filter(Boolean).join(" / "));
+        }
+      } else {
+        lines.push("fallback attempts: 0");
+      }
+      return lines;
+    }
+
+    function numberValue() {
+      for (const value of arguments) {
+        const number = Number(value);
+        if (Number.isFinite(number)) {
+          return number;
+        }
+      }
+      return null;
     }
 
     function cleanSessionModelRow(row) {
@@ -5246,6 +6033,21 @@ ${apiKeyFieldsHtml()}
           });
         }
       }
+      if (metadata && Array.isArray(metadata.workflow_stages)) {
+        for (const stage of metadata.workflow_stages) {
+          if (!stage || typeof stage !== "object") {
+            continue;
+          }
+          recordSessionModel({
+            role: stage.role || stage.stage || "workflow",
+            agent: stage.agent,
+            provider: stage.provider,
+            model: stage.model,
+            status: "used",
+            detail: stage.stage ? "stage: " + stage.stage : "workflow"
+          });
+        }
+      }
     }
 
     function renderSessionModels() {
@@ -5307,7 +6109,7 @@ ${apiKeyFieldsHtml()}
         if (!state) {
           continue;
         }
-        state.textContent = row.saved ? "Saved" : "Not set";
+        state.textContent = row.saved ? "Saved" : row.envPresent ? "Env" : "Not set";
       }
       if (messageText !== undefined) {
         keyMessage.textContent = messageText || "";
@@ -5531,6 +6333,7 @@ ${apiKeyFieldsHtml()}
         finishLiveMessage(turn, message.text, {
           tools: message.tools || [],
           sources: message.sources || [],
+          routingDetails: routingDetailsLines(message.response),
           feedbackRequestId: message.response && message.response.id
         });
         setBusy(false);
@@ -8446,7 +9249,21 @@ function permissionActionFromApprovalEvent(event) {
   const tool = event && event.tool ? String(event.tool) : "tool";
   const files = Array.isArray(event && event.affected_files) ? event.affected_files : [];
   const commands = Array.isArray(event && event.commands) ? event.commands : [];
-  const category = tool === "run_command" ? "shell_command" : "file_write";
+  const deleteCount = Number(event && event.delete_count || 0);
+  const category = event && event.category
+    ? String(event.category)
+    : tool === "run_command"
+      ? "shell_command"
+      : deleteCount > 0
+        ? "file_delete"
+        : "file_write";
+  const detailParts = [];
+  if (event && event.impact) {
+    detailParts.push(event.impact);
+  }
+  if (event && event.patch_preview) {
+    detailParts.push("Preview:\n" + String(event.patch_preview).slice(0, 3200));
+  }
   return {
     category,
     description: event && event.summary
@@ -8454,7 +9271,7 @@ function permissionActionFromApprovalEvent(event) {
       : `Agent Hub asks permission to run ${tool}.`,
     resource: files.length ? files.join(", ") : commands.join(", "),
     risk: event && event.risk_level ? event.risk_level : "medium",
-    detail: event && event.impact ? event.impact : ""
+    detail: detailParts.join("\n\n")
   };
 }
 

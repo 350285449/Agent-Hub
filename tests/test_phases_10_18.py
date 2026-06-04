@@ -185,6 +185,36 @@ class MCPRepoWorkflowEvaluationStatusTests(unittest.TestCase):
         self.assertEqual(result.memory.state.retries, 1)
         self.assertEqual(result.memory.state.final_status, "completed")
 
+    def test_issue_to_pr_workflow_runs_validation_patch_summary_and_finalizer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls: list[HubRequest] = []
+            config = _tool_config(root)
+            engine = WorkflowEngine(config)
+            engine.router.provider_factory = lambda agent: _SequenceProvider(agent, calls, [
+                ProviderResult(text="plan app.py", model=agent.model),
+                ProviderResult(text="work app.py", model=agent.model),
+                ProviderResult(text="no blocking issues", model=agent.model),
+                ProviderResult(text="validation pass", model=agent.model),
+                ProviderResult(text="pr summary app.py", model=agent.model),
+            ])
+
+            result = engine.execute(
+                "issue-to-pr",
+                HubRequest(
+                    session_id="wf",
+                    messages=[{"role": "user", "content": "take issue #42 to PR for app.py"}],
+                    raw={"validate": True},
+                ),
+            )
+
+        stages = [stage.stage for stage in result.memory.stage_results]
+        self.assertEqual(result.memory.kind, "issue-pr")
+        self.assertEqual(stages, ["plan", "work", "review", "validate", "patch_summary", "final"])
+        self.assertEqual(result.response.text, "pr summary app.py")
+        self.assertEqual(calls[-1].raw["agent_hub"]["workflow_role"], "finalizer")
+        self.assertIn("Summarize the pull request", calls[-1].messages[0]["content"])
+
     def test_evaluation_scores_are_stored_and_status_endpoints_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
