@@ -109,6 +109,35 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(shaped["output"][0]["content"][0]["type"], "output_text")
         self.assertEqual(events[-1], "[DONE]")
 
+    def test_openai_responses_tool_history_becomes_provider_neutral_messages(self) -> None:
+        request = request_from_openai_responses(
+            {
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "read_file",
+                        "arguments": '{"path":"README.md"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "file text",
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(request.messages[0]["tool_calls"][0]["function"]["name"], "read_file")
+        self.assertEqual(
+            request.messages[0]["tool_calls"][0]["function"]["arguments"],
+            '{"path":"README.md"}',
+        )
+        self.assertEqual(request.messages[1]["role"], "tool")
+        self.assertEqual(request.messages[1]["tool_call_id"], "call_1")
+        self.assertEqual(request.messages[1]["name"], "read_file")
+        self.assertEqual(request.messages[1]["content"], "file text")
+
     def test_response_shapes_hide_routing_details_by_default(self) -> None:
         response = HubResponse(
             request_id="hub-1",

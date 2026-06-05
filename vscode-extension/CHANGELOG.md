@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.7
+
+- Fixes bundled backend startup on fresh Python installations without `packaging`.
+- Makes the backend runtime stdlib-only while keeping release tooling dependencies optional.
+- Verifies the full Agent Hub CLI import before starting the server.
+
+## 0.8.6
+
+- Adds universal routing across native, OpenAI Chat, OpenAI Responses, and Anthropic Messages request shapes.
+- Adds cross-provider tool-call translation for OpenAI, OpenAI-compatible, Anthropic, and Gemini adapters.
+- Adds an explicitly labeled tool-call compatibility bridge for text-only models while preserving client tool ownership.
+- Improves routing diagnostics, feature readiness reporting, and recommendation compatibility metadata.
+
 ## 0.8.5
 
 - Changes Token Safe Mode to route free cloud models first without shrinking Codex CLI/API-key fallback context or output.

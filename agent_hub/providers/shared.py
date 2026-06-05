@@ -238,17 +238,18 @@ def _openai_user_parts_from_anthropic(content: Any) -> tuple[str, list[dict[str,
         if not isinstance(item, dict):
             continue
         item_type = item.get("type")
-        if item_type == "tool_result":
+        if item_type in {"tool_result", "function_call_output"}:
             tool_results.append(
                 {
                     "role": "tool",
                     "tool_call_id": str(
                         item.get("tool_use_id")
                         or item.get("tool_call_id")
+                        or item.get("call_id")
                         or item.get("id")
                         or "call_0"
                     ),
-                    "content": content_to_text(item.get("content")),
+                    "content": content_to_text(item.get("output", item.get("content"))),
                 }
             )
         elif item_type in {"text", "input_text"}:
@@ -267,7 +268,7 @@ def _openai_tool_calls_from_message(message: dict[str, Any]) -> list[dict[str, A
         return []
     calls: list[dict[str, Any]] = []
     for index, item in enumerate(content):
-        if not isinstance(item, dict) or item.get("type") != "tool_use":
+        if not isinstance(item, dict) or item.get("type") not in {"tool_use", "function_call"}:
             continue
         name = item.get("name")
         if not isinstance(name, str):
@@ -279,7 +280,11 @@ def _openai_tool_calls_from_message(message: dict[str, Any]) -> list[dict[str, A
                 "function": {
                     "name": name,
                     "arguments": json.dumps(
-                        item.get("input") if isinstance(item.get("input"), dict) else {},
+                        (
+                            item.get("input")
+                            if isinstance(item.get("input"), dict)
+                            else _json_object(item.get("arguments"))
+                        ),
                         separators=(",", ":"),
                         ensure_ascii=False,
                     ),
@@ -297,17 +302,18 @@ def _anthropic_user_content(content: Any) -> Any:
         if not isinstance(item, dict):
             continue
         item_type = item.get("type")
-        if item_type == "tool_result":
+        if item_type in {"tool_result", "function_call_output"}:
             blocks.append(
                 {
                     "type": "tool_result",
                     "tool_use_id": str(
                         item.get("tool_use_id")
                         or item.get("tool_call_id")
+                        or item.get("call_id")
                         or item.get("id")
                         or "call_0"
                     ),
-                    "content": content_to_text(item.get("content")),
+                    "content": content_to_text(item.get("output", item.get("content"))),
                 }
             )
         elif item_type in {"text", "input_text"} and isinstance(item.get("text"), str):
@@ -323,13 +329,17 @@ def _anthropic_assistant_content(message: dict[str, Any]) -> Any:
             if not isinstance(item, dict):
                 continue
             item_type = item.get("type")
-            if item_type == "tool_use" and isinstance(item.get("name"), str):
+            if item_type in {"tool_use", "function_call"} and isinstance(item.get("name"), str):
                 blocks.append(
                     {
                         "type": "tool_use",
                         "id": str(item.get("id") or f"toolu_{len(blocks)}"),
                         "name": item["name"],
-                        "input": item.get("input") if isinstance(item.get("input"), dict) else {},
+                        "input": (
+                            item.get("input")
+                            if isinstance(item.get("input"), dict)
+                            else _json_object(item.get("arguments"))
+                        ),
                     }
                 )
             elif item_type in {"text", "output_text"} and isinstance(item.get("text"), str):
@@ -463,6 +473,116 @@ def _gemini_tool_specs(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ]
         }
     ]
+
+
+def _gemini_tool_choice(value: Any) -> dict[str, Any] | None:
+    mode = ""
+    allowed: list[str] = []
+    if isinstance(value, str):
+        mode = value.strip().lower()
+    elif isinstance(value, dict):
+        choice_type = str(value.get("type") or "").lower()
+        function = value.get("function") if isinstance(value.get("function"), dict) else value
+        name = function.get("name") if isinstance(function, dict) else None
+        if isinstance(name, str) and name:
+            mode = "required"
+            allowed = [name]
+        else:
+            mode = choice_type
+    mapped = {
+        "any": "ANY",
+        "required": "ANY",
+        "auto": "AUTO",
+        "none": "NONE",
+    }.get(mode)
+    if mapped is None:
+        return None
+    config: dict[str, Any] = {"mode": mapped}
+    if allowed:
+        config["allowedFunctionNames"] = allowed
+    return {"functionCallingConfig": config}
+
+
+def _gemini_message_parts(message: dict[str, Any]) -> list[dict[str, Any]]:
+    role = str(message.get("role") or "user")
+    content = message.get("content")
+    parts: list[dict[str, Any]] = []
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                if isinstance(item, str):
+                    parts.append({"text": item})
+                continue
+            item_type = item.get("type")
+            if item_type in {"text", "input_text", "output_text"} and isinstance(item.get("text"), str):
+                parts.append({"text": item["text"]})
+            elif item_type in {"tool_use", "function_call"} and isinstance(item.get("name"), str):
+                parts.append(
+                    {
+                        "functionCall": {
+                            "name": item["name"],
+                            "args": (
+                                item.get("input")
+                                if isinstance(item.get("input"), dict)
+                                else _json_object(item.get("arguments"))
+                            ),
+                        }
+                    }
+                )
+            elif item_type in {"tool_result", "function_call_output"}:
+                parts.append(
+                    _gemini_function_response(
+                        name=str(item.get("name") or "tool"),
+                        content=item.get("output", item.get("content")),
+                    )
+                )
+
+    raw_calls = message.get("tool_calls")
+    if isinstance(raw_calls, list):
+        for call in raw_calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+                continue
+            parts.append(
+                {
+                    "functionCall": {
+                        "name": function["name"],
+                        "args": _json_object(function.get("arguments")),
+                    }
+                }
+            )
+    function_call = message.get("function_call")
+    if isinstance(function_call, dict) and isinstance(function_call.get("name"), str):
+        parts.append(
+            {
+                "functionCall": {
+                    "name": function_call["name"],
+                    "args": _json_object(function_call.get("arguments")),
+                }
+            }
+        )
+    if role == "tool" and not any("functionResponse" in part for part in parts):
+        parts.append(
+            _gemini_function_response(
+                name=str(message.get("name") or "tool"),
+                content=content,
+            )
+        )
+    if not parts:
+        parts.append({"text": content_to_text(content)})
+    extra_context = _message_extra_context_text(message)
+    if extra_context:
+        parts.append({"text": extra_context})
+    return parts
+
+
+def _gemini_function_response(*, name: str, content: Any) -> dict[str, Any]:
+    return {
+        "functionResponse": {
+            "name": name,
+            "response": {"output": content_to_text(content)},
+        }
+    }
 
 
 def _gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:

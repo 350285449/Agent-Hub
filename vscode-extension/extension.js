@@ -7206,6 +7206,7 @@ async function ensurePythonBackend(config, workspace, launch) {
     "import sys",
     "assert sys.version_info >= (3, 11), 'Agent Hub requires Python 3.11 or newer'",
     "import agent_hub",
+    "import agent_hub.cli",
     "print(sys.executable)",
     "print(getattr(agent_hub, '__file__', 'agent_hub'))"
   ].join("; ");

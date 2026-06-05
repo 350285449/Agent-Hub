@@ -12,6 +12,7 @@ from ..evaluation import ProviderScoreStore
 from ..models import HubRequest
 from ..plugins import discover_plugins
 from ..server_routes.middleware import api_token, public_bind_host
+from ..tool_compatibility import tool_emulation_enabled, universal_compatibility_enabled
 from ..version import backend_version, build_metadata, config_runtime_hash
 
 
@@ -45,6 +46,8 @@ BACKEND_FEATURES = {
     "openai_tool_call_passthrough": True,
     "anthropic_messages_compatibility": True,
     "anthropic_tool_use_passthrough": True,
+    "universal_provider_compatibility": True,
+    "emulated_tool_call_bridge": True,
     "local_dummy_auth_compatibility": True,
     "workspace_checkpoints": True,
     "validation_repair_loops": True,
@@ -857,6 +860,8 @@ def _production_checks(
         and row.get("available") is False
         and not (row.get("unavailable_reason") or row.get("why"))
     ]
+    readiness_warnings = int(_dict(readiness.get("summary")).get("warning_count", 0) or 0)
+    compatibility_metadata_hidden = not config.expose_routing_details
     checks = [
         _production_check(
             "readiness_score",
@@ -972,12 +977,43 @@ def _production_checks(
             if public_bind_host(str(config.host or "")) and not api_token(config)
             else None,
         ),
+        _production_check(
+            "readiness_warnings",
+            "Readiness warnings are resolved",
+            readiness_warnings == 0,
+            5,
+            severity="evidence",
+            detail=(
+                "No readiness warnings remain."
+                if readiness_warnings == 0
+                else f"{readiness_warnings} readiness warning(s) remain."
+            ),
+            command=_dict(readiness.get("next_step")).get("command"),
+        ),
+        _production_check(
+            "compatibility_metadata_policy",
+            "Compatibility responses hide internal routing metadata",
+            compatibility_metadata_hidden,
+            5,
+            severity="evidence",
+            detail=(
+                "Internal routing details are hidden unless explicitly requested."
+                if compatibility_metadata_hidden
+                else "expose_routing_details=true makes compatibility responses larger and reveals internal routing metadata."
+            ),
+            command=(
+                None
+                if compatibility_metadata_hidden
+                else "Set expose_routing_details=false for production compatibility endpoints."
+            ),
+        ),
     ]
     return checks
 
 
 _FEATURE_STATUS_KEYS = {
     "provider_routing",
+    "universal_compatibility",
     "setup_guidance",
     "security",
     "model_leaderboard",
@@ -1320,6 +1356,18 @@ def _feature_status(
         "provider_routing": {
             "state": "ready" if active_names else "needs_setup",
             "detail": ", ".join(active_names[:8]) if active_names else "No provider reports as available.",
+        },
+        "universal_compatibility": {
+            "state": "ready" if universal_compatibility_enabled(config) else "disabled",
+            "request_shapes": ["native", "openai-chat", "openai-responses", "anthropic-messages"],
+            "provider_adapters": ["openai", "openai-compatible", "anthropic", "gemini"],
+            "tool_emulation_enabled": tool_emulation_enabled(config),
+            "detail": (
+                "All supported request shapes can route across provider adapters; "
+                "native tools are preferred and text-only models use labeled emulation."
+                if universal_compatibility_enabled(config)
+                else "Universal cross-provider routing is disabled by compatibility_mode."
+            ),
         },
         "setup_guidance": {
             "state": "ready" if setup_guidance.get("ready") else "needs_action",

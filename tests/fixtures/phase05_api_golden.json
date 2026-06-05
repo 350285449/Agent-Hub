@@ -109,9 +109,9 @@
   },
   "messages_failure": {
     "body": {
+      "type": "error",
       "error": {
         "message": "Model 'agent:missing' was not found in Agent Hub routes or agents.",
-        "suggested_fix": "Use /v1/models, agent-hub-coding, a configured route name, or agent:<agent-name>.",
         "type": "model_not_found"
       }
     },

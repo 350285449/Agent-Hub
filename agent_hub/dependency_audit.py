@@ -119,8 +119,6 @@ def dependency_install_checks(root: Path) -> list[dict[str, Any]]:
 def validate_dependency_declarations(root: Path, pyproject: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     audit = runtime_dependency_audit(root, pyproject)
-    if not audit["declared_runtime_dependency_specs"]:
-        failures.append("pyproject.toml project.dependencies must not be empty")
     for name in audit["missing"]:
         failures.append(f"pyproject.toml project.dependencies is missing runtime dependency for import {name}")
     for name in audit["extra"]:

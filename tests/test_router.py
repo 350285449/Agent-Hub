@@ -350,6 +350,7 @@ class RouterTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=Path(tmp),
                 workspace_dir=Path(tmp),
+                compatibility_mode={"emulate_tools": False},
                 routes=[RouteRule(name="coding", agents=["plain", "echo"])],
                 agents={
                     "plain": AgentConfig(
@@ -398,6 +399,7 @@ class RouterTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=Path(tmp),
                 workspace_dir=Path(tmp),
+                compatibility_mode={"emulate_tools": False},
                 routes=[RouteRule(name="coding", agents=["echo"])],
                 agents={
                     "echo": AgentConfig(
@@ -565,6 +567,46 @@ class RouterTests(unittest.TestCase):
 
             self.assertEqual(recommendations[0]["agent"], "coder")
             self.assertTrue(recommendations[0]["supports_tools"])
+
+    def test_recommendation_requires_tool_capability_when_explicitly_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
+                compatibility_mode={"emulate_tools": False},
+                default_route=["general", "coder"],
+                agents={
+                    "general": AgentConfig(
+                        name="general",
+                        provider="openai-compatible",
+                        model="general-test",
+                        base_url="http://127.0.0.1:9999",
+                        priority=100,
+                    ),
+                    "coder": AgentConfig(
+                        name="coder",
+                        provider="openai-compatible",
+                        model="coder-test",
+                        base_url="http://127.0.0.1:9999",
+                        supports_tools=True,
+                    ),
+                },
+            )
+
+            available = AgentRouter(config).recommend(
+                HubRequest(session_id="abc", messages=[{"role": "user", "content": "fix tests"}]),
+                needs_tools=True,
+            )
+            all_rows = AgentRouter(config).recommend(
+                HubRequest(session_id="abc", messages=[{"role": "user", "content": "fix tests"}]),
+                needs_tools=True,
+                include_unavailable=True,
+            )
+
+            self.assertEqual([row["agent"] for row in available], ["coder"])
+            general = next(row for row in all_rows if row["agent"] == "general")
+            self.assertFalse(general["available"])
+            self.assertEqual(general["unavailable_reason"], "tool support required")
 
     def test_recommendation_marks_failed_local_probe_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -515,7 +515,7 @@ def _framework(file_types: list[str], files_involved: list[str], text: str, lang
         return "django"
     if "flask" in haystack:
         return "flask"
-    if "pytest" in haystack:
+    if "pytest" in haystack and language == "python":
         return "pytest"
     if language in {"go", "rust", "java", "csharp"}:
         return language
@@ -614,6 +614,8 @@ def _complexity(
 
 def _reviewer_required(task_type: str, risk_level: str, text: str, files_involved: list[str]) -> bool:
     if task_type == "security_sensitive_change" or risk_level in {"high", "critical"}:
+        return True
+    if len(files_involved) >= 2 and "refactor" in text:
         return True
     if len(files_involved) >= 4 and any(word in text for word in ("edit", "write", "refactor", "fix")):
         return True
@@ -811,6 +813,11 @@ def _looks_like_mutating_task(text: str) -> bool:
         for marker in (
             "write",
             "edit",
+            "fix",
+            "implement",
+            "create",
+            "update",
+            "refactor",
             "replace",
             "delete",
             "remove",

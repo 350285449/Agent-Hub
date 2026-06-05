@@ -8,8 +8,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from packaging.version import InvalidVersion, Version
-
 from .config import normalize_provider
 from .core.router import AgentRouter
 from .dependency_audit import dependency_install_checks
@@ -456,13 +454,14 @@ def _backend_snapshot_check(root: Path) -> dict[str, Any]:
 def _version_alignment_check(root: Path) -> dict[str, Any]:
     versions = _version_sources(root)
     present = {key: value for key, value in versions.items() if value}
-    normalized: dict[str, Version] = {}
+    normalized: dict[str, str] = {}
     invalid: list[str] = []
     for key, value in present.items():
-        try:
-            normalized[key] = Version(str(value))
-        except InvalidVersion:
+        normalized_value = _normalize_release_version(value)
+        if normalized_value is None:
             invalid.append(f"{key}={value}")
+        else:
+            normalized[key] = normalized_value
     unique = {str(value) for value in normalized.values()}
     ok = bool(present) and not invalid and len(unique) <= 1
     if ok:
@@ -478,6 +477,18 @@ def _version_alignment_check(root: Path) -> dict[str, Any]:
         "detail": detail,
         "versions": versions,
     }
+
+
+def _normalize_release_version(value: Any) -> str | None:
+    match = re.fullmatch(
+        r"\s*[vV]?(\d+)\.(\d+)\.(\d+)([-+][0-9A-Za-z][0-9A-Za-z.-]*)?\s*",
+        str(value),
+    )
+    if match is None:
+        return None
+    release = ".".join(str(int(part)) for part in match.groups()[:3])
+    suffix = str(match.group(4) or "").lower()
+    return release + suffix
 
 
 def _release_validation_check(root: Path) -> dict[str, Any]:

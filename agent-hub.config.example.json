@@ -68,6 +68,8 @@
   ],
   "max_context_tokens": null,
   "compatibility_mode": {
+    "universal_routing": true,
+    "emulate_tools": true,
     "minimal_tool_schema": true,
     "reduced_repo_context": true,
     "max_context_tokens": null
@@ -95,7 +97,7 @@
   "enterprise_permission_grants": [],
   "enterprise_audit_retention_days": 90,
   "include_raw_responses": false,
-  "expose_routing_details": true,
+  "expose_routing_details": false,
   "default_route": [
     "ollama-local",
     "openai-compatible-example"

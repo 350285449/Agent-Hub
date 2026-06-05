@@ -39,6 +39,18 @@ class SmartWorkspaceRoutingTests(unittest.TestCase):
         self.assertIn(risky.risk_level, {"high", "critical"})
         self.assertEqual(risky.workflow_hint, "reviewer_permission_gate")
 
+    def test_multi_file_refactor_has_consistent_risk_and_review_signals(self) -> None:
+        classification = TaskClassifier().classify(
+            _request("Refactor src/app.ts and src/state.ts safely, then run tests.")
+        )
+
+        self.assertEqual(classification.task_category, "refactor")
+        self.assertEqual(classification.language, "typescript")
+        self.assertEqual(classification.framework, "unknown")
+        self.assertEqual(classification.risk_level, "medium")
+        self.assertTrue(classification.reviewer_required)
+        self.assertIn("file_write", classification.permission_requirements)
+
     def test_router_decision_explains_smart_workspace_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _smart_config(Path(tmp))

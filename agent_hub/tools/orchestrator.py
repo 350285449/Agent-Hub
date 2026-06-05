@@ -188,6 +188,14 @@ class ToolLoopRunner:
         if _request_option(request, "auto_execute_tools", "execute_tools") is True:
             return True
         raw = request.raw if isinstance(request.raw, dict) else {}
+        hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+        compatibility = (
+            hub.get("tool_compatibility")
+            if isinstance(hub.get("tool_compatibility"), dict)
+            else {}
+        )
+        if compatibility.get("client_owned_tools"):
+            return False
         if _request_has_client_tool_specs(request) and not isinstance(raw.get("agent_hub_tools"), list):
             return False
         return all(self.registry.get(call.name) is not None for call in calls)

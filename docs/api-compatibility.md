@@ -23,6 +23,9 @@ metadata out of public responses by default.
 - Streaming responses preserve expected SSE framing and final terminators.
 - Tool calls are preserved in provider-native OpenAI, Anthropic, and Responses
   compatible shapes.
+- Every supported request shape can route to every configured provider adapter.
+  Native tools are preferred; text-only models use the explicitly labeled
+  `emulated` JSON tool bridge when `compatibility_mode.emulate_tools=true`.
 - Error responses use the expected public error shape for the compatibility
   endpoint.
 

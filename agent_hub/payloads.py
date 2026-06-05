@@ -718,6 +718,7 @@ def _responses_input_messages(value: Any, *, preserve_structured: bool = False) 
         return [{"role": "user", "content": value}]
     if isinstance(value, list):
         messages: list[Message] = []
+        call_names: dict[str, str] = {}
         for item in value:
             if isinstance(item, dict) and item.get("type") == "message":
                 role = item.get("role", "user")
@@ -738,9 +739,45 @@ def _responses_input_messages(value: Any, *, preserve_structured: bool = False) 
                 )
                 messages.append(message)
             elif isinstance(item, dict) and item.get("type") in {"function_call", "tool_use"}:
-                messages.append({"role": "assistant", "content": [dict(item)] if preserve_structured else content_to_text(item)})
+                name = item.get("name")
+                if isinstance(name, str) and name:
+                    call_id = str(item.get("call_id") or item.get("id") or "call_0")
+                    call_names[call_id] = name
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": json_dumps_compact(
+                                            _json_object(
+                                                item.get("arguments", item.get("input", {}))
+                                            )
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    )
             elif isinstance(item, dict) and item.get("type") in {"function_call_output", "tool_result"}:
-                messages.append({"role": "tool", "content": [dict(item)] if preserve_structured else content_to_text(item)})
+                call_id = str(
+                    item.get("call_id")
+                    or item.get("tool_use_id")
+                    or item.get("id")
+                    or "call_0"
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": item.get("name") or call_names.get(call_id),
+                        "content": content_to_text(item.get("output", item.get("content", ""))),
+                    }
+                )
             elif isinstance(item, str):
                 messages.append({"role": "user", "content": item})
         return messages

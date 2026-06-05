@@ -46,6 +46,20 @@ class RepositoryIntelligenceTests(unittest.TestCase):
         self.assertTrue(decision.failure_prediction["chance_of_success"] > 0)
         self.assertTrue(decision.candidate_scores[0]["repository_dna"]["active"])
 
+    def test_repository_dna_does_not_backfill_framework_across_languages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_minecraft_mod(root)
+            classification = AgentRouter(_repo_routing_config(root))._classify_request(
+                HubRequest(
+                    session_id="s",
+                    messages=[{"role": "user", "content": "Explain src/app.ts"}],
+                )
+            )
+
+        self.assertEqual(classification.language, "typescript")
+        self.assertEqual(classification.framework, "unknown")
+
     def test_routing_simulation_exposes_killer_feature_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

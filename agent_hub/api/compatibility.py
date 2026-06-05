@@ -15,6 +15,7 @@ from ..payloads import (
     openai_stream_events,
     request_from_payload,
 )
+from ..tool_compatibility import tool_compatibility_mode
 
 
 API_SHAPES = {"native", "openai-chat", "openai-responses", "anthropic-messages"}
@@ -406,6 +407,9 @@ def model_rows(config: HubConfig, router: Any) -> list[dict[str, Any]]:
                         "reasoning_score": agent.reasoning_score,
                         "speed_score": agent.speed_score,
                         "supports_tools": bool(agent.supports_tools or agent.supports_function_calling),
+                        "effective_supports_tools": tool_compatibility_mode(config, agent)
+                        in {"native", "emulated"},
+                        "tool_compatibility": tool_compatibility_mode(config, agent),
                         "health": health.get(agent.name, {}),
                     },
                 }

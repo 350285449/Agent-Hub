@@ -43,6 +43,13 @@ from ...session_store import SessionStore
 from ...streaming import normalize_stream_chunk
 from ...token_optimizer import ContextCache, TokenOptimizer
 from ...tools import ToolExecutionPipeline, ToolLoopRunner, create_builtin_registry
+from ...tool_compatibility import (
+    agent_can_emulate_tools,
+    normalize_emulated_tool_result,
+    prepare_tool_compatibility_request,
+    tool_compatibility_mode,
+    tool_emulation_can_handle,
+)
 from ...tools.loop import (
     ToolLoopMetadata,
     merge_tool_loop_metadata,
@@ -347,7 +354,7 @@ class AgentRouter:
             config=config,
             registry=self.tool_registry,
             pipeline=self.tool_pipeline,
-            chat_provider=self.provider_manager.chat,
+            chat_provider=self._tool_loop_chat,
             record_tool_result=self.record_tool_result,
             record_event=self._record_route_event,
         )
@@ -484,6 +491,18 @@ class AgentRouter:
                     )
                 )
                 continue
+            if tool_emulation_can_handle(self.config, effective_request) and not _agent_supports_tools(agent):
+                failover.append(
+                    FailoverEvent(
+                        agent=agent.name,
+                        provider=agent.provider,
+                        model=agent.model,
+                        reason="Tool compatibility emulation requires buffered compatibility streaming.",
+                        retryable=False,
+                        error_type="native_streaming_unavailable",
+                    )
+                )
+                continue
 
             self._record_internal_event(
                 PROVIDER_SELECTED,
@@ -528,6 +547,8 @@ class AgentRouter:
 
         agent = self.config.agents.get(agent_name)
         if agent is None or not agent.enabled or not self._adapter_supports_native_streaming(agent):
+            return None
+        if tool_emulation_can_handle(self.config, request) and not _agent_supports_tools(agent):
             return None
         request_id = f"hub-{uuid.uuid4().hex}"
         decision = self.decide(request)
@@ -826,6 +847,7 @@ class AgentRouter:
         decision: RoutingDecision,
         stream: bool = False,
     ) -> HubRequest:
+        request = prepare_tool_compatibility_request(self.config, agent, request)
         prepared, usage = self._apply_context_safety_cap(agent, request)
         prepared, limit_usage = self._apply_model_output_limit(agent, prepared, usage)
         if limit_usage.get("output_tokens_adjusted"):
@@ -941,7 +963,10 @@ class AgentRouter:
         decision: RoutingDecision,
     ) -> ProviderResult:
         del decision
-        result = self.provider_manager.chat(agent, request)
+        result = normalize_emulated_tool_result(
+            request,
+            self.provider_manager.chat(agent, request),
+        )
         validation = validate_provider_result(result)
         if validation.valid:
             return result
@@ -963,7 +988,10 @@ class AgentRouter:
             issues=validation.issues,
             retrying=True,
         )
-        result = self.provider_manager.chat(agent, request)
+        result = normalize_emulated_tool_result(
+            request,
+            self.provider_manager.chat(agent, request),
+        )
         validation = validate_provider_result(result)
         if validation.valid:
             self._record_route_event(
@@ -1116,9 +1144,16 @@ class AgentRouter:
         names.extend(self._manual_model_or_provider_agent_names(request))
         names.extend(self._route_names(request))
         return any(
-            _agent_supports_tools(agent)
+            agent_can_emulate_tools(self.config, agent) or _agent_supports_tools(agent)
             for name in names
             if (agent := self.config.agents.get(name)) is not None and agent.enabled
+        )
+
+    def _tool_loop_chat(self, agent: AgentConfig, request: HubRequest) -> ProviderResult:
+        compatible_request = prepare_tool_compatibility_request(self.config, agent, request)
+        return normalize_emulated_tool_result(
+            compatible_request,
+            self.provider_manager.chat(agent, compatible_request),
         )
 
     def _run_tool_loop(
@@ -1325,7 +1360,11 @@ class AgentRouter:
         reasons.append(f"Repository DNA: {dna.summary}")
         language = classification.language if classification.language != "unknown" else dna.language
         framework = classification.framework
-        if framework == "unknown" and dna.frameworks:
+        if (
+            framework == "unknown"
+            and dna.frameworks
+            and classification.language in {"unknown", dna.language}
+        ):
             framework = dna.frameworks[0]
         complexity = classification.complexity
         if (
@@ -2167,6 +2206,7 @@ class AgentRouter:
         for index, agent in enumerate(candidates):
             free = is_free_agent(agent)
             health = self._health.get(agent.name)
+            tool_mode = tool_compatibility_mode(self.config, agent)
             unavailable_reason = ""
             if not agent.enabled:
                 unavailable_reason = "disabled"
@@ -2174,6 +2214,12 @@ class AgentRouter:
                 unavailable_reason = "not free"
             elif self.config.free_only and not free:
                 unavailable_reason = "skipped by free_only"
+            elif (
+                needs_tools is True
+                and not _agent_supports_tools(agent)
+                and tool_mode == "unavailable"
+            ):
+                unavailable_reason = "tool support required"
             elif self._is_on_cooldown(agent.name):
                 unavailable_reason = "temporarily unavailable"
             else:
@@ -2209,6 +2255,10 @@ class AgentRouter:
                     "reasoning_score": agent.reasoning_score,
                     "speed_score": agent.speed_score,
                     "supports_tools": bool(agent.supports_tools or agent.supports_function_calling),
+                    "effective_supports_tools": (
+                        tool_mode in {"native", "emulated"}
+                    ),
+                    "tool_compatibility": tool_mode,
                     "reliability_score": round(health.reliability_score, 4) if health else 0.7,
                     "average_latency_ms": round(health.average_latency_ms, 2) if health else 0.0,
                     "degraded": health.is_degraded() if health else False,

@@ -701,6 +701,114 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(declaration["parameters"]["type"], "OBJECT")
         self.assertEqual(declaration["parameters"]["properties"]["path"]["type"], "STRING")
 
+    def test_gemini_provider_translates_cross_protocol_tool_history(self) -> None:
+        agent = AgentConfig(
+            name="gemini",
+            provider="gemini",
+            model="gemini-test",
+            api_key="key",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": '{"path":"README.md"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "name": "read_file",
+                    "tool_call_id": "call_1",
+                    "content": "file text",
+                },
+            ],
+            raw={
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "parameters": {"type": "object"},
+                        },
+                    }
+                ],
+                "tool_choice": {"type": "function", "function": {"name": "read_file"}},
+            },
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.return_value = {
+                "candidates": [{"content": {"parts": [{"text": "Done"}]}}],
+                "usageMetadata": {},
+            }
+            GeminiProvider(agent).complete(request)
+
+        payload = post_json.call_args.kwargs["payload"]
+        self.assertEqual(
+            payload["contents"][0]["parts"][0]["functionCall"]["name"],
+            "read_file",
+        )
+        self.assertEqual(
+            payload["contents"][1]["parts"][0]["functionResponse"]["name"],
+            "read_file",
+        )
+        self.assertEqual(
+            payload["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"],
+            ["read_file"],
+        )
+
+    def test_gemini_provider_maps_anthropic_tool_result_to_prior_tool_name(self) -> None:
+        agent = AgentConfig(name="gemini", provider="gemini", model="gemini-test", api_key="key")
+        request = HubRequest(
+            session_id="s",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "read_file",
+                            "input": {"path": "README.md"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": "file text",
+                        }
+                    ],
+                },
+            ],
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.return_value = {
+                "candidates": [{"content": {"parts": [{"text": "Done"}]}}],
+                "usageMetadata": {},
+            }
+            GeminiProvider(agent).complete(request)
+
+        payload = post_json.call_args.kwargs["payload"]
+        self.assertEqual(
+            payload["contents"][1]["parts"][0]["functionResponse"]["name"],
+            "read_file",
+        )
+
     def test_local_research_provider_builds_cited_answer(self) -> None:
         agent = AgentConfig(
             name="local-research",

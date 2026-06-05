@@ -39,6 +39,8 @@ DEFAULT_REPO_IGNORE_PATTERNS = [
     ".pytest_cache/**",
 ]
 DEFAULT_COMPATIBILITY_MODE = {
+    "universal_routing": True,
+    "emulate_tools": True,
     "minimal_tool_schema": True,
     "reduced_repo_context": True,
     "max_context_tokens": None,
@@ -251,7 +253,7 @@ class HubConfig:
     initialization_report: dict[str, Any] = field(default_factory=dict)
 
     include_raw_responses: bool = False
-    expose_routing_details: bool = True
+    expose_routing_details: bool = False
 
     def ensure_dirs(self) -> None:
         """Create all local persistence folders required by the hub."""
@@ -993,7 +995,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         mcp_servers=mcp_servers,
         group_roles=dict(raw.get("group_roles", {})),
         include_raw_responses=_bool_with_default(raw.get("include_raw_responses"), False),
-        expose_routing_details=_bool_with_default(raw.get("expose_routing_details"), True),
+        expose_routing_details=_bool_with_default(raw.get("expose_routing_details"), False),
     )
 
 
@@ -1592,6 +1594,14 @@ def _normalize_compatibility_mode(value: Any) -> dict[str, Any]:
         source.get("max_context_tokens", defaults["max_context_tokens"])
     )
     return {
+        "universal_routing": _bool_with_default(
+            source.get("universal_routing"),
+            bool(defaults["universal_routing"]),
+        ),
+        "emulate_tools": _bool_with_default(
+            source.get("emulate_tools"),
+            bool(defaults["emulate_tools"]),
+        ),
         "minimal_tool_schema": _bool_with_default(
             source.get("minimal_tool_schema"),
             bool(defaults["minimal_tool_schema"]),

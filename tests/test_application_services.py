@@ -138,6 +138,22 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertGreaterEqual(report["rating"], 9.0)
             self.assertTrue(any(check["id"] == "vscode_backend_contract" for check in report["checks"]))
 
+    def test_production_check_reports_readiness_and_metadata_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            config.expose_routing_details = True
+            router = AgentRouter(config, provider_factory=_Provider)
+
+            report = DiagnosticsApplicationService(config).production_check_body(
+                router,
+                provider_health={"coder": {"available": True}},
+            )
+
+            checks = {check["id"]: check for check in report["checks"]}
+            self.assertFalse(checks["readiness_warnings"]["ok"])
+            self.assertFalse(checks["compatibility_metadata_policy"]["ok"])
+            self.assertLess(report["score"], 100)
+
 
 class _Provider:
     def __init__(self, agent: AgentConfig) -> None:

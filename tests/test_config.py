@@ -93,6 +93,8 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNone(config.agents["ollama-qwen-coder"].max_tokens)
         self.assertIsNone(config.agents["codex"].max_tokens)
         self.assertEqual(config.native_stream_failure_policy, "recover")
+        self.assertTrue(config.compatibility_mode["universal_routing"])
+        self.assertTrue(config.compatibility_mode["emulate_tools"])
         self.assertIsNone(config.compatibility_mode["max_context_tokens"])
         self.assertTrue(config.routing["unlimited_default"])
         self.assertEqual(config.routing["max_tokens_mode"], "auto")

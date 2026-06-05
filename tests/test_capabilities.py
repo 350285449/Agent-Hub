@@ -44,6 +44,18 @@ class CapabilityModelTests(unittest.TestCase):
         self.assertEqual(capabilities.to_model_info_dict()["supports_tools"], True)
         self.assertEqual(capabilities.to_health_fields()["max_output_tokens"], 512)
 
+    def test_vision_capability_uses_agent_configuration(self) -> None:
+        capabilities = agent_capabilities(
+            AgentConfig(
+                name="vision",
+                provider="openai-compatible",
+                model="m",
+                supports_vision=True,
+            )
+        )
+
+        self.assertTrue(capabilities.supports_vision)
+
     def test_base_provider_adapter_reads_capabilities_from_shared_model(self) -> None:
         agent = AgentConfig(
             name="adapter",

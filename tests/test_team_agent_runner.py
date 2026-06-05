@@ -24,6 +24,7 @@ class TeamAgentRunnerTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=root / "state",
                 workspace_dir=root,
+                approval_mode="auto",
                 default_route=["planner", "researcher", "coder", "reviewer", "finalizer"],
                 group_roles={
                     "planner": "planner",

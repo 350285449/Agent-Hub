@@ -4,6 +4,7 @@ from typing import Any
 
 from ..capabilities import agent_capabilities
 from ..config import HubConfig, normalize_provider
+from ..tool_compatibility import tool_compatibility_mode
 
 
 def build_provider_status(
@@ -27,6 +28,10 @@ def build_provider_status(
                 "score": row.get("score", 0.0),
                 "streaming": capabilities.supports_streaming,
                 "supports_tools": capabilities.tool_capable,
+                "effective_supports_tools": (
+                    capabilities.tool_capable or tool_compatibility_mode(config, agent) == "emulated"
+                ),
+                "tool_compatibility": tool_compatibility_mode(config, agent),
                 "cooldown_until": row.get("cooldown_until"),
                 "unavailable_until": row.get("unavailable_until"),
                 "recent_failures": row.get("failure_count", 0),
@@ -65,6 +70,7 @@ def build_capability_graph(
             )
     for agent in config.agents.values():
         row = health.get(agent.name, {})
+        compatibility_mode = tool_compatibility_mode(config, agent)
         nodes.append(
             {
                 "agent": agent.name,
@@ -74,6 +80,13 @@ def build_capability_graph(
                 "enabled": agent.enabled,
                 "available": bool(row.get("available")),
                 "capabilities": agent_capabilities(agent).to_graph_dict(),
+                "compatibility": {
+                    "request_shapes": ["native", "openai-chat", "openai-responses", "anthropic-messages"],
+                    "response_shapes": ["native", "openai-chat", "openai-responses", "anthropic-messages"],
+                    "tool_mode": compatibility_mode,
+                    "effective_tools": compatibility_mode in {"native", "emulated"},
+                    "buffered_stream_fallback": True,
+                },
                 "benchmark_memory": {
                     "reliability_score": row.get("reliability_score"),
                     "average_latency_ms": row.get("average_latency_ms"),

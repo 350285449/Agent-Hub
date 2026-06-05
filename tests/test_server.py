@@ -32,6 +32,8 @@ class ServerCompatibilityTests(unittest.TestCase):
         self.assertTrue(BACKEND_FEATURES["context_usage_bar"])
         self.assertTrue(BACKEND_FEATURES["anthropic_messages_compatibility"])
         self.assertTrue(BACKEND_FEATURES["anthropic_tool_use_passthrough"])
+        self.assertTrue(BACKEND_FEATURES["universal_provider_compatibility"])
+        self.assertTrue(BACKEND_FEATURES["emulated_tool_call_bridge"])
         self.assertTrue(BACKEND_FEATURES["local_dummy_auth_compatibility"])
         self.assertTrue(BACKEND_FEATURES["readiness_scorecard"])
         self.assertTrue(BACKEND_FEATURES["feature_maturity_status"])
@@ -321,6 +323,7 @@ class ServerCompatibilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp) / "state",
+                compatibility_mode={"emulate_tools": False},
                 default_route=["echo"],
                 routes=[RouteRule(name="coding", agents=["echo"])],
                 agents={
@@ -722,6 +725,10 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("score", readiness)
             self.assertTrue(any(item["id"] == "route_ready_provider" for item in readiness["items"]))
             self.assertEqual(readiness["feature_status"]["external_mcp_bridge"]["state"], "foundation")
+            self.assertEqual(readiness["feature_status"]["universal_compatibility"]["state"], "ready")
+            self.assertTrue(
+                readiness["feature_status"]["universal_compatibility"]["tool_emulation_enabled"]
+            )
             self.assertEqual(production["object"], "agent_hub.production_check")
             self.assertIn("checks", production)
             self.assertTrue(any(check["id"] == "vscode_backend_contract" for check in production["checks"]))
@@ -779,6 +786,7 @@ class ServerCompatibilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp) / "state",
+                workspace_dir=Path(tmp),
                 approval_mode="auto",
                 free_only=False,
                 default_route=["unknown"],
@@ -821,6 +829,7 @@ class ServerCompatibilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp) / "state",
+                workspace_dir=Path(tmp),
                 approval_mode="ask",
                 cline_compatibility_mode=False,
                 free_only=False,

@@ -642,13 +642,10 @@ curl http://127.0.0.1:8787/debug/context
 
 ## Runtime Dependencies
 
-Agent Hub intentionally uses the Python standard library for most functionality.
-The only required runtime dependency is:
-
-- `packaging>=24.0`
-
-Additional dependencies are optional and installed only when specific providers
-or development tools are used.
+Agent Hub's backend uses only the Python standard library at runtime. A bundled
+VSIX can therefore start on a fresh Python 3.11+ installation without downloading
+Python packages. Release and development tools use optional dependencies such as
+`packaging`, `build`, and `pytest`.
 
 ## Operations
 
@@ -666,8 +663,8 @@ servers, Cline/Claude endpoints, approval mode, safe mode, token optimization
 mode, context diagnostics, likely problems, and exact fixes.
 Use `agent-hub doctor --json` for issue reports or automation; dependency
 checks distinguish the runtime import audit from optional release tooling. The
-runtime dependency audit currently reports `packaging` as the only non-stdlib
-runtime import because provider transport uses Python stdlib HTTP modules.
+runtime dependency audit reports `stdlib only`; provider transport uses Python
+stdlib HTTP modules.
 
 Router/provider errors also expose structured categories internally
 (`configuration`, `provider`, `rate_limit`, `quota`, `context_limit`,
@@ -973,9 +970,11 @@ API key: local-agent-hub-token
 ```
 
 Agent-Hub accepts OpenAI Chat Completions, OpenAI Responses, Anthropic Messages,
-and native `/v1/agent` requests. It forwards or translates tool definitions
-where possible and returns OpenAI-compatible `tool_calls` when the routed model
-chooses a tool.
+and native `/v1/agent` requests. Every request shape can route to every
+configured provider adapter. Native tools are preferred; text-only models use
+the labeled universal JSON tool bridge when `compatibility_mode.emulate_tools`
+is enabled, and the result is returned in the client's expected tool-call
+shape.
 
 During agent workflows, every model turn keeps the same conversation, session
 history, tool results, and workspace state. If a provider is rate-limited,

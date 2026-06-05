@@ -7,6 +7,7 @@ from typing import Any
 from ..capabilities import agent_supports_tools
 from ..config import AgentConfig, HubConfig, _is_local_or_private_url, is_free_agent, normalize_provider
 from ..models import HubRequest
+from ..tool_compatibility import agent_can_emulate_tools, tool_emulation_can_handle
 from .context import estimate_context_tokens
 from .health import ProviderHealth
 
@@ -32,7 +33,14 @@ class RouterPreflightPolicy:
         health: ProviderHealth | None = None,
     ) -> str | None:
         health = health if health is not None else self._health_for(agent)
-        if _requires_tool_capable_model(request) and not _agent_supports_tools(agent):
+        if (
+            _requires_tool_capable_model(request)
+            and not _agent_supports_tools(agent)
+            and not (
+                agent_can_emulate_tools(self.config, agent)
+                and tool_emulation_can_handle(self.config, request)
+            )
+        ):
             if _is_echo_agent(agent):
                 return (
                     "Echo is a diagnostic provider and cannot satisfy Cline, Claude Code, "
@@ -92,6 +100,10 @@ class RouterPreflightPolicy:
         if _requires_tool_capable_model(request):
             if (
                 not _agent_supports_tools(agent)
+                and not (
+                    agent_can_emulate_tools(self.config, agent)
+                    and tool_emulation_can_handle(self.config, request)
+                )
                 or _requires_missing_api_key(agent)
                 or "free_only" in reason
             ):

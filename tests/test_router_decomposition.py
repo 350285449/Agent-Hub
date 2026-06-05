@@ -17,7 +17,7 @@ from agent_hub.models import HubRequest
 
 class RouterDecompositionTests(unittest.TestCase):
     def test_preflight_policy_rejects_tool_request_without_tool_capable_agent(self) -> None:
-        config = HubConfig()
+        config = HubConfig(compatibility_mode={"emulate_tools": False})
         agent = AgentConfig(name="plain", provider="openai-compatible", model="m")
         request = HubRequest(
             session_id="s",

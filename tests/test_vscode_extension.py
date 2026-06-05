@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -335,6 +338,25 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("package.json", source)
         self.assertIn('env.PYTHONSAFEPATH = "1"', source)
         self.assertIn('env.PYTHONDONTWRITEBYTECODE = "1"', source)
+
+    def test_backend_cli_imports_without_site_packages_and_extension_probes_cli(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(ROOT)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", "import agent_hub.cli; print('ready')"],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "ready")
+        self.assertIn('"import agent_hub.cli"', source)
 
     def test_extension_and_python_backend_versions_match(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
