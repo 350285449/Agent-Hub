@@ -646,6 +646,11 @@ def _health_report(config: Any, *, route: str, include_history: bool) -> dict[st
     }
 
 
+def _production_check_report(config: Any) -> dict[str, Any]:
+    router = AgentRouter(config)
+    return DiagnosticsApplicationService(config).production_check_body(router)
+
+
 def _print_health(report: dict[str, Any]) -> None:
     print("Agent-Hub health")
     print(f"Route: {report['route']}")
@@ -669,6 +674,30 @@ def _print_health(report: dict[str, Any]) -> None:
             recommendations[:5],
             ["rank", "agent", "provider", "model", "score", "available", "why"],
         )
+
+
+def _print_production_check(report: dict[str, Any]) -> None:
+    print("Agent-Hub production check")
+    print(f"Score: {report.get('score', '?')}/100 ({report.get('state', 'unknown')})")
+    print(f"Rating: {report.get('rating', '?')}/10")
+    failed = report.get("failed") if isinstance(report.get("failed"), list) else []
+    warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
+    if failed:
+        print()
+        print("Failed checks:")
+        _print_table(
+            failed,
+            ["id", "severity", "detail", "command"],
+        )
+    if warnings:
+        print()
+        print("Warnings:")
+        _print_table(
+            warnings,
+            ["id", "severity", "detail", "command"],
+        )
+    if not failed and not warnings:
+        print("All production checks passed.")
 
 
 def _print_metrics(report: dict[str, Any]) -> None:

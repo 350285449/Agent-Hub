@@ -715,6 +715,7 @@ python -m agent_hub metrics --route cloud-agent
 agent-hub route-diagnose --route cloud-agent --needs-tools "fix a failing test"
 agent-hub benchmark-suite --route cloud-agent --json
 python -m agent_hub doctor
+agent-hub production-check
 agent-hub debug-bundle --output agent-hub-debug-bundle.zip
 ```
 
@@ -725,6 +726,10 @@ success/failure counts, token usage, and recent failover history. `doctor`
 combines config readiness with the same provider-health and recommendation
 signals. `route-diagnose` shows the selected provider, selected model, skipped
 providers, fallback reason, latency, and estimated cost when configured.
+`production-check` is a strict local acceptance gate: it requires route-ready
+provider health, production-safe security guardrails, honest feature maturity
+states, dashboard contracts, and VS Code/backend feature alignment. It exits
+nonzero until major/critical checks pass and the score reaches 90/100.
 `benchmark-suite` compares static routing with adaptive routing and writes a
 JSON report under `.agent-hub/state/benchmark_reports`.
 `debug-bundle` exports sanitized version info, config, logs, doctor output,
@@ -768,6 +773,7 @@ Additional visibility endpoints:
 
 - `GET /v1/provider-health`
 - `GET /v1/readiness`
+- `GET /v1/production-check`
 - `GET /v1/routing/status`
 - `GET /v1/routing/last-decision`
 - `GET /v1/routing/test-failover`

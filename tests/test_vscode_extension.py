@@ -121,8 +121,10 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('id="routingChain"', source)
         self.assertIn('id="routingSummaryGrid"', source)
         self.assertIn('id="routingReasonList"', source)
+        self.assertIn('id="heroReadiness"', source)
         self.assertIn("function sidebarRoutingExplanation", source)
         self.assertIn("function renderRoutingIntelligence", source)
+        self.assertIn("function readinessText", source)
         self.assertIn('id="onboardingList"', source)
         self.assertIn('id="contextDiagnostics"', source)
         self.assertIn('id="heroHealthScore"', source)
@@ -130,6 +132,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("function dashboardHealthScore", source)
         self.assertIn("averageTokensPerCall", source)
         self.assertIn("health score", source)
+        self.assertIn("readiness score", source)
 
     def test_webview_theme_tokens_have_dark_mode_fallbacks(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
@@ -169,6 +172,9 @@ class VscodeExtensionContributionTests(unittest.TestCase):
             "events_endpoint",
             "dashboard_status_endpoints",
             "tool_execution_loop",
+            "readiness_scorecard",
+            "feature_maturity_status",
+            "production_acceptance_check",
         ]:
             self.assertIn(feature, required)
             self.assertTrue(BACKEND_FEATURES[feature])

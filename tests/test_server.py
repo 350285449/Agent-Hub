@@ -713,6 +713,7 @@ class ServerCompatibilityTests(unittest.TestCase):
             try:
                 base = f"http://127.0.0.1:{server.server_address[1]}"
                 readiness = _get_json(f"{base}/v1/readiness")
+                production = _get_json(f"{base}/v1/production-check")
                 dashboard = _get_text(f"{base}/dashboard")
             finally:
                 _stop(server, thread)
@@ -721,6 +722,9 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("score", readiness)
             self.assertTrue(any(item["id"] == "route_ready_provider" for item in readiness["items"]))
             self.assertEqual(readiness["feature_status"]["external_mcp_bridge"]["state"], "foundation")
+            self.assertEqual(production["object"], "agent_hub.production_check")
+            self.assertIn("checks", production)
+            self.assertTrue(any(check["id"] == "vscode_backend_contract" for check in production["checks"]))
             self.assertIn("readiness", dashboard.lower())
             self.assertIn("/v1/readiness", dashboard)
 

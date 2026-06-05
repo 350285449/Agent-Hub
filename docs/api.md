@@ -128,6 +128,7 @@ curl http://127.0.0.1:8787/v1/routing-history
 curl http://127.0.0.1:8787/v1/provider-scores
 curl http://127.0.0.1:8787/v1/provider-health
 curl http://127.0.0.1:8787/v1/readiness
+curl http://127.0.0.1:8787/v1/production-check
 curl http://127.0.0.1:8787/v1/routing-memory/stats
 curl http://127.0.0.1:8787/v1/routing-memory/recent
 curl http://127.0.0.1:8787/v1/routing-decision/hub-request-id
@@ -156,6 +157,12 @@ rating, state, next action, scored readiness items, and feature maturity states.
 It distinguishes route-ready providers from merely configured providers, and it
 marks data-backed dashboards, plugins, MCP bridge, and night mode with honest
 ready/needs-data/foundation/plan-only states.
+
+`/v1/production-check` returns `agent_hub.production_check`: a strict acceptance
+gate with weighted checks, failed major/critical checks, warnings, readiness
+details, and a pass/fail `ok` field. The matching CLI command is
+`agent-hub production-check`; it exits nonzero until the install reaches at
+least 90/100 with no major or critical failures.
 
 `/dashboard` renders the same core provider status in lightweight HTML.
 `/dashboard/routing-intelligence` renders selected model, selected workflow,

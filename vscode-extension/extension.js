@@ -301,7 +301,10 @@ const REQUIRED_BACKEND_FEATURES = [
   "workspace_rollback_api",
   "events_endpoint",
   "dashboard_status_endpoints",
-  "tool_execution_loop"
+  "tool_execution_loop",
+  "readiness_scorecard",
+  "feature_maturity_status",
+  "production_acceptance_check"
 ];
 const APPROVAL_MODES = new Set(["ask", "auto", "safe", "readonly", "shell-ask", "deny"]);
 const SENSITIVE_PERMISSION_CATEGORIES = new Set([
@@ -687,6 +690,7 @@ async function sidebarDashboardState() {
     onboarding: await sidebarOnboardingState(config, null),
     contextDiagnostics: {},
     statistics: sidebarStatistics(null, null, null, null, [], [], null),
+    readiness: null,
     optimization: null,
     routingIntelligence: null,
     routingExplanation: null,
@@ -754,6 +758,7 @@ async function sidebarDashboardState() {
     dashboard.status = "Running";
     dashboard.statusText = `Running at ${config.serverUrl}`;
     dashboard.health = health;
+    dashboard.readiness = health && health.readiness && typeof health.readiness === "object" ? health.readiness : null;
     dashboard.activeModel = sidebarActiveModel(health, limits);
     dashboard.providers = sidebarProviderRows(health, limits);
     dashboard.limits = sidebarLimitRows(health, limits);
@@ -768,7 +773,7 @@ async function sidebarDashboardState() {
     if (metrics && dashboard.optimization) {
       metrics.optimization = dashboard.optimization;
     }
-    dashboard.statistics = sidebarStatistics(health, usage, metrics, permissions, dashboard.providers, dashboard.limits, debugContext, dashboard.optimization);
+    dashboard.statistics = sidebarStatistics(health, usage, metrics, permissions, dashboard.providers, dashboard.limits, debugContext, dashboard.optimization, dashboard.readiness);
     dashboard.insights = sidebarInsightRows(dashboard, metrics);
     dashboard.onboarding = await sidebarOnboardingState(config, health);
     dashboard.workspaceProfile = await sidebarWorkspaceProfile(config, health);
@@ -894,7 +899,7 @@ function sidebarTokenUsage(usage, limits) {
   };
 }
 
-function sidebarStatistics(health, usage, metrics, permissions, providers, limits, debugContext, optimization) {
+function sidebarStatistics(health, usage, metrics, permissions, providers, limits, debugContext, optimization, readiness) {
   const providerRows = Array.isArray(providers) && providers.length ? providers : sidebarProviderRows(health, limits);
   const counters = metrics && metrics.counters && typeof metrics.counters === "object" ? metrics.counters : {};
   const metricUsage = metrics && metrics.usage && typeof metrics.usage === "object" ? metrics.usage : {};
@@ -964,6 +969,13 @@ function sidebarStatistics(health, usage, metrics, permissions, providers, limit
     contextTruncations,
     streamFailures
   });
+  const readinessScore = readiness && Number.isFinite(Number(readiness.score))
+    ? Math.max(0, Math.min(100, Math.round(Number(readiness.score))))
+    : null;
+  const readinessState = readiness && readiness.state ? String(readiness.state).replace(/_/g, " ") : "";
+  const readinessNextStep = readiness && readiness.next_step && typeof readiness.next_step === "object"
+    ? readiness.next_step
+    : null;
 
   return {
     providersTotal: totalProviders,
@@ -999,6 +1011,10 @@ function sidebarStatistics(health, usage, metrics, permissions, providers, limit
     adaptiveAverageLatencyMs: Number(optimizationSummary.average_latency_ms || 0),
     adaptiveAverageRetries: Number(optimizationSummary.average_retries || 0),
     failedRequestsRecovered: Number(optimizationSummary.failed_requests_recovered || 0),
+    readinessScore,
+    readinessState,
+    readinessNextStepLabel: readinessNextStep && readinessNextStep.label ? readinessNextStep.label : "",
+    readinessNextStepDetail: readinessNextStep && readinessNextStep.detail ? readinessNextStep.detail : "",
     bestWorkflow: bestWorkflow.label || bestWorkflow.workflow_pattern || "",
     bestWorkflowAttempts: Number(bestWorkflow.attempts || 0),
     bestWorkflowSuccessRate: Math.round(Number(bestWorkflow.success_rate || 0) * 100),
@@ -1022,6 +1038,13 @@ function sidebarInsightRows(dashboard, metrics) {
   const insights = [];
   if (dashboard.status !== "Running") {
     insights.push({ tone: "warn", main: "Agent Hub is off", meta: "Click Start to collect health and usage numbers." });
+  }
+  if (dashboard.status === "Running" && stats.readinessScore !== null && stats.readinessScore !== undefined) {
+    if (stats.readinessScore >= 90) {
+      insights.push({ tone: "ok", main: `Readiness ${stats.readinessScore}/100`, meta: stats.readinessState || "production ready" });
+    } else if (stats.readinessNextStepLabel) {
+      insights.push({ tone: "warn", main: `Readiness ${stats.readinessScore}/100`, meta: `${stats.readinessNextStepLabel}: ${stats.readinessNextStepDetail || "review readiness"}` });
+    }
   }
   if (stats.providersTotal > 0 && stats.providersAvailable === 0) {
     insights.push({ tone: "error", main: "No providers are available", meta: "Check API keys, local model servers, or provider cooldowns." });
@@ -2518,6 +2541,10 @@ function sidebarHtml(webview, logoPath) {
           <span>Providers</span>
           <strong id="heroProviders">0/0</strong>
         </div>
+        <div class="state-pill">
+          <span>Readiness</span>
+          <strong id="heroReadiness">--</strong>
+        </div>
       </div>
       <button class="primary hero-server-action" id="heroServerAction" type="button" data-primary-action="start-server" data-state="Stopped">Start</button>
       <form class="quick-task" id="quickTaskForm">
@@ -2717,6 +2744,7 @@ function sidebarHtml(webview, logoPath) {
     const heroMode = document.getElementById("heroMode");
     const heroApproval = document.getElementById("heroApproval");
     const heroProviders = document.getElementById("heroProviders");
+    const heroReadiness = document.getElementById("heroReadiness");
     const setupProgressText = document.getElementById("setupProgressText");
     const setupProgressFill = document.getElementById("setupProgressFill");
     const nextStepTitle = document.getElementById("nextStepTitle");
@@ -2771,6 +2799,7 @@ function sidebarHtml(webview, logoPath) {
       setText(heroMode, compactModeText(dashboard.agentProviderMode || "cloud", dashboard.agentMode || "agent"));
       setText(heroApproval, dashboard.approvalMode || "ask");
       setText(heroProviders, providerCountText(dashboard.statistics || {}));
+      setText(heroReadiness, readinessText(dashboard.readiness));
       renderServerControls(status, dashboard);
       renderSetupSummary(dashboard);
       renderOrchestration(dashboard.orchestrationFlow || {});
@@ -2842,18 +2871,30 @@ function sidebarHtml(webview, logoPath) {
     }
 
     function renderSetupSummary(dashboard) {
+      const readiness = dashboard.readiness && typeof dashboard.readiness === "object" ? dashboard.readiness : null;
       const rows = Array.isArray(dashboard.onboarding) ? dashboard.onboarding : [];
       const setupRows = rows.filter((row) => row && row.setupRequired !== false && row.action !== true);
       const complete = setupRows.filter((row) => row && row.ok).length;
       const total = setupRows.length || 1;
-      const percent = Math.round((complete / total) * 100);
+      const readinessScore = readiness && Number.isFinite(Number(readiness.score)) ? Number(readiness.score) : null;
+      const percent = readinessScore === null ? Math.round((complete / total) * 100) : Math.max(0, Math.min(100, Math.round(readinessScore)));
       setupProgressText.textContent = percent + "%";
-      setupProgressText.title = complete + " of " + total + " setup checks passed. Starting Agent Hub is the next action, not a setup check.";
-      setupProgressText.dataset.state = percent === 100 ? "Ready" : percent >= 50 ? "Starting" : "Stopped";
+      setupProgressText.title = readiness
+        ? "Readiness score from Agent Hub backend: " + percent + "/100."
+        : complete + " of " + total + " setup checks passed. Starting Agent Hub is the next action, not a setup check.";
+      setupProgressText.dataset.state = percent >= 90 ? "Ready" : percent >= 50 ? "Starting" : "Stopped";
       setupProgressFill.style.width = percent + "%";
 
+      const readinessStep = readiness && readiness.next_step && typeof readiness.next_step === "object"
+        ? readiness.next_step
+        : null;
       const nextSetup = setupRows.find((row) => row && !row.ok);
       const nextAction = rows.find((row) => row && row.action === true && !row.ok);
+      if (readinessStep && dashboard.status === "Running") {
+        nextStepTitle.textContent = readinessStep.status === "warn" ? "Review: " + readinessStep.label : "Next: " + readinessStep.label;
+        nextStepDetail.textContent = readinessStep.detail || readinessStep.command || "Review Agent Hub readiness.";
+        return;
+      }
       if (dashboard.status === "Running" && percent === 100) {
         nextStepTitle.textContent = "Ready";
         nextStepDetail.textContent = "Send a task from the main panel.";
@@ -2891,6 +2932,15 @@ function sidebarHtml(webview, logoPath) {
         return "Reinstall or rebuild the VSIX so the bundled backend is included.";
       }
       return row && row.detail ? row.detail : "Complete this setup step.";
+    }
+
+    function readinessText(readiness) {
+      if (!readiness || typeof readiness !== "object") {
+        return "--";
+      }
+      const score = Number(readiness.score);
+      const label = readiness.state ? String(readiness.state).replace(/_/g, " ") : "unknown";
+      return Number.isFinite(score) ? Math.round(score) + "% " + label : label;
     }
 
     function renderOrchestration(flow) {
@@ -2961,6 +3011,16 @@ function sidebarHtml(webview, logoPath) {
           caption: healthCaption(stats, status),
           percent: score,
           featured: true
+        },
+        {
+          value: status === "Running" && stats.readinessScore !== null && stats.readinessScore !== undefined
+            ? String(stats.readinessScore)
+            : "--",
+          label: "readiness score",
+          caption: stats.readinessNextStepLabel
+            ? stats.readinessState + " / " + stats.readinessNextStepLabel
+            : stats.readinessState || "waiting for backend readiness",
+          percent: stats.readinessScore === null || stats.readinessScore === undefined ? 0 : Number(stats.readinessScore)
         },
         {
           value: Number(stats.providersAvailable || 0) + "/" + Number(stats.providersTotal || 0),

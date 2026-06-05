@@ -120,6 +120,24 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertEqual(readiness["feature_status"]["provider_routing"]["state"], "ready")
             self.assertTrue(any(item["id"] == "security_guardrails" for item in readiness["items"]))
 
+    def test_production_check_passes_for_route_ready_guarded_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            config.agents["coder"].supports_tools = True
+            config.agents["coder"].supports_function_calling = True
+            router = AgentRouter(config, provider_factory=_Provider)
+            service = DiagnosticsApplicationService(config)
+
+            report = service.production_check_body(
+                router,
+                provider_health={"coder": {"available": True}},
+            )
+
+            self.assertEqual(report["object"], "agent_hub.production_check")
+            self.assertTrue(report["ok"])
+            self.assertGreaterEqual(report["rating"], 9.0)
+            self.assertTrue(any(check["id"] == "vscode_backend_contract" for check in report["checks"]))
+
 
 class _Provider:
     def __init__(self, agent: AgentConfig) -> None:

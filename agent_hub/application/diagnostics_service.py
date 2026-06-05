@@ -823,6 +823,242 @@ def _has_mapping_values(value: Any) -> bool:
     return any(item not in (None, "", {}, []) for item in value.values())
 
 
+def _production_checks(
+    config: HubConfig,
+    router: Any,
+    provider_health: dict[str, dict[str, Any]],
+    setup_guidance: dict[str, Any],
+    plugins: dict[str, Any],
+    readiness: dict[str, Any],
+    dashboards: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    active_names = _active_names(config, provider_health)
+    recommendations = router.recommend(
+        HubRequest(
+            session_id="production-check",
+            route="cloud-agent",
+            messages=[{"role": "user", "content": "select a production-ready model"}],
+            record_session=False,
+        ),
+        limit=8,
+        needs_tools=True,
+        include_unavailable=True,
+    )
+    feature_contract = _extension_feature_contract()
+    security = _security_readiness_item(config)
+    dashboards_ok = all(
+        _dict(body.get("summary")).get("data_state") or body.get("object")
+        for body in dashboards.values()
+    )
+    unavailable_without_reason = [
+        row.get("agent")
+        for row in recommendations
+        if isinstance(row, dict)
+        and row.get("available") is False
+        and not (row.get("unavailable_reason") or row.get("why"))
+    ]
+    checks = [
+        _production_check(
+            "readiness_score",
+            "Readiness score is production-grade",
+            int(readiness.get("score", 0) or 0) >= 90 and readiness.get("state") == "production_ready",
+            15,
+            severity="major",
+            detail=f"Readiness {readiness.get('score', 0)}/100 ({readiness.get('state', 'unknown')}).",
+            command=(readiness.get("next_step") or {}).get("command")
+            if isinstance(readiness.get("next_step"), dict)
+            else None,
+        ),
+        _production_check(
+            "route_ready_provider",
+            "At least one provider is route-ready",
+            bool(active_names),
+            20,
+            severity="critical",
+            detail=(
+                "Ready provider(s): " + ", ".join(active_names[:8])
+                if active_names
+                else "No enabled provider currently reports as available."
+            ),
+            command=None if active_names else "python -m agent_hub doctor --providers",
+        ),
+        _production_check(
+            "security_guardrails",
+            "Security guardrails are production-safe",
+            security.get("status") != "action",
+            20,
+            severity="critical",
+            detail=str(security.get("detail") or ""),
+            command=security.get("command"),
+        ),
+        _production_check(
+            "dashboard_contracts",
+            "Dashboards return structured summaries and empty states",
+            dashboards_ok,
+            8,
+            severity="major",
+            detail="Cost, leaderboard, and benchmark dashboards expose summary data.",
+        ),
+        _production_check(
+            "feature_maturity_honesty",
+            "Feature maturity states are explicit",
+            all(key in readiness.get("feature_status", {}) for key in _FEATURE_STATUS_KEYS),
+            8,
+            severity="major",
+            detail="Ready, needs-data, foundation, and plan-only states are exposed.",
+        ),
+        _production_check(
+            "vscode_backend_contract",
+            "VS Code required backend features are present",
+            bool(feature_contract.get("ok")),
+            10,
+            severity="major",
+            detail=str(feature_contract.get("detail") or ""),
+            metadata=feature_contract,
+        ),
+        _production_check(
+            "recommendation_honesty",
+            "Unavailable recommendations explain why",
+            not unavailable_without_reason,
+            7,
+            severity="major",
+            detail=(
+                "All unavailable recommendation rows include a reason."
+                if not unavailable_without_reason
+                else "Missing unavailable reasons for: " + ", ".join(str(name) for name in unavailable_without_reason[:8])
+            ),
+        ),
+        _production_check(
+            "setup_guidance_actionable",
+            "Setup guidance has a next action when blocked",
+            bool(setup_guidance.get("ready")) or isinstance(setup_guidance.get("next_step"), dict),
+            5,
+            severity="major",
+            detail=(
+                "Setup is ready."
+                if setup_guidance.get("ready")
+                else str((_dict(setup_guidance.get("next_step")).get("detail") or "Setup guidance has a next step."))
+            ),
+            command=_dict(setup_guidance.get("next_step")).get("command"),
+        ),
+        _production_check(
+            "plugin_policy_honesty",
+            "Plugin and MCP state is policy-gated and explicit",
+            _dict(readiness.get("feature_status")).get("plugins", {}).get("state") in {
+                "foundation",
+                "execution_enabled",
+                "disabled",
+                "needs_manifest_fixes",
+            },
+            4,
+            severity="evidence",
+            detail=str(_dict(readiness.get("feature_status")).get("plugins", {}).get("state") or "unknown"),
+            metadata={"plugin_count": plugins.get("count", 0)},
+        ),
+        _production_check(
+            "public_bind_auth",
+            "Public bind cannot run without API auth",
+            not public_bind_host(str(config.host or "")) or bool(api_token(config)),
+            3,
+            severity="critical",
+            detail=(
+                "Localhost bind does not require API auth."
+                if not public_bind_host(str(config.host or ""))
+                else "Public bind has API auth configured."
+                if api_token(config)
+                else "Public bind is missing api_auth_token/api_auth_token_env."
+            ),
+            command="Set api_auth_token or api_auth_token_env before binding publicly."
+            if public_bind_host(str(config.host or "")) and not api_token(config)
+            else None,
+        ),
+    ]
+    return checks
+
+
+_FEATURE_STATUS_KEYS = {
+    "provider_routing",
+    "setup_guidance",
+    "security",
+    "model_leaderboard",
+    "benchmark_results_dashboard",
+    "cost_dashboard",
+    "autonomous_night_mode",
+    "plugins",
+    "external_mcp_bridge",
+}
+
+
+def _production_check(
+    check_id: str,
+    label: str,
+    ok: bool,
+    weight: int,
+    *,
+    severity: str,
+    detail: str,
+    command: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "id": check_id,
+        "label": label,
+        "ok": bool(ok),
+        "status": "ok" if ok else "fail",
+        "severity": severity,
+        "weight": weight,
+        "earned": weight if ok else 0,
+        "detail": detail,
+    }
+    if command and not ok:
+        item["command"] = command
+    if metadata:
+        item["metadata"] = metadata
+    return item
+
+
+def _extension_feature_contract() -> dict[str, Any]:
+    root = Path(__file__).resolve().parents[2]
+    extension_path = root / "vscode-extension" / "extension.js"
+    if not extension_path.exists():
+        return {
+            "ok": True,
+            "available": False,
+            "detail": "VS Code extension source is not bundled in this install.",
+            "missing": [],
+        }
+    try:
+        source = extension_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {
+            "ok": False,
+            "available": True,
+            "detail": f"Could not read VS Code extension source: {exc}",
+            "missing": [],
+        }
+    match = re.search(r"const REQUIRED_BACKEND_FEATURES = \[(?P<body>.*?)\];", source, re.DOTALL)
+    if not match:
+        return {
+            "ok": False,
+            "available": True,
+            "detail": "VS Code extension does not declare REQUIRED_BACKEND_FEATURES.",
+            "missing": [],
+        }
+    required = sorted(set(re.findall(r'"([^"]+)"', match.group("body"))))
+    missing = [feature for feature in required if BACKEND_FEATURES.get(feature) is not True]
+    return {
+        "ok": not missing,
+        "available": True,
+        "detail": (
+            f"{len(required)} required backend feature(s) are present."
+            if not missing
+            else "Missing backend features: " + ", ".join(missing)
+        ),
+        "required_count": len(required),
+        "missing": missing,
+    }
+
+
 def _readiness_items(
     config: HubConfig,
     provider_health: dict[str, dict[str, Any]],

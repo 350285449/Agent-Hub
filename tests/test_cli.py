@@ -93,6 +93,21 @@ class CliTests(unittest.TestCase):
             self.assertEqual(data["readiness"]["object"], "agent_hub.readiness")
             self.assertIn("feature_status", data["readiness"])
 
+    def test_production_check_reports_unready_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(["--config", str(path), "production-check", "--json"])
+
+            self.assertEqual(code, 1)
+            data = json.loads(buffer.getvalue())
+            self.assertEqual(data["object"], "agent_hub.production_check")
+            self.assertFalse(data["ok"])
+            self.assertTrue(any(check["id"] == "route_ready_provider" for check in data["failed"]))
+
     def test_doctor_json_includes_install_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"

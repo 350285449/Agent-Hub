@@ -12,6 +12,11 @@ def handle_get(handler: object, path: str) -> bool:
             handler.server.diagnostics_service.readiness_body(handler.server.router)
         )
         return True
+    if path == "/v1/production-check":
+        handler._send_diagnostics_json(
+            handler.server.diagnostics_service.production_check_body(handler.server.router)
+        )
+        return True
     if path == "/v1/limits":
         handler._send_diagnostics_json(handler.server.diagnostics_service.limits_body(handler.server.router))
         return True

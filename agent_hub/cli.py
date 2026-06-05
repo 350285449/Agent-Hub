@@ -40,6 +40,8 @@ from .commands_provider import (
     _print_health,
     _print_local_models,
     _print_metrics,
+    _print_production_check,
+    _production_check_report,
     _recommend,
     _route_test,
     _route_diagnose,
@@ -109,6 +111,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     health_parser = subparsers.add_parser("health", help="Show live provider health and best route candidates.")
     health_parser.add_argument("--route", default="cloud-agent", help="Route to summarize.")
     health_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    production_parser = subparsers.add_parser(
+        "production-check",
+        help="Run a strict local acceptance check for production readiness.",
+    )
+    production_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     metrics_parser = subparsers.add_parser("metrics", help="Show persisted provider metrics and failover history.")
     metrics_parser.add_argument("--route", default="cloud-agent", help="Route to summarize.")
@@ -445,6 +453,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             _print_health(report)
         return 0
+    if command == "production-check":
+        report = _production_check_report(config)
+        if args.json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            _print_production_check(report)
+        return 0 if report.get("ok") else 1
     if command == "metrics":
         report = _health_report(config, route=args.route, include_history=True)
         if args.json:
