@@ -80,6 +80,7 @@ BACKEND_FEATURES = {
     "adaptive_learning_router": True,
     "routing_memory": True,
     "routing_memory_api": True,
+    "routing_intelligence_api": True,
     "repository_dna": True,
     "repository_specific_routing": True,
     "workspace_memory": True,
@@ -174,6 +175,7 @@ class DiagnosticsApplicationService:
                     "task_scores": dict(score.get("task_scores") or {}),
                     "task_sample_counts": dict(score.get("task_sample_counts") or {}),
                     "samples": int(score.get("sample_count", samples) or samples),
+                    "measurement_status": "measured" if samples or score.get("sample_count") else "needs_data",
                 }
             )
         rows.sort(
@@ -189,9 +191,44 @@ class DiagnosticsApplicationService:
             dna = router.repository_intelligence.repository_dna().to_dict()
         except Exception:
             dna = {}
+        sample_count = sum(int(row.get("samples", 0) or 0) for row in rows)
+        measured_agent_count = sum(1 for row in rows if int(row.get("samples", 0) or 0) > 0)
+        leader = next(
+            (
+                row
+                for row in rows
+                if int(row.get("samples", 0) or 0) > 0
+                or float(row.get("overall_score", 0.0) or 0.0) > 0.0
+            ),
+            None,
+        )
         return {
             "object": "agent_hub.model_leaderboard",
             "routing_basis": "real outcomes, task success, latency, cost, and failure history",
+            "summary": {
+                "agent_count": len(rows),
+                "measured_agent_count": measured_agent_count,
+                "sample_count": sample_count,
+                "best_agent": leader.get("agent") if leader else None,
+                "best_model": leader.get("model") if leader else None,
+                "data_state": "ready" if sample_count else "waiting_for_benchmarks_or_traffic",
+            },
+            "empty_state": (
+                None
+                if sample_count
+                else {
+                    "title": "No measured model outcomes yet",
+                    "message": (
+                        "The leaderboard can rank configured agents, but it needs benchmark "
+                        "or live-routing outcomes before scores are meaningful."
+                    ),
+                    "actions": [
+                        "Run: python -m agent_hub eval --route coding --json",
+                        "Run: python -m agent_hub benchmark-suite --route coding --limit 24 --json",
+                        "Send real requests through Agent Hub so routing memory can learn outcomes.",
+                    ],
+                }
+            ),
             "repository": dna,
             "routing_memory": router.routing_memory.stats(),
             "data": rows,
@@ -217,6 +254,32 @@ class DiagnosticsApplicationService:
         return {
             "object": "agent_hub.benchmark_results",
             "count": len(reports),
+            "summary": {
+                "report_count": len(reports),
+                "latest_report": reports[0]["name"] if reports else None,
+                "total_result_count": sum(
+                    len(report.get("results", []))
+                    for report in reports
+                    if isinstance(report.get("results"), list)
+                ),
+                "data_state": "ready" if reports else "waiting_for_benchmark_reports",
+            },
+            "empty_state": (
+                None
+                if reports
+                else {
+                    "title": "No benchmark reports yet",
+                    "message": (
+                        "Benchmark dashboards are populated after a benchmark suite writes "
+                        "reports into the Agent Hub state directory."
+                    ),
+                    "actions": [
+                        "Run: python -m agent_hub benchmark-suite --route coding --limit 24 --json",
+                        "Use --output to save a specific report path.",
+                        "Check provider readiness first with: python -m agent_hub doctor",
+                    ],
+                }
+            ),
             "reports": reports,
         }
 
@@ -254,19 +317,59 @@ class DiagnosticsApplicationService:
         }
 
     def cost_dashboard_body(self, optimization: dict[str, Any]) -> dict[str, Any]:
+        cost_by_provider = optimization.get("cost_by_provider", {})
+        cost_by_model = optimization.get("cost_by_model", {})
+        cost_by_task_type = optimization.get("cost_by_task_type", {})
+        cost_by_day = optimization.get("cost_by_day", {})
+        known_cost = optimization.get("known_cost_usd", optimization.get("total_known_cost_usd"))
+        average_known_cost = optimization.get("average_known_cost_usd")
+        has_cost_data = (
+            known_cost is not None
+            or average_known_cost is not None
+            or _has_mapping_values(cost_by_provider)
+            or _has_mapping_values(cost_by_model)
+            or _has_mapping_values(cost_by_task_type)
+            or _has_mapping_values(cost_by_day)
+        )
         return {
             "object": "agent_hub.cost_dashboard",
-            "cost_by_provider": optimization.get("cost_by_provider", {}),
-            "cost_by_model": optimization.get("cost_by_model", {}),
-            "cost_by_task_type": optimization.get("cost_by_task_type", {}),
-            "cost_by_day": optimization.get("cost_by_day", {}),
-            "known_cost_usd": optimization.get("known_cost_usd", optimization.get("total_known_cost_usd")),
-            "average_known_cost_usd": optimization.get("average_known_cost_usd"),
+            "summary": {
+                "data_state": "ready" if has_cost_data else "waiting_for_priced_usage",
+                "known_cost_usd": known_cost,
+                "average_known_cost_usd": average_known_cost,
+                "providers_tracked": len(cost_by_provider) if isinstance(cost_by_provider, dict) else 0,
+                "models_tracked": len(cost_by_model) if isinstance(cost_by_model, dict) else 0,
+                "task_types_tracked": len(cost_by_task_type) if isinstance(cost_by_task_type, dict) else 0,
+            },
+            "empty_state": (
+                None
+                if has_cost_data
+                else {
+                    "title": "No known cost data yet",
+                    "message": (
+                        "Agent Hub can estimate costs only when provider pricing is configured "
+                        "and requests include token usage."
+                    ),
+                    "actions": [
+                        "Add cost_per_million_input and cost_per_million_output to agents you want tracked.",
+                        "Run: python -m agent_hub estimate --route coding --output-tokens 1000 --json \"fix tests\"",
+                        "Send requests through priced providers so optimization data can accumulate.",
+                    ],
+                }
+            ),
+            "cost_by_provider": cost_by_provider,
+            "cost_by_model": cost_by_model,
+            "cost_by_task_type": cost_by_task_type,
+            "cost_by_day": cost_by_day,
+            "known_cost_usd": known_cost,
+            "average_known_cost_usd": average_known_cost,
             "money_saved": optimization.get("cost_optimizer", {}),
         }
 
     def backend_health_body(self, router: Any, *, context_diagnostics: dict[str, Any]) -> dict[str, Any]:
         config = self.config
+        provider_health = router.health_snapshot()
+        setup_guidance = _setup_guidance(config, provider_health)
         return {
             "status": "ok",
             "running": True,
@@ -340,6 +443,7 @@ class DiagnosticsApplicationService:
                 ],
             },
             "context_diagnostics": context_diagnostics,
+            "setup_guidance": setup_guidance,
             "streaming": {
                 "force_compatibility_streaming": config.force_compatibility_streaming,
             },
@@ -362,10 +466,14 @@ class DiagnosticsApplicationService:
             },
             "workspace_dir": str(config.workspace_dir),
             "initialization": config.initialization_report,
-            "provider_health": router.health_snapshot(),
+            "provider_health": provider_health,
             "providers": router.provider_status(),
             "capability_graph": router.capability_graph(),
-            "active_providers": self.active_provider_names(router),
+            "active_providers": [
+                name
+                for name, agent in sorted(config.agents.items())
+                if agent.enabled and provider_health.get(name, {}).get("available")
+            ],
             "limits": self.limits_body(router),
             "recommendations": router.recommend(
                 HubRequest(
@@ -567,6 +675,191 @@ def _positive_int(value: Any, *, default: int, maximum: int) -> int:
     except (TypeError, ValueError):
         number = default
     return max(1, min(number, maximum))
+
+
+def _has_mapping_values(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return any(item not in (None, "", {}, []) for item in value.values())
+
+
+def _setup_guidance(config: HubConfig, provider_health: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    agents = list(config.agents.values())
+    enabled_agents = [agent for agent in agents if agent.enabled]
+    active_agents = [
+        agent
+        for agent in enabled_agents
+        if provider_health.get(agent.name, {}).get("available")
+    ]
+    if not agents:
+        items.append(
+            _setup_item(
+                "configure_agents",
+                "action",
+                "Configure at least one provider",
+                "No agents are configured, so Agent Hub cannot route requests.",
+                "python -m agent_hub init --with-cloud-examples",
+            )
+        )
+    else:
+        items.append(
+            _setup_item(
+                "configure_agents",
+                "ok",
+                "Provider entries exist",
+                f"{len(agents)} agent(s) are configured.",
+            )
+        )
+    if agents and not enabled_agents:
+        items.append(
+            _setup_item(
+                "enable_provider",
+                "action",
+                "Enable a provider",
+                "All configured agents are disabled.",
+                "python -m agent_hub agents",
+            )
+        )
+    elif enabled_agents:
+        items.append(
+            _setup_item(
+                "enable_provider",
+                "ok",
+                "At least one provider is enabled",
+                f"{len(enabled_agents)} agent(s) are enabled.",
+            )
+        )
+    missing_keys = [
+        agent
+        for agent in enabled_agents
+        if agent.api_key_env and not agent.resolved_api_key
+    ]
+    if missing_keys and not active_agents:
+        first = missing_keys[0]
+        items.append(
+            _setup_item(
+                "provider_api_keys",
+                "action",
+                "Set required provider API keys",
+                f"{first.name} is missing {first.api_key_env}.",
+                f"Set {first.api_key_env} before starting Agent Hub.",
+            )
+        )
+    elif missing_keys:
+        items.append(
+            _setup_item(
+                "provider_api_keys",
+                "warn",
+                "Some API-key providers are not ready",
+                ", ".join(f"{agent.name}:{agent.api_key_env}" for agent in missing_keys[:5]),
+            )
+        )
+    else:
+        items.append(
+            _setup_item(
+                "provider_api_keys",
+                "ok",
+                "No missing API keys detected",
+                "Enabled API-key providers either have keys or do not require one.",
+            )
+        )
+    probe_errors = (
+        config.initialization_report.get("probe_errors")
+        if isinstance(config.initialization_report, dict)
+        else {}
+    )
+    if isinstance(probe_errors, dict) and probe_errors and not active_agents:
+        first_name, first_error = next(iter(probe_errors.items()))
+        items.append(
+            _setup_item(
+                "local_model_probe",
+                "action",
+                "Start or fix the local model server",
+                f"{first_name} probe failed: {first_error}",
+                "python -m agent_hub local-models",
+            )
+        )
+    elif isinstance(probe_errors, dict) and probe_errors:
+        items.append(
+            _setup_item(
+                "local_model_probe",
+                "warn",
+                "Some local model probes failed",
+                ", ".join(str(name) for name in list(probe_errors)[:5]),
+                "python -m agent_hub local-models",
+            )
+        )
+    if active_agents:
+        items.append(
+            _setup_item(
+                "route_ready",
+                "ok",
+                "At least one provider is route-ready",
+                ", ".join(agent.name for agent in active_agents[:8]),
+            )
+        )
+    else:
+        items.append(
+            _setup_item(
+                "route_ready",
+                "action",
+                "Make a provider route-ready",
+                "No enabled provider currently reports as available.",
+                "python -m agent_hub doctor --providers",
+            )
+        )
+    if config.approval_mode == "auto":
+        items.append(
+            _setup_item(
+                "approval_mode",
+                "warn",
+                "Approval mode is auto",
+                "Trusted cloud providers may run without interactive approval unless security policy blocks them.",
+                "Use approval_mode=safe or ask for stricter interactive review.",
+            )
+        )
+    else:
+        items.append(
+            _setup_item(
+                "approval_mode",
+                "ok",
+                "Approval mode is guarded",
+                f"Current mode: {config.approval_mode}.",
+            )
+        )
+    action_count = sum(1 for item in items if item["status"] == "action")
+    warning_count = sum(1 for item in items if item["status"] == "warn")
+    next_step = next((item for item in items if item["status"] == "action"), None)
+    if next_step is None:
+        next_step = next((item for item in items if item["status"] == "warn"), None)
+    return {
+        "object": "agent_hub.setup_guidance",
+        "ready": action_count == 0,
+        "action_count": action_count,
+        "warning_count": warning_count,
+        "next_step": next_step,
+        "items": items,
+    }
+
+
+def _setup_item(
+    item_id: str,
+    status: str,
+    label: str,
+    detail: str,
+    command: str | None = None,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "id": item_id,
+        "status": status,
+        "ok": status == "ok",
+        "label": label,
+        "detail": detail,
+    }
+    if command:
+        item["command"] = command
+    return item
 
 
 __all__ = ["BACKEND_FEATURES", "BACKEND_VERSION", "DiagnosticsApplicationService"]

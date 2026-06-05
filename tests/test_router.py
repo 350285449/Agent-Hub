@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import tempfile
 import time
@@ -112,6 +112,7 @@ class RouterTests(unittest.TestCase):
             calls: list[str] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 enable_load_balancing=False,
                 routing={
                     "unlimited_default": True,
@@ -203,6 +204,7 @@ class RouterTests(unittest.TestCase):
             calls: list[str] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 enable_load_balancing=False,
                 default_route=["primary", "fallback"],
                 agents={
@@ -259,6 +261,7 @@ class RouterTests(unittest.TestCase):
             calls: list[str] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 default_route=["low", "high"],
                 agents={
                     "low": AgentConfig(
@@ -297,6 +300,7 @@ class RouterTests(unittest.TestCase):
             calls: list[str] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 default_route=["plain", "tooly"],
                 agents={
                     "plain": AgentConfig(
@@ -345,6 +349,7 @@ class RouterTests(unittest.TestCase):
             calls: list[str] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 routes=[RouteRule(name="coding", agents=["plain", "echo"])],
                 agents={
                     "plain": AgentConfig(
@@ -392,6 +397,7 @@ class RouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 routes=[RouteRule(name="coding", agents=["echo"])],
                 agents={
                     "echo": AgentConfig(
@@ -428,6 +434,7 @@ class RouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 routes=[RouteRule(name="coding", agents=["codex", "echo"])],
                 agents={
                     "codex": AgentConfig(
@@ -473,6 +480,7 @@ class RouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 debug_echo_enabled=True,
                 default_route=["echo"],
                 agents={
@@ -522,6 +530,7 @@ class RouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 default_route=["general", "coder"],
                 agents={
                     "general": AgentConfig(
@@ -557,10 +566,69 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(recommendations[0]["agent"], "coder")
             self.assertTrue(recommendations[0]["supports_tools"])
 
+    def test_recommendation_marks_failed_local_probe_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
+                default_route=["local"],
+                initialization_report={
+                    "probe_errors": {"local": "connection refused"},
+                    "detected_local_models": {},
+                },
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="qwen-test",
+                        base_url="http://127.0.0.1:9999/v1",
+                        free=True,
+                    ),
+                },
+            )
+
+            recommendations = AgentRouter(config).recommend(
+                HubRequest(session_id="abc", messages=[{"role": "user", "content": "fix tests"}]),
+                include_unavailable=True,
+            )
+
+            self.assertFalse(recommendations[0]["available"])
+            self.assertIn("local endpoint probe failed", recommendations[0]["unavailable_reason"])
+
+    def test_recommendation_marks_unlisted_local_model_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
+                default_route=["local"],
+                initialization_report={
+                    "probe_errors": {},
+                    "detected_local_models": {"local": ["other-model"]},
+                },
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="qwen-test",
+                        base_url="http://127.0.0.1:9999/v1",
+                        free=True,
+                    ),
+                },
+            )
+
+            recommendations = AgentRouter(config).recommend(
+                HubRequest(session_id="abc", messages=[{"role": "user", "content": "fix tests"}]),
+                include_unavailable=True,
+            )
+
+            self.assertFalse(recommendations[0]["available"])
+            self.assertIn("was not reported", recommendations[0]["unavailable_reason"])
+
     def test_recommendation_hides_echo_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 default_route=["cloud", "echo"],
                 agents={
                     "cloud": AgentConfig(
@@ -597,6 +665,7 @@ class RouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 debug_echo_enabled=True,
                 default_route=["echo"],
                 agents={
@@ -623,6 +692,7 @@ class RouterTests(unittest.TestCase):
             seen: list[list[dict]] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 default_route=["openai"],
                 agents={
                     "openai": AgentConfig(
@@ -721,6 +791,7 @@ class RouterTests(unittest.TestCase):
             calls: list[str] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 default_route=["paid", "local"],
                 agents={
                     "paid": AgentConfig(
@@ -758,6 +829,7 @@ class RouterTests(unittest.TestCase):
             calls: list[str] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 default_route=["tiny", "large"],
                 routing={"max_tokens_mode": "explicit"},
                 agents={
@@ -801,6 +873,7 @@ class RouterTests(unittest.TestCase):
             seen: list[HubRequest] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 default_route=["small"],
                 agents={
                     "small": AgentConfig(
@@ -846,6 +919,7 @@ class RouterTests(unittest.TestCase):
             calls: list[str] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 default_route=["small", "large"],
                 agents={
                     "small": AgentConfig(
@@ -902,6 +976,7 @@ class RouterTests(unittest.TestCase):
             calls: list[str] = []
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 default_route=["writer"],
                 agents={
                     "writer": AgentConfig(
@@ -935,6 +1010,7 @@ class RouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
                 default_route=["tiny"],
                 routing={"max_tokens_mode": "explicit"},
                 agents={
@@ -964,6 +1040,7 @@ class RouterTests(unittest.TestCase):
 def _config(path: Path) -> HubConfig:
     return HubConfig(
         state_dir=path,
+        workspace_dir=path,
         automatic_escalation_enabled=False,
         default_route=["claude", "openai"],
         routes=[

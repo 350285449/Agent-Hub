@@ -110,10 +110,16 @@ class TaskClassifier:
 
     def classify(self, request: HubRequest) -> TaskClassification:
         raw_text = _classification_text(request)
+        lightweight_intent = _lightweight_intent_without_repo_need(request)
+        if lightweight_intent:
+            raw_text = _intent_text(request)
         text = raw_text.lower()
-        estimated_tokens = estimate_input_tokens(request)
+        estimated_tokens = max(1, len(raw_text) // 4) if lightweight_intent else estimate_input_tokens(request)
         files_involved = _referenced_paths(raw_text, request)
         file_types = _referenced_file_types(raw_text, request, files_involved=files_involved)
+        if lightweight_intent:
+            files_involved = []
+            file_types = []
         required = _required_capabilities(request, text, file_types)
         risk_level = _risk_level(request, text, file_types)
         repo_needed = _repo_context_needed(request, text, file_types)
@@ -313,8 +319,13 @@ def _risk_level(request: HubRequest, text: str, file_types: list[str]) -> str:
 def _repo_context_needed(request: HubRequest, text: str, file_types: list[str]) -> bool:
     if request.raw and isinstance(request.raw, dict):
         hub = request.raw.get("agent_hub")
-        if isinstance(hub, dict) and hub.get("repo_context") is False:
-            return False
+        if isinstance(hub, dict):
+            if hub.get("repo_context") is False:
+                return False
+            if hub.get("repo_context") is True:
+                return True
+    if _lightweight_intent_without_repo_need(request):
+        return False
     return (
         bool(file_types)
         or _looks_like_coding_task(text)
@@ -647,6 +658,54 @@ def _looks_like_simple_explanation(text: str, estimated_tokens: int) -> bool:
         and not _looks_like_shell_task(text)
         and not _looks_like_security_task(text)
     )
+
+
+def _lightweight_intent_without_repo_need(request: HubRequest) -> bool:
+    intent = _intent_text(request).lower()
+    if not intent:
+        return False
+    words = re.findall(r"\b[\w'-]+\b", intent)
+    if len(words) > 8:
+        return False
+    if _referenced_paths(intent):
+        return False
+    return not any(
+        (
+            _looks_like_coding_task(intent),
+            _tool_task_requested(intent),
+            _looks_like_mutating_task(intent),
+            _looks_like_debug_task(intent),
+            _looks_like_test_generation_task(intent),
+            _looks_like_review_task(intent),
+            _looks_like_research_task(intent),
+            _looks_like_shell_task(intent),
+            _looks_like_security_task(intent),
+            _looks_like_large_repo_task(intent),
+        )
+    )
+
+
+def _intent_text(request: HubRequest) -> str:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    for source in (hub, raw, metadata):
+        if not isinstance(source, dict):
+            continue
+        for key in ("classification_text", "routing_text", "user_task"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    parts = [request.task or ""]
+    for message in request.messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("agent_hub_repo_context") or message.get("agent_hub_security_notice"):
+            continue
+        if message.get("role") not in {None, "user"}:
+            continue
+        parts.append(content_to_text(message.get("content")))
+    return "\n".join(part for part in parts if part).strip()
 
 
 def _looks_like_coding_task(text: str) -> bool:

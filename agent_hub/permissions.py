@@ -440,6 +440,9 @@ def provider_permission_request(agent: AgentConfig, request: HubRequest) -> Perm
     ]
     sensitive_files = list(prepared_security.get("sensitive_files") or [])
     injection_findings = list(prepared_security.get("injection_findings") or [])
+    if prepared_security.get("has_secret_findings"):
+        transparency["secret_findings"] = secret_findings[:20]
+        transparency["has_secret_findings"] = True
     category = "workspace_cloud"
     sends_workspace_content = request_text_has_workspace_context(request)
     if not sends_workspace_content:
@@ -447,6 +450,7 @@ def provider_permission_request(agent: AgentConfig, request: HubRequest) -> Perm
     risk_level = "high" if agent.resolved_api_key or not agent.free else "medium"
     explicit_approval_required = bool(
         transparency["has_secret_findings"]
+        or prepared_security.get("has_secret_findings")
         or prepared_security.get("has_unredacted_secrets")
         or sensitive_files
     )
@@ -503,13 +507,15 @@ def provider_trust_level(agent: AgentConfig) -> str:
     provider_type = str(agent.provider_type or "").lower()
     if provider in {"echo", "local-research"}:
         return LOCAL
+    if provider_type in TRUSTED_CLOUD_PROVIDER_TYPES:
+        return TRUSTED_CLOUD
     if (provider == "ollama" or provider_type == "ollama") and (
         not agent.base_url or _is_local_or_private_url(agent.base_url)
     ):
         return LOCAL
     if provider == "openai-compatible" and _is_local_or_private_url(agent.base_url):
         return LOCAL
-    if provider in TRUSTED_CLOUD_PROVIDER_TYPES or provider_type in TRUSTED_CLOUD_PROVIDER_TYPES:
+    if provider in TRUSTED_CLOUD_PROVIDER_TYPES:
         return TRUSTED_CLOUD
     return UNTRUSTED_EXTERNAL
 

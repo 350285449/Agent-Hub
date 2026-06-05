@@ -222,6 +222,55 @@ class SmartWorkspaceRoutingTests(unittest.TestCase):
         self.assertIn("agent_hub_tools", prepared.raw)
         self.assertTrue(prepared.raw["agent_hub"]["auto_execute_tools"])
 
+    def test_tiny_user_intent_does_not_expand_active_file_into_repo_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / "state",
+                repo_context_enabled=True,
+                agents={"agent": AgentConfig(name="agent", provider="echo", model="echo")},
+            )
+            registry = create_builtin_registry(config)
+            calls: list[str] = []
+
+            def repo_provider(*args, **kwargs):
+                calls.append("repo")
+                raise AssertionError("repo context should not be requested")
+
+            service = ContextPreparationService(
+                config,
+                tool_registry=registry,
+                has_tool_capable_candidate=lambda request: False,
+                repo_context_provider=repo_provider,
+            )
+            request = HubRequest(
+                session_id="s",
+                context="Current file: app.py\nprint('hello')\n",
+                messages=[{"role": "user", "content": "thanks"}],
+                raw={},
+            )
+
+            prepared = service.prepare(request)
+
+        self.assertEqual(calls, [])
+        self.assertFalse(any(message.get("agent_hub_repo_context") for message in prepared.messages))
+
+    def test_tiny_user_intent_ignores_active_config_file_for_risk(self) -> None:
+        request = HubRequest(
+            session_id="s",
+            context="Current file: agent-hub.config.json\n{\"approval_mode\":\"safe\"}\n",
+            messages=[{"role": "user", "content": "thanks"}],
+            raw={},
+        )
+
+        classification = TaskClassifier().classify(request)
+
+        self.assertEqual(classification.risk_level, "low")
+        self.assertFalse(classification.repository_context_needed)
+        self.assertFalse(classification.reviewer_required)
+
     def test_api_compatibility_does_not_leak_internal_metadata_by_default(self) -> None:
         response = _hub_response_with_internal_metadata()
 

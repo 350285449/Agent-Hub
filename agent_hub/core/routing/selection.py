@@ -2178,6 +2178,8 @@ class AgentRouter:
                 unavailable_reason = "temporarily unavailable"
             else:
                 unavailable_reason = self._preflight_skip_reason(agent, request) or ""
+                if not unavailable_reason:
+                    unavailable_reason = _local_probe_readiness_reason(self.config, agent) or ""
 
             available = not unavailable_reason
             if unavailable_reason and not include_unavailable:
@@ -3428,6 +3430,28 @@ def _remaining_quota_value(health: ProviderHealth) -> int | float | str:
     if not values:
         return "unknown"
     return min(values)
+
+
+def _local_probe_readiness_reason(config: HubConfig, agent: AgentConfig) -> str | None:
+    if normalize_provider(agent.provider) != "openai-compatible":
+        return None
+    if not _is_local_or_private_agent(agent):
+        return None
+    report = getattr(config, "initialization_report", {}) or {}
+    if not isinstance(report, dict):
+        return None
+    probe_errors = report.get("probe_errors")
+    if isinstance(probe_errors, dict) and probe_errors.get(agent.name):
+        return f"local endpoint probe failed: {probe_errors[agent.name]}"
+    detected_models = report.get("detected_local_models")
+    if isinstance(detected_models, dict) and agent.name in detected_models:
+        models = detected_models.get(agent.name)
+        if isinstance(models, list):
+            if not models:
+                return "local endpoint returned no model IDs"
+            if agent.model not in models:
+                return f"configured model {agent.model!r} was not reported by the local endpoint"
+    return None
 
 
 def _assign_int(health: ProviderHealth, field_name: str, value: Any) -> None:

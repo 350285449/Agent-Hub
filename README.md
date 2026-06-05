@@ -693,7 +693,9 @@ Invoke-RestMethod http://127.0.0.1:8787/health
 `/health` includes the initialized config status, enabled agents, provider
 health/cooldown data, quota estimates when providers expose them, latency and
 reliability metrics, active recommendations, and model aliases exposed to
-OpenAI-compatible tools.
+OpenAI-compatible tools. It also includes `setup_guidance`, an actionable
+readiness summary with the next setup step, missing provider/API-key actions,
+local-model probe issues, and approval-mode warnings.
 
 Runtime health is persisted in `.agent-hub/state/provider_health.json`.
 Agent-Hub stores rolling success/failure counts, timeout counts, average
@@ -724,6 +726,12 @@ JSON report under `.agent-hub/state/benchmark_reports`.
 `debug-bundle` exports sanitized version info, config, logs, doctor output,
 provider status, and release validation results with secret-like values
 redacted.
+
+Dashboard pages avoid raw empty JSON when data has not accumulated yet:
+
+- `/dashboard/costs` explains missing pricing/usage data and links to the cost JSON.
+- `/dashboard/model-leaderboard` shows configured models plus measured-vs-waiting status.
+- `/dashboard/benchmarks` explains how to generate benchmark reports.
 
 Test proof:
 

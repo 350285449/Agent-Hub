@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
+
+from agent_hub.application.diagnostics_service import BACKEND_FEATURES
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -142,6 +145,33 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("function isLocalServerOfflineError", source)
         self.assertIn("if (!isLocalServerOfflineError(error))", source)
         self.assertIn('return "server is not running";', source)
+
+    def test_required_backend_features_cover_current_dashboard_endpoints(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        match = re.search(
+            r"const REQUIRED_BACKEND_FEATURES = \[(?P<body>.*?)\];",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        required = set(re.findall(r'"([^"]+)"', match.group("body")))
+
+        for feature in [
+            "routing_intelligence_api",
+            "routing_memory_api",
+            "optimization_dashboard",
+            "routing_simulation",
+            "cost_dashboard",
+            "model_leaderboard",
+            "benchmark_results_dashboard",
+            "workspace_checkpoints",
+            "workspace_rollback_api",
+            "events_endpoint",
+            "dashboard_status_endpoints",
+            "tool_execution_loop",
+        ]:
+            self.assertIn(feature, required)
+            self.assertTrue(BACKEND_FEATURES[feature])
 
     def test_cline_compatibility_setting_is_enabled_by_default(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))

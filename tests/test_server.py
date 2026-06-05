@@ -69,6 +69,29 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(data["repository_context_scoring"]["strict_minimum"], 6)
             self.assertTrue(data["features"]["repository_context_scoring"])
 
+    def test_health_includes_actionable_setup_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=[],
+                agents={},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                data = _get_json(f"http://127.0.0.1:{server.server_address[1]}/health")
+            finally:
+                _stop(server, thread)
+
+            guidance = data["setup_guidance"]
+            self.assertEqual(guidance["object"], "agent_hub.setup_guidance")
+            self.assertFalse(guidance["ready"])
+            self.assertGreaterEqual(guidance["action_count"], 1)
+            self.assertEqual(guidance["next_step"]["id"], "configure_agents")
+            self.assertIn("python -m agent_hub init", guidance["next_step"]["command"])
+
     def test_model_rows_include_router_aliases_and_agent_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
@@ -648,6 +671,32 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("Routing Intelligence", dashboard)
             self.assertIn("Provider Rankings", dashboard)
             self.assertIn("explanation", last["decision"]["routing_decision"])
+
+    def test_data_light_dashboards_have_empty_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                costs = _get_text(f"{base}/dashboard/costs")
+                leaderboard = _get_text(f"{base}/dashboard/model-leaderboard")
+                benchmarks = _get_text(f"{base}/dashboard/benchmarks")
+                costs_json = _get_json(f"{base}/v1/cost-dashboard")
+                leaderboard_json = _get_json(f"{base}/v1/model-leaderboard")
+                benchmarks_json = _get_json(f"{base}/v1/benchmarks")
+            finally:
+                _stop(server, thread)
+
+            self.assertIn("No known cost data yet", costs)
+            self.assertIn("Raw payload", costs)
+            self.assertIn("No measured model outcomes yet", leaderboard)
+            self.assertIn("Ranked Models", leaderboard)
+            self.assertIn("No benchmark reports yet", benchmarks)
+            self.assertIn("Recent Reports", benchmarks)
+            self.assertEqual(costs_json["summary"]["data_state"], "waiting_for_priced_usage")
+            self.assertEqual(leaderboard_json["summary"]["data_state"], "waiting_for_benchmarks_or_traffic")
+            self.assertEqual(benchmarks_json["summary"]["data_state"], "waiting_for_benchmark_reports")
 
     def test_health_exposes_capability_graph_and_token_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

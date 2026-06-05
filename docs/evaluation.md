@@ -38,4 +38,8 @@ curl http://127.0.0.1:8787/v1/model-leaderboard
 curl http://127.0.0.1:8787/v1/benchmarks
 ```
 
-The endpoint returns stored scores and benchmark task categories.
+The leaderboard and benchmark endpoints include a `summary` object and an
+`empty_state` object when there is not enough measured data yet. The matching
+dashboard pages (`/dashboard/model-leaderboard` and `/dashboard/benchmarks`)
+show the same guidance as readable setup instructions instead of an empty JSON
+blob.

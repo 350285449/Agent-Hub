@@ -422,6 +422,55 @@ class CliTests(unittest.TestCase):
             self.assertEqual(data["skipped_providers"][0]["agent"], "paid")
             self.assertEqual(data["skipped_providers"][0]["reason"], "skipped by free_only")
 
+    def test_route_diagnose_does_not_select_failed_local_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "state_dir": str(Path(tmp) / "state"),
+                        "auto_enable_available_providers": False,
+                        "auto_detect_local_models": True,
+                        "local_model_probe_timeout_seconds": 0.05,
+                        "free_only": True,
+                        "default_route": ["local"],
+                        "routes": [{"name": "coding", "agents": ["local"]}],
+                        "agents": [
+                            {
+                                "name": "local",
+                                "provider": "openai-compatible",
+                                "model": "local-test",
+                                "base_url": "http://127.0.0.1:1/v1",
+                                "free": True,
+                                "supports_tools": True,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "route-diagnose",
+                        "--route",
+                        "coding",
+                        "--json",
+                        "fix tests",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            data = json.loads(buffer.getvalue())
+            self.assertIsNone(data["selected_provider"])
+            self.assertIsNone(data["selected_model"])
+            self.assertEqual(data["skipped_providers"][0]["agent"], "local")
+            self.assertIn("local endpoint probe failed", data["skipped_providers"][0]["reason"])
+
     def test_debug_bundle_exports_zip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"

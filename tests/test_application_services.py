@@ -86,6 +86,23 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertEqual(body["object"], "agent_hub.provider_scores")
             self.assertEqual(body["data"]["coder"]["overall_score"], 0.91)
 
+    def test_diagnostics_dashboards_explain_missing_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            router = AgentRouter(config, provider_factory=_Provider)
+            service = DiagnosticsApplicationService(config)
+
+            leaderboard = service.model_leaderboard_body(router)
+            costs = service.cost_dashboard_body({})
+            benchmarks = service.benchmark_results_body()
+
+            self.assertEqual(leaderboard["summary"]["data_state"], "waiting_for_benchmarks_or_traffic")
+            self.assertEqual(leaderboard["empty_state"]["title"], "No measured model outcomes yet")
+            self.assertEqual(costs["summary"]["data_state"], "waiting_for_priced_usage")
+            self.assertEqual(costs["empty_state"]["title"], "No known cost data yet")
+            self.assertEqual(benchmarks["summary"]["data_state"], "waiting_for_benchmark_reports")
+            self.assertEqual(benchmarks["empty_state"]["title"], "No benchmark reports yet")
+
 
 class _Provider:
     def __init__(self, agent: AgentConfig) -> None:

@@ -154,6 +154,50 @@ class ProviderCompatibilityTests(unittest.TestCase):
             self.assertEqual(audit[-1]["trust_level"], LOCAL)
             self.assertTrue(audit[-1]["allowed"])
 
+    def test_ollama_cloud_provider_type_is_not_downgraded_by_localhost_url(self) -> None:
+        agent = AgentConfig(
+            name="ollama-cloud",
+            provider="openai-compatible",
+            provider_type="ollama-cloud",
+            base_url="http://127.0.0.1:11434/v1",
+            model="gpt-oss:120b-cloud",
+            api_key="secret",
+            free=False,
+        )
+
+        self.assertEqual(provider_trust_level(agent), TRUSTED_CLOUD)
+
+    def test_ollama_cloud_localhost_proxy_requires_cloud_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            agent = AgentConfig(
+                name="ollama-cloud",
+                provider="openai-compatible",
+                provider_type="ollama-cloud",
+                base_url="http://127.0.0.1:11434/v1",
+                model="gpt-oss:120b-cloud",
+                api_key="secret",
+                free=False,
+            )
+            config = _config(
+                Path(tmp),
+                approval_mode="ask",
+                cline_compatibility_mode=False,
+                agent=agent,
+            )
+
+            with self.assertRaises(RouterError) as error:
+                AgentRouter(config, provider_factory=_provider(calls)).route(
+                    _workspace_request(api_shape="openai-chat")
+                )
+
+            self.assertEqual(calls, [])
+            self.assertEqual(error.exception.failover[0].error_type, "permission_required")
+            audit = recent_events(config.state_dir, "security_audit", limit=10)
+            self.assertEqual(audit[-1]["trust_level"], TRUSTED_CLOUD)
+            self.assertFalse(audit[-1]["allowed"])
+            self.assertTrue(audit[-1]["interactive_approval_required"])
+
     def test_provider_trust_classification_rules(self) -> None:
         self.assertEqual(
             provider_trust_level(

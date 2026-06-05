@@ -289,7 +289,19 @@ const REQUIRED_BACKEND_FEATURES = [
   "cline_compatibility_mode",
   "context_debug_endpoints",
   "team_agent_mode",
-  "provider_presets"
+  "provider_presets",
+  "routing_intelligence_api",
+  "routing_memory_api",
+  "optimization_dashboard",
+  "routing_simulation",
+  "cost_dashboard",
+  "model_leaderboard",
+  "benchmark_results_dashboard",
+  "workspace_checkpoints",
+  "workspace_rollback_api",
+  "events_endpoint",
+  "dashboard_status_endpoints",
+  "tool_execution_loop"
 ];
 const APPROVAL_MODES = new Set(["ask", "auto", "safe", "readonly", "shell-ask", "deny"]);
 const SENSITIVE_PERMISSION_CATEGORIES = new Set([

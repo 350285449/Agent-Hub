@@ -3,14 +3,13 @@ from __future__ import annotations
 import json
 import re
 import time
-import urllib.error
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
 
 from .adaptive import estimate_known_cost_usd
 from .config import (
+    _is_local_or_private_url,
     cloud_route_agent_names,
     config_to_dict,
     default_agent_names,
@@ -20,6 +19,7 @@ from .config import (
     normalize_provider,
 )
 from .core.router import AgentRouter, RouterError
+from .discovery import fetch_openai_models
 from .evaluation import BenchmarkRunner, ProviderScoreStore, default_benchmark_tasks
 from .evaluation.benchmark_suite import BenchmarkSuiteRunner
 from .payloads import request_from_payload
@@ -686,7 +686,12 @@ def _print_metrics(report: dict[str, Any]) -> None:
 def _local_models_report(config: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for agent in config.agents.values():
-        if normalize_provider(agent.provider) != "openai-compatible" or not is_free_agent(agent):
+        if (
+            normalize_provider(agent.provider) != "openai-compatible"
+            or not is_free_agent(agent)
+            or (agent.provider_type or "").lower() == "ollama-cloud"
+            or not _is_local_or_private_url(agent.base_url)
+        ):
             continue
         row = {
             "name": agent.name,
@@ -701,7 +706,13 @@ def _local_models_report(config: Any) -> list[dict[str, Any]]:
             rows.append(row)
             continue
         try:
-            models = _fetch_openai_models(agent.base_url, timeout=3.0)
+            timeout = max(0.05, float(getattr(config, "local_model_probe_timeout_seconds", 3.0) or 3.0))
+            models = fetch_openai_models(
+                agent.base_url,
+                timeout=timeout,
+                api_key=agent.resolved_api_key,
+                headers=agent.headers,
+            )
             row["online"] = True
             row["models"] = models
             row["configured_model_available"] = agent.model in models
@@ -874,7 +885,7 @@ def _route_diagnose(
         )
         for row in rows
     ]
-    selected = next((row for row in candidates if row.get("available")), candidates[0] if candidates else None)
+    selected = next((row for row in candidates if row.get("available")), None)
     skipped = [row for row in candidates if not row.get("available")]
     fallback_reason = _diagnostic_fallback_reason(skipped)
     report = {
@@ -1109,32 +1120,6 @@ def _route_test(config: HubConfig, *, route: str, prompt: str, as_json: bool) ->
             for event in response.failover:
                 print(f"- {event.agent}: {event.reason}")
     return 0
-
-
-def _fetch_openai_models(base_url: str, timeout: float) -> list[str]:
-    url = _openai_url(base_url, "/v1/models")
-    request = urllib.request.Request(url, headers={"Accept": "application/json"}, method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            text = response.read().decode("utf-8")
-    except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc.reason if hasattr(exc, "reason") else exc)) from exc
-    data = json.loads(text) if text else {}
-    items = data.get("data") if isinstance(data, dict) else None
-    if not isinstance(items, list):
-        return []
-    return sorted(
-        item["id"]
-        for item in items
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    )
-
-
-def _openai_url(base_url: str, path: str) -> str:
-    base = base_url.rstrip("/")
-    if base.endswith("/v1") and path.startswith("/v1/"):
-        return f"{base}{path[3:]}"
-    return f"{base}{path}"
 
 
 def _print_local_models(rows: list[dict[str, Any]]) -> None:
