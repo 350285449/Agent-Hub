@@ -7,6 +7,11 @@ from ..security.secrets import redact_secrets
 def handle_get(handler: object, path: str) -> bool:
     from .. import server as server_module
 
+    if path == "/v1/readiness":
+        handler._send_diagnostics_json(
+            handler.server.diagnostics_service.readiness_body(handler.server.router)
+        )
+        return True
     if path == "/v1/limits":
         handler._send_diagnostics_json(handler.server.diagnostics_service.limits_body(handler.server.router))
         return True

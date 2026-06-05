@@ -127,6 +127,7 @@ curl -X POST http://127.0.0.1:8787/v1/routing/simulate \
 curl http://127.0.0.1:8787/v1/routing-history
 curl http://127.0.0.1:8787/v1/provider-scores
 curl http://127.0.0.1:8787/v1/provider-health
+curl http://127.0.0.1:8787/v1/readiness
 curl http://127.0.0.1:8787/v1/routing-memory/stats
 curl http://127.0.0.1:8787/v1/routing-memory/recent
 curl http://127.0.0.1:8787/v1/routing-decision/hub-request-id
@@ -149,6 +150,12 @@ when authentication is missing.
 Diagnostic responses are recursively redacted before they are returned. Provider
 errors, audit rows, and plugin metadata should keep useful context while
 masking API keys, bearer tokens, auth headers, and secret-looking strings.
+
+`/v1/readiness` returns `agent_hub.readiness`: a weighted 0-100 score, 1-10
+rating, state, next action, scored readiness items, and feature maturity states.
+It distinguishes route-ready providers from merely configured providers, and it
+marks data-backed dashboards, plugins, MCP bridge, and night mode with honest
+ready/needs-data/foundation/plan-only states.
 
 `/dashboard` renders the same core provider status in lightweight HTML.
 `/dashboard/routing-intelligence` renders selected model, selected workflow,

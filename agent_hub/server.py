@@ -162,6 +162,9 @@ COMPATIBILITY_ENDPOINT_REGISTRATION_MARKERS = (
 
 
 class AgentHubHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
     def __init__(self, server_address: tuple[str, int], config: HubConfig) -> None:
         super().__init__(server_address, AgentHubHandler)
         self.config = config
@@ -746,6 +749,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
+        _safe_flush(self)
 
     def _send_diagnostics_json(self, data: dict[str, Any]) -> None:
         auth_error = _diagnostics_auth_error(self.server.config, self.headers)
@@ -763,6 +767,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self._send_common_headers()
         self.end_headers()
         self.wfile.write(body)
+        _safe_flush(self)
 
     def _send_common_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -798,6 +803,11 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         agents = ", ".join(enabled_agents) or "none"
         active = ", ".join(status["active_providers"]) or "none"
         optimization = self.server.adaptive_service.optimization_summary()
+        readiness = self.server.diagnostics_service.readiness_body(self.server.router)
+        readiness_label = f"{int(readiness.get('score', 0))}/100"
+        readiness_state = str(readiness.get("state") or "unknown").replace("_", " ")
+        next_step = readiness.get("next_step") if isinstance(readiness.get("next_step"), dict) else {}
+        next_step_label = str(next_step.get("label") or "No immediate action")
         workflow_rate = optimization.get("workflow_success_rate", {})
         workflow_label = (
             f"{float(workflow_rate.get('rate', 0.0)) * 100:.0f}%"
@@ -919,6 +929,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     <section>
       <h2>Optimization</h2>
       <div class="cards">
+        <div class="card"><strong>{_html(readiness_label)}</strong><span>readiness: {_html(readiness_state)}</span></div>
+        <div class="card"><strong>{_html(next_step_label)}</strong><span>next setup step</span></div>
         <div class="card"><strong>{_html(workflow_label)}</strong><span>workflow success</span></div>
         <div class="card"><strong>{_html(best_model_label)}</strong><span>best learned model</span></div>
         <div class="card"><strong>{_html(avg_latency_label)}</strong><span>average latency</span></div>
@@ -940,6 +952,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       <a href="/dashboard/costs">Cost Dashboard</a> |
       <a href="/dashboard/model-leaderboard">Model Leaderboard</a> |
       <a href="/dashboard/benchmarks">Benchmarks</a> |
+      <a href="/v1/readiness">Readiness</a> |
       <a href="/v1/optimization">Optimization JSON</a> |
       <a href="/v1/repository-dna">Repository DNA</a> |
       <a href="/v1/workspace-memory">Workspace Memory</a> |

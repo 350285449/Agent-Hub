@@ -43,3 +43,8 @@ The leaderboard and benchmark endpoints include a `summary` object and an
 dashboard pages (`/dashboard/model-leaderboard` and `/dashboard/benchmarks`)
 show the same guidance as readable setup instructions instead of an empty JSON
 blob.
+
+`/health`, `agent-hub health --json`, and `/v1/readiness` also surface this data
+state. A route-ready setup can score highly before benchmark reports exist, but
+the readiness score keeps a warning on `data_products` until leaderboard samples
+or benchmark reports have been recorded.

@@ -80,7 +80,18 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             output = buffer.getvalue()
             self.assertIn("Agent-Hub health", output)
+            self.assertIn("Readiness:", output)
+            self.assertIn("Next step:", output)
             self.assertIn("reliability", output)
+
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                code = main(["--config", str(path), "health", "--json"])
+
+            self.assertEqual(code, 0)
+            data = json.loads(buffer.getvalue())
+            self.assertEqual(data["readiness"]["object"], "agent_hub.readiness")
+            self.assertIn("feature_status", data["readiness"])
 
     def test_doctor_json_includes_install_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

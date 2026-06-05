@@ -103,6 +103,23 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertEqual(benchmarks["summary"]["data_state"], "waiting_for_benchmark_reports")
             self.assertEqual(benchmarks["empty_state"]["title"], "No benchmark reports yet")
 
+    def test_readiness_score_rewards_real_route_ready_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            router = AgentRouter(config, provider_factory=_Provider)
+            service = DiagnosticsApplicationService(config)
+
+            readiness = service.readiness_body(
+                router,
+                provider_health={"coder": {"available": True}},
+            )
+
+            self.assertEqual(readiness["object"], "agent_hub.readiness")
+            self.assertGreaterEqual(readiness["rating"], 9.0)
+            self.assertEqual(readiness["state"], "production_ready")
+            self.assertEqual(readiness["feature_status"]["provider_routing"]["state"], "ready")
+            self.assertTrue(any(item["id"] == "security_guardrails" for item in readiness["items"]))
+
 
 class _Provider:
     def __init__(self, agent: AgentConfig) -> None:

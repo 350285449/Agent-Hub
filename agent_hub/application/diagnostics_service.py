@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from ..api.compatibility import available_model_ids, model_rows
@@ -10,6 +11,7 @@ from ..enterprise import export_enterprise_audit
 from ..evaluation import ProviderScoreStore
 from ..models import HubRequest
 from ..plugins import discover_plugins
+from ..server_routes.middleware import api_token, public_bind_host
 from ..version import backend_version, build_metadata, config_runtime_hash
 
 
@@ -121,6 +123,10 @@ BACKEND_FEATURES = {
     "config_migration": True,
     "events_endpoint": True,
     "deployment_templates": True,
+    "readiness_scorecard": True,
+    "feature_maturity_status": True,
+    "production_acceptance_check": True,
+    "vscode_readiness_surface": True,
 }
 
 
@@ -366,10 +372,142 @@ class DiagnosticsApplicationService:
             "money_saved": optimization.get("cost_optimizer", {}),
         }
 
+    def readiness_body(
+        self,
+        router: Any,
+        *,
+        provider_health: dict[str, dict[str, Any]] | None = None,
+        setup_guidance: dict[str, Any] | None = None,
+        plugins: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        provider_health = provider_health if isinstance(provider_health, dict) else router.health_snapshot()
+        setup_guidance = (
+            setup_guidance
+            if isinstance(setup_guidance, dict)
+            else _setup_guidance(self.config, provider_health)
+        )
+        plugins = plugins if isinstance(plugins, dict) else self.plugins_body()
+        leaderboard = self.model_leaderboard_body(router)
+        benchmarks = self.benchmark_results_body()
+        feature_status = _feature_status(
+            self.config,
+            provider_health,
+            setup_guidance,
+            plugins,
+            leaderboard=leaderboard,
+            benchmarks=benchmarks,
+        )
+        items = _readiness_items(
+            self.config,
+            provider_health,
+            setup_guidance,
+            plugins,
+            leaderboard=leaderboard,
+            benchmarks=benchmarks,
+        )
+        total_weight = sum(_float(item.get("weight")) or 0.0 for item in items) or 1.0
+        earned = sum(_float(item.get("earned")) or 0.0 for item in items)
+        score = int(round((earned / total_weight) * 100))
+        action_items = [item for item in items if item.get("status") == "action"]
+        warning_items = [item for item in items if item.get("status") == "warn"]
+        if action_items:
+            state = "needs_setup"
+        elif score >= 90:
+            state = "production_ready"
+        elif score >= 75:
+            state = "solid_beta"
+        else:
+            state = "needs_attention"
+        next_step = action_items[0] if action_items else (warning_items[0] if warning_items else None)
+        return {
+            "object": "agent_hub.readiness",
+            "score": score,
+            "rating": round(score / 10, 1),
+            "state": state,
+            "summary": {
+                "total_weight": int(total_weight),
+                "earned": round(earned, 2),
+                "action_count": len(action_items),
+                "warning_count": len(warning_items),
+                "ok_count": sum(1 for item in items if item.get("status") == "ok"),
+            },
+            "next_step": next_step,
+            "items": items,
+            "feature_status": feature_status,
+        }
+
+    def production_check_body(
+        self,
+        router: Any,
+        *,
+        provider_health: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        provider_health = provider_health if isinstance(provider_health, dict) else router.health_snapshot()
+        setup_guidance = _setup_guidance(self.config, provider_health)
+        plugins = self.plugins_body()
+        readiness = self.readiness_body(
+            router,
+            provider_health=provider_health,
+            setup_guidance=setup_guidance,
+            plugins=plugins,
+        )
+        dashboards = {
+            "cost": self.cost_dashboard_body({}),
+            "leaderboard": self.model_leaderboard_body(router),
+            "benchmarks": self.benchmark_results_body(),
+        }
+        checks = _production_checks(
+            self.config,
+            router,
+            provider_health,
+            setup_guidance,
+            plugins,
+            readiness,
+            dashboards,
+        )
+        total_weight = sum(_float(check.get("weight")) or 0.0 for check in checks) or 1.0
+        earned = sum(_float(check.get("earned")) or 0.0 for check in checks)
+        score = int(round((earned / total_weight) * 100))
+        failed = [
+            check
+            for check in checks
+            if not check.get("ok") and check.get("severity") in {"critical", "major"}
+        ]
+        warnings = [
+            check
+            for check in checks
+            if not check.get("ok") and check.get("severity") not in {"critical", "major"}
+        ]
+        return {
+            "object": "agent_hub.production_check",
+            "ok": not failed and score >= 90,
+            "score": score,
+            "rating": round(score / 10, 1),
+            "state": "passed" if not failed and score >= 90 else "needs_attention",
+            "summary": {
+                "total_weight": int(total_weight),
+                "earned": round(earned, 2),
+                "failed_count": len(failed),
+                "warning_count": len(warnings),
+                "passed_count": sum(1 for check in checks if check.get("ok")),
+            },
+            "failed": failed,
+            "warnings": warnings,
+            "checks": checks,
+            "readiness": readiness,
+        }
+
     def backend_health_body(self, router: Any, *, context_diagnostics: dict[str, Any]) -> dict[str, Any]:
         config = self.config
         provider_health = router.health_snapshot()
         setup_guidance = _setup_guidance(config, provider_health)
+        plugins = self.plugins_body()
+        readiness = self.readiness_body(
+            router,
+            provider_health=provider_health,
+            setup_guidance=setup_guidance,
+            plugins=plugins,
+        )
         return {
             "status": "ok",
             "running": True,
@@ -444,11 +582,13 @@ class DiagnosticsApplicationService:
             },
             "context_diagnostics": context_diagnostics,
             "setup_guidance": setup_guidance,
+            "readiness": readiness,
+            "feature_status": readiness["feature_status"],
             "streaming": {
                 "force_compatibility_streaming": config.force_compatibility_streaming,
             },
             "repo_ignore_patterns": config.repo_ignore_patterns,
-            "plugins": self.plugins_body(),
+            "plugins": plugins,
             "repository_context_scoring": {
                 "enabled": config.context_change_bar_enabled,
                 "light_minimum": 3,
@@ -681,6 +821,355 @@ def _has_mapping_values(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     return any(item not in (None, "", {}, []) for item in value.values())
+
+
+def _readiness_items(
+    config: HubConfig,
+    provider_health: dict[str, dict[str, Any]],
+    setup_guidance: dict[str, Any],
+    plugins: dict[str, Any],
+    *,
+    leaderboard: dict[str, Any],
+    benchmarks: dict[str, Any],
+) -> list[dict[str, Any]]:
+    agents = list(config.agents.values())
+    enabled_agents = [agent for agent in agents if agent.enabled]
+    active_names = _active_names(config, provider_health)
+    items = [
+        _readiness_item(
+            "providers_configured",
+            "Providers are configured and enabled",
+            "ok" if enabled_agents else "action",
+            10,
+            10 if enabled_agents else (4 if agents else 0),
+            (
+                f"{len(enabled_agents)} enabled provider(s) configured."
+                if enabled_agents
+                else (
+                    "Provider entries exist but all are disabled."
+                    if agents
+                    else "No providers are configured."
+                )
+            ),
+            None if enabled_agents else "python -m agent_hub init --with-cloud-examples",
+        ),
+        _readiness_item(
+            "route_ready_provider",
+            "At least one provider is route-ready",
+            "ok" if active_names else "action",
+            20,
+            20 if active_names else (8 if enabled_agents else 0),
+            (
+                f"Available provider(s): {', '.join(active_names[:8])}."
+                if active_names
+                else "No enabled provider currently reports as available."
+            ),
+            None if active_names else "python -m agent_hub doctor --providers",
+        ),
+        _security_readiness_item(config),
+        _context_readiness_item(config),
+        _observability_readiness_item(config, provider_health),
+        _data_product_readiness_item(leaderboard, benchmarks),
+        _advanced_readiness_item(config),
+        _plugin_readiness_item(config, plugins),
+    ]
+    if isinstance(setup_guidance.get("next_step"), dict) and setup_guidance.get("action_count"):
+        route_item = next((item for item in items if item["id"] == "route_ready_provider"), None)
+        if route_item is not None and not route_item.get("command"):
+            route_item["command"] = setup_guidance["next_step"].get("command")
+    return items
+
+
+def _security_readiness_item(config: HubConfig) -> dict[str, Any]:
+    public_auth_ok = not public_bind_host(str(config.host or "")) or bool(api_token(config))
+    shell_guarded = not config.allow_shell_tools or config.shell_command_policy in {"ask", "deny"}
+    controls = {
+        "approval mode is guarded": config.approval_mode != "auto",
+        "secret scanning enabled": config.secret_scanning_enabled,
+        "prompt injection defense enabled": config.prompt_injection_defense_enabled,
+        "provider privacy mode enabled": config.provider_privacy_mode_enabled,
+        "public bind has API auth": public_auth_ok,
+        "shell execution is guarded": shell_guarded,
+    }
+    missing = [label for label, ok in controls.items() if not ok]
+    earned = 20 * ((len(controls) - len(missing)) / len(controls))
+    status = "ok"
+    command = None
+    if missing:
+        status = "warn"
+        command = "Use approval_mode=safe and keep secret_scanning/provider_privacy enabled."
+    if not public_auth_ok or not config.secret_scanning_enabled or not config.provider_privacy_mode_enabled:
+        status = "action"
+        command = (
+            "Set api_auth_token/api_auth_token_env for public bind and keep "
+            "secret_scanning_enabled/provider_privacy_mode_enabled true."
+        )
+    return _readiness_item(
+        "security_guardrails",
+        "Security guardrails are production-safe",
+        status,
+        20,
+        earned,
+        "All core guardrails are enabled." if not missing else "Missing: " + ", ".join(missing) + ".",
+        command,
+    )
+
+
+def _context_readiness_item(config: HubConfig) -> dict[str, Any]:
+    controls = {
+        "context compaction": config.agent_context_compaction_enabled,
+        "Cline compatibility": config.cline_compatibility_mode,
+        "repository context": config.repo_context_enabled,
+        "context change bar": config.context_change_bar_enabled,
+    }
+    missing = [label for label, ok in controls.items() if not ok]
+    earned = 10 * ((len(controls) - len(missing)) / len(controls))
+    return _readiness_item(
+        "context_safety",
+        "Context handling is guarded",
+        "ok" if not missing else "warn",
+        10,
+        earned,
+        "Context compaction and compatibility protections are enabled."
+        if not missing
+        else "Disabled: " + ", ".join(missing) + ".",
+        None if not missing else "Re-enable context compaction and compatibility protections.",
+    )
+
+
+def _observability_readiness_item(
+    config: HubConfig,
+    provider_health: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    controls = {
+        "routing memory": config.routing_memory_enabled,
+        "adaptive learning": config.adaptive_learning_enabled,
+        "provider health snapshot": bool(provider_health),
+        "structured dashboard endpoints": True,
+    }
+    missing = [label for label, ok in controls.items() if not ok]
+    earned = 15 * ((len(controls) - len(missing)) / len(controls))
+    return _readiness_item(
+        "observability_learning",
+        "Observability and learning are active",
+        "ok" if not missing else "warn",
+        15,
+        earned,
+        "Routing memory, adaptive learning, and health snapshots are available."
+        if not missing
+        else "Disabled or empty: " + ", ".join(missing) + ".",
+        None if not missing else "Enable routing_memory_enabled and adaptive_learning_enabled.",
+    )
+
+
+def _data_product_readiness_item(
+    leaderboard: dict[str, Any],
+    benchmarks: dict[str, Any],
+) -> dict[str, Any]:
+    leaderboard_summary = _dict(leaderboard.get("summary"))
+    benchmark_summary = _dict(benchmarks.get("summary"))
+    measured_agents = int(leaderboard_summary.get("measured_agent_count", 0) or 0)
+    benchmark_reports = int(benchmark_summary.get("report_count", 0) or 0)
+    has_leaderboard_data = measured_agents > 0
+    has_benchmark_data = benchmark_reports > 0
+    if has_leaderboard_data and has_benchmark_data:
+        status = "ok"
+        earned = 10
+        detail = f"{measured_agents} measured agent(s), {benchmark_reports} benchmark report(s)."
+        command = None
+    elif has_leaderboard_data or has_benchmark_data:
+        status = "warn"
+        earned = 8
+        detail = "Some performance data exists, but benchmark and live outcome coverage are incomplete."
+        command = "Run python -m agent_hub benchmark-suite --route coding --limit 24 --json."
+    else:
+        status = "warn"
+        earned = 5
+        detail = "Dashboards are usable, but leaderboard and benchmark data have not accumulated yet."
+        command = "Run python -m agent_hub eval --route coding --json."
+    return _readiness_item(
+        "data_products",
+        "Dashboards have real performance data",
+        status,
+        10,
+        earned,
+        detail,
+        command,
+    )
+
+
+def _advanced_readiness_item(config: HubConfig) -> dict[str, Any]:
+    controls = {
+        "failure prediction": config.failure_prediction_enabled,
+        "cost optimizer": config.cost_optimizer_enabled,
+        "model tournament": config.model_tournament_enabled,
+        "automatic escalation": config.automatic_escalation_enabled,
+        "night mode plan": True,
+    }
+    missing = [label for label, ok in controls.items() if not ok]
+    earned = 10 * ((len(controls) - len(missing)) / len(controls))
+    if not config.autonomous_night_mode_enabled:
+        earned = min(earned, 8.0)
+    detail = "Advanced routing intelligence is enabled."
+    if missing:
+        detail = "Disabled: " + ", ".join(missing) + "."
+    elif not config.autonomous_night_mode_enabled:
+        detail = "Advanced routing is enabled; autonomous night mode remains plan-only by default."
+    return _readiness_item(
+        "advanced_intelligence",
+        "Advanced intelligence is usable and honest",
+        "ok" if not missing and config.autonomous_night_mode_enabled else "warn",
+        10,
+        earned,
+        detail,
+        None if not missing else "Re-enable failure prediction, tournament mode, and escalation.",
+    )
+
+
+def _plugin_readiness_item(config: HubConfig, plugins: dict[str, Any]) -> dict[str, Any]:
+    errors = plugins.get("errors") if isinstance(plugins.get("errors"), list) else []
+    if not config.plugins_enabled:
+        return _readiness_item(
+            "plugins_integrations",
+            "Plugin and MCP foundations are discoverable",
+            "warn",
+            5,
+            2,
+            "Plugin discovery is disabled.",
+            "Set plugins_enabled=true to inspect plugin manifests.",
+        )
+    if errors:
+        return _readiness_item(
+            "plugins_integrations",
+            "Plugin and MCP foundations are discoverable",
+            "warn",
+            5,
+            3,
+            f"{len(errors)} plugin discovery error(s) need attention.",
+            "Check /v1/plugins for manifest errors.",
+        )
+    if config.plugin_execution_enabled:
+        return _readiness_item(
+            "plugins_integrations",
+            "Plugin and MCP foundations are discoverable",
+            "ok",
+            5,
+            5,
+            "Plugin discovery and execution policy are enabled.",
+        )
+    return _readiness_item(
+        "plugins_integrations",
+        "Plugin and MCP foundations are discoverable",
+        "ok",
+        5,
+        4,
+        "Plugin manifests and trust policy are available; third-party code execution is disabled by default.",
+    )
+
+
+def _feature_status(
+    config: HubConfig,
+    provider_health: dict[str, dict[str, Any]],
+    setup_guidance: dict[str, Any],
+    plugins: dict[str, Any],
+    *,
+    leaderboard: dict[str, Any],
+    benchmarks: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    active_names = _active_names(config, provider_health)
+    leaderboard_summary = _dict(leaderboard.get("summary"))
+    benchmark_summary = _dict(benchmarks.get("summary"))
+    plugin_errors = plugins.get("errors") if isinstance(plugins.get("errors"), list) else []
+    return {
+        "provider_routing": {
+            "state": "ready" if active_names else "needs_setup",
+            "detail": ", ".join(active_names[:8]) if active_names else "No provider reports as available.",
+        },
+        "setup_guidance": {
+            "state": "ready" if setup_guidance.get("ready") else "needs_action",
+            "action_count": setup_guidance.get("action_count", 0),
+            "warning_count": setup_guidance.get("warning_count", 0),
+        },
+        "security": {
+            "state": "ready" if _security_readiness_item(config)["status"] == "ok" else "needs_review",
+            "approval_mode": config.approval_mode,
+            "provider_privacy_mode_enabled": config.provider_privacy_mode_enabled,
+            "secret_scanning_enabled": config.secret_scanning_enabled,
+        },
+        "model_leaderboard": {
+            "state": leaderboard_summary.get("data_state", "unknown"),
+            "measured_agent_count": leaderboard_summary.get("measured_agent_count", 0),
+            "sample_count": leaderboard_summary.get("sample_count", 0),
+        },
+        "benchmark_results_dashboard": {
+            "state": benchmark_summary.get("data_state", "unknown"),
+            "report_count": benchmark_summary.get("report_count", 0),
+        },
+        "cost_dashboard": {
+            "state": "ready_needs_priced_usage",
+            "detail": "Endpoint and HTML dashboard are available; meaningful totals require priced usage data.",
+        },
+        "autonomous_night_mode": {
+            "state": "plan_enabled" if config.autonomous_night_mode_enabled else "plan_only_disabled",
+            "detail": "Night mode returns a safety plan and does not execute unattended work by default.",
+        },
+        "plugins": {
+            "state": (
+                "disabled"
+                if not config.plugins_enabled
+                else ("needs_manifest_fixes" if plugin_errors else "execution_enabled" if config.plugin_execution_enabled else "foundation")
+            ),
+            "count": plugins.get("count", 0),
+            "errors": len(plugin_errors),
+        },
+        "external_mcp_bridge": {
+            "state": "foundation",
+            "detail": "Internal MCP-shaped tools and config metadata are present; external execution stays policy-gated.",
+        },
+    }
+
+
+def _readiness_item(
+    item_id: str,
+    label: str,
+    status: str,
+    weight: int,
+    earned: float,
+    detail: str,
+    command: str | None = None,
+) -> dict[str, Any]:
+    bounded = max(0.0, min(float(weight), float(earned)))
+    item: dict[str, Any] = {
+        "id": item_id,
+        "label": label,
+        "status": status,
+        "ok": status == "ok",
+        "weight": weight,
+        "earned": round(bounded, 2),
+        "detail": detail,
+    }
+    if command:
+        item["command"] = command
+    return item
+
+
+def _active_names(config: HubConfig, provider_health: dict[str, dict[str, Any]]) -> list[str]:
+    return [
+        name
+        for name, agent in sorted(config.agents.items())
+        if agent.enabled and provider_health.get(name, {}).get("available")
+    ]
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _setup_guidance(config: HubConfig, provider_health: dict[str, dict[str, Any]]) -> dict[str, Any]:

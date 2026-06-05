@@ -695,7 +695,10 @@ health/cooldown data, quota estimates when providers expose them, latency and
 reliability metrics, active recommendations, and model aliases exposed to
 OpenAI-compatible tools. It also includes `setup_guidance`, an actionable
 readiness summary with the next setup step, missing provider/API-key actions,
-local-model probe issues, and approval-mode warnings.
+local-model probe issues, and approval-mode warnings. The companion
+`readiness` object gives a weighted 0-100 score, 1-10 rating, next action, and
+feature maturity states so foundation-level or data-waiting features are not
+reported as indistinguishable from fully ready ones.
 
 Runtime health is persisted in `.agent-hub/state/provider_health.json`.
 Agent-Hub stores rolling success/failure counts, timeout counts, average
@@ -715,7 +718,8 @@ python -m agent_hub doctor
 agent-hub debug-bundle --output agent-hub-debug-bundle.zip
 ```
 
-`health` summarizes live availability and current best route candidates.
+`health` summarizes live availability, current best route candidates, readiness
+score, and the next setup action.
 `metrics` includes persisted latency, streaming-speed estimates, tool-call
 success/failure counts, token usage, and recent failover history. `doctor`
 combines config readiness with the same provider-health and recommendation
@@ -763,6 +767,7 @@ npm run check:version
 Additional visibility endpoints:
 
 - `GET /v1/provider-health`
+- `GET /v1/readiness`
 - `GET /v1/routing/status`
 - `GET /v1/routing/last-decision`
 - `GET /v1/routing/test-failover`

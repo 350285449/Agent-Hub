@@ -33,6 +33,8 @@ class ServerCompatibilityTests(unittest.TestCase):
         self.assertTrue(BACKEND_FEATURES["anthropic_messages_compatibility"])
         self.assertTrue(BACKEND_FEATURES["anthropic_tool_use_passthrough"])
         self.assertTrue(BACKEND_FEATURES["local_dummy_auth_compatibility"])
+        self.assertTrue(BACKEND_FEATURES["readiness_scorecard"])
+        self.assertTrue(BACKEND_FEATURES["feature_maturity_status"])
 
     def test_health_includes_context_enforcement_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -91,6 +93,11 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertGreaterEqual(guidance["action_count"], 1)
             self.assertEqual(guidance["next_step"]["id"], "configure_agents")
             self.assertIn("python -m agent_hub init", guidance["next_step"]["command"])
+            readiness = data["readiness"]
+            self.assertEqual(readiness["object"], "agent_hub.readiness")
+            self.assertEqual(readiness["state"], "needs_setup")
+            self.assertEqual(readiness["next_step"]["id"], "providers_configured")
+            self.assertEqual(data["feature_status"]["provider_routing"]["state"], "needs_setup")
 
     def test_model_rows_include_router_aliases_and_agent_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -697,6 +704,25 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(costs_json["summary"]["data_state"], "waiting_for_priced_usage")
             self.assertEqual(leaderboard_json["summary"]["data_state"], "waiting_for_benchmarks_or_traffic")
             self.assertEqual(benchmarks_json["summary"]["data_state"], "waiting_for_benchmark_reports")
+
+    def test_readiness_endpoint_exposes_scorecard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                readiness = _get_json(f"{base}/v1/readiness")
+                dashboard = _get_text(f"{base}/dashboard")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(readiness["object"], "agent_hub.readiness")
+            self.assertIn("score", readiness)
+            self.assertTrue(any(item["id"] == "route_ready_provider" for item in readiness["items"]))
+            self.assertEqual(readiness["feature_status"]["external_mcp_bridge"]["state"], "foundation")
+            self.assertIn("readiness", dashboard.lower())
+            self.assertIn("/v1/readiness", dashboard)
 
     def test_health_exposes_capability_graph_and_token_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .adaptive import estimate_known_cost_usd
+from .application import DiagnosticsApplicationService
 from .config import (
     _is_local_or_private_url,
     cloud_route_agent_names,
@@ -620,10 +621,15 @@ def _health_report(config: Any, *, route: str, include_history: bool) -> dict[st
         include_unavailable=True,
     )
     health = router.health_snapshot(include_history=include_history)
+    readiness = DiagnosticsApplicationService(config).readiness_body(
+        router,
+        provider_health=health,
+    )
     return {
         "status": "ok",
         "route": route,
         "provider_health": health,
+        "readiness": readiness,
         "recommendations": recommendations,
         "routing_decisions": [
             {
@@ -643,6 +649,13 @@ def _health_report(config: Any, *, route: str, include_history: bool) -> dict[st
 def _print_health(report: dict[str, Any]) -> None:
     print("Agent-Hub health")
     print(f"Route: {report['route']}")
+    readiness = report.get("readiness") if isinstance(report.get("readiness"), dict) else {}
+    if readiness:
+        state = str(readiness.get("state") or "unknown").replace("_", " ")
+        print(f"Readiness: {readiness.get('score', '?')}/100 ({state})")
+        next_step = readiness.get("next_step") if isinstance(readiness.get("next_step"), dict) else {}
+        if next_step:
+            print(f"Next step: {next_step.get('label')} - {next_step.get('detail')}")
     print()
     _print_table(
         _health_rows(report.get("provider_health", {})),
