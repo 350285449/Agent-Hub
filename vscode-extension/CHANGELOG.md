@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.8
+
+- Returns Cline-visible repair instructions when trusted cloud provider approval blocks a request.
+- Guides users to update the running Agent Hub `--config` file, restart the backend, or switch to a local route.
+
 ## 0.8.7
 
 - Fixes bundled backend startup on fresh Python installations without `packaging`.

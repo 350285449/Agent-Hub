@@ -36,7 +36,7 @@ from .api.compatibility import (
 )
 from .config import HubConfig
 from .context import request_context_diagnostics
-from .models import HubRequest
+from .models import HubRequest, HubResponse
 from .observability import permission_snapshot, recent_events, record_event, usage_snapshot
 from .permissions import UNTRUSTED_EXTERNAL, mark_trusted_approval
 from .security.secrets import redact_secrets
@@ -498,6 +498,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 event.error_type in {"permission_required", "permission_denied"}
                 for event in exc.failover
             )
+            permission_event = None
+            trust_level = None
+            explicit_security_approval = False
+            unknown_external = False
             route_error_type = getattr(exc, "error_type", None)
             error_type = (
                 "agent_hub_permission_required"
@@ -610,6 +614,28 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             status = getattr(exc, "status_code", None)
             if status is None:
                 status = 403 if permission_required else 503
+            if _should_return_cline_permission_guidance(
+                request,
+                response_shape,
+                permission_required=permission_required,
+            ):
+                diagnostic = _cline_permission_guidance_response(
+                    request=request,
+                    config=self.server.config,
+                    error_body=error_body,
+                    permission_event=permission_event,
+                    failover=exc.failover,
+                    trust_level=trust_level,
+                    explicit_security_approval=explicit_security_approval,
+                    unknown_external=unknown_external,
+                )
+                self._send_response_for_shape(
+                    diagnostic,
+                    response_shape,
+                    request.stream,
+                    include_routing_details=self.server.config.expose_routing_details,
+                )
+                return
             if response_shape == "anthropic-messages":
                 error_body = error_response_for_shape(
                     error_body["error"],
@@ -1147,6 +1173,153 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
         _safe_flush(self)
+
+
+def _should_return_cline_permission_guidance(
+    request: HubRequest,
+    response_shape: str,
+    *,
+    permission_required: bool,
+) -> bool:
+    return (
+        permission_required
+        and response_shape == "openai-chat"
+        and _request_from_cline(request)
+    )
+
+
+def _request_from_cline(request: HubRequest) -> bool:
+    metadata = request.metadata or {}
+    markers = (
+        metadata.get("source"),
+        metadata.get("client"),
+        metadata.get("user_agent"),
+        metadata.get("client_user_agent"),
+    )
+    return any("cline" in str(value).lower() for value in markers if value is not None)
+
+
+def _cline_permission_guidance_response(
+    *,
+    request: HubRequest,
+    config: HubConfig,
+    error_body: dict[str, Any],
+    permission_event: Any,
+    failover: list[Any],
+    trust_level: str | None,
+    explicit_security_approval: bool,
+    unknown_external: bool,
+) -> HubResponse:
+    error = error_body.get("error") if isinstance(error_body.get("error"), dict) else {}
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    public_model = raw.get("model") if isinstance(raw.get("model"), str) else "agent-hub-coding"
+    provider = str(getattr(permission_event, "agent", "") or error.get("provider") or "selected-provider")
+    provider_name = str(getattr(permission_event, "provider", "") or provider)
+    model = str(getattr(permission_event, "model", "") or public_model)
+    text = _cline_permission_guidance_text(
+        config=config,
+        error=error,
+        provider=provider,
+        provider_name=provider_name,
+        model=model,
+        trust_level=trust_level,
+        explicit_security_approval=explicit_security_approval,
+        unknown_external=unknown_external,
+    )
+    completion_tokens = max(1, len(text) // 4)
+    return HubResponse(
+        request_id=f"hub-permission-{time.time_ns()}",
+        session_id=request.session_id,
+        agent=provider,
+        provider=provider_name,
+        model=model,
+        public_model=public_model,
+        text=text,
+        usage={
+            "prompt_tokens": 0,
+            "completion_tokens": completion_tokens,
+            "total_tokens": completion_tokens,
+        },
+        finish_reason="stop",
+        failover=list(failover),
+        raw={
+            "agent_hub": {
+                "permission_required": True,
+                "diagnostic_response": True,
+                "permission_error": error,
+                "trust_level": trust_level,
+                "approval_mode": config.approval_mode,
+            }
+        },
+    )
+
+
+def _cline_permission_guidance_text(
+    *,
+    config: HubConfig,
+    error: dict[str, Any],
+    provider: str,
+    provider_name: str,
+    model: str,
+    trust_level: str | None,
+    explicit_security_approval: bool,
+    unknown_external: bool,
+) -> str:
+    message = str(error.get("message") or "Provider approval is required.")
+    lines = [
+        "Agent Hub blocked this Cline request before sending workspace context to the selected provider.",
+        "",
+        f"Reason: {message}",
+        f"Provider: {provider} ({provider_name}, model {model})",
+        f"Trust level: {trust_level or 'unknown'}",
+        f"Current approval_mode: {config.approval_mode}",
+        "",
+    ]
+    if explicit_security_approval:
+        lines.extend(
+            [
+                "This is a security approval, not just a Cline compatibility issue.",
+                "",
+                "What to do:",
+                "1. Remove secrets or sensitive workspace content from the prompt/context, then retry.",
+                "2. If sending that content is intentional, approve it from the Agent Hub VS Code UI or a trusted session.",
+                "3. Do not rely on approval_mode=auto for content that Agent Hub says needs explicit security approval.",
+            ]
+        )
+    elif unknown_external:
+        lines.extend(
+            [
+                "This provider is an unknown external endpoint. approval_mode=auto does not bypass unknown external providers.",
+                "",
+                "What to do:",
+                "1. Use a local route such as agent-hub-local/local-agent, or configure the provider as a known trusted provider type if it really is one.",
+                "2. Otherwise approve the provider from the Agent Hub VS Code UI or send a trusted X-Agent-Hub-Approval-Token from a trusted client.",
+                "3. Restart Agent Hub after changing provider configuration, then retry from Cline.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "Cline cannot answer Agent Hub's interactive approval prompt, so trusted cloud routes need a non-interactive setting or a trusted session.",
+                "",
+                "What to do:",
+                "1. Find the config used by the running Agent Hub server. In the Agent Hub VS Code output, copy the path after --config. From PowerShell, you can also run:",
+                "   Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'agent_hub.*serve' } | Select-Object -ExpandProperty CommandLine",
+                "2. Edit that JSON config file. If Agent Hub was started by the VS Code extension, this may be under %APPDATA%\\Code\\User\\globalStorage\\agent-hub.agent-hub-vscode\\workspaces\\..., not just the workspace agent-hub.config.json.",
+                "3. Set these values:",
+                '   "approval_mode": "auto"',
+                '   "cline_compatibility_mode": true',
+                '   "tool_loop_enabled_for_cline": false',
+                "4. Restart Agent Hub with the VS Code command Agent Hub: Restart Server, or stop/start the backend.",
+                "5. Retry the Cline prompt.",
+                "",
+                "Prompt Cline to make the config edit like this:",
+                'Find the running Agent Hub serve command, open the JSON file passed after --config, set "approval_mode" to "auto", keep "cline_compatibility_mode" true, then restart Agent Hub.',
+                "",
+                "Safer local-only alternative: keep approval_mode as ask/safe and route Cline to a local provider such as agent-hub-local/local-agent.",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def serve(config: HubConfig) -> None:

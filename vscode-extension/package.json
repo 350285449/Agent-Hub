@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub - Local-First AI Model Router",
   "description": "Cline, Codex and Claude Code compatible AI model router with free-model routing, workspace agents, and cost-saving local-first orchestration.",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",

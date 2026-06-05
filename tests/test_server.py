@@ -875,6 +875,48 @@ class ServerCompatibilityTests(unittest.TestCase):
                 },
             )
 
+    def test_cline_permission_error_returns_repair_prompt_chat_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                workspace_dir=Path(tmp),
+                approval_mode="ask",
+                cline_compatibility_mode=True,
+                free_only=False,
+                default_route=["paid"],
+                agents={
+                    "paid": AgentConfig(
+                        name="paid",
+                        provider="openai",
+                        model="paid-model",
+                        api_key="secret",
+                    )
+                },
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                body = _post_json(
+                    f"{base}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "messages": [{"role": "user", "content": "Current file: app.py\nhello"}],
+                    },
+                    headers={"User-Agent": "Cline/3.0"},
+                )
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(body["object"], "chat.completion")
+            self.assertEqual(body["model"], "agent-hub-coding")
+            content = body["choices"][0]["message"]["content"]
+            self.assertIn("Agent Hub blocked this Cline request", content)
+            self.assertIn('\"approval_mode\": \"auto\"', content)
+            self.assertIn("--config", content)
+            self.assertIn("Agent Hub: Restart Server", content)
+            self.assertIn("Prompt Cline to make the config edit", content)
+
     def test_debug_request_preserves_cline_structured_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _compat_config(Path(tmp))
