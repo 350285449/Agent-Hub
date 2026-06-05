@@ -12,6 +12,7 @@ from .config import normalize_provider
 from .core.router import AgentRouter
 from .dependency_audit import dependency_install_checks
 from .payloads import request_from_payload
+from .permissions import TRUSTED_CLOUD, provider_trust_level
 from .version import backend_version
 from .commands_provider import _agent_rows, _health_rows
 from .output import _print_table
@@ -587,7 +588,10 @@ def _doctor_likely_problems(
         problems.append("missing_api_key")
     if not any(row.get("running") for row in local_servers):
         problems.append("no_local_server_detected")
-    if config.approval_mode in {"auto", "deny"}:
+    if config.approval_mode == "deny" or (
+        config.approval_mode == "auto"
+        and not _auto_approval_expected_for_ide_cloud_routes(config, rows)
+    ):
         problems.append("approval_mode_review_recommended")
     if not config.cline_compatibility_mode:
         problems.append("cline_compatibility_disabled")
@@ -616,7 +620,15 @@ def _doctor_exact_fixes(
     if "no_local_server_detected" in problems:
         fixes.append("Start Ollama on http://127.0.0.1:11434 or LM Studio on http://127.0.0.1:1234 for local fallback.")
     if "approval_mode_review_recommended" in problems:
-        fixes.append("Use approval_mode=ask or safe for publishable setups; readonly is best for demos.")
+        if config.approval_mode == "auto":
+            fixes.append(
+                "approval_mode=auto is intended for non-interactive Cline/cloud routes; "
+                "use ask or safe for local-only or publishable setups."
+            )
+        elif config.approval_mode == "deny":
+            fixes.append("approval_mode=deny blocks privileged actions; use readonly for demos or safe/ask for interactive use.")
+        else:
+            fixes.append("Use approval_mode=ask or safe for publishable setups; readonly is best for demos.")
     if "cline_compatibility_disabled" in problems:
         fixes.append("Set cline_compatibility_mode=true in agent-hub.config.json.")
     if "backend_not_reachable" in problems:
@@ -628,6 +640,31 @@ def _doctor_exact_fixes(
     fixes.append(f"Cline: base URL http://{config.host}:{config.port}/v1, model agent-hub-coding, API key any non-empty placeholder.")
     fixes.append(f"Claude Code: Anthropic base URL http://{config.host}:{config.port}, model agent-hub-coding.")
     return fixes
+
+
+def _auto_approval_expected_for_ide_cloud_routes(
+    config: Any,
+    rows: list[dict[str, Any]],
+) -> bool:
+    if not getattr(config, "cline_compatibility_mode", False):
+        return False
+    allowed_names = {
+        str(row.get("name") or "")
+        for row in rows
+        if row.get("enabled") and row.get("allowed") and row.get("status") in {"ready", "configured"}
+    }
+    routed_names = set(str(name) for name in getattr(config, "default_route", []) or [])
+    for route in getattr(config, "routes", []) or []:
+        route_name = str(getattr(route, "name", "") or "")
+        if route_name in {"coding", "cloud-agent", "hybrid-agent", "research"}:
+            routed_names.update(str(name) for name in getattr(route, "agents", []) or [])
+    for name in routed_names:
+        if name not in allowed_names:
+            continue
+        agent = getattr(config, "agents", {}).get(name)
+        if agent is not None and provider_trust_level(agent) == TRUSTED_CLOUD:
+            return True
+    return False
 
 
 def _print_doctor(report: dict[str, Any]) -> None:

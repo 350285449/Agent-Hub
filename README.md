@@ -324,7 +324,7 @@ Cline:
 - Base URL: `http://127.0.0.1:8787/v1`
 - API key: `local-agent-hub-token`
 - Model: `agent-hub-coding`
-- Recommended config: `"approval_mode": "safe"` and
+- Recommended cloud/hybrid config: `"approval_mode": "auto"` and
   `"cline_compatibility_mode": true`
 
 Continue:
@@ -350,11 +350,11 @@ Approval must come from the Agent-Hub VS Code UI or another trusted session
 using `X-Agent-Hub-Approval-Token`. API authentication and approval tokens are
 separate credentials.
 
-Recommended IDE config:
+Recommended IDE config for generated cloud/hybrid routes:
 
 ```json
 {
-  "approval_mode": "safe",
+  "approval_mode": "auto",
   "cline_compatibility_mode": true,
   "tool_loop_enabled": true,
   "tool_loop_enabled_for_cline": false,
@@ -366,6 +366,11 @@ Recommended IDE config:
   }
 }
 ```
+
+For local-only routing, keep `approval_mode: "safe"` and point the IDE client at
+the `local-agent` route. Generated VS Code configs use `approval_mode: "auto"`
+because their default cloud routes include trusted hosted providers that
+non-interactive IDE clients cannot approve.
 
 For weak, free, or OpenAI-compatible providers, Agent-Hub now validates and
 normalizes provider output before returning it to IDE clients. Empty responses,

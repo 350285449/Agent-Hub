@@ -4,7 +4,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts import check_phase7
 from scripts.backend_snapshot import generate_snapshot, validate_snapshot
 from scripts.package_clean import cleanup_messages
 from scripts.update_release_metadata import update_release_metadata
@@ -126,6 +128,35 @@ class PhaseNineReleaseMetadataTests(unittest.TestCase):
         failures = validate_extension_packaging_scripts(package)
 
         self.assertTrue(any("vscode:prepublish script must run prepare-backend" in item for item in failures))
+
+    def test_phase7_check_defaults_to_lightweight_unittest_target(self) -> None:
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> object:
+            commands.append(command)
+            return type("Completed", (), {"returncode": 0})()
+
+        with (
+            patch("scripts.check_phase7.shutil.which", return_value="node"),
+            patch("scripts.check_phase7.subprocess.run", side_effect=fake_run),
+        ):
+            self.assertEqual(check_phase7.main([]), 0)
+
+        unittest_commands = [command for command in commands if "-m" in command and "unittest" in command]
+        self.assertEqual(len(unittest_commands), 1)
+        self.assertIn("tests.test_api_compatibility_phase7", unittest_commands[0])
+        self.assertNotIn("discover", unittest_commands[0])
+
+        commands.clear()
+        with (
+            patch("scripts.check_phase7.shutil.which", return_value="node"),
+            patch("scripts.check_phase7.subprocess.run", side_effect=fake_run),
+        ):
+            self.assertEqual(check_phase7.main(["--full-unittest"]), 0)
+
+        unittest_commands = [command for command in commands if "-m" in command and "unittest" in command]
+        self.assertEqual(len(unittest_commands), 1)
+        self.assertIn("discover", unittest_commands[0])
 
 
 class PhaseNineSnapshotEnforcementTests(unittest.TestCase):

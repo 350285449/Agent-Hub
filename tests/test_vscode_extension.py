@@ -206,6 +206,36 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("function clearWorkspaceAgentHubSettings", source)
         self.assertIn("Moved Agent Hub settings out of workspace settings.", source)
 
+    def test_generated_config_defaults_are_cline_cloud_ready(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        helper_start = source.index("function generatedConfigApprovalMode")
+        helper_end = source.index("function localConfigForLocalModels", helper_start)
+        helper = source[helper_start:helper_end]
+        config_start = source.index("function localConfigForLocalModels")
+        config_end = source.index("function ollamaCloudModelAgentConfig", config_start)
+        generated_config = source[config_start:config_end]
+        repair_start = source.index("async function repairGeneratedLocalConfig")
+        repair_end = source.index("function configsEquivalent", repair_start)
+        repair = source[repair_start:repair_end]
+
+        self.assertIn('return "auto";', helper)
+        self.assertIn('return mode === "ask" ? "auto" : mode;', helper)
+        self.assertIn("tool_loop_enabled_for_cline: false", generated_config)
+        self.assertIn("approval_mode: generatedConfigApprovalMode(options.approvalMode)", generated_config)
+        self.assertNotIn('approval_mode: "ask"', generated_config)
+        self.assertIn("approvalMode: raw.approval_mode", repair)
+
+    def test_config_repair_restarts_extension_owned_server(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        start_server_start = source.index("async function startServer")
+        start_server_end = source.index("async function serverLaunchEnvironment", start_server_start)
+        start_server = source[start_server_start:start_server_end]
+
+        self.assertIn("configChanged && serverProcess", start_server)
+        self.assertIn("restarting extension-owned backend", start_server)
+        self.assertIn("Restarting Agent Hub to load repaired config", start_server)
+        self.assertIn("Agent Hub config was repaired, but the running backend did not stop", start_server)
+
     def test_max_tokens_setting_is_unset_by_default(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
         setting = package["contributes"]["configuration"]["properties"]["agentHub.maxTokens"]

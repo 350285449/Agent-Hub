@@ -7092,13 +7092,25 @@ async function startServer(options = {}) {
   const configChanged = await ensureLocalConfig(config, workspace);
 
   if (await isServerOnline()) {
-    setServerLifecycleState("Running", `Running at ${config.serverUrl}`);
-    if (configChanged) {
-      vscode.window.showWarningMessage("Agent Hub config was repaired. Restart Agent Hub to use the repaired config.");
+    if (configChanged && serverProcess) {
+      output.appendLine("Agent Hub config was repaired; restarting extension-owned backend to load it.");
+      setServerLifecycleState("Starting", "Restarting Agent Hub to load repaired config...");
+      stopServerProcess();
+      const offline = await waitForServerOffline(3000);
+      if (!offline && (await isServerOnline())) {
+        setServerLifecycleState("Error", "Agent Hub config was repaired, but the running backend did not stop.");
+        vscode.window.showWarningMessage("Agent Hub config was repaired, but the running backend did not stop. Restart Agent Hub to use the repaired config.");
+        return;
+      }
     } else {
-      vscode.window.showInformationMessage("Agent Hub is already running.");
+      setServerLifecycleState("Running", `Running at ${config.serverUrl}`);
+      if (configChanged) {
+        vscode.window.showWarningMessage("Agent Hub config was repaired. Restart Agent Hub to use the repaired config.");
+      } else {
+        vscode.window.showInformationMessage("Agent Hub is already running.");
+      }
+      return;
     }
-    return;
   }
   if (serverProcess) {
     setServerLifecycleState("Starting", "Agent Hub is starting.");
@@ -7536,6 +7548,7 @@ async function repairGeneratedLocalConfig(configPath, options = {}) {
     const repaired = localConfigForLocalModels(selectedSources, {
       cloudRouteMode: configCloudRouteMode(raw),
       cloudSettings: cloudModelSettingsFromConfig(raw),
+      approvalMode: raw.approval_mode,
       workspaceDir,
       storageDir
     });
@@ -8061,6 +8074,15 @@ function listOrEmpty(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function generatedConfigApprovalMode(value) {
+  const hasExplicitValue = value !== undefined && value !== null && String(value).trim() !== "";
+  if (!hasExplicitValue) {
+    return "auto";
+  }
+  const mode = normalizeApprovalMode(value);
+  return mode === "ask" ? "auto" : mode;
+}
+
 function localConfigForLocalModels(sources, options = {}) {
   const localSources = completeLocalModelSources(sources);
   const ollamaCloudSources = ollamaCloudModelSources();
@@ -8097,8 +8119,9 @@ function localConfigForLocalModels(sources, options = {}) {
     agent_context_compaction_enabled: true,
     context_mode: "balanced",
     cline_compatibility_mode: true,
+    tool_loop_enabled_for_cline: false,
     allow_shell_tools: true,
-    approval_mode: "ask",
+    approval_mode: generatedConfigApprovalMode(options.approvalMode),
     free_only: options.cloudSettings?.freeOnly !== false,
     enable_load_balancing: options.cloudSettings?.enableLoadBalancing !== false,
     include_raw_responses: false,

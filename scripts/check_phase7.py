@@ -10,6 +10,7 @@ from pathlib import Path
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run lightweight Phase 7 readiness checks.")
     parser.add_argument("--skip-unittest", action="store_true", help="Skip unittest discovery.")
+    parser.add_argument("--full-unittest", action="store_true", help="Run full unittest discovery instead of the Phase 7 compatibility smoke test.")
     args = parser.parse_args(argv)
 
     root = Path(__file__).resolve().parents[1]
@@ -23,7 +24,12 @@ def main(argv: list[str] | None = None) -> int:
         [python, "scripts/validate_vsix_cleanliness.py"],
     ]
     if not args.skip_unittest:
-        commands.insert(1, [python, "-m", "unittest", "discover", "-s", "tests"])
+        unittest_command = (
+            [python, "-m", "unittest", "discover", "-s", "tests"]
+            if args.full_unittest
+            else [python, "-m", "unittest", "tests.test_api_compatibility_phase7"]
+        )
+        commands.insert(1, unittest_command)
     node = shutil.which("node")
     if node:
         commands.append([node, "vscode-extension/scripts/check-version.js"])

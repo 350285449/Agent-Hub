@@ -49,11 +49,11 @@ hosted provider while `approval_mode` is interactive, Cline can see:
 }
 ```
 
-Recommended config for Cline:
+Recommended config for Cline with the default cloud or hybrid routes:
 
 ```json
 {
-  "approval_mode": "safe",
+  "approval_mode": "auto",
   "cline_compatibility_mode": true,
   "tool_loop_enabled": true,
   "tool_loop_enabled_for_cline": false,
@@ -72,6 +72,11 @@ per-session `X-Agent-Hub-Approval-Token`, or explicitly configure
 `approval_mode: "auto"` for trusted cloud providers. Local providers are always
 allowed. Unknown external endpoints still require trusted approval, and
 requests that appear to contain secrets trigger the security gate.
+
+For local-only Cline routing, you can keep `approval_mode: "safe"` and use the
+`local-agent` route. For generated VS Code configs, Agent Hub uses
+`approval_mode: "auto"` by default because the generated cloud routes include
+trusted hosted providers that Cline cannot approve interactively.
 
 `tool_loop_enabled_for_cline=false` is recommended because Cline manages its own
 tool loop. Agent-Hub still preserves routing, failover, provider balancing, and

@@ -143,6 +143,61 @@ class CliTests(unittest.TestCase):
             self.assertTrue(data["backend_reachable"]["ok"])
             self.assertTrue(any("Cline:" in fix for fix in data["exact_fixes"]))
 
+    def test_doctor_does_not_warn_for_cline_cloud_auto_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "state_dir": str(Path(tmp) / "state"),
+                        "auto_detect_local_models": False,
+                        "approval_mode": "auto",
+                        "cline_compatibility_mode": True,
+                        "free_only": False,
+                        "default_route": ["ollama-qwen-cloud"],
+                        "routes": [
+                            {
+                                "name": "cloud-agent",
+                                "agents": ["ollama-qwen-cloud"],
+                            }
+                        ],
+                        "agents": [
+                            {
+                                "name": "ollama-qwen-cloud",
+                                "provider": "openai-compatible",
+                                "provider_type": "ollama-cloud",
+                                "model": "qwen3.5:cloud",
+                                "base_url": "http://127.0.0.1:11434",
+                                "free": True,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+            release_check = {
+                "id": "release_validation",
+                "category": "release",
+                "ok": True,
+                "detail": "passed",
+                "failures": [],
+            }
+
+            with (
+                patch("agent_hub.cli._backend_reachability") as backend,
+                patch("agent_hub.commands_doctor._validate_backend_snapshot", return_value=[]),
+                patch("agent_hub.commands_doctor._release_validation_check", return_value=release_check),
+                redirect_stdout(buffer),
+            ):
+                backend.return_value = {"ok": True, "url": "http://127.0.0.1:8787/health", "detail": "HTTP 200"}
+                code = main(["--config", str(path), "doctor", "--json"])
+
+            self.assertEqual(code, 0)
+            data = json.loads(buffer.getvalue())
+            self.assertNotIn("approval_mode_review_recommended", data["likely_problems"])
+            self.assertFalse(any("Use approval_mode=ask or safe" in fix for fix in data["exact_fixes"]))
+
     def test_agent_command_reports_route_errors_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"
