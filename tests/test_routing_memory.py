@@ -223,6 +223,7 @@ def _router_config(root: Path) -> HubConfig:
         workspace_dir=root,
         free_only=False,
         adaptive_learning_enabled=False,
+        automatic_escalation_enabled=False,
         repo_context_enabled=False,
         default_route=["bad", "good"],
         agents={

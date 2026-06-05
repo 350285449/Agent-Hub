@@ -427,7 +427,7 @@ class PhaseTwoFourFoundationTests(unittest.TestCase):
                 thread.join(timeout=5)
 
             self.assertEqual(error.exception.code, 401)
-            self.assertEqual(body["error"]["type"], "diagnostics_auth_required")
+            self.assertEqual(body["error"]["type"], "api_auth_required")
             self.assertEqual(authed["object"], "agent_hub.provider_health")
 
     def test_localhost_diagnostics_remain_backward_compatible_without_auth(self) -> None:

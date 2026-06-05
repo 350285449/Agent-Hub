@@ -62,6 +62,12 @@ Agent-Hub records outcome metadata and uses it to influence future routing.
 Models that succeed on similar tasks can be boosted; models that time out or
 fail on similar large-context tasks can be penalized.
 
+Routing combines repository DNA, task type, language/framework, repo size,
+context estimate, provider health, real success/failure history, latency, cost,
+and user feedback. Cheap/free candidates can run first, low-confidence results
+can escalate, and `tournament_mode` runs multiple worker candidates through a
+judge before returning the selected result.
+
 Key code:
 
 - `agent_hub/adaptive.py`
@@ -106,6 +112,9 @@ Surfaces:
 - `GET /v1/routing/last-decision`
 - `GET /v1/routing-decision/{request_id}`
 - VS Code Routing Intelligence panel
+- `GET /v1/model-leaderboard`
+- `GET /v1/cost-dashboard`
+- `GET /v1/benchmarks`
 
 ## When to Choose Agent-Hub
 

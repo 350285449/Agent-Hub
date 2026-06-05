@@ -58,11 +58,11 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("function generateCommitMessage", source)
         self.assertIn("repository.inputBox.value = message", source)
 
-    def test_approval_mode_setting_is_ask_by_default(self) -> None:
+    def test_approval_mode_setting_is_safe_by_default(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
         approval = package["contributes"]["configuration"]["properties"]["agentHub.approvalMode"]
 
-        self.assertEqual(approval["default"], "ask")
+        self.assertEqual(approval["default"], "safe")
         self.assertIn("safe", approval["enum"])
         self.assertIn("readonly", approval["enum"])
         self.assertIn("deny", approval["enum"])
@@ -318,6 +318,8 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("agent-hub-coding", source)
         self.assertIn("function claudeCodeConfigText", source)
         self.assertIn("/debug/request", source)
+        self.assertIn("env.AGENT_HUB_API_TOKEN = config.apiToken", source)
+        self.assertIn("config.approvalToken || runtimeApprovalToken", source)
 
 
 if __name__ == "__main__":

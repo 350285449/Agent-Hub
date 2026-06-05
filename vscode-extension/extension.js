@@ -20,6 +20,7 @@ let statusBarItem = null;
 let lastActiveTextEditor = null;
 let serverLifecycleState = "Stopped";
 let lastServerMessage = "";
+const runtimeApprovalToken = crypto.randomBytes(32).toString("hex");
 const EXTENSION_VERSION = readExtensionPackageVersion();
 const DEFAULT_CONFIG_FILENAME = "agent-hub.config.json";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
@@ -417,8 +418,17 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.copyClaudeCodeConfig", copyClaudeCodeConfig),
     vscode.commands.registerCommand("agentHub.testAnthropicEndpoint", testAnthropicEndpoint),
     vscode.commands.registerCommand("agentHub.showClaudeCodeSetup", showClaudeCodeSetup),
+    vscode.commands.registerCommand("agentHub.rollbackLatestCheckpoint", rollbackLatestCheckpoint),
+    vscode.commands.registerCommand("agentHub.openModelLeaderboard", () => openAgentHubDashboard("/dashboard/model-leaderboard")),
+    vscode.commands.registerCommand("agentHub.openCostDashboard", () => openAgentHubDashboard("/dashboard/costs")),
+    vscode.commands.registerCommand("agentHub.openBenchmarkResults", () => openAgentHubDashboard("/dashboard/benchmarks")),
     vscode.commands.registerCommand("agentHub.openOutput", () => output.show())
   );
+}
+
+async function openAgentHubDashboard(pathname) {
+  const url = new URL(pathname, settings().serverUrl);
+  await vscode.env.openExternal(vscode.Uri.parse(url.toString()));
 }
 
 class AgentHubSidebarProvider {
@@ -4054,7 +4064,8 @@ async function sendAdaptiveFeedback(panel, message) {
     await requestJson("POST", "/v1/feedback", {
       request_id: requestId,
       rating,
-      workflow_success: !!message.workflowSuccess
+      workflow_success: !!message.workflowSuccess,
+      reason: typeof message.reason === "string" ? message.reason : ""
     });
     panel.webview.postMessage({
       type: "serverStatus",
@@ -6338,25 +6349,35 @@ ${apiKeyFieldsHtml()}
     function feedbackControls(agentHubRequestId) {
       const wrapper = document.createElement("div");
       wrapper.className = "feedback";
-      const up = document.createElement("button");
-      up.type = "button";
-      up.textContent = "Good";
-      const down = document.createElement("button");
-      down.type = "button";
-      down.textContent = "Bad";
-      const send = (rating) => {
-        up.disabled = true;
-        down.disabled = true;
+      const options = [
+        ["👍", "up", "good"],
+        ["👎", "down", "bad"],
+        ["Worked", "up", "worked"],
+        ["Failed", "down", "failed"],
+        ["Too expensive", "down", "too_expensive"],
+        ["Wrong files", "down", "wrong_files"]
+      ];
+      const buttons = options.map(([label, rating, reason]) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.title = reason.replaceAll("_", " ");
+        button.addEventListener("click", () => send(rating, reason));
+        return button;
+      });
+      const send = (rating, reason) => {
+        for (const button of buttons) {
+          button.disabled = true;
+        }
         vscode.postMessage({
           type: "feedback",
           requestId: agentHubRequestId,
           rating,
+          reason,
           workflowSuccess: rating === "up"
         });
       };
-      up.addEventListener("click", () => send("up"));
-      down.addEventListener("click", () => send("down"));
-      wrapper.append(up, down);
+      wrapper.append(...buttons);
       return wrapper;
     }
 
@@ -7075,6 +7096,11 @@ async function startServer(options = {}) {
 
 async function serverLaunchEnvironment(workspace) {
   const env = { ...process.env };
+  const config = settings();
+  env.AGENT_HUB_TRUSTED_APPROVAL_TOKEN = config.approvalToken || runtimeApprovalToken;
+  if (config.apiToken) {
+    env.AGENT_HUB_API_TOKEN = config.apiToken;
+  }
   await applySavedApiKeysToEnv(env);
   const backendRoot = backendSourceRoot(workspace);
   if (backendRoot) {
@@ -9181,6 +9207,41 @@ async function requestCommitMessage(diffContext) {
   return message;
 }
 
+async function rollbackLatestCheckpoint() {
+  try {
+    const body = await requestJson("GET", "/v1/workspace/checkpoints");
+    const checkpoints = Array.isArray(body.data) ? body.data : [];
+    const checkpoint = checkpoints[0];
+    if (!checkpoint || !checkpoint.id) {
+      vscode.window.showInformationMessage("Agent Hub has no workspace checkpoints to restore.");
+      return;
+    }
+    const paths = Array.isArray(checkpoint.paths) ? checkpoint.paths : [];
+    const approved = await requestPermission({
+      category: "file_write",
+      description: "Agent Hub wants to restore the latest workspace checkpoint.",
+      resource: checkpoint.id,
+      risk: "high",
+      detail: paths.length ? `Files: ${paths.slice(0, 12).join(", ")}` : "Checkpoint file list unavailable."
+    });
+    if (!approved) {
+      return;
+    }
+    const result = await requestJson("POST", "/v1/workspace/rollback", {
+      checkpoint_id: checkpoint.id
+    });
+    output.appendLine(`[rollback] ${JSON.stringify(result)}`);
+    vscode.window.showInformationMessage(
+      result.ok
+        ? `Agent Hub restored checkpoint ${checkpoint.id}.`
+        : `Agent Hub rollback was partial for checkpoint ${checkpoint.id}.`
+    );
+  } catch (error) {
+    output.appendLine(`Workspace rollback failed: ${error.message}`);
+    vscode.window.showErrorMessage(formatAgentHubError(error));
+  }
+}
+
 function commitMessageTask(scope) {
   return [
     "Generate a Git commit message for the provided diff.",
@@ -9947,6 +10008,8 @@ function settings() {
   const providerMode = normalizeAgentProviderMode(config.get("agentProviderMode", "cloud"));
   return {
     serverUrl: config.get("serverUrl", "http://127.0.0.1:8787").replace(/\/+$/, ""),
+    apiToken: String(config.get("apiToken", "") || ""),
+    approvalToken: String(config.get("approvalToken", "") || ""),
     pythonPath: config.get("pythonPath", "auto"),
     configPath: config.get("configPath", ""),
     route: config.get("route", "coding"),
@@ -9954,14 +10017,14 @@ function settings() {
     codingAgentRoute: config.get("codingAgentRoute", "local-agent"),
     agentProviderMode: providerMode,
     agentMode: normalizeAgentMode(config.get("agentMode", "agent")),
-    approvalMode: normalizeApprovalMode(config.get("approvalMode", "ask")),
+    approvalMode: normalizeApprovalMode(config.get("approvalMode", "safe")),
     groupPlanCandidates: config.get("groupPlanCandidates", 1),
     agentMaxSteps: config.get("agentMaxSteps", 20),
     agentContextBudgetTokens: config.get("agentContextBudgetTokens", 32000),
     agentContextCompactionEnabled: config.get("agentContextCompactionEnabled", true),
     contextMode: normalizeContextMode(config.get("contextMode", "balanced")),
     clineCompatibilityMode: config.get("clineCompatibilityMode", true),
-    allowShellTools: config.get("allowShellTools", true),
+    allowShellTools: config.get("allowShellTools", false),
     maxTokens: normalizeOptionalPositiveInteger(config.get("maxTokens", null)),
     autoStart: config.get("autoStart", true)
   };
@@ -10409,6 +10472,23 @@ function contextUsageProgressText(data) {
   return `Context [${bar}] ${clamped.toFixed(1)}% (${budgetText} tokens, ${deltaText})${compactText}${warning}`;
 }
 
+function agentHubHttpHeaders(extra = {}) {
+  const config = settings();
+  const headers = {
+    "X-Agent-Hub-Client": "vscode-agent-hub",
+    ...extra
+  };
+  if (config.apiToken) {
+    headers.Authorization = `Bearer ${config.apiToken}`;
+    headers["X-Agent-Hub-API-Token"] = config.apiToken;
+  }
+  const approvalToken = config.approvalToken || runtimeApprovalToken;
+  if (approvalToken) {
+    headers["X-Agent-Hub-Approval-Token"] = approvalToken;
+  }
+  return headers;
+}
+
 function requestEventStream(method, pathname, body, callbacks = {}) {
   const config = settings();
   const url = new URL(pathname, config.serverUrl);
@@ -10461,11 +10541,11 @@ function requestEventStream(method, pathname, body, callbacks = {}) {
       url,
       {
         method,
-        headers: {
+        headers: agentHubHttpHeaders({
           "Accept": "text/event-stream",
           "Content-Type": "application/json",
           "Content-Length": data ? Buffer.byteLength(data) : 0
-        },
+        }),
         timeout: 600000
       },
       (response) => {
@@ -10625,10 +10705,10 @@ function requestJson(method, pathname, body) {
       url,
       {
         method,
-        headers: {
+        headers: agentHubHttpHeaders({
           "Content-Type": "application/json",
           "Content-Length": data ? Buffer.byteLength(data) : 0
-        },
+        }),
         timeout: 600000
       },
       (response) => {

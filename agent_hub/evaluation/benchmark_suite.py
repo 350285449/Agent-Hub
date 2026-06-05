@@ -28,10 +28,10 @@ class BenchmarkSuiteRunner:
         self,
         *,
         route: str = "cloud-agent",
-        limit: int = 6,
+        limit: int = 20,
         tasks: list[BenchmarkTask] | None = None,
     ) -> dict[str, Any]:
-        selected_tasks = (tasks or default_benchmark_tasks(route=route))[: max(1, min(limit, 20))]
+        selected_tasks = (tasks or default_benchmark_tasks(route=route))[: max(1, min(limit, 50))]
         static_router = self._router(
             replace(
                 self.config,

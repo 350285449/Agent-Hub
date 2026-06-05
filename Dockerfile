@@ -13,6 +13,6 @@ RUN pip install --no-cache-dir .
 EXPOSE 8787
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import json, urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).read()"
+  CMD python -c "import os, urllib.request; token=os.environ['AGENT_HUB_API_TOKEN']; request=urllib.request.Request('http://127.0.0.1:8787/health', headers={'Authorization': 'Bearer '+token}); urllib.request.urlopen(request, timeout=3).read()"
 
 CMD ["agent-hub", "--config", "/config/agent-hub.config.json", "serve", "--host", "0.0.0.0", "--port", "8787"]

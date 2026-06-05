@@ -467,6 +467,7 @@ def _router_config(root: Path) -> HubConfig:
     return HubConfig(
         state_dir=root / "state",
         repo_context_enabled=False,
+        automatic_escalation_enabled=False,
         default_route=["bad", "good"],
         agents={
             "bad": AgentConfig(name="bad", provider="openai-compatible", model="bad-test", base_url="http://127.0.0.1:9999"),

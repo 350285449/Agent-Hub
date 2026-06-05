@@ -291,7 +291,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Compare static routing with adaptive routing and write a benchmark report.",
     )
     benchmark_suite_parser.add_argument("--route", default="cloud-agent")
-    benchmark_suite_parser.add_argument("--limit", type=int, default=6)
+    benchmark_suite_parser.add_argument("--limit", type=int, default=20)
     benchmark_suite_parser.add_argument("--output", default="")
     benchmark_suite_parser.add_argument("--json", action="store_true")
 

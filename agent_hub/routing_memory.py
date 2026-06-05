@@ -260,6 +260,30 @@ class RoutingMemoryStore:
             for row in self._read_recent(limit=max(1, min(int(limit or 50), 500)))
         ]
 
+    def record_feedback(self, *, request_id: str, rating: str, reason: str = "") -> dict[str, Any]:
+        if not self.enabled:
+            return {"matched": False, "enabled": False}
+        rating = str(rating or "").strip().lower()
+        rows = self._read_recent(limit=MAX_MEMORY_READ)
+        target = next((row for row in rows if str(row.get("request_id") or "") == request_id), None)
+        if not isinstance(target, dict):
+            return {"matched": False, "enabled": True}
+        positive = rating == "up"
+        adjusted = dict(target)
+        adjusted["time"] = time.time()
+        adjusted["feedback_rating"] = rating
+        adjusted["feedback_reason"] = str(reason or "")[:120]
+        adjusted["final"] = True
+        adjusted["final_outcome"] = "user_confirmed" if positive else "user_rejected"
+        adjusted["success"] = positive
+        adjusted["failure"] = not positive
+        adjusted["outcome_score"] = round(
+            _clamp(_safe_float(target.get("outcome_score"), 0.5) + (0.18 if positive else -0.24), 0.0, 1.0),
+            4,
+        )
+        self._append(adjusted)
+        return {"matched": True, "enabled": True, "outcome_score": adjusted["outcome_score"]}
+
     def stats(self) -> dict[str, Any]:
         rows = self._read_recent(limit=MAX_MEMORY_READ)
         return {

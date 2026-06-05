@@ -776,11 +776,15 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(body["error"]["type"], "agent_hub_permission_required")
             self.assertEqual(
                 body["error"]["message"],
-                "Provider requires approval. Set approval_mode=auto or enable cline_compatibility_mode.",
+                "Provider requires approval from the VS Code UI or a trusted session. "
+                "Trusted cloud providers may also be enabled explicitly with approval_mode=auto.",
             )
             self.assertEqual(
                 body["error"]["suggested_fix"],
-                {"approval_mode": "auto", "cline_compatibility_mode": True},
+                {
+                    "approval_mode": "auto",
+                    "trusted_approval_header": "X-Agent-Hub-Approval-Token",
+                },
             )
 
     def test_debug_request_preserves_cline_structured_context(self) -> None:

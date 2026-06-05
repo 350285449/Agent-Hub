@@ -13,6 +13,7 @@ from agent_hub.permissions import (
     TRUSTED_CLOUD,
     UNTRUSTED_EXTERNAL,
     PermissionManager,
+    mark_trusted_approval,
     provider_trust_level,
     tool_permission_request,
 )
@@ -45,7 +46,7 @@ class ProviderCompatibilityTests(unittest.TestCase):
             self.assertNotIn("Current file", str(audit[-1]["permission"]))
             self.assertNotIn("preview", str(audit[-1]["permission"]))
 
-    def test_cline_compatibility_mode_allows_trusted_cloud_in_ask_mode(self) -> None:
+    def test_cline_compatibility_mode_does_not_bypass_trusted_cloud_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             calls: list[str] = []
             config = _config(
@@ -55,14 +56,14 @@ class ProviderCompatibilityTests(unittest.TestCase):
                 agent=_trusted_cloud_agent(),
             )
 
-            response = AgentRouter(config, provider_factory=_provider(calls)).route(
-                _workspace_request(api_shape="openai-chat")
-            )
+            with self.assertRaises(RouterError):
+                AgentRouter(config, provider_factory=_provider(calls)).route(
+                    _workspace_request(api_shape="openai-chat")
+                )
 
-            self.assertEqual(response.text, "ok")
-            self.assertEqual(calls, ["cloud"])
+            self.assertEqual(calls, [])
 
-    def test_cline_user_agent_bypasses_trusted_cloud_approval(self) -> None:
+    def test_cline_user_agent_does_not_bypass_trusted_cloud_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             calls: list[str] = []
             config = _config(
@@ -72,8 +73,21 @@ class ProviderCompatibilityTests(unittest.TestCase):
                 agent=_trusted_cloud_agent(),
             )
 
-            response = AgentRouter(config, provider_factory=_provider(calls)).route(
-                _workspace_request(metadata={"user_agent": "Cline/3.0 VSCode"})
+            router = AgentRouter(config, provider_factory=_provider(calls))
+            request = _workspace_request(metadata={"user_agent": "Cline/3.0 VSCode"})
+            with self.assertRaises(RouterError):
+                router.route(request)
+            response = router.route(
+                mark_trusted_approval(
+                    HubRequest(
+                        session_id=request.session_id,
+                        api_shape=request.api_shape,
+                        messages=request.messages,
+                        metadata=request.metadata,
+                        raw={"agent_hub": {"provider_approval_granted": True}},
+                    ),
+                    source="test-trusted-session",
+                )
             )
 
             self.assertEqual(response.text, "ok")
@@ -195,6 +209,7 @@ def _config(
 ) -> HubConfig:
     return HubConfig(
         state_dir=path / "state",
+        workspace_dir=path,
         approval_mode=approval_mode,
         cline_compatibility_mode=cline_compatibility_mode,
         free_only=False,

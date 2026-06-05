@@ -12,6 +12,7 @@ from ..enterprise import (
 from ..models import HubRequest
 from ..observability import record_event
 from ..permissions import (
+    LOCAL,
     TRUSTED_CLOUD,
     UNTRUSTED_EXTERNAL,
     PermissionDecision,
@@ -49,6 +50,14 @@ class ProviderPermissionPolicy:
             )
             return None
 
+        if getattr(self.config, "provider_privacy_mode_enabled", True):
+            _apply_provider_privacy_policy(
+                agent=agent,
+                request=request,
+                permission_request=permission_request,
+                trust_level=trust_level,
+            )
+
         explicit_approval = provider_approval_granted_from_request(request)
         compatibility = client_compatibility_mode_enabled(request, self.config)
         explicit_security_approval = _explicit_security_approval_required(permission_request)
@@ -56,7 +65,7 @@ class ProviderPermissionPolicy:
             trust_level == TRUSTED_CLOUD
             and not explicit_approval
             and not explicit_security_approval
-            and (approval_mode == "auto" or compatibility)
+            and approval_mode == "auto"
         ):
             enterprise_decision = self.check_enterprise(
                 permission_request,
@@ -68,7 +77,7 @@ class ProviderPermissionPolicy:
             else:
                 reason = (
                     "Allowed trusted cloud provider without interactive approval "
-                    "because approval_mode=auto or IDE compatibility mode is enabled."
+                    "because approval_mode=auto is explicitly configured."
                 )
                 decision = PermissionDecision(
                     True,
@@ -80,9 +89,9 @@ class ProviderPermissionPolicy:
                 )
         elif trust_level == UNTRUSTED_EXTERNAL and not explicit_approval:
             reason = (
-                "Provider requires approval. Set approval_mode=auto or enable "
-                "cline_compatibility_mode for trusted providers; unknown external "
-                "endpoints require explicit approval."
+                "Provider requires approval from a trusted session. Trusted cloud "
+                "providers may also be enabled explicitly with approval_mode=auto; "
+                "unknown external endpoints always require trusted approval."
             )
             decision = PermissionDecision(
                 False,
@@ -176,7 +185,7 @@ class ProviderPermissionPolicy:
                 "compatibility_bypass": bool(
                     decision.allowed
                     and trust_level == TRUSTED_CLOUD
-                    and (approval_mode == "auto" or compatibility)
+                    and approval_mode == "auto"
                 ),
                 "category": permission_request.category,
                 "risk_level": permission_request.risk_level,
@@ -195,6 +204,69 @@ def _explicit_security_approval_required(permission_request: PermissionRequest) 
         isinstance(security, dict)
         and (security.get("blocked") or security.get("explicit_approval_required"))
     )
+
+
+def _apply_provider_privacy_policy(
+    *,
+    agent: AgentConfig,
+    request: HubRequest,
+    permission_request: PermissionRequest,
+    trust_level: str,
+) -> None:
+    security = (
+        permission_request.details.get("security")
+        if isinstance(permission_request.details, dict)
+        else None
+    )
+    if not isinstance(security, dict):
+        return
+    sends_workspace = bool(
+        permission_request.details.get("sends_workspace_content")
+        if isinstance(permission_request.details, dict)
+        else False
+    )
+    prepared = (
+        permission_request.details.get("prepared_security_context")
+        if isinstance(permission_request.details, dict)
+        else None
+    )
+    prepared = prepared if isinstance(prepared, dict) else {}
+    has_secrets = bool(
+        prepared.get("has_unredacted_secrets")
+        or (not prepared.get("redacted") and security.get("findings"))
+    )
+    if trust_level == LOCAL:
+        return
+    if bool(getattr(agent, "local_only", False)):
+        _block_security(
+            security,
+            "Provider privacy mode blocks this provider because it is marked local_only but is not local/private.",
+        )
+        return
+    if sends_workspace and bool(getattr(agent, "never_send_workspace_files", False)):
+        _block_security(
+            security,
+            "Provider privacy mode blocks workspace files for this provider.",
+        )
+        return
+    if sends_workspace and not bool(getattr(agent, "safe_for_code", True)):
+        _block_security(
+            security,
+            "Provider privacy mode blocks workspace code for providers not marked safe_for_code.",
+        )
+        return
+    if has_secrets and not bool(getattr(agent, "safe_for_secrets", False)):
+        _block_security(
+            security,
+            "Provider privacy mode blocks secrets or sensitive files from being sent to this provider.",
+        )
+
+
+def _block_security(security: dict[str, Any], reason: str) -> None:
+    security["blocked"] = True
+    security["explicit_approval_required"] = True
+    security["risk_level"] = "critical"
+    security["reason"] = reason
 
 
 __all__ = ["ProviderPermissionPolicy"]

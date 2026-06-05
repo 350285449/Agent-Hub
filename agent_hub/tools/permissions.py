@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from ..config import HubConfig
 from ..enterprise import EnterprisePolicy, enterprise_subject_from_request, enterprise_workspace_from_request
 from ..models import HubRequest
-from ..permissions import PermissionManager, tool_permission_request
+from ..permissions import PermissionManager, approval_granted_from_request, tool_permission_request
 from .types import Tool, ToolCall, ToolResult
 
 
@@ -55,13 +55,9 @@ class ToolPermissionLayer:
 
 
 def _approval_granted(request: HubRequest | None) -> bool:
-    raw = request.raw if request is not None and isinstance(request.raw, dict) else {}
-    value = raw.get("tool_approval_granted") or raw.get("approval_granted")
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "approved"}
-    return False
+    if request is None:
+        return False
+    return approval_granted_from_request(request)
 
 
 def _legacy_tool_name(name: str) -> str:

@@ -18,6 +18,15 @@ WORKFLOW_PATTERNS = {
     "reviewed_worker",
     "team_reviewed",
 }
+WORKFLOW_PRESETS: dict[str, dict[str, Any]] = {
+    "bug_fixer": {"pattern": "reviewed_worker", "description": "Debug, patch, validate, and repair."},
+    "refactorer": {"pattern": "reviewed_worker", "description": "Plan and review a multi-file refactor."},
+    "test_writer": {"pattern": "planned_worker", "description": "Plan and generate focused tests."},
+    "security_reviewer": {"pattern": "team_reviewed", "description": "Multi-agent security review with judge."},
+    "architecture_reviewer": {"pattern": "team_reviewed", "description": "Multi-agent architecture analysis with judge."},
+    "cheap_first_expensive_last": {"pattern": "planned_worker", "routing_mode": "cheapest"},
+    "local_only": {"pattern": "reviewed_worker", "routing_mode": "local_private"},
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +191,11 @@ def with_workflow_selection_raw(request: HubRequest, selection: WorkflowSelectio
     raw = dict(request.raw or {})
     raw["workflow_pattern"] = selection.pattern
     raw["workflow_selection"] = selection.pattern
+    hub_input = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    preset_name = str(hub_input.get("workflow_preset") or raw.get("workflow_preset") or "").strip()
+    preset = WORKFLOW_PRESETS.get(preset_name.lower().replace("-", "_").replace(" ", "_"))
+    if preset and preset.get("routing_mode"):
+        raw["routing_mode"] = preset["routing_mode"]
     if selection.pattern == "team_reviewed":
         group = dict(raw.get("group_agent") or {})
         group.setdefault("plan_candidates", 2)
@@ -200,12 +214,27 @@ def with_workflow_selection_raw(request: HubRequest, selection: WorkflowSelectio
 def _workflow_pattern_override(request: HubRequest) -> str:
     raw = request.raw if isinstance(request.raw, dict) else {}
     hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    if _truthy(hub.get("tournament_mode")) or _truthy(raw.get("tournament_mode")):
+        return "team_reviewed"
+    for value in (hub.get("workflow_preset"), raw.get("workflow_preset")):
+        if isinstance(value, str):
+            preset = WORKFLOW_PRESETS.get(value.strip().lower().replace("-", "_").replace(" ", "_"))
+            if preset:
+                return str(preset["pattern"])
     for value in (hub.get("workflow_pattern"), raw.get("workflow_pattern")):
         if isinstance(value, str):
             normalized = value.strip().lower().replace("-", "_")
             if normalized in WORKFLOW_PATTERNS:
                 return normalized
     return ""
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _task_type(text: str, *, has_tools: bool, tokens: int) -> str:
@@ -285,6 +314,7 @@ def _path_like_tokens(text: str) -> set[str]:
 
 __all__ = [
     "WORKFLOW_PATTERNS",
+    "WORKFLOW_PRESETS",
     "WorkflowSelection",
     "WorkflowSelector",
     "with_workflow_selection_raw",

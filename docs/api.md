@@ -141,10 +141,10 @@ curl http://127.0.0.1:8787/v1/plugins
 curl http://127.0.0.1:8787/v1/enterprise/audit
 ```
 
-If Agent Hub is configured with a public bind host such as `0.0.0.0`, the
-diagnostic endpoints above require `Authorization: Bearer <token>` or
-`X-Agent-Hub-Diagnostics-Token`. Configure the token with
-`diagnostics_auth_token` or `diagnostics_auth_token_env`.
+If Agent Hub is configured with a public bind host such as `0.0.0.0`, every
+endpoint requires `Authorization: Bearer <token>` or `X-Agent-Hub-API-Token`.
+Configure `api_auth_token` or `api_auth_token_env`. Public startup is blocked
+when authentication is missing.
 
 Diagnostic responses are recursively redacted before they are returned. Provider
 errors, audit rows, and plugin metadata should keep useful context while

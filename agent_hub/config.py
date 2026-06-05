@@ -26,6 +26,15 @@ DEFAULT_REPO_IGNORE_PATTERNS = [
     "sessions/**",
     "logs/**",
     "*.log",
+    ".env",
+    ".env.*",
+    ".npmrc",
+    ".pypirc",
+    "*.key",
+    "*.pem",
+    "id_rsa",
+    "id_ed25519",
+    "credentials*",
     "__pycache__/**",
     ".pytest_cache/**",
 ]
@@ -87,6 +96,11 @@ class AgentConfig:
     supports_vision: bool | None = None
     supports_function_calling: bool | None = None
     priority: float = 0.0
+    privacy_mode: str = "safe_for_code"
+    local_only: bool = False
+    safe_for_code: bool = True
+    safe_for_secrets: bool = False
+    never_send_workspace_files: bool = False
 
     @property
     def resolved_api_key(self) -> str | None:
@@ -151,10 +165,14 @@ class HubConfig:
     force_compatibility_streaming: bool = False
     native_stream_failure_policy: str = "recover"
     debug_raw_provider_responses: bool = False
+    api_auth_token: str | None = None
+    api_auth_token_env: str | None = None
+    trusted_approval_token: str | None = None
+    trusted_approval_token_env: str | None = None
     diagnostics_auth_token: str | None = None
     diagnostics_auth_token_env: str | None = None
-    allow_shell_tools: bool = True
-    shell_command_policy: str = "allow"
+    allow_shell_tools: bool = False
+    shell_command_policy: str = "deny"
     tool_loop_enabled: bool = True
     tool_loop_enabled_for_cline: bool = False
     tool_loop_debug: bool = False
@@ -191,13 +209,20 @@ class HubConfig:
     failure_prediction_enabled: bool = True
     cost_optimizer_enabled: bool = True
     autonomous_night_mode_enabled: bool = False
+    provider_privacy_mode_enabled: bool = True
+    secret_scanning_enabled: bool = True
+    prompt_injection_defense_enabled: bool = True
+    model_tournament_enabled: bool = True
+    model_tournament_max_candidates: int = 4
+    automatic_escalation_enabled: bool = True
+    confidence_threshold: float = 0.72
     auto_enable_available_providers: bool = True
     auto_detect_local_models: bool = True
     local_model_probe_timeout_seconds: float = 0.35
     quota_cooldown_seconds: float = 3600.0
     rate_limit_cooldown_seconds: float = 120.0
     routing: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_ROUTING_CONFIG))
-    approval_mode: str = "auto"
+    approval_mode: str = "safe"
     enterprise_mode_enabled: bool = False
     enterprise_default_workspace_id: str = "default"
     enterprise_users: list[dict[str, Any]] = field(default_factory=list)
@@ -226,7 +251,7 @@ class HubConfig:
     initialization_report: dict[str, Any] = field(default_factory=dict)
 
     include_raw_responses: bool = False
-    expose_routing_details: bool = False
+    expose_routing_details: bool = True
 
     def ensure_dirs(self) -> None:
         """Create all local persistence folders required by the hub."""
@@ -568,8 +593,8 @@ def free_local_config() -> HubConfig:
         force_compatibility_streaming=False,
         native_stream_failure_policy="recover",
         debug_raw_provider_responses=False,
-        allow_shell_tools=True,
-        shell_command_policy="ask",
+        allow_shell_tools=False,
+        shell_command_policy="deny",
         tool_loop_enabled=True,
         tool_loop_enabled_for_cline=False,
         tool_loop_debug=False,
@@ -592,10 +617,17 @@ def free_local_config() -> HubConfig:
         failure_prediction_enabled=True,
         cost_optimizer_enabled=True,
         autonomous_night_mode_enabled=False,
+        provider_privacy_mode_enabled=True,
+        secret_scanning_enabled=True,
+        prompt_injection_defense_enabled=True,
+        model_tournament_enabled=True,
+        model_tournament_max_candidates=4,
+        automatic_escalation_enabled=True,
+        confidence_threshold=0.72,
         auto_enable_available_providers=True,
         auto_detect_local_models=True,
         routing=dict(DEFAULT_ROUTING_CONFIG),
-        approval_mode="ask",
+        approval_mode="safe",
         debug_echo_enabled=False,
         fast_write_finalize=False,
         validation_mode="basic",
@@ -707,6 +739,14 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             supports_vision=_optional_bool(item.get("supports_vision")),
             supports_function_calling=_optional_bool(item.get("supports_function_calling")),
             priority=float(item.get("priority", 0.0)),
+            privacy_mode=str(item.get("privacy_mode") or "safe_for_code"),
+            local_only=_bool_with_default(item.get("local_only"), False),
+            safe_for_code=_bool_with_default(item.get("safe_for_code"), True),
+            safe_for_secrets=_bool_with_default(item.get("safe_for_secrets"), False),
+            never_send_workspace_files=_bool_with_default(
+                item.get("never_send_workspace_files"),
+                False,
+            ),
         )
         for item in raw.get("agents", [])
     }
@@ -761,6 +801,26 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             raw.get("debug_raw_provider_responses"),
             False,
         ),
+        api_auth_token=(
+            str(raw.get("api_auth_token"))
+            if raw.get("api_auth_token") not in (None, "")
+            else None
+        ),
+        api_auth_token_env=(
+            str(raw.get("api_auth_token_env"))
+            if raw.get("api_auth_token_env") not in (None, "")
+            else None
+        ),
+        trusted_approval_token=(
+            str(raw.get("trusted_approval_token"))
+            if raw.get("trusted_approval_token") not in (None, "")
+            else None
+        ),
+        trusted_approval_token_env=(
+            str(raw.get("trusted_approval_token_env"))
+            if raw.get("trusted_approval_token_env") not in (None, "")
+            else None
+        ),
         diagnostics_auth_token=(
             str(raw.get("diagnostics_auth_token"))
             if raw.get("diagnostics_auth_token") not in (None, "")
@@ -771,9 +831,9 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             if raw.get("diagnostics_auth_token_env") not in (None, "")
             else None
         ),
-        allow_shell_tools=_bool_with_default(raw.get("allow_shell_tools"), True),
+        allow_shell_tools=_bool_with_default(raw.get("allow_shell_tools"), False),
         shell_command_policy=_normalize_shell_command_policy(
-            raw.get("shell_command_policy", raw.get("shell_tools_policy", "ask"))
+            raw.get("shell_command_policy", raw.get("shell_tools_policy", "deny"))
         ),
         tool_loop_enabled=_bool_with_default(raw.get("tool_loop_enabled"), True),
         tool_loop_enabled_for_cline=_bool_with_default(
@@ -858,6 +918,22 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         failure_prediction_enabled=_bool_with_default(raw.get("failure_prediction_enabled"), True),
         cost_optimizer_enabled=_bool_with_default(raw.get("cost_optimizer_enabled"), True),
         autonomous_night_mode_enabled=_bool_with_default(raw.get("autonomous_night_mode_enabled"), False),
+        provider_privacy_mode_enabled=_bool_with_default(raw.get("provider_privacy_mode_enabled"), True),
+        secret_scanning_enabled=_bool_with_default(raw.get("secret_scanning_enabled"), True),
+        prompt_injection_defense_enabled=_bool_with_default(
+            raw.get("prompt_injection_defense_enabled"),
+            True,
+        ),
+        model_tournament_enabled=_bool_with_default(raw.get("model_tournament_enabled"), True),
+        model_tournament_max_candidates=max(
+            2,
+            min(4, _int_with_default(raw.get("model_tournament_max_candidates"), 4)),
+        ),
+        automatic_escalation_enabled=_bool_with_default(raw.get("automatic_escalation_enabled"), True),
+        confidence_threshold=max(
+            0.0,
+            min(1.0, _float_with_default(raw.get("confidence_threshold"), 0.72)),
+        ),
         auto_enable_available_providers=_bool_with_default(
             raw.get("auto_enable_available_providers"),
             True,
@@ -873,7 +949,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             raw.get("rate_limit_cooldown_seconds", routing["cooldown_rate_limit_seconds"])
         ),
         routing=routing,
-        approval_mode=_normalize_approval_mode(raw.get("approval_mode", "ask")),
+        approval_mode=_normalize_approval_mode(raw.get("approval_mode", "safe")),
         enterprise_mode_enabled=_bool_with_default(raw.get("enterprise_mode_enabled"), False),
         enterprise_default_workspace_id=str(raw.get("enterprise_default_workspace_id") or "default"),
         enterprise_users=_dict_list(raw.get("enterprise_users")),
@@ -917,7 +993,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         mcp_servers=mcp_servers,
         group_roles=dict(raw.get("group_roles", {})),
         include_raw_responses=_bool_with_default(raw.get("include_raw_responses"), False),
-        expose_routing_details=_bool_with_default(raw.get("expose_routing_details"), False),
+        expose_routing_details=_bool_with_default(raw.get("expose_routing_details"), True),
     )
 
 
@@ -982,6 +1058,10 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "force_compatibility_streaming": config.force_compatibility_streaming,
         "native_stream_failure_policy": config.native_stream_failure_policy,
         "debug_raw_provider_responses": config.debug_raw_provider_responses,
+        "api_auth_token": config.api_auth_token,
+        "api_auth_token_env": config.api_auth_token_env,
+        "trusted_approval_token": config.trusted_approval_token,
+        "trusted_approval_token_env": config.trusted_approval_token_env,
         "diagnostics_auth_token": config.diagnostics_auth_token,
         "diagnostics_auth_token_env": config.diagnostics_auth_token_env,
         "allow_shell_tools": config.allow_shell_tools,
@@ -1022,6 +1102,13 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "failure_prediction_enabled": config.failure_prediction_enabled,
         "cost_optimizer_enabled": config.cost_optimizer_enabled,
         "autonomous_night_mode_enabled": config.autonomous_night_mode_enabled,
+        "provider_privacy_mode_enabled": config.provider_privacy_mode_enabled,
+        "secret_scanning_enabled": config.secret_scanning_enabled,
+        "prompt_injection_defense_enabled": config.prompt_injection_defense_enabled,
+        "model_tournament_enabled": config.model_tournament_enabled,
+        "model_tournament_max_candidates": config.model_tournament_max_candidates,
+        "automatic_escalation_enabled": config.automatic_escalation_enabled,
+        "confidence_threshold": config.confidence_threshold,
         "auto_enable_available_providers": config.auto_enable_available_providers,
         "auto_detect_local_models": config.auto_detect_local_models,
         "local_model_probe_timeout_seconds": config.local_model_probe_timeout_seconds,
@@ -1104,6 +1191,11 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
                     "supports_vision": agent.supports_vision,
                     "supports_function_calling": agent.supports_function_calling,
                     "priority": agent.priority,
+                    "privacy_mode": agent.privacy_mode,
+                    "local_only": agent.local_only,
+                    "safe_for_code": agent.safe_for_code,
+                    "safe_for_secrets": agent.safe_for_secrets,
+                    "never_send_workspace_files": agent.never_send_workspace_files,
                 }
             )
             for agent in config.agents.values()
@@ -1204,6 +1296,13 @@ def _env_bool(name: str, default: bool) -> bool:
 def _int_with_default(value: Any, default: int) -> int:
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_with_default(value: Any, default: float) -> float:
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return default
 

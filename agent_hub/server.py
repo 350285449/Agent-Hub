@@ -4,6 +4,7 @@ import json
 import time
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 from .agent_runner import AgentRunner
@@ -37,14 +38,17 @@ from .config import HubConfig
 from .context import request_context_diagnostics
 from .models import HubRequest
 from .observability import permission_snapshot, recent_events, record_event, usage_snapshot
-from .permissions import UNTRUSTED_EXTERNAL
+from .permissions import UNTRUSTED_EXTERNAL, mark_trusted_approval
 from .security.secrets import redact_secrets
 from .streaming import safe_stream_failure_chunk
 from .core.router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
 from .team_agent_runner import TeamAgentRunner
+from .tools.workspace_state import _checkpoint_base_dir, restore_workspace_checkpoint
 from .version import build_metadata, config_runtime_hash
 from .workflows import WorkflowEngine
 from .server_routes.middleware import (
+    api_auth_error as _api_auth_error,
+    api_token as _api_token,
     diagnostics_auth_error as _diagnostics_auth_error,
     diagnostics_auth_required as _diagnostics_auth_required,
     diagnostics_token as _diagnostics_token,
@@ -52,6 +56,7 @@ from .server_routes.middleware import (
     public_bind_host as _public_bind_host,
     request_path as _request_path,
     request_query as _request_query,
+    trusted_approval_from_headers as _trusted_approval_from_headers,
 )
 from .server_routes import handle_get as handle_route_get, handle_post as handle_route_post
 from .server_routes.chat import (
@@ -179,6 +184,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     server: AgentHubHTTPServer
 
     def do_GET(self) -> None:
+        if self._reject_unauthenticated_public_request():
+            return
         path = _request_path(self.path)
         if handle_route_get(self, path):
             return
@@ -197,12 +204,15 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 "Authorization, Content-Type, X-API-Key, API-Key, "
                 "Anthropic-Version, Anthropic-Beta, X-Agent-Hub-Session-ID, "
                 "X-Session-ID, X-Conversation-ID, X-Thread-ID, "
-                "X-Agent-Hub-Diagnostics-Token"
+                "X-Agent-Hub-API-Token, X-Agent-Hub-Diagnostics-Token, "
+                "X-Agent-Hub-Approval-Token, X-Agent-Hub-Client"
             ),
         )
         self.end_headers()
 
     def do_POST(self) -> None:
+        if self._reject_unauthenticated_public_request():
+            return
         try:
             payload = self._read_json()
         except ValueError as exc:
@@ -215,6 +225,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, status=404)
 
     def do_DELETE(self) -> None:
+        if self._reject_unauthenticated_public_request():
+            return
         path = _request_path(self.path)
         if path == "/v1/routing-memory":
             auth_error = _diagnostics_auth_error(self.server.config, self.headers)
@@ -226,8 +238,28 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"error": "not found"}, status=404)
 
+    def _reject_unauthenticated_public_request(self) -> bool:
+        auth_error = _api_auth_error(self.server.config, self.headers)
+        if auth_error is None:
+            return False
+        body, status = auth_error
+        self._send_json(body, status=status)
+        return True
+
+    def _trusted_request(self, request: HubRequest) -> HubRequest:
+        trusted, source = _trusted_approval_from_headers(
+            self.server.config,
+            self.headers,
+            client_address=str(self.client_address[0] if self.client_address else ""),
+        )
+        if not trusted:
+            return request
+        return mark_trusted_approval(request, source=source)
+
     def _handle_recommendation(self, payload: dict[str, Any]) -> None:
-        request = request_from_header_payload(payload, self.headers, api_shape="native")
+        request = self._trusted_request(
+            request_from_header_payload(payload, self.headers, api_shape="native")
+        )
         limit = _positive_int(payload.get("limit"), default=5, maximum=25)
         prefer = payload.get("prefer")
         if not isinstance(prefer, str) or prefer == "balanced":
@@ -249,7 +281,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         )
 
     def _handle_workflow(self, payload: dict[str, Any], workflow: str) -> None:
-        request = request_from_header_payload(payload, self.headers, api_shape="native")
+        request = self._trusted_request(
+            request_from_header_payload(payload, self.headers, api_shape="native")
+        )
         try:
             result = self.server.workflow_engine.execute(workflow, request)
         except ValueError as exc:
@@ -270,7 +304,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         )
 
     def _handle_auto_payload(self, payload: dict[str, Any]) -> None:
-        request = request_from_header_payload(payload, self.headers, api_shape="native")
+        request = self._trusted_request(
+            request_from_header_payload(payload, self.headers, api_shape="native")
+        )
         apply_model_routing(self.server.config, request)
         try:
             response = self.server.adaptive_service.execute_auto(request)
@@ -289,8 +325,53 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         body, status = self.server.adaptive_service.record_feedback_payload(payload)
         self._send_json(body, status=status)
 
+    def _handle_workspace_rollback(self, payload: dict[str, Any]) -> None:
+        trusted, _source = _trusted_approval_from_headers(
+            self.server.config,
+            self.headers,
+            client_address=str(self.client_address[0] if self.client_address else ""),
+        )
+        if not trusted:
+            self._send_json(
+                {
+                    "error": {
+                        "type": "trusted_approval_required",
+                        "message": "Workspace rollback requires approval from the VS Code UI or a trusted session.",
+                    }
+                },
+                status=403,
+            )
+            return
+        checkpoint_id = str(payload.get("checkpoint_id") or payload.get("id") or "").strip()
+        if not checkpoint_id or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for char in checkpoint_id):
+            self._send_json(
+                {"error": {"type": "invalid_checkpoint", "message": "A valid checkpoint_id is required."}},
+                status=400,
+            )
+            return
+        root = Path(self.server.config.workspace_dir).resolve()
+        base = _checkpoint_base_dir(root, self.server.config.state_dir).resolve()
+        checkpoint = (base / checkpoint_id).resolve()
+        if checkpoint.parent != base:
+            self._send_json(
+                {"error": {"type": "invalid_checkpoint", "message": "Checkpoint path is outside the workspace state directory."}},
+                status=400,
+            )
+            return
+        try:
+            result = restore_workspace_checkpoint(checkpoint, root=root)
+        except Exception as exc:
+            self._send_json(
+                {"error": {"type": "rollback_failed", "message": str(exc)}},
+                status=400,
+            )
+            return
+        self._send_json({"object": "agent_hub.workspace_rollback", **result})
+
     def _handle_routing_simulation(self, payload: dict[str, Any]) -> None:
-        request = request_from_header_payload(payload, self.headers, api_shape="native")
+        request = self._trusted_request(
+            request_from_header_payload(payload, self.headers, api_shape="native")
+        )
         apply_model_routing(self.server.config, request)
         self._send_json(redact_secrets(self.server.adaptive_service.simulate_request(request)))
 
@@ -337,7 +418,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         response_shape: str,
         agent_mode_default: bool = False,
     ) -> None:
-        request = request_from_compat_payload(payload, self.headers, api_shape=api_shape)
+        request = self._trusted_request(
+            request_from_compat_payload(payload, self.headers, api_shape=api_shape)
+        )
         payload = request.raw if isinstance(request.raw, dict) else payload
         record_event(
             self.server.config.state_dir,
@@ -498,12 +581,13 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                         }
                     else:
                         error_body["error"]["message"] = (
-                            "Provider requires approval. Set approval_mode=auto or "
-                            "enable cline_compatibility_mode."
+                            "Provider requires approval from the VS Code UI or a trusted session. "
+                            "Trusted cloud providers may also be enabled explicitly with "
+                            "approval_mode=auto."
                         )
                         error_body["error"]["suggested_fix"] = {
                             "approval_mode": "auto",
-                            "cline_compatibility_mode": True,
+                            "trusted_approval_header": "X-Agent-Hub-Approval-Token",
                         }
                     error_body["agent_hub"]["provider"] = permission_event.agent
                     if isinstance(permission_event.metadata, dict) and permission_event.metadata.get("permission"):
@@ -853,13 +937,16 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       <a href="/v1/provider-scores">Provider Scores</a> |
       <a href="/dashboard/routing-intelligence">Routing Intelligence</a> |
       <a href="/dashboard/optimization">Optimization Dashboard</a> |
+      <a href="/dashboard/costs">Cost Dashboard</a> |
+      <a href="/dashboard/model-leaderboard">Model Leaderboard</a> |
+      <a href="/dashboard/benchmarks">Benchmarks</a> |
       <a href="/v1/optimization">Optimization JSON</a> |
       <a href="/v1/repository-dna">Repository DNA</a> |
       <a href="/v1/workspace-memory">Workspace Memory</a> |
       <a href="/v1/night-mode">Night Mode</a>
     </p>
     <p>
-      <a href="/health">Health JSON</a> ·
+      <a href="/health">Health JSON</a> |
       <a href="/v1/models">Models JSON</a>
     </p>
   </main>
@@ -1051,6 +1138,12 @@ class AgentHubHandler(BaseHTTPRequestHandler):
 
 def serve(config: HubConfig) -> None:
     config.ensure_dirs()
+    if _public_bind_host(str(config.host or "")) and not _api_token(config):
+        raise SystemExit(
+            "Agent Hub refuses to bind publicly without API authentication. "
+            "Set api_auth_token/api_auth_token_env (or the legacy diagnostics_auth_token/"
+            "diagnostics_auth_token_env) before using host 0.0.0.0, ::, or another public host."
+        )
     try:
         server = AgentHubHTTPServer((config.host, config.port), config)
     except OSError as exc:

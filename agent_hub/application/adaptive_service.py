@@ -42,6 +42,9 @@ class AdaptiveApplicationService:
             self.config.adaptive_workflow_upgrades_enabled
         )
         summary["routing_memory"] = self.router.routing_memory.stats()
+        summary["cost_optimizer"] = build_cost_optimizer_summary(
+            routing_events=recent_events(self.config.state_dir, "routing", limit=1000)
+        )
         try:
             dna = self.router.repository_intelligence.repository_dna()
             summary["repository_dna"] = dna.to_dict()
@@ -63,6 +66,7 @@ class AdaptiveApplicationService:
     def record_feedback_payload(self, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         request_id = str(payload.get("request_id") or payload.get("id") or "").strip()
         rating = str(payload.get("rating") or "").strip().lower()
+        reason = str(payload.get("reason") or payload.get("feedback_reason") or "").strip().lower()
         workflow_success = payload.get("workflow_success")
         if not request_id:
             return (
@@ -87,8 +91,18 @@ class AdaptiveApplicationService:
             )
         except ValueError as exc:
             return {"error": {"message": str(exc), "type": "invalid_feedback"}}, 400
+        memory = self.router.routing_memory.record_feedback(
+            request_id=request_id,
+            rating=rating,
+            reason=reason,
+        )
         status = 200 if result.get("matched") else 404
-        return {"object": "agent_hub.feedback", **result}, status
+        return {
+            "object": "agent_hub.feedback",
+            **result,
+            "reason": reason,
+            "routing_memory": memory,
+        }, status
 
     def simulate_request(self, request: HubRequest) -> dict[str, Any]:
         """Dry-run auto workflow and router choices without provider calls."""

@@ -11,6 +11,11 @@ Claude Code, and native requests; classifies the task; understands repository
 signals; assesses risk; selects a workflow; ranks provider/model candidates;
 executes with failover; records outcomes; and learns from the result.
 
+It is a local-first AI model router compatible with Cline, Codex, Claude Code,
+VS Code, OpenAI-compatible clients, and Anthropic-compatible clients. It routes
+simple work to free/cheap models, escalates low-confidence work, validates
+patches, and shows why each model was selected.
+
 The core feature is Adaptive Workspace Intelligence™: Agent-Hub makes its model
 choice visible and explainable. It can show the selected model, selected
 workflow, task classification, risk level, repository analysis, routing reasons,
@@ -49,6 +54,8 @@ providers without rewriting every coding tool.
   retry, and safe empty-response recovery.
 - Improve safety with centralized provider, shell, install, file-write,
   deletion, and config-edit permissions.
+- Require API authentication for every endpoint on public binds, redact secrets
+  before provider calls, and ignore approval booleans from untrusted JSON.
 - Keep coding workflows local and auditable through JSONL request, routing,
   permission, workflow, and tool logs.
 - Give developers visibility into selected models, routing reasons, fallback
@@ -75,6 +82,13 @@ See `/v1/routing-intelligence`, `/dashboard/routing-intelligence`,
 `selected_model`, `routing_reason`, `task_classification`,
 `cost_context_estimate`, fallback events, permission blocks, workflow progress,
 and rejected-candidate explanations.
+
+Additional surfaces:
+
+- `/v1/model-leaderboard` and `/dashboard/model-leaderboard`
+- `/v1/cost-dashboard` and `/dashboard/costs`
+- `/v1/benchmarks` and `/dashboard/benchmarks`
+- `/v1/workflow-presets` and `/v1/workspace/checkpoints`
 
 ## How Learning Works
 
@@ -310,7 +324,7 @@ Cline:
 - Base URL: `http://127.0.0.1:8787/v1`
 - API key: `local-agent-hub-token`
 - Model: `agent-hub-coding`
-- Recommended config: `"approval_mode": "auto"` and
+- Recommended config: `"approval_mode": "safe"` and
   `"cline_compatibility_mode": true`
 
 Continue:
@@ -327,23 +341,20 @@ Continue:
 
 ### Approval Compatibility
 
-Older configs using `approval_mode: "ask"` can return a 403 like
+Configs using `approval_mode: "ask"` or `"safe"` can return a 403 like
 `agent_hub_permission_required` when an IDE client routes workspace context to a
 cloud provider. Cline, Continue, Claude Code, and many VS Code extensions cannot
-answer Agent-Hub's interactive approval prompt, so Agent-Hub supports
-non-interactive client compatibility mode.
-
-With `cline_compatibility_mode: true`, OpenAI-compatible IDE requests can use
-trusted cloud providers without an interactive provider prompt. Agent-Hub still
-records a permission and security audit event, and it still blocks dangerous
-tools, unsafe shell commands, path escapes, unknown external endpoints, and
-requests that trigger explicit security rules such as secret detection.
+answer Agent-Hub's interactive approval prompt. Compatibility mode preserves
+their API shape and tool behavior, but it never counts as security approval.
+Approval must come from the Agent-Hub VS Code UI or another trusted session
+using `X-Agent-Hub-Approval-Token`. API authentication and approval tokens are
+separate credentials.
 
 Recommended IDE config:
 
 ```json
 {
-  "approval_mode": "auto",
+  "approval_mode": "safe",
   "cline_compatibility_mode": true,
   "tool_loop_enabled": true,
   "tool_loop_enabled_for_cline": false,
@@ -384,8 +395,8 @@ Provider trust levels are:
 - `LOCAL`: Ollama/local research/localhost or private OpenAI-compatible
   endpoints. These are always allowed.
 - `TRUSTED_CLOUD`: OpenAI, Anthropic, Gemini, Groq, OpenRouter, and
-  Ollama Cloud provider types. These are allowed automatically in
-  `approval_mode: "auto"` or compatibility mode.
+  Ollama Cloud provider types. These require trusted approval unless
+  `approval_mode: "auto"` is explicitly configured.
 - `UNTRUSTED_EXTERNAL`: unknown external OpenAI-compatible endpoints. These may
   still require explicit approval before workspace content is sent.
 

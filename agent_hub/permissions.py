@@ -58,6 +58,7 @@ SENSITIVE_CATEGORIES = {
 
 
 PermissionCallback = Callable[[dict[str, Any]], bool]
+_TRUSTED_APPROVAL_MARKER = object()
 
 
 @dataclass(slots=True)
@@ -290,6 +291,8 @@ def normalize_approval_mode(value: Any) -> str:
 
 
 def approval_granted_from_request(request: HubRequest) -> bool:
+    if not trusted_approval_session(request):
+        return False
     for key in ("approval_granted", "approved"):
         value = _request_option(request, key, False)
         if _truthy(value):
@@ -298,6 +301,8 @@ def approval_granted_from_request(request: HubRequest) -> bool:
 
 
 def provider_approval_granted_from_request(request: HubRequest) -> bool:
+    if not trusted_approval_session(request):
+        return False
     for key in (
         "provider_approval_granted",
         "cloud_approval_granted",
@@ -309,6 +314,24 @@ def provider_approval_granted_from_request(request: HubRequest) -> bool:
         if _truthy(value):
             return True
     return False
+
+
+def trusted_approval_session(request: HubRequest | None) -> bool:
+    if request is None:
+        return False
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    return metadata.get("_agent_hub_trusted_approval") is _TRUSTED_APPROVAL_MARKER
+
+
+def mark_trusted_approval(request: HubRequest, *, source: str) -> HubRequest:
+    """Attach an in-process approval marker that cannot be forged through JSON."""
+
+    from dataclasses import replace
+
+    metadata = dict(request.metadata or {})
+    metadata["_agent_hub_trusted_approval"] = _TRUSTED_APPROVAL_MARKER
+    metadata["_agent_hub_trusted_approval_source"] = str(source or "trusted-session")
+    return replace(request, metadata=metadata)
 
 
 def approval_mode_from_request(request: HubRequest, default: str) -> str:
@@ -410,11 +433,23 @@ def provider_permission_request(agent: AgentConfig, request: HubRequest) -> Perm
         context=request.context,
         token_estimate=token_estimate,
     )
+    prepared_security = _security_context_from_request(request)
+    secret_findings = [
+        *list(transparency.get("secret_findings") or []),
+        *list(prepared_security.get("secret_findings") or []),
+    ]
+    sensitive_files = list(prepared_security.get("sensitive_files") or [])
+    injection_findings = list(prepared_security.get("injection_findings") or [])
     category = "workspace_cloud"
-    if not request_text_has_workspace_context(request):
+    sends_workspace_content = request_text_has_workspace_context(request)
+    if not sends_workspace_content:
         category = "external_provider"
     risk_level = "high" if agent.resolved_api_key or not agent.free else "medium"
-    explicit_approval_required = bool(transparency["has_secret_findings"])
+    explicit_approval_required = bool(
+        transparency["has_secret_findings"]
+        or prepared_security.get("has_unredacted_secrets")
+        or sensitive_files
+    )
     security = {
         "category": category,
         "risk_level": "critical" if explicit_approval_required else risk_level,
@@ -425,8 +460,13 @@ def provider_permission_request(agent: AgentConfig, request: HubRequest) -> Perm
         ),
         "blocked": False,
         "explicit_approval_required": explicit_approval_required,
-        "findings": transparency["secret_findings"],
-        "metadata": {"token_estimate": token_estimate},
+        "findings": secret_findings[:20],
+        "metadata": {
+            "token_estimate": token_estimate,
+            "sensitive_files": sensitive_files[:20],
+            "prompt_injection_findings": injection_findings[:20],
+            "repo_files_untrusted": bool(prepared_security.get("repo_files_untrusted")),
+        },
     }
     return PermissionRequest(
         action="call_external_provider",
@@ -443,9 +483,10 @@ def provider_permission_request(agent: AgentConfig, request: HubRequest) -> Perm
             "provider_type": agent.provider_type,
             "model": agent.model,
             "may_cost_money": bool(agent.resolved_api_key or not agent.free),
-            "sends_workspace_content": bool(text_preview),
+            "sends_workspace_content": sends_workspace_content,
             "preview": text_preview[:1000],
             "cloud_transparency": transparency,
+            "prepared_security_context": prepared_security,
             "security": security,
         },
     )
@@ -493,6 +534,16 @@ def _request_option(request: HubRequest, key: str, default: Any) -> Any:
     if isinstance(hub_options, dict) and key in hub_options:
         return hub_options[key]
     return raw.get(key, default)
+
+
+def _security_context_from_request(request: HubRequest) -> dict[str, Any]:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub_options = raw.get("agent_hub")
+    if isinstance(hub_options, dict):
+        security = hub_options.get("security_context")
+        if isinstance(security, dict):
+            return security
+    return {}
 
 
 def _first_present(raw: dict[str, Any], metadata: dict[str, Any], *keys: str) -> Any:

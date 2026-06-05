@@ -29,10 +29,17 @@ Mount a config file at `/config/agent-hub.config.json`, workspace files at
 `/workspace`, and state at `/data/.agent-hub`. Keep real `.env` values and
 provider keys out of git.
 
-Because the example container binds to `0.0.0.0`, configure
-`diagnostics_auth_token_env` and provide that environment variable before
-exposing diagnostics endpoints. Enterprise audit events are written under the
-configured state directory.
+Because the example container binds to `0.0.0.0`, Docker Compose requires
+`AGENT_HUB_API_TOKEN` and `AGENT_HUB_TRUSTED_APPROVAL_TOKEN`. Agent Hub refuses
+to start on a public bind without API authentication, and every endpoint
+requires the API token. Enterprise audit events are written under the configured
+state directory.
+
+Use one of the shipped profiles:
+
+- `examples/agent-hub.dev.json`: localhost development, shell disabled.
+- `examples/agent-hub.local-power-user.json`: localhost shell access with approval.
+- `examples/agent-hub.production.json`: public auth, privacy guardrails, no shell.
 
 Before carrying an older config forward, inspect migrations:
 

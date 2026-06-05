@@ -964,6 +964,7 @@ class RouterTests(unittest.TestCase):
 def _config(path: Path) -> HubConfig:
     return HubConfig(
         state_dir=path,
+        automatic_escalation_enabled=False,
         default_route=["claude", "openai"],
         routes=[
             RouteRule(

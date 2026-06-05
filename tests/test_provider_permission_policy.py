@@ -7,6 +7,7 @@ from pathlib import Path
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.core.router import AgentRouter
 from agent_hub.models import HubRequest
+from agent_hub.permissions import mark_trusted_approval
 from agent_hub.observability import recent_events
 from agent_hub.security.provider_permissions import ProviderPermissionPolicy
 
@@ -63,11 +64,11 @@ class ProviderPermissionPolicyTests(unittest.TestCase):
             blocked = policy.check(agent, request)
             approved = policy.check(
                 agent,
-                HubRequest(
+                mark_trusted_approval(HubRequest(
                     session_id="s",
                     messages=request.messages,
                     raw={"agent_hub": {"provider_approval_granted": True}},
-                ),
+                ), source="test-trusted-session"),
             )
 
             self.assertFalse(blocked.allowed)

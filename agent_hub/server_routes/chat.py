@@ -59,6 +59,9 @@ def handle_post(handler: object, path: str, payload: dict[str, Any]) -> bool:
     if path == "/v1/feedback":
         handler._handle_feedback(payload)
         return True
+    if path == "/v1/workspace/rollback":
+        handler._handle_workspace_rollback(payload)
+        return True
     if path == "/v1/routing/simulate":
         handler._handle_routing_simulation(payload)
         return True

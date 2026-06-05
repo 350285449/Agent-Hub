@@ -1,7 +1,7 @@
 {
   "name": "agent-hub-vscode",
-  "displayName": "Agent Hub - Multi-Provider AI Router",
-  "description": "Use OpenAI, Claude, Gemini, Ollama, OpenRouter and local models through one OpenAI-compatible router for VS Code, Cline and coding agents.",
+  "displayName": "Agent Hub - Local-First AI Model Router",
+  "description": "Cline, Codex and Claude Code compatible AI model router with free-model routing, workspace agents, and cost-saving local-first orchestration.",
   "version": "0.8.5",
   "publisher": "agent-hub",
   "license": "MIT",
@@ -231,6 +231,22 @@
       {
         "command": "agentHub.openOutput",
         "title": "Agent Hub: Open Output"
+      },
+      {
+        "command": "agentHub.rollbackLatestCheckpoint",
+        "title": "Agent Hub: Roll Back Latest Checkpoint"
+      },
+      {
+        "command": "agentHub.openModelLeaderboard",
+        "title": "Agent Hub: Open Model Leaderboard"
+      },
+      {
+        "command": "agentHub.openCostDashboard",
+        "title": "Agent Hub: Open Cost Dashboard"
+      },
+      {
+        "command": "agentHub.openBenchmarkResults",
+        "title": "Agent Hub: Open Benchmark Results"
       }
     ],
     "configuration": {
@@ -240,6 +256,16 @@
           "type": "string",
           "default": "http://127.0.0.1:8787",
           "description": "Agent-Hub server URL."
+        },
+        "agentHub.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer/API token for Agent Hub when the server is bound publicly."
+        },
+        "agentHub.approvalToken": {
+          "type": "string",
+          "default": "",
+          "description": "Trusted approval token used when resuming approved Agent Hub actions."
         },
         "agentHub.pythonPath": {
           "type": "string",
@@ -311,7 +337,7 @@
             "shell-ask",
             "deny"
           ],
-          "default": "ask",
+          "default": "safe",
           "description": "Permission mode for privileged Agent Hub actions. Ask prompts before commands, file/config changes, process control, model downloads, and cloud provider use."
         },
         "agentHub.contextMode": {
@@ -338,7 +364,7 @@
         },
         "agentHub.allowShellTools": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Allow the coding agent command to run shell commands in the workspace."
         },
         "agentHub.maxTokens": {

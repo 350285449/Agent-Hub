@@ -47,7 +47,8 @@ class ConfigTests(unittest.TestCase):
             },
         )
         self.assertTrue(config.free_only)
-        self.assertTrue(config.allow_shell_tools)
+        self.assertFalse(config.allow_shell_tools)
+        self.assertEqual(config.shell_command_policy, "deny")
         self.assertFalse(config.fast_write_finalize)
         self.assertEqual(config.validation_mode, "basic")
         self.assertTrue(config.auto_validate_after_edits)

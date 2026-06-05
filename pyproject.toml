@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-hub"
 version = "0.8.5"
-description = "Local routing hub with Codex-style workspace chat, provider failover, and team-agent orchestration."
+description = "Local-first AI model router for Cline, Codex, Claude Code, free-model routing, and cost-saving workspace agents."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Agent Hub" }]

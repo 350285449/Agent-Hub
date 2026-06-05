@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 from ..api.compatibility import available_model_ids, model_rows
@@ -63,6 +65,10 @@ BACKEND_FEATURES = {
     "central_token_budget_manager": True,
     "tool_security_classifier": True,
     "secret_detection": True,
+    "mandatory_public_api_auth": True,
+    "trusted_session_approvals": True,
+    "prompt_injection_defense": True,
+    "provider_privacy_mode": True,
     "structured_observability": True,
     "capability_graph": True,
     "safe_mode": True,
@@ -78,9 +84,17 @@ BACKEND_FEATURES = {
     "repository_specific_routing": True,
     "workspace_memory": True,
     "multi_agent_debate": True,
+    "model_tournament_mode": True,
+    "automatic_escalation": True,
+    "response_confidence_scoring": True,
     "failure_prediction": True,
     "cost_optimizer": True,
     "model_performance_database": True,
+    "model_leaderboard": True,
+    "cost_dashboard": True,
+    "benchmark_results_dashboard": True,
+    "workspace_rollback_api": True,
+    "structured_user_feedback": True,
     "autonomous_night_mode_plan": True,
     "ai_team_visualization": True,
     "auto_workflow_selection": True,
@@ -130,6 +144,125 @@ class DiagnosticsApplicationService:
                 "latency",
             ],
             "data": self.provider_scores(),
+        }
+
+    def model_leaderboard_body(self, router: Any) -> dict[str, Any]:
+        scores = self.provider_scores()
+        health = router.health_snapshot()
+        rows: list[dict[str, Any]] = []
+        for name, agent in self.config.agents.items():
+            score = scores.get(name, {}) if isinstance(scores.get(name), dict) else {}
+            state = health.get(name, {}) if isinstance(health.get(name), dict) else {}
+            successes = int(score.get("successes", state.get("success_count", 0)) or 0)
+            failures = int(score.get("failures", state.get("failure_count", 0)) or 0)
+            samples = successes + failures
+            success_rate = successes / samples if samples else float(state.get("reliability_score", 0.7) or 0.7)
+            rows.append(
+                {
+                    "agent": name,
+                    "provider": agent.provider,
+                    "model": agent.model,
+                    "overall_score": float(score.get("overall_score", 0.0) or 0.0),
+                    "success_rate": round(success_rate, 4),
+                    "test_pass_rate": round(success_rate, 4),
+                    "average_latency_ms": float(
+                        score.get("average_latency_ms", state.get("average_latency_ms", 0.0)) or 0.0
+                    ),
+                    "free": bool(agent.free),
+                    "cost_per_million_input": agent.cost_per_million_input,
+                    "cost_per_million_output": agent.cost_per_million_output,
+                    "task_scores": dict(score.get("task_scores") or {}),
+                    "task_sample_counts": dict(score.get("task_sample_counts") or {}),
+                    "samples": int(score.get("sample_count", samples) or samples),
+                }
+            )
+        rows.sort(
+            key=lambda row: (
+                -float(row["overall_score"]),
+                -float(row["success_rate"]),
+                float(row["average_latency_ms"] or 0.0),
+            )
+        )
+        for rank, row in enumerate(rows, start=1):
+            row["rank"] = rank
+        try:
+            dna = router.repository_intelligence.repository_dna().to_dict()
+        except Exception:
+            dna = {}
+        return {
+            "object": "agent_hub.model_leaderboard",
+            "routing_basis": "real outcomes, task success, latency, cost, and failure history",
+            "repository": dna,
+            "routing_memory": router.routing_memory.stats(),
+            "data": rows,
+        }
+
+    def benchmark_results_body(self) -> dict[str, Any]:
+        reports_dir = Path(self.config.state_dir) / "benchmark_reports"
+        reports: list[dict[str, Any]] = []
+        if reports_dir.exists():
+            for path in sorted(reports_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)[:20]:
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                reports.append(
+                    {
+                        "name": path.name,
+                        "updated_at": path.stat().st_mtime,
+                        "summary": payload.get("summary", {}),
+                        "results": payload.get("results", payload.get("data", [])),
+                    }
+                )
+        return {
+            "object": "agent_hub.benchmark_results",
+            "count": len(reports),
+            "reports": reports,
+        }
+
+    def workspace_checkpoints_body(self) -> dict[str, Any]:
+        root = Path(self.config.workspace_dir).resolve()
+        state_dir = Path(self.config.state_dir)
+        if not state_dir.is_absolute():
+            state_dir = root / state_dir
+        checkpoints_dir = state_dir.resolve() / "workspace-checkpoints"
+        checkpoints: list[dict[str, Any]] = []
+        if checkpoints_dir.exists():
+            for path in sorted(checkpoints_dir.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True):
+                if not path.is_dir() or path.name.startswith("."):
+                    continue
+                try:
+                    manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                checkpoints.append(
+                    {
+                        "id": str(manifest.get("id") or path.name),
+                        "created_at": manifest.get("created_at"),
+                        "reason": str(manifest.get("reason") or ""),
+                        "paths": [
+                            str(item.get("path"))
+                            for item in manifest.get("files", [])
+                            if isinstance(item, dict) and item.get("path")
+                        ],
+                    }
+                )
+        return {
+            "object": "agent_hub.workspace_checkpoints",
+            "count": len(checkpoints),
+            "data": checkpoints,
+        }
+
+    def cost_dashboard_body(self, optimization: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "object": "agent_hub.cost_dashboard",
+            "cost_by_provider": optimization.get("cost_by_provider", {}),
+            "cost_by_model": optimization.get("cost_by_model", {}),
+            "cost_by_task_type": optimization.get("cost_by_task_type", {}),
+            "cost_by_day": optimization.get("cost_by_day", {}),
+            "known_cost_usd": optimization.get("known_cost_usd", optimization.get("total_known_cost_usd")),
+            "average_known_cost_usd": optimization.get("average_known_cost_usd"),
+            "money_saved": optimization.get("cost_optimizer", {}),
         }
 
     def backend_health_body(self, router: Any, *, context_diagnostics: dict[str, Any]) -> dict[str, Any]:

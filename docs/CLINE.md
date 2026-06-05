@@ -44,7 +44,7 @@ hosted provider while `approval_mode` is interactive, Cline can see:
 {
   "error": {
     "type": "agent_hub_permission_required",
-    "message": "Provider requires approval. Set approval_mode=auto or enable cline_compatibility_mode."
+    "message": "Provider requires approval from the VS Code UI or a trusted session."
   }
 }
 ```
@@ -53,7 +53,7 @@ Recommended config for Cline:
 
 ```json
 {
-  "approval_mode": "auto",
+  "approval_mode": "safe",
   "cline_compatibility_mode": true,
   "tool_loop_enabled": true,
   "tool_loop_enabled_for_cline": false,
@@ -66,11 +66,12 @@ Recommended config for Cline:
 }
 ```
 
-With compatibility mode enabled, trusted cloud provider routing is allowed
-without an interactive prompt and an audit event is written instead. Local
-providers are always allowed. Unknown external endpoints can still require
-explicit approval, and requests that appear to contain secrets still trigger the
-security gate.
+Compatibility mode preserves Cline's API shape and tool behavior, but it does
+not bypass provider approval. Use the Agent-Hub VS Code UI, which supplies a
+per-session `X-Agent-Hub-Approval-Token`, or explicitly configure
+`approval_mode: "auto"` for trusted cloud providers. Local providers are always
+allowed. Unknown external endpoints still require trusted approval, and
+requests that appear to contain secrets trigger the security gate.
 
 `tool_loop_enabled_for_cline=false` is recommended because Cline manages its own
 tool loop. Agent-Hub still preserves routing, failover, provider balancing, and

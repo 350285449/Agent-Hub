@@ -1,9 +1,10 @@
 # Privacy And Security
 
-Before cloud provider use, Agent Hub evaluates provider permission, secret
-findings, workspace context, and approval mode. Cloud transparency data includes
-provider/model, token estimate, file/snippet hints, and secret findings when
-available.
+Before cloud provider use, Agent Hub treats repository files as untrusted data,
+detects prompt-injection-like instructions, scans for secrets and sensitive
+paths, redacts detected secret values, and evaluates the target provider's
+privacy policy. Providers can be marked `local_only`, `safe_for_code`,
+`safe_for_secrets`, or `never_send_workspace_files`.
 
 Agent Hub does not install packages, pull models, edit configs, spawn
 processes, upload workspace data, or write files without permission in modes
@@ -19,12 +20,18 @@ plugin directories and is manifest-only: Agent Hub validates plugin metadata,
 entrypoint paths, trust registry entries, manifest hashes, and optional
 signatures, but does not execute plugin code.
 
-When the HTTP server is bound to a public host, diagnostic endpoints such as
-`/v1/provider-health`, `/v1/routing/status`, `/v1/limits`, `/v1/usage`,
-`/v1/client-sources`, `/v1/events`, `/v1/tools`, `/v1/workflows/status`,
-`/v1/plugins`, and `/v1/enterprise/audit` require a diagnostics token. Set
-`diagnostics_auth_token_env` for
-deployments. Enterprise permissions are optional; when
+When the HTTP server is bound to a public host, every endpoint requires
+`Authorization: Bearer <token>` or `X-Agent-Hub-API-Token`. Set
+`api_auth_token_env`; the server refuses to start publicly without a token.
+The legacy diagnostics token remains accepted for compatibility.
+
+Approval booleans such as `approval_granted` and `approved` are ignored when
+they arrive only in request JSON. Approval is honored only when the request has
+an in-process trusted-session marker created after a valid
+`X-Agent-Hub-Approval-Token`. The VS Code extension creates a per-process
+approval token when it launches the backend.
+
+Enterprise permissions are optional; when
 `enterprise_mode_enabled` is true, sensitive provider and tool actions are
 checked against configured users, roles, and grants.
 

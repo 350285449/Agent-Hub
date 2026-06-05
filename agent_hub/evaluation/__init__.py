@@ -209,11 +209,29 @@ class BenchmarkRunner:
 def default_benchmark_tasks(route: str = "cloud-agent") -> list[BenchmarkTask]:
     return [
         BenchmarkTask("coding", "Write a concise plan to fix a failing Python unit test.", ["test", "fix"], route),
+        BenchmarkTask("coding", "Implement input validation for a JSON API handler.", ["validate", "error"], route),
+        BenchmarkTask("coding", "Describe a safe multi-file refactor for duplicated parsing logic.", ["refactor", "test"], route),
+        BenchmarkTask("coding", "Generate a minimal unit test for a function that adds two integers.", ["test", "assert"], route),
         BenchmarkTask("reasoning", "Explain why a fallback router should track provider health.", ["health", "fallback"], route),
+        BenchmarkTask("reasoning", "Compare success-rate routing with prompt-only routing.", ["success", "routing"], route),
+        BenchmarkTask("reasoning", "Explain when a cheap model should escalate to a stronger model.", ["confidence", "escalate"], route),
+        BenchmarkTask("reasoning", "List risks of trusting approval flags from request JSON.", ["approval", "trust"], route),
         BenchmarkTask("summarization", "Summarize: Agent Hub routes requests across local and cloud models.", ["route"], route),
+        BenchmarkTask("summarization", "Summarize why secrets should be redacted before provider calls.", ["secret", "provider"], route),
+        BenchmarkTask("summarization", "Summarize the generate, verify, repair loop in one sentence.", ["verify", "repair"], route),
+        BenchmarkTask("summarization", "Summarize the purpose of repository-specific routing memory.", ["repository", "routing"], route),
         BenchmarkTask("tool_calling", "Say which tool would read README.md from a workspace.", ["file_read", "read"], route, True),
+        BenchmarkTask("tool_calling", "Say which tool should search a repository for TODO markers.", ["search", "repo"], route, True),
+        BenchmarkTask("tool_calling", "Explain which validation command should run after Python edits.", ["test", "python"], route, True),
+        BenchmarkTask("tool_calling", "Describe why shell execution needs explicit approval.", ["shell", "approval"], route, True),
         BenchmarkTask("long_context", "Identify the main point after reading a long repeated context. " + ("context " * 200), ["context"], route),
+        BenchmarkTask("long_context", "Find the routing requirement in this repeated specification. " + ("routing memory " * 180), ["routing", "memory"], route),
+        BenchmarkTask("long_context", "Extract the security requirement from this repeated text. " + ("never send secrets " * 180), ["secret"], route),
+        BenchmarkTask("long_context", "State the requested workflow from this repeated text. " + ("generate verify repair " * 180), ["verify", "repair"], route),
         BenchmarkTask("latency", "Reply with the word ok.", ["ok"], route),
+        BenchmarkTask("latency", "Reply with the word ready.", ["ready"], route),
+        BenchmarkTask("latency", "Reply with the word pass.", ["pass"], route),
+        BenchmarkTask("latency", "Reply with the word routed.", ["routed"], route),
     ]
 
 

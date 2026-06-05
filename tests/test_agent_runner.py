@@ -8,10 +8,20 @@ from pathlib import Path
 
 from agent_hub.agent_tools import AgentToolbox, create_workspace_checkpoint, restore_workspace_checkpoint
 from agent_hub.agent_runner import AgentRunner, _is_repository_file_path
-from agent_hub.config import AgentConfig, HubConfig
+from agent_hub.config import AgentConfig, HubConfig as _HubConfig
 from agent_hub.models import HubRequest, HubResponse, ProviderResult
+from agent_hub.permissions import mark_trusted_approval
 from agent_hub.core.router import AgentRouter, estimate_input_tokens
 from agent_hub.providers import ProviderError
+
+
+def HubConfig(**kwargs):
+    """Use explicit power-user permissions in tests focused on agent execution."""
+
+    kwargs.setdefault("approval_mode", "auto")
+    kwargs.setdefault("allow_shell_tools", True)
+    kwargs.setdefault("shell_command_policy", "auto")
+    return _HubConfig(**kwargs)
 
 
 class AgentRunnerTests(unittest.TestCase):
@@ -1155,11 +1165,11 @@ class AgentRunnerTests(unittest.TestCase):
             target.write_text("A = 1\n", encoding="utf-8")
             toolbox = AgentToolbox(
                 HubConfig(workspace_dir=root, approval_mode="ask"),
-                HubRequest(
+                mark_trusted_approval(HubRequest(
                     session_id="agent",
                     messages=[],
                     raw={"agent_hub": {"approval_granted": True}},
-                ),
+                ), source="test-trusted-session"),
             )
 
             result = toolbox.run(
@@ -1289,12 +1299,12 @@ class AgentRunnerTests(unittest.TestCase):
             self.assertTrue(session["reasoning_state"]["execution_plan"]["blocked_nodes"])
 
             second = AgentRunner(config, router).run(
-                HubRequest(
+                mark_trusted_approval(HubRequest(
                     session_id="agent-approval",
                     messages=[{"role": "user", "content": "Approved."}],
                     use_session_history=True,
                     raw={"agent_hub": {"approval_granted": True}},
-                )
+                ), source="test-trusted-session")
             )
 
             self.assertEqual(second.text, "Applied after approval.")

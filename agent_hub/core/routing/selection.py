@@ -151,6 +151,8 @@ class RoutingDecision:
     repository_dna: dict[str, Any] = field(default_factory=dict)
     workspace_memory: dict[str, Any] = field(default_factory=dict)
     failure_prediction: dict[str, Any] = field(default_factory=dict)
+    tournament_plan: dict[str, Any] = field(default_factory=dict)
+    escalation_plan: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = {
@@ -183,6 +185,10 @@ class RoutingDecision:
             data["workspace_memory"] = dict(self.workspace_memory)
         if self.failure_prediction:
             data["failure_prediction"] = dict(self.failure_prediction)
+        if self.tournament_plan:
+            data["tournament_plan"] = dict(self.tournament_plan)
+        if self.escalation_plan:
+            data["escalation_plan"] = dict(self.escalation_plan)
         if self.candidate_scores:
             data["candidate_scores"] = list(self.candidate_scores)
         data["explanation"] = _routing_decision_explanation(self).to_dict()
@@ -1207,6 +1213,8 @@ class AgentRouter:
             task_classification=classification.to_dict(),
             repository_dna=dna.to_dict() if dna is not None else {},
             workspace_memory=workspace_memory,
+            tournament_plan=self._tournament_plan(agents, candidate_scores, classification),
+            escalation_plan=self._escalation_plan(agents, candidate_scores, classification),
         )
         if getattr(self.config, "failure_prediction_enabled", True):
             decision.failure_prediction = build_failure_prediction(decision=decision, config=self.config)
@@ -1550,6 +1558,117 @@ class AgentRouter:
         weighted = sum(score * min(12, max(1, samples)) for score, samples in scores) / max(1, total_weight)
         return round(_bounded_float(weighted, 0.0, 1.0), 4), sum(max(0, samples) for _score, samples in scores)
 
+    def _outcome_based_routing_signal(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        classification: Any,
+    ) -> dict[str, Any]:
+        score, samples = self._model_efficiency_score(agent, request, classification)
+        health = self._health.get(agent.name)
+        average_latency_ms = round(health.average_latency_ms, 2) if health else 0.0
+        failure_count = health.failure_count if health else 0
+        success_count = health.success_count if health else 0
+        return {
+            "enabled": bool(
+                self.config.adaptive_learning_enabled
+                or getattr(self.config, "routing_memory_enabled", True)
+            ),
+            "score": score,
+            "samples": samples,
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "average_latency_ms": average_latency_ms,
+            "cost_efficiency_score": round(provider_cost_efficiency_score(agent), 4),
+            "summary": (
+                f"{agent.name} has {samples} outcome sample(s) for similar "
+                f"{classification.task_type} work."
+                if samples
+                else f"No historical outcome samples for {agent.name} on this task shape yet."
+            ),
+        }
+
+    def _tournament_plan(
+        self,
+        agents: list[AgentConfig],
+        candidate_scores: list[dict[str, Any]],
+        classification: Any,
+    ) -> dict[str, Any]:
+        enabled = bool(getattr(self.config, "model_tournament_enabled", True))
+        max_candidates = max(2, min(4, int(getattr(self.config, "model_tournament_max_candidates", 4) or 4)))
+        cheap = [
+            row
+            for row in candidate_scores
+            if row.get("agent")
+            and (
+                row.get("estimated_cost_usd") in (None, 0)
+                or any(agent.name == row.get("agent") and is_free_agent(agent) for agent in agents)
+            )
+        ][:max_candidates]
+        judge = next(
+            (
+                row
+                for row in candidate_scores
+                if row.get("agent") not in {item.get("agent") for item in cheap}
+            ),
+            candidate_scores[0] if candidate_scores else {},
+        )
+        return {
+            "enabled": enabled,
+            "task_type": getattr(classification, "task_type", ""),
+            "candidate_count": len(cheap),
+            "candidates": [
+                {
+                    "agent": row.get("agent"),
+                    "provider": row.get("provider"),
+                    "model": row.get("model"),
+                    "estimated_cost_usd": row.get("estimated_cost_usd"),
+                    "outcome_score": (row.get("outcome_based_routing") or {}).get("score")
+                    if isinstance(row.get("outcome_based_routing"), dict)
+                    else None,
+                }
+                for row in cheap
+            ],
+            "judge": {
+                "agent": judge.get("agent"),
+                "provider": judge.get("provider"),
+                "model": judge.get("model"),
+                "mode": "judge-model" if judge else "rule-based",
+            },
+            "selection_policy": "Judge answers by correctness, file grounding, syntax, testability, cost, and latency.",
+        }
+
+    def _escalation_plan(
+        self,
+        agents: list[AgentConfig],
+        candidate_scores: list[dict[str, Any]],
+        classification: Any,
+    ) -> dict[str, Any]:
+        threshold = max(0.0, min(1.0, float(getattr(self.config, "confidence_threshold", 0.72) or 0.72)))
+        cheap_first = [
+            row.get("agent")
+            for row in candidate_scores
+            if row.get("agent") and (row.get("estimated_cost_usd") in (None, 0))
+        ]
+        stronger = [
+            row.get("agent")
+            for row in candidate_scores
+            if row.get("agent") and row.get("agent") not in cheap_first
+        ]
+        return {
+            "enabled": bool(getattr(self.config, "automatic_escalation_enabled", True)),
+            "confidence_threshold": threshold,
+            "task_type": getattr(classification, "task_type", ""),
+            "start": cheap_first[0] if cheap_first else (candidate_scores[0].get("agent") if candidate_scores else None),
+            "escalate_to": [name for name in stronger[:3] if name],
+            "triggers": [
+                "low_confidence_response",
+                "empty_or_truncated_output",
+                "tests_or_validation_failed",
+                "tool_or_syntax_failure",
+            ],
+        }
+
     def _rank_by_key(
         self,
         agents: list[AgentConfig],
@@ -1629,6 +1748,7 @@ class AgentRouter:
                 classification,
                 repository_dna,
             )
+            outcome_signal = self._outcome_based_routing_signal(agent, request, classification)
             memory_adjustment = float(routing_memory.get("adjustment", 0.0) or 0.0)
             final_routing_score = original_routing_score + memory_adjustment
             rows.append(
@@ -1658,6 +1778,7 @@ class AgentRouter:
                     "adaptive": adaptive,
                     "routing_memory": routing_memory,
                     "repository_dna": repository_signal,
+                    "outcome_based_routing": outcome_signal,
                     "health": {
                         "success_count": health.success_count if health else 0,
                         "failure_count": health.failure_count if health else 0,
@@ -1773,6 +1894,13 @@ class AgentRouter:
                 decision=decision,
                 latency_seconds=latency_seconds,
             )
+            agent_metadata["confidence"] = self._confidence_score(
+                request=request,
+                agent=agent,
+                result=result,
+                failover=failover,
+                latency_seconds=latency_seconds,
+            )
             if tool_loop_metadata is not None:
                 agent_metadata.update(tool_loop_metadata.to_dict())
             raw["agent_hub"] = agent_metadata
@@ -1792,6 +1920,67 @@ class AgentRouter:
             search_results=result.search_results,
             related_questions=result.related_questions,
         )
+
+    def _confidence_score(
+        self,
+        *,
+        request: HubRequest,
+        agent: AgentConfig,
+        result: ProviderResult,
+        failover: list[FailoverEvent],
+        latency_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        score = 0.86
+        reasons: list[str] = []
+        text = str(result.text or "").strip()
+        if not text:
+            score -= 0.72
+            reasons.append("empty_response")
+        if _token_limit_finish_reason(result.finish_reason):
+            score -= 0.32
+            reasons.append("output_limit_finish")
+        lowered = text.lower()
+        if any(marker in lowered for marker in ("i cannot access", "i can't access", "as an ai language model")):
+            score -= 0.18
+            reasons.append("capability_disclaimer")
+        if len(text) < 40 and self._classify_task(request) in {"coding", "debug", "test_generation"}:
+            score -= 0.25
+            reasons.append("too_short_for_coding_task")
+        if "```" in text and text.count("```") % 2:
+            score -= 0.12
+            reasons.append("unclosed_code_block")
+        if failover:
+            score -= min(0.16, len(failover) * 0.04)
+            reasons.append("fallbacks_used")
+        if latency_seconds is not None and latency_seconds > 45:
+            score -= 0.08
+            reasons.append("slow_response")
+        if result.finish_reason in {"error", "failed"}:
+            score -= 0.5
+            reasons.append("error_finish_reason")
+        confidence = round(_bounded_float(score, 0.0, 1.0), 4)
+        threshold = _bounded_float(float(getattr(self.config, "confidence_threshold", 0.72) or 0.72), 0.0, 1.0)
+        return {
+            "score": confidence,
+            "threshold": threshold,
+            "level": "high" if confidence >= 0.82 else "medium" if confidence >= threshold else "low",
+            "should_escalate": bool(
+                getattr(self.config, "automatic_escalation_enabled", True)
+                and confidence < threshold
+                and any(
+                    reason in reasons
+                    for reason in (
+                        "empty_response",
+                        "output_limit_finish",
+                        "error_finish_reason",
+                        "too_short_for_coding_task",
+                    )
+                )
+            ),
+            "reasons": reasons,
+            "agent": agent.name,
+            "model": result.model or agent.model,
+        }
 
     def _is_on_cooldown(self, agent_name: str) -> bool:
         return self._cooldown_until(agent_name) > time.time()

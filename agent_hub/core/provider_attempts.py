@@ -310,6 +310,54 @@ class ProviderAttemptExecutor:
                     )
                     continue
 
+                confidence = router._confidence_score(
+                    request=provider_request,
+                    agent=agent,
+                    result=result,
+                    failover=failover,
+                    latency_seconds=latency,
+                )
+                if confidence.get("should_escalate") and agent != candidates[-1]:
+                    reason = (
+                        "Provider response confidence was low "
+                        f"({confidence.get('score')}); escalating to the next candidate."
+                    )
+                    router._record_failure(
+                        agent,
+                        error_type="low_confidence_response",
+                        message=reason,
+                        unavailable_until=None,
+                        metadata={"confidence": confidence},
+                        request_id=request_id,
+                        request=provider_request,
+                        routing_mode=decision.routing_mode,
+                        failover_attempts=len(failover),
+                    )
+                    failover.append(
+                        FailoverEvent(
+                            agent=agent.name,
+                            provider=agent.provider,
+                            model=agent.model,
+                            reason=reason,
+                            retryable=True,
+                            error_type="low_confidence_response",
+                            metadata={"confidence": confidence},
+                        )
+                    )
+                    router._record_internal_event(
+                        ROUTER_FALLBACK,
+                        request_id=request_id,
+                        request=provider_request,
+                        from_agent=agent.name,
+                        from_provider=agent.provider,
+                        from_model=agent.model,
+                        reason=reason,
+                        error_type="low_confidence_response",
+                        next_agent=helpers.next_candidate_name(candidates, agent),
+                        routing_mode=decision.routing_mode,
+                    )
+                    continue
+
                 router._record_success(
                     agent,
                     latency,

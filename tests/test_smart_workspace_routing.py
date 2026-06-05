@@ -13,6 +13,7 @@ from agent_hub.core.task_classifier import TaskClassifier
 from agent_hub.evaluation import BenchmarkResult, ProviderScoreStore
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.payloads import openai_chat_response, openai_response_response
+from agent_hub.permissions import mark_trusted_approval
 from agent_hub.tools import create_builtin_registry
 from agent_hub.workflows import (
     SafeWorkspaceService,
@@ -181,12 +182,12 @@ class SmartWorkspaceRoutingTests(unittest.TestCase):
             )
 
             AgentRouter(config, provider_factory=_OkProvider).route(
-                HubRequest(
+                mark_trusted_approval(HubRequest(
                     session_id="s",
                     route="cloud-agent",
                     messages=[{"role": "user", "content": "Explain what a context window is."}],
                     raw={"provider_approval_granted": True},
-                )
+                ), source="test-trusted-session")
             )
             scores = ProviderScoreStore(config.state_dir).load()
 

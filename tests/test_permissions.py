@@ -7,7 +7,7 @@ from pathlib import Path
 from agent_hub.agent_tools import AgentToolbox
 from agent_hub.config import AgentConfig, HubConfig, config_from_dict, free_local_config
 from agent_hub.models import HubRequest, ProviderResult
-from agent_hub.permissions import PermissionManager, PermissionRequest
+from agent_hub.permissions import PermissionManager, PermissionRequest, mark_trusted_approval
 from agent_hub.core.router import AgentRouter, RouterError
 
 
@@ -36,10 +36,10 @@ class PermissionManagerTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertTrue(decision.denied)
 
-    def test_default_loaded_configs_use_ask_mode(self) -> None:
-        self.assertEqual(free_local_config().approval_mode, "ask")
-        self.assertEqual(config_from_dict({}).approval_mode, "ask")
-        self.assertEqual(config_from_dict({}).shell_command_policy, "ask")
+    def test_default_loaded_configs_use_safe_mode(self) -> None:
+        self.assertEqual(free_local_config().approval_mode, "safe")
+        self.assertEqual(config_from_dict({}).approval_mode, "safe")
+        self.assertEqual(config_from_dict({}).shell_command_policy, "deny")
 
     def test_agent_tools_ask_before_any_shell_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -58,6 +58,7 @@ class PermissionManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(
                 state_dir=Path(tmp) / "state",
+                workspace_dir=Path(tmp),
                 approval_mode="ask",
                 free_only=False,
                 default_route=["cloud"],
@@ -91,11 +92,11 @@ class PermissionManagerTests(unittest.TestCase):
             self.assertEqual(error.exception.failover[0].error_type, "permission_required")
 
             approved = router.route(
-                HubRequest(
+                mark_trusted_approval(HubRequest(
                     session_id="s",
                     messages=request.messages,
                     raw={"agent_hub": {"provider_approval_granted": True}},
-                )
+                ), source="test-trusted-session")
             )
             self.assertEqual(approved.text, "ok")
 
@@ -104,6 +105,7 @@ class PermissionManagerTests(unittest.TestCase):
             calls: list[str] = []
             config = HubConfig(
                 state_dir=Path(tmp) / "state",
+                workspace_dir=Path(tmp),
                 approval_mode="auto",
                 free_only=False,
                 default_route=["cloud"],

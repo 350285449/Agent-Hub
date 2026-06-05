@@ -16,7 +16,7 @@ static config scores.
 
 ```sh
 python -m agent_hub eval --route coding --json
-python -m agent_hub benchmark-suite --route coding --json
+python -m agent_hub benchmark-suite --route coding --limit 24 --json
 ```
 
 Scores are written to `.agent-hub/state/provider_scores.json`. The router adds
@@ -27,10 +27,15 @@ latency, success rate, failover frequency, cost, score deltas, workflow
 effectiveness, and a winner, then writes a JSON report under
 `.agent-hub/state/benchmark_reports`.
 
+The built-in suite contains 24 coding, reasoning, summarization, tool-calling,
+long-context, and latency tasks. Up to 50 custom tasks can be run in one suite.
+
 ## API
 
 ```sh
 curl http://127.0.0.1:8787/v1/provider-scores
+curl http://127.0.0.1:8787/v1/model-leaderboard
+curl http://127.0.0.1:8787/v1/benchmarks
 ```
 
 The endpoint returns stored scores and benchmark task categories.

@@ -395,7 +395,7 @@ class TeamAgentRunner:
         event_sink: AgentEventSink | None,
         reasoning_state: WorkspaceReasoningState,
     ) -> dict[str, Any]:
-        agents = self._role_agents("coder", request)[:count]
+        agents = self._tournament_candidate_agents(request)[:count]
         if not agents:
             agents = self._role_agents("finalizer", request)[:1]
         candidates: list[dict[str, Any]] = []
@@ -603,6 +603,11 @@ class TeamAgentRunner:
     def _role_agent_name(self, role: str, request: HubRequest) -> str | None:
         agents = self._role_agents(role, request)
         return agents[0].name if agents else None
+
+    def _tournament_candidate_agents(self, request: HubRequest) -> list[AgentConfig]:
+        agents = self._role_agents("coder", request)
+        cheap = [agent for agent in agents if is_free_agent(agent)]
+        return cheap or agents
 
     def _role_agents(self, role: str, request: HubRequest) -> list[AgentConfig]:
         configured = self.config.group_roles.get(role)

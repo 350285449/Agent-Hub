@@ -275,6 +275,49 @@ class TeamAgentRunnerTests(unittest.TestCase):
             self.assertIn("coder-b", calls)
             self.assertEqual(response.text, "Done.")
 
+    def test_tournament_candidates_prefer_free_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                free_only=False,
+                default_route=["paid", "free-a", "free-b"],
+                agents={
+                    "paid": AgentConfig(
+                        name="paid",
+                        provider="openai",
+                        model="paid-test",
+                        api_key="key",
+                        free=False,
+                        coding_score=1.0,
+                    ),
+                    "free-a": AgentConfig(
+                        name="free-a",
+                        provider="openai-compatible",
+                        model="free-a-test",
+                        base_url="http://127.0.0.1:9999",
+                        free=True,
+                        coding_score=0.8,
+                    ),
+                    "free-b": AgentConfig(
+                        name="free-b",
+                        provider="openai-compatible",
+                        model="free-b-test",
+                        base_url="http://127.0.0.1:9999",
+                        free=True,
+                        coding_score=0.7,
+                    ),
+                },
+            )
+            runner = TeamAgentRunner(config, AgentRouter(config))
+
+            candidates = runner._tournament_candidate_agents(
+                HubRequest(session_id="s", messages=[{"role": "user", "content": "fix app.py"}])
+            )
+
+        self.assertEqual([agent.name for agent in candidates], ["free-a", "free-b"])
+
 
 if __name__ == "__main__":
     unittest.main()
