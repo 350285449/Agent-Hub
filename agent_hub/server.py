@@ -850,6 +850,67 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         avg_cost = optimization.get("average_known_cost_usd")
         avg_cost_label = f"${float(avg_cost):.4f}" if avg_cost is not None else "unknown"
         avg_latency_label = f"{float(optimization.get('average_latency_ms') or 0):.0f} ms"
+        dashboard_groups = [
+            (
+                "Operate",
+                [
+                    ("Status", "/dashboard/status", "Backend, providers, and next dashboard links"),
+                    ("Readiness", "/dashboard/readiness", "Setup scorecard and next action"),
+                    ("Provider Health", "/dashboard/provider-health", "Availability, reliability, cooldowns"),
+                    ("Limits", "/dashboard/limits", "Quota, active model, fallback state"),
+                    ("Usage", "/dashboard/usage", "Tokens, provider calls, tool and permission activity"),
+                ],
+            ),
+            (
+                "Routing",
+                [
+                    ("Routing Intelligence", "/dashboard/routing-intelligence", "Reasons, rejected candidates, rankings"),
+                    ("Routing History", "/dashboard/routing-history", "Recent selections, fallbacks, failures"),
+                    ("Optimization", "/dashboard/optimization", "Adaptive learning and workflow analytics"),
+                    ("Provider Scores", "/dashboard/provider-scores", "Stored scores used by routing"),
+                ],
+            ),
+            (
+                "Models",
+                [
+                    ("Model Leaderboard", "/dashboard/model-leaderboard", "Ranked models and readiness baselines"),
+                    ("Costs", "/dashboard/costs", "Pricing coverage and recorded spend"),
+                    ("Benchmarks", "/dashboard/benchmarks", "Benchmark coverage and reports"),
+                ],
+            ),
+            (
+                "Workspace",
+                [
+                    ("Repository DNA", "/dashboard/repository-dna", "Language, framework, risk, style signals"),
+                    ("Workspace Memory", "/dashboard/workspace-memory", "Remembered facts and important files"),
+                    ("Tools", "/dashboard/tools", "Registered tools and permission requirements"),
+                    ("Workflows", "/dashboard/workflows", "Presets, runs, and workflow status"),
+                ],
+            ),
+            (
+                "Automation And Admin",
+                [
+                    ("Night Mode", "/dashboard/night-mode", "Validation plan and safeguards"),
+                    ("Events", "/dashboard/events", "Internal, routing, workflow, adaptive events"),
+                    ("Plugins", "/dashboard/plugins", "Discovered plugin capabilities"),
+                    ("Enterprise", "/dashboard/enterprise", "Users, roles, workspaces, audit status"),
+                    ("Production Check", "/dashboard/production-check", "Strict acceptance checks"),
+                ],
+            ),
+        ]
+        dashboard_sections = "\n".join(
+            "<section class=\"nav-section\">"
+            f"<h2>{_html(title)}</h2>"
+            "<div class=\"dashboard-grid\">"
+            + "".join(
+                "<a class=\"nav-card\" "
+                f"href=\"{_html(href)}\"><strong>{_html(label)}</strong>"
+                f"<span>{_html(detail)}</span></a>"
+                for label, href, detail in links
+            )
+            + "</div></section>"
+            for title, links in dashboard_groups
+        )
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -859,23 +920,37 @@ class AgentHubHandler(BaseHTTPRequestHandler):
   <style>
     body {{
       margin: 0;
-      padding: 32px;
       color: #e8e8e8;
-      background: #151515;
+      background: #101418;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.5;
     }}
     main {{
-      max-width: 980px;
+      max-width: 1180px;
       margin: 0 auto;
+      padding: 28px;
     }}
     h1 {{
       margin: 0 0 8px;
-      font-size: 28px;
+      font-size: 30px;
+    }}
+    h2 {{
+      margin: 0 0 12px;
+      font-size: 18px;
+    }}
+    .hero {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: start;
+      margin-bottom: 18px;
+    }}
+    .hero p {{
+      margin: 0;
+      color: #b8c0cc;
     }}
     .status {{
       display: inline-block;
-      margin: 8px 0 20px;
       padding: 4px 9px;
       border-radius: 999px;
       color: #122313;
@@ -933,12 +1008,56 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       color: #aaa;
       font-size: 13px;
     }}
+    .nav-section {{
+      margin: 24px 0;
+    }}
+    .dashboard-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }}
+    .nav-card {{
+      display: block;
+      min-height: 72px;
+      border: 1px solid #303844;
+      border-radius: 10px;
+      padding: 14px;
+      background: #171d24;
+      text-decoration: none;
+    }}
+    .nav-card strong,
+    .nav-card span {{
+      display: block;
+    }}
+    .nav-card strong {{
+      color: #e8e8e8;
+      font-size: 15px;
+    }}
+    .nav-card span {{
+      color: #a8b3c2;
+      margin-top: 5px;
+      font-size: 13px;
+    }}
+    .nav-card:hover {{
+      border-color: #8ab4ff;
+      background: #1b2633;
+    }}
+    .json-links {{
+      margin-top: 28px;
+      color: #a8b3c2;
+      font-size: 13px;
+    }}
   </style>
 </head>
 <body>
   <main>
-    <h1>Agent Hub</h1>
-    <div class="status">Running</div>
+    <div class="hero">
+      <div>
+        <h1>Agent Hub</h1>
+        <p>Local-first routing, provider health, workspace intelligence, cost tracking, and automation controls.</p>
+      </div>
+      <div class="status">Running</div>
+    </div>
     <dl>
       <dt>Version</dt><dd>{BACKEND_VERSION}</dd>
       <dt>Config hash</dt><dd><code>{config_runtime_hash(config)}</code></dd>
@@ -969,24 +1088,14 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         {''.join(_provider_row_html(row) for row in status["providers"][:12])}
       </tbody>
     </table>
-    <p>
-      <a href="/v1/status">Status JSON</a> |
-      <a href="/v1/routing-history">Routing History</a> |
-      <a href="/v1/provider-scores">Provider Scores</a> |
-      <a href="/dashboard/routing-intelligence">Routing Intelligence</a> |
-      <a href="/dashboard/optimization">Optimization Dashboard</a> |
-      <a href="/dashboard/costs">Cost Dashboard</a> |
-      <a href="/dashboard/model-leaderboard">Model Leaderboard</a> |
-      <a href="/dashboard/benchmarks">Benchmarks</a> |
-      <a href="/v1/readiness">Readiness</a> |
-      <a href="/v1/optimization">Optimization JSON</a> |
-      <a href="/v1/repository-dna">Repository DNA</a> |
-      <a href="/v1/workspace-memory">Workspace Memory</a> |
-      <a href="/v1/night-mode">Night Mode</a>
-    </p>
-    <p>
-      <a href="/health">Health JSON</a> |
-      <a href="/v1/models">Models JSON</a>
+    {dashboard_sections}
+    <p class="json-links">
+      Raw APIs:
+      <a href="/v1/status">status</a> |
+      <a href="/health">health</a> |
+      <a href="/v1/models">models</a> |
+      <a href="/v1/optimization">optimization</a> |
+      <a href="/v1/events">events</a>
     </p>
   </main>
 </body>

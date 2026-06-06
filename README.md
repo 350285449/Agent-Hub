@@ -214,7 +214,14 @@ Agent-Hub is organized around modular backend systems:
   into bounded local-process JSON execution.
 - Dashboard: `/dashboard`, `/dashboard/routing-intelligence`,
   `/dashboard/optimization`, `/dashboard/costs`,
-  `/dashboard/model-leaderboard`, `/dashboard/benchmarks`, `/v1/status`,
+  `/dashboard/model-leaderboard`, `/dashboard/benchmarks`,
+  `/dashboard/status`, `/dashboard/provider-health`,
+  `/dashboard/provider-scores`, `/dashboard/routing-history`,
+  `/dashboard/readiness`, `/dashboard/production-check`,
+  `/dashboard/limits`, `/dashboard/usage`, `/dashboard/events`,
+  `/dashboard/tools`, `/dashboard/workflows`, `/dashboard/plugins`,
+  `/dashboard/enterprise`, `/dashboard/repository-dna`,
+  `/dashboard/workspace-memory`, `/dashboard/night-mode`, `/v1/status`,
   `/v1/readiness`, `/v1/production-check`, `/v1/routing-history`,
   `/v1/provider-scores`, `/v1/provider-health`, `/v1/cost-dashboard`,
   `/v1/model-leaderboard`, and `/v1/benchmarks` explain model selection,
@@ -752,7 +759,18 @@ redacted.
 
 Dashboard pages avoid raw empty JSON when data has not accumulated yet:
 
-- `/dashboard` links to all current HTML diagnostics pages.
+- `/dashboard` groups feature pages into Operate, Routing, Models, Workspace,
+  Automation, and Admin sections.
+- `/dashboard/status` summarizes backend status and links to follow-up pages.
+- `/dashboard/provider-health` renders availability, latency, cooldowns, and failures.
+- `/dashboard/production-check` renders release-readiness acceptance checks.
+- `/dashboard/limits` renders quota, cooldown, active model, and fallback state.
+- `/dashboard/usage` renders token totals, provider calls, tools, and permissions.
+- `/dashboard/events` renders internal, routing, workflow, and adaptive events.
+- `/dashboard/tools` renders registered tools and permission requirements.
+- `/dashboard/workflows` renders presets, runs, and workflow status.
+- `/dashboard/plugins` renders discovered plugin capabilities.
+- `/dashboard/enterprise` renders users, roles, workspaces, and audit status.
 - `/dashboard/routing-intelligence` shows selected model/workflow, reasons,
   rejected candidates, provider rankings, and fallback options.
 - `/dashboard/optimization` shows adaptive routing, routing memory, workflow,
@@ -760,6 +778,13 @@ Dashboard pages avoid raw empty JSON when data has not accumulated yet:
 - `/dashboard/costs` explains missing pricing/usage data and links to the cost JSON.
 - `/dashboard/model-leaderboard` shows configured models plus measured-vs-waiting status.
 - `/dashboard/benchmarks` explains how to generate benchmark reports.
+- `/dashboard/provider-scores` renders stored provider scores instead of raw JSON.
+- `/dashboard/routing-history` renders recent routing events.
+- `/dashboard/readiness` renders setup scorecard and feature maturity.
+- `/dashboard/repository-dna` renders repository profile, language/framework
+  signals, and risk areas.
+- `/dashboard/workspace-memory` renders remembered repository facts and files.
+- `/dashboard/night-mode` renders the validation plan and safeguards.
 
 Test proof:
 

@@ -191,6 +191,15 @@ from `/v1/cost-dashboard`. `/dashboard/model-leaderboard` renders configured
 models with measured-vs-waiting status from `/v1/model-leaderboard`.
 `/dashboard/benchmarks` renders benchmark report guidance and recent reports
 from `/v1/benchmarks`.
+`/dashboard/status`, `/dashboard/provider-health`,
+`/dashboard/provider-scores`, `/dashboard/routing-history`,
+`/dashboard/readiness`, `/dashboard/production-check`, `/dashboard/limits`,
+`/dashboard/usage`, `/dashboard/events`, `/dashboard/tools`,
+`/dashboard/workflows`, `/dashboard/plugins`, `/dashboard/enterprise`,
+`/dashboard/repository-dna`, `/dashboard/workspace-memory`, and
+`/dashboard/night-mode` render the matching diagnostic APIs as readable HTML
+tables and cards. The raw JSON endpoints remain linked inside each rendered
+dashboard page.
 The VS Code extension exposes the same browser entry point through
 `Agent Hub: Open Dashboard` and the sidebar `Dashboard` button.
 `POST /v1/routing/simulate` previews the auto workflow selection, router

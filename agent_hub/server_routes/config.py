@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from .middleware import request_query
+from ..observability import usage_snapshot
 
 
 def handle_get(handler: object, path: str) -> bool:
@@ -42,6 +43,81 @@ def handle_get(handler: object, path: str) -> bool:
     if path == "/dashboard/benchmarks":
         body = handler.server.diagnostics_service.benchmark_results_body()
         handler._send_html(_benchmark_results_dashboard_html(body))
+        return True
+    if path == "/dashboard/status":
+        body = server_module._status_body(
+            handler.server.config,
+            handler.server.router,
+            provider_scores=handler.server.diagnostics_service.provider_scores(),
+        )
+        handler._send_html(_status_dashboard_html(body))
+        return True
+    if path == "/dashboard/provider-health":
+        body = server_module._provider_health_body(handler.server.config, handler.server.router)
+        handler._send_html(_provider_health_dashboard_html(body))
+        return True
+    if path == "/dashboard/production-check":
+        body = handler.server.diagnostics_service.production_check_body(handler.server.router)
+        handler._send_html(_production_check_dashboard_html(body))
+        return True
+    if path == "/dashboard/limits":
+        body = handler.server.diagnostics_service.limits_body(handler.server.router)
+        handler._send_html(_limits_dashboard_html(body))
+        return True
+    if path == "/dashboard/usage":
+        body = usage_snapshot(
+            handler.server.config.state_dir,
+            handler.server.router.health_snapshot(include_history=True),
+        )
+        handler._send_html(_usage_dashboard_html(body))
+        return True
+    if path == "/dashboard/events":
+        body = server_module._events_body(handler.server.config)
+        handler._send_html(_events_dashboard_html(body))
+        return True
+    if path == "/dashboard/tools":
+        body = server_module._tools_body(handler.server.router)
+        handler._send_html(_tools_dashboard_html(body))
+        return True
+    if path == "/dashboard/workflows":
+        body = server_module._workflow_status_body(handler.server.config)
+        handler._send_html(_workflows_dashboard_html(body))
+        return True
+    if path == "/dashboard/plugins":
+        body = handler.server.diagnostics_service.plugins_body()
+        handler._send_html(_plugins_dashboard_html(body))
+        return True
+    if path == "/dashboard/enterprise":
+        body = handler.server.diagnostics_service.enterprise_status_body()
+        handler._send_html(_enterprise_dashboard_html(body))
+        return True
+    if path == "/dashboard/provider-scores":
+        body = handler.server.diagnostics_service.provider_scores_body()
+        handler._send_html(_provider_scores_dashboard_html(body))
+        return True
+    if path == "/dashboard/routing-history":
+        body = server_module._routing_history_body(handler.server.config)
+        handler._send_html(_routing_history_dashboard_html(body))
+        return True
+    if path == "/dashboard/readiness":
+        body = handler.server.diagnostics_service.readiness_body(handler.server.router)
+        handler._send_html(_readiness_dashboard_html(body))
+        return True
+    if path == "/dashboard/repository-dna":
+        dna = handler.server.router.repository_intelligence.repository_dna()
+        body = dna.to_dict()
+        handler._send_html(_repository_dna_dashboard_html(body))
+        return True
+    if path == "/dashboard/workspace-memory":
+        body = handler.server.router.repository_intelligence.workspace_memory()
+        handler._send_html(_workspace_memory_dashboard_html(body))
+        return True
+    if path == "/dashboard/night-mode":
+        from ..repository_intelligence import build_autonomous_night_mode_plan
+
+        dna = handler.server.router.repository_intelligence.repository_dna()
+        body = build_autonomous_night_mode_plan(dna=dna, config=handler.server.config)
+        handler._send_html(_night_mode_dashboard_html(body))
         return True
     if path == "/v1/events":
         handler._send_diagnostics_json(server_module._events_body(handler.server.config))
@@ -283,6 +359,558 @@ def _benchmark_results_dashboard_html(body: dict[str, Any]) -> str:
     )
 
 
+def _status_dashboard_html(body: dict[str, Any]) -> str:
+    providers = body.get("providers") if isinstance(body.get("providers"), list) else []
+    table_rows = "".join(_status_provider_row_html(row) for row in providers if isinstance(row, dict))
+    if not table_rows:
+        table_rows = "<tr><td colspan=\"7\" class=\"muted\">No providers configured.</td></tr>"
+    quick_links = _quick_link_grid_html(
+        [
+            ("Readiness", "/dashboard/readiness", "Setup score and next action"),
+            ("Provider Health", "/dashboard/provider-health", "Availability, latency, and failures"),
+            ("Routing Intelligence", "/dashboard/routing-intelligence", "Why a model was selected"),
+            ("Limits", "/dashboard/limits", "Quota, cooldown, and active model state"),
+        ]
+    )
+    content = f"""
+{quick_links}
+<section class="panel">
+  <h2>Providers</h2>
+  <table>
+    <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Available</th><th>Score</th><th>Latency</th><th>Reason</th></tr></thead>
+    <tbody>{table_rows}</tbody>
+  </table>
+</section>"""
+    cards = [
+        ("Status", body.get("status", "unknown")),
+        ("Version", body.get("version", "unknown")),
+        ("Active providers", len(body.get("active_providers", [])) if isinstance(body.get("active_providers"), list) else 0),
+        ("Selected model", body.get("selected_model") or "none yet"),
+    ]
+    return _dashboard_page(
+        "Agent Hub Status",
+        "Current backend state, provider availability, and the most useful follow-up dashboards.",
+        cards,
+        content,
+        body,
+        json_path="/v1/status",
+    )
+
+
+def _provider_health_dashboard_html(body: dict[str, Any]) -> str:
+    providers = body.get("providers") if isinstance(body.get("providers"), list) else []
+    health = _dict(body.get("health"))
+    rows = "".join(
+        _provider_health_row_html(row, _dict(health.get(str(row.get("agent") or row.get("name") or ""))))
+        for row in providers
+        if isinstance(row, dict)
+    )
+    if not rows:
+        rows = "<tr><td colspan=\"9\" class=\"muted\">No provider health rows are available.</td></tr>"
+    failures = body.get("recent_failures") if isinstance(body.get("recent_failures"), list) else []
+    failure_rows = "".join(_event_row_html(row) for row in failures[-25:] if isinstance(row, dict))
+    if not failure_rows:
+        failure_rows = "<tr><td colspan=\"5\" class=\"muted\">No recent provider failures.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>Provider Health</h2>
+  <table>
+    <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Available</th><th>Degraded</th><th>Reliability</th><th>Latency</th><th>Cooldown</th><th>Last Error</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Recent Failures</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Type</th><th>Agent</th><th>Model</th><th>Detail</th></tr></thead>
+    <tbody>{failure_rows}</tbody>
+  </table>
+</section>"""
+    available = sum(1 for row in health.values() if isinstance(row, dict) and row.get("available"))
+    cards = [
+        ("Providers", len(providers)),
+        ("Available", available),
+        ("Recent failures", len(failures)),
+        ("State", "healthy" if available else "needs provider"),
+    ]
+    return _dashboard_page(
+        "Agent Hub Provider Health",
+        "Provider readiness, reliability, latency, cooldowns, and recent failures.",
+        cards,
+        content,
+        body,
+        json_path="/v1/provider-health",
+    )
+
+
+def _production_check_dashboard_html(body: dict[str, Any]) -> str:
+    checks = body.get("checks") if isinstance(body.get("checks"), list) else []
+    check_rows = "".join(_production_check_row_html(row) for row in checks if isinstance(row, dict))
+    if not check_rows:
+        check_rows = "<tr><td colspan=\"6\" class=\"muted\">No production checks were reported.</td></tr>"
+    failed = body.get("failed") if isinstance(body.get("failed"), list) else []
+    warnings = body.get("warnings") if isinstance(body.get("warnings"), list) else []
+    content = f"""
+<section class="panel">
+  <h2>Acceptance Checks</h2>
+  <table>
+    <thead><tr><th>Check</th><th>Severity</th><th>OK</th><th>Earned</th><th>Detail</th><th>Command</th></tr></thead>
+    <tbody>{check_rows}</tbody>
+  </table>
+</section>"""
+    cards = [
+        ("Score", body.get("score", "unknown")),
+        ("State", body.get("state", "unknown")),
+        ("Failed", len(failed)),
+        ("Warnings", len(warnings)),
+    ]
+    return _dashboard_page(
+        "Agent Hub Production Check",
+        "Strict release-readiness checks for provider health, safety, dashboards, and extension/backend alignment.",
+        cards,
+        content,
+        body,
+        json_path="/v1/production-check",
+    )
+
+
+def _limits_dashboard_html(body: dict[str, Any]) -> str:
+    limits = body.get("limits") if isinstance(body.get("limits"), list) else []
+    rows = "".join(_limit_row_html(row) for row in limits if isinstance(row, dict))
+    if not rows:
+        rows = "<tr><td colspan=\"8\" class=\"muted\">No enabled provider limits were reported.</td></tr>"
+    active = _dict(body.get("active_model"))
+    recommendations = body.get("recommendations") if isinstance(body.get("recommendations"), list) else []
+    rec_rows = "".join(_recommendation_row_html(row) for row in recommendations if isinstance(row, dict))
+    if not rec_rows:
+        rec_rows = "<tr><td colspan=\"5\" class=\"muted\">No routing recommendations yet.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>Limits And Cooldowns</h2>
+  <table>
+    <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Available</th><th>Requests</th><th>Tokens</th><th>Cooldown</th><th>Last Error</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Routing Recommendations</h2>
+  <table>
+    <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Available</th><th>Reason</th></tr></thead>
+    <tbody>{rec_rows}</tbody>
+  </table>
+</section>"""
+    cards = [
+        ("Active model", active.get("model") or "none"),
+        ("Available providers", len(body.get("active_providers", [])) if isinstance(body.get("active_providers"), list) else 0),
+        ("Failed models", len(body.get("failed_models", [])) if isinstance(body.get("failed_models"), list) else 0),
+        ("Fallback models", len(body.get("fallback_models", [])) if isinstance(body.get("fallback_models"), list) else 0),
+    ]
+    return _dashboard_page(
+        "Agent Hub Limits",
+        "Quota, cooldown, fallback, and active model information for configured providers.",
+        cards,
+        content,
+        body,
+        json_path="/v1/limits",
+    )
+
+
+def _usage_dashboard_html(body: dict[str, Any]) -> str:
+    tool_rows = "".join(_event_row_html(row) for row in body.get("recent_tool_executions", []) if isinstance(row, dict))
+    if not tool_rows:
+        tool_rows = "<tr><td colspan=\"5\" class=\"muted\">No recent tool executions.</td></tr>"
+    permission_rows = "".join(_event_row_html(row) for row in body.get("recent_permissions", []) if isinstance(row, dict))
+    if not permission_rows:
+        permission_rows = "<tr><td colspan=\"5\" class=\"muted\">No recent permission events.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>Recent Tool Executions</h2>
+  <table><thead><tr><th>Time</th><th>Type</th><th>Agent</th><th>Model</th><th>Detail</th></tr></thead><tbody>{tool_rows}</tbody></table>
+</section>
+<section class="panel">
+  <h2>Recent Permission Events</h2>
+  <table><thead><tr><th>Time</th><th>Type</th><th>Agent</th><th>Model</th><th>Detail</th></tr></thead><tbody>{permission_rows}</tbody></table>
+</section>"""
+    cards = [
+        ("Input tokens", body.get("input_tokens", 0)),
+        ("Output tokens", body.get("output_tokens", 0)),
+        ("Provider calls", _int(body.get("successful_provider_calls")) + _int(body.get("failed_provider_calls"))),
+        ("Tool executions", body.get("tool_executions", 0)),
+    ]
+    return _dashboard_page(
+        "Agent Hub Usage",
+        "Token totals, provider call counts, tool execution counts, and permission activity.",
+        cards,
+        content,
+        body,
+        json_path="/v1/usage",
+    )
+
+
+def _events_dashboard_html(body: dict[str, Any]) -> str:
+    sections = []
+    for label, key in (
+        ("Internal Events", "events"),
+        ("Routing Events", "routing"),
+        ("Workflow Events", "workflows"),
+        ("Adaptive Events", "adaptive"),
+    ):
+        rows = "".join(_event_row_html(row) for row in body.get(key, []) if isinstance(row, dict))
+        if not rows:
+            rows = "<tr><td colspan=\"5\" class=\"muted\">No events yet.</td></tr>"
+        sections.append(
+            f"""
+<section class="panel">
+  <h2>{_html(label)}</h2>
+  <table><thead><tr><th>Time</th><th>Type</th><th>Agent</th><th>Model</th><th>Detail</th></tr></thead><tbody>{rows}</tbody></table>
+</section>"""
+        )
+    cards = [
+        ("Events", len(body.get("events", [])) if isinstance(body.get("events"), list) else 0),
+        ("Routing", len(body.get("routing", [])) if isinstance(body.get("routing"), list) else 0),
+        ("Workflows", len(body.get("workflows", [])) if isinstance(body.get("workflows"), list) else 0),
+        ("Adaptive", len(body.get("adaptive", [])) if isinstance(body.get("adaptive"), list) else 0),
+    ]
+    return _dashboard_page(
+        "Agent Hub Events",
+        "Recent internal, routing, workflow, and adaptive learning events.",
+        cards,
+        "\n".join(sections),
+        body,
+        json_path="/v1/events",
+    )
+
+
+def _tools_dashboard_html(body: dict[str, Any]) -> str:
+    tools = body.get("tools") if isinstance(body.get("tools"), list) else []
+    rows = "".join(_tool_row_html(row) for row in tools if isinstance(row, dict))
+    if not rows:
+        rows = "<tr><td colspan=\"5\" class=\"muted\">No tools registered.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>Registered Tools</h2>
+  <table><thead><tr><th>Name</th><th>Description</th><th>Permission</th><th>Required</th><th>Schema</th></tr></thead><tbody>{rows}</tbody></table>
+</section>"""
+    cards = [
+        ("Tools", body.get("count", len(tools))),
+        ("Privileged", sum(1 for row in tools if isinstance(row, dict) and row.get("permission"))),
+        ("State", "ready" if tools else "no tools"),
+    ]
+    return _dashboard_page(
+        "Agent Hub Tools",
+        "Registered workspace tools, permissions, and argument schemas.",
+        cards,
+        content,
+        body,
+        json_path="/v1/tools",
+    )
+
+
+def _workflows_dashboard_html(body: dict[str, Any]) -> str:
+    summary = _dict(body.get("summary"))
+    runs = body.get("runs") if isinstance(body.get("runs"), list) else []
+    presets = body.get("presets") if isinstance(body.get("presets"), list) else []
+    run_rows = "".join(_workflow_run_row_html(row) for row in runs if isinstance(row, dict))
+    if not run_rows:
+        run_rows = "<tr><td colspan=\"7\" class=\"muted\">No workflow runs yet.</td></tr>"
+    preset_rows = "".join(_workflow_preset_row_html(row) for row in presets if isinstance(row, dict))
+    if not preset_rows:
+        preset_rows = "<tr><td colspan=\"4\" class=\"muted\">No workflow presets reported.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>Recent Runs</h2>
+  <table><thead><tr><th>ID</th><th>Workflow</th><th>Pattern</th><th>Status</th><th>Stages</th><th>Started</th><th>Updated</th></tr></thead><tbody>{run_rows}</tbody></table>
+</section>
+<section class="panel">
+  <h2>Presets</h2>
+  <table><thead><tr><th>ID</th><th>Task Type</th><th>Pattern</th><th>Description</th></tr></thead><tbody>{preset_rows}</tbody></table>
+</section>"""
+    cards = [
+        ("Runs", summary.get("recent_run_count", len(runs))),
+        ("Active", summary.get("active_run_count", 0)),
+        ("Finished", summary.get("finished_run_count", 0)),
+        ("Presets", summary.get("preset_count", len(presets))),
+    ]
+    return _dashboard_page(
+        "Agent Hub Workflows",
+        "Workflow presets, recent runs, stage counts, and status.",
+        cards,
+        content,
+        body,
+        json_path="/v1/workflows/status",
+    )
+
+
+def _plugins_dashboard_html(body: dict[str, Any]) -> str:
+    plugins = body.get("plugins") if isinstance(body.get("plugins"), list) else body.get("data")
+    plugins = plugins if isinstance(plugins, list) else []
+    rows = "".join(_plugin_row_html(row) for row in plugins if isinstance(row, dict))
+    if not rows:
+        rows = "<tr><td colspan=\"5\" class=\"muted\">No plugins discovered.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>Discovered Plugins</h2>
+  <table><thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Enabled</th><th>Scopes</th></tr></thead><tbody>{rows}</tbody></table>
+</section>"""
+    cards = [
+        ("Plugins", body.get("count", len(plugins))),
+        ("Enabled", sum(1 for row in plugins if isinstance(row, dict) and row.get("enabled"))),
+        ("State", body.get("state") or ("ready" if plugins else "none discovered")),
+    ]
+    return _dashboard_page(
+        "Agent Hub Plugins",
+        "Discovered provider, tool, workflow, routing, memory, and context plugins.",
+        cards,
+        content,
+        body,
+        json_path="/v1/plugins",
+    )
+
+
+def _enterprise_dashboard_html(body: dict[str, Any]) -> str:
+    summary = _dict(body.get("summary"))
+    warnings = body.get("warnings") if isinstance(body.get("warnings"), list) else []
+    users = body.get("users") if isinstance(body.get("users"), list) else []
+    roles = body.get("roles") if isinstance(body.get("roles"), list) else []
+    workspaces = body.get("workspaces") if isinstance(body.get("workspaces"), list) else []
+    warning_section = _list_section_html("Warnings", warnings)
+    content = "\n".join(
+        [
+            warning_section,
+            _enterprise_rows_section_html("Users", users),
+            _enterprise_rows_section_html("Roles", roles),
+            _enterprise_rows_section_html("Workspaces", workspaces),
+        ]
+    )
+    cards = [
+        ("Enabled", str(bool(body.get("enabled"))).lower()),
+        ("State", body.get("state", "unknown")),
+        ("Users", summary.get("users", len(users))),
+        ("Audit events", summary.get("audit_events", 0)),
+    ]
+    return _dashboard_page(
+        "Agent Hub Enterprise",
+        "Enterprise users, roles, workspaces, grants, audit status, and configuration warnings.",
+        cards,
+        content,
+        body,
+        json_path="/v1/enterprise/status",
+    )
+
+
+def _provider_scores_dashboard_html(body: dict[str, Any]) -> str:
+    scores = _dict(body.get("data"))
+    rows = "".join(
+        _provider_score_row_html(agent, row)
+        for agent, row in sorted(scores.items())
+        if isinstance(row, dict)
+    )
+    if not rows:
+        rows = "<tr><td colspan=\"8\" class=\"muted\">No provider scores have been recorded yet.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>Provider Scores</h2>
+  <table>
+    <thead><tr><th>Agent</th><th>Overall</th><th>Success</th><th>Failures</th><th>Samples</th><th>Latency</th><th>Cost</th><th>Task Scores</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>"""
+    cards = [
+        ("Scored agents", len(scores)),
+        ("Benchmark types", len(body.get("benchmark_types", [])) if isinstance(body.get("benchmark_types"), list) else 0),
+        ("State", "measured" if scores else "waiting for data"),
+    ]
+    return _dashboard_page(
+        "Agent Hub Provider Scores",
+        "Stored provider evaluation and live outcome scores used by routing.",
+        cards,
+        content,
+        body,
+        json_path="/v1/provider-scores",
+    )
+
+
+def _routing_history_dashboard_html(body: dict[str, Any]) -> str:
+    events = body.get("data") if isinstance(body.get("data"), list) else []
+    rows = "".join(_routing_history_row_html(row) for row in events[:100] if isinstance(row, dict))
+    if not rows:
+        rows = "<tr><td colspan=\"6\" class=\"muted\">No routing events have been recorded yet.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>Recent Routing Events</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Type</th><th>Agent</th><th>Provider</th><th>Model</th><th>Detail</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>"""
+    cards = [
+        ("Events", body.get("count", len(events))),
+        ("Showing", len(events[:100])),
+        ("State", "recording" if events else "waiting for events"),
+    ]
+    return _dashboard_page(
+        "Agent Hub Routing History",
+        "Recent routing selections, fallbacks, failures, and provider events.",
+        cards,
+        content,
+        body,
+        json_path="/v1/routing-history",
+    )
+
+
+def _readiness_dashboard_html(body: dict[str, Any]) -> str:
+    items = body.get("items") if isinstance(body.get("items"), list) else []
+    feature_status = _dict(body.get("feature_status"))
+    item_rows = "".join(_readiness_item_row_html(row) for row in items if isinstance(row, dict))
+    if not item_rows:
+        item_rows = "<tr><td colspan=\"6\" class=\"muted\">No readiness items were reported.</td></tr>"
+    feature_rows = "".join(
+        _feature_status_row_html(name, row)
+        for name, row in sorted(feature_status.items())
+        if isinstance(row, dict)
+    )
+    if not feature_rows:
+        feature_rows = "<tr><td colspan=\"4\" class=\"muted\">No feature states were reported.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>Readiness Scorecard</h2>
+  <table>
+    <thead><tr><th>Item</th><th>Status</th><th>Score</th><th>Weight</th><th>Detail</th><th>Command</th></tr></thead>
+    <tbody>{item_rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Feature Maturity</h2>
+  <table>
+    <thead><tr><th>Feature</th><th>State</th><th>Ready</th><th>Detail</th></tr></thead>
+    <tbody>{feature_rows}</tbody>
+  </table>
+</section>"""
+    next_step = _dict(body.get("next_step"))
+    cards = [
+        ("Score", body.get("score", "unknown")),
+        ("Rating", body.get("rating", "unknown")),
+        ("State", body.get("state", "unknown")),
+        ("Next step", next_step.get("label") or "none"),
+    ]
+    return _dashboard_page(
+        "Agent Hub Readiness",
+        "Setup score, route readiness, and feature maturity for this install.",
+        cards,
+        content,
+        body,
+        json_path="/v1/readiness",
+    )
+
+
+def _repository_dna_dashboard_html(body: dict[str, Any]) -> str:
+    source_counts = _dict(body.get("source_counts"))
+    commit_history = _dict(body.get("commit_history"))
+    content = "\n".join(
+        [
+            _key_value_section_html(
+                "Repository Profile",
+                [
+                    ("Root", body.get("root")),
+                    ("Profile ID", body.get("profile_id")),
+                    ("Fingerprint", body.get("fingerprint")),
+                    ("Project", body.get("project")),
+                    ("Primary language", body.get("language")),
+                    ("Architecture", body.get("architecture")),
+                    ("Code style", body.get("code_style")),
+                    ("Testing", body.get("testing")),
+                    ("Summary", body.get("summary")),
+                ],
+            ),
+            _list_section_html("Frameworks", body.get("frameworks")),
+            _list_section_html("Design Patterns", body.get("design_patterns")),
+            _list_section_html("Dependencies", body.get("dependencies")),
+            _list_section_html("Risk Areas", body.get("risk_areas")),
+            _list_section_html("Package Files", body.get("package_files")),
+            _mapping_section_html("Source Counts", source_counts),
+            _mapping_section_html("Commit History", commit_history),
+        ]
+    )
+    cards = [
+        ("Project", body.get("project", "Repository")),
+        ("Language", body.get("language", "unknown")),
+        ("Frameworks", len(body.get("frameworks", [])) if isinstance(body.get("frameworks"), list) else 0),
+        ("Confidence", _percent(body.get("confidence"))),
+    ]
+    return _dashboard_page(
+        "Agent Hub Repository DNA",
+        "Repository fingerprint, language/framework signals, risk areas, and context clues used by routing.",
+        cards,
+        content,
+        body,
+        json_path="/v1/repository-dna",
+    )
+
+
+def _workspace_memory_dashboard_html(body: dict[str, Any]) -> str:
+    facts = body.get("facts") if isinstance(body.get("facts"), list) else []
+    files = body.get("remembered_files") if isinstance(body.get("remembered_files"), list) else []
+    content = "\n".join(
+        [
+            _list_section_html("Remembered Facts", facts),
+            _list_section_html("Remembered Files", files),
+            _key_value_section_html(
+                "Memory Metadata",
+                [
+                    ("Last updated", _timestamp(body.get("last_updated_at"))),
+                    ("Fact count", len(facts)),
+                    ("File count", len(files)),
+                ],
+            ),
+        ]
+    )
+    cards = [
+        ("Facts", len(facts)),
+        ("Files", len(files)),
+        ("Last updated", _timestamp(body.get("last_updated_at"))),
+    ]
+    return _dashboard_page(
+        "Agent Hub Workspace Memory",
+        "Compact repository facts and files remembered for routing and context selection.",
+        cards,
+        content,
+        body,
+        json_path="/v1/workspace-memory",
+    )
+
+
+def _night_mode_dashboard_html(body: dict[str, Any]) -> str:
+    content = "\n".join(
+        [
+            _list_section_html("Planned Tasks", body.get("tasks")),
+            _list_section_html("Validation Commands", body.get("validation_commands")),
+            _list_section_html("Safeguards", body.get("safeguards")),
+            _key_value_section_html(
+                "Plan Metadata",
+                [
+                    ("Enabled", str(bool(body.get("enabled"))).lower()),
+                    ("Mode", body.get("mode")),
+                    ("Repository profile", body.get("repository_profile_id")),
+                ],
+            ),
+        ]
+    )
+    cards = [
+        ("Enabled", str(bool(body.get("enabled"))).lower()),
+        ("Mode", body.get("mode", "plan_only")),
+        ("Tasks", len(body.get("tasks", [])) if isinstance(body.get("tasks"), list) else 0),
+        ("Commands", len(body.get("validation_commands", [])) if isinstance(body.get("validation_commands"), list) else 0),
+    ]
+    return _dashboard_page(
+        "Agent Hub Night Mode",
+        "Autonomous validation plan and safeguards. Execution remains validation-only unless explicitly enabled.",
+        cards,
+        content,
+        body,
+        json_path="/v1/night-mode",
+    )
+
+
 def _dashboard_page(
     title: str,
     subtitle: str,
@@ -311,6 +939,10 @@ p{{color:#cbd5e1}} a{{color:#67e8f9}} code,pre{{font-family:ui-monospace,SFMono-
 .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:20px 0}}
 .card,.panel,.empty{{border:1px solid #334155;background:#111827;border-radius:12px;padding:16px}}
 .card strong{{display:block;font-size:22px;margin-bottom:4px}} .card span,.muted{{color:#94a3b8}}
+.link-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:20px 0}}
+.link-card{{display:block;border:1px solid #334155;background:#111827;border-radius:12px;padding:14px;text-decoration:none}}
+.link-card strong,.link-card span{{display:block}} .link-card span{{color:#94a3b8;margin-top:4px}}
+.link-card:hover{{border-color:#67e8f9;background:#172033}}
 .panel{{margin:16px 0;overflow:auto}} .empty{{border-color:#475569;background:#172033}}
 table{{width:100%;border-collapse:collapse}} th,td{{padding:10px;border-bottom:1px solid #334155;text-align:left;vertical-align:top}}
 th{{color:#93c5fd;font-size:12px;text-transform:uppercase;letter-spacing:.05em}}
@@ -425,6 +1057,280 @@ def _benchmark_snapshot_row_html(row: dict[str, Any]) -> str:
         f"<td>{_html(row.get('measurement_status'))}</td>"
         "</tr>"
     )
+
+
+def _quick_link_grid_html(links: list[tuple[str, str, str]]) -> str:
+    items = "".join(
+        f"<a class=\"link-card\" href=\"{_html(href)}\"><strong>{_html(label)}</strong><span>{_html(detail)}</span></a>"
+        for label, href, detail in links
+    )
+    return f"<section class=\"link-grid\">{items}</section>"
+
+
+def _status_provider_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('agent') or row.get('name'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{str(bool(row.get('available'))).lower()}</td>"
+        f"<td>{_html(_number(row.get('score') or row.get('provider_score')))}</td>"
+        f"<td>{_html(_latency(row.get('average_latency_ms') or row.get('latency_ms')))}</td>"
+        f"<td>{_html(row.get('unavailable_reason') or row.get('last_error_message') or row.get('reason'))}</td>"
+        "</tr>"
+    )
+
+
+def _provider_health_row_html(row: dict[str, Any], health: dict[str, Any]) -> str:
+    agent = row.get("agent") or row.get("name")
+    return (
+        "<tr>"
+        f"<td>{_html(agent)}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{str(bool(health.get('available', row.get('available')))).lower()}</td>"
+        f"<td>{str(bool(health.get('degraded'))).lower()}</td>"
+        f"<td>{_html(_percent(health.get('reliability_score')))}</td>"
+        f"<td>{_html(_latency(health.get('average_latency_ms') or row.get('average_latency_ms')))}</td>"
+        f"<td>{_html(_timestamp(health.get('cooldown_until') or row.get('cooldown_until')))}</td>"
+        f"<td>{_html(health.get('last_error_message') or row.get('last_error_message') or row.get('unavailable_reason'))}</td>"
+        "</tr>"
+    )
+
+
+def _production_check_row_html(row: dict[str, Any]) -> str:
+    earned = row.get("earned")
+    weight = row.get("weight")
+    score = f"{earned}/{weight}" if weight is not None else earned
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('label') or row.get('id'))}</td>"
+        f"<td>{_html(row.get('severity'))}</td>"
+        f"<td>{str(bool(row.get('ok'))).lower()}</td>"
+        f"<td>{_html(score)}</td>"
+        f"<td>{_html(row.get('detail'))}</td>"
+        f"<td><code>{_html(row.get('command'))}</code></td>"
+        "</tr>"
+    )
+
+
+def _limit_row_html(row: dict[str, Any]) -> str:
+    requests = row.get("requests_remaining") if row.get("requests_remaining") is not None else row.get("remaining")
+    tokens = row.get("tokens_remaining") if row.get("tokens_remaining") is not None else row.get("quota_remaining")
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('agent'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{str(bool(row.get('available'))).lower()}</td>"
+        f"<td>{_html(requests)}</td>"
+        f"<td>{_html(tokens)}</td>"
+        f"<td>{_html(_timestamp(row.get('cooldown_until')))}</td>"
+        f"<td>{_html(row.get('last_error_message') or row.get('unavailable_reason'))}</td>"
+        "</tr>"
+    )
+
+
+def _recommendation_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('agent') or row.get('name'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{str(bool(row.get('available'))).lower()}</td>"
+        f"<td>{_html(row.get('reason') or row.get('why') or row.get('unavailable_reason'))}</td>"
+        "</tr>"
+    )
+
+
+def _event_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(_timestamp(row.get('time') or row.get('timestamp')))}</td>"
+        f"<td>{_html(row.get('type') or row.get('name') or row.get('event'))}</td>"
+        f"<td>{_html(row.get('agent') or row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model') or row.get('tool') or row.get('workflow'))}</td>"
+        f"<td>{_html(row.get('message') or row.get('reason') or row.get('detail') or row.get('status'))}</td>"
+        "</tr>"
+    )
+
+
+def _tool_row_html(row: dict[str, Any]) -> str:
+    schema = _dict(row.get("input_schema") or row.get("parameters"))
+    required = schema.get("required") if isinstance(schema.get("required"), list) else []
+    properties = _dict(schema.get("properties"))
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('name'))}</td>"
+        f"<td>{_html(row.get('description'))}</td>"
+        f"<td>{_html(row.get('permission'))}</td>"
+        f"<td>{_html(', '.join(str(item) for item in required))}</td>"
+        f"<td>{_html(', '.join(properties.keys()))}</td>"
+        "</tr>"
+    )
+
+
+def _workflow_run_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('workflow_id'))}</td>"
+        f"<td>{_html(row.get('workflow'))}</td>"
+        f"<td>{_html(row.get('workflow_pattern'))}</td>"
+        f"<td>{_html(row.get('status'))}</td>"
+        f"<td>{_html(row.get('stage_count'))}</td>"
+        f"<td>{_html(_timestamp(row.get('started_at')))}</td>"
+        f"<td>{_html(_timestamp(row.get('updated_at')))}</td>"
+        "</tr>"
+    )
+
+
+def _workflow_preset_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('id'))}</td>"
+        f"<td>{_html(row.get('task_type'))}</td>"
+        f"<td>{_html(row.get('workflow_pattern'))}</td>"
+        f"<td>{_html(row.get('description') or row.get('label'))}</td>"
+        "</tr>"
+    )
+
+
+def _plugin_row_html(row: dict[str, Any]) -> str:
+    scopes = row.get("scopes") if isinstance(row.get("scopes"), list) else row.get("requested_scopes")
+    scopes_text = ", ".join(str(item) for item in scopes) if isinstance(scopes, list) else ""
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('id') or row.get('plugin_id'))}</td>"
+        f"<td>{_html(row.get('name'))}</td>"
+        f"<td>{_html(row.get('type') or row.get('kind'))}</td>"
+        f"<td>{str(bool(row.get('enabled'))).lower()}</td>"
+        f"<td>{_html(scopes_text)}</td>"
+        "</tr>"
+    )
+
+
+def _enterprise_rows_section_html(title: str, rows: list[Any]) -> str:
+    body = "".join(
+        f"<tr><td>{_html(_dict(row).get('id') or _dict(row).get('name'))}</td><td>{_html(json.dumps(row, ensure_ascii=False, default=str))}</td></tr>"
+        for row in rows
+        if isinstance(row, dict)
+    )
+    if not body:
+        body = "<tr><td colspan=\"2\" class=\"muted\">No rows configured.</td></tr>"
+    return f"""
+<section class="panel">
+  <h2>{_html(title)}</h2>
+  <table><thead><tr><th>ID</th><th>Details</th></tr></thead><tbody>{body}</tbody></table>
+</section>"""
+
+
+def _provider_score_row_html(agent: str, row: dict[str, Any]) -> str:
+    successes = _int(row.get("successes"))
+    failures = _int(row.get("failures"))
+    samples = _int(row.get("sample_count")) or successes + failures
+    task_scores = _dict(row.get("task_scores"))
+    task_text = ", ".join(
+        f"{key}: {_number(value)}" for key, value in sorted(task_scores.items())
+    )
+    success_rate = successes / samples if samples else None
+    return (
+        "<tr>"
+        f"<td>{_html(agent)}</td>"
+        f"<td>{_html(_number(row.get('overall_score')))}</td>"
+        f"<td>{_html(_percent(success_rate))}</td>"
+        f"<td>{_html(failures)}</td>"
+        f"<td>{_html(samples)}</td>"
+        f"<td>{_html(_latency(row.get('average_latency_ms')))}</td>"
+        f"<td>{_html(_money(row.get('average_known_cost_usd')))}</td>"
+        f"<td>{_html(task_text or 'waiting')}</td>"
+        "</tr>"
+    )
+
+
+def _routing_history_row_html(row: dict[str, Any]) -> str:
+    data = _dict(row.get("data"))
+    return (
+        "<tr>"
+        f"<td>{_html(_timestamp(row.get('timestamp') or data.get('timestamp')))}</td>"
+        f"<td>{_html(row.get('type') or row.get('event') or data.get('type'))}</td>"
+        f"<td>{_html(row.get('agent') or data.get('agent'))}</td>"
+        f"<td>{_html(row.get('provider') or data.get('provider'))}</td>"
+        f"<td>{_html(row.get('model') or data.get('model'))}</td>"
+        f"<td>{_html(row.get('reason') or row.get('message') or data.get('reason') or data.get('message'))}</td>"
+        "</tr>"
+    )
+
+
+def _readiness_item_row_html(row: dict[str, Any]) -> str:
+    score = row.get("score")
+    max_score = row.get("max_score") or row.get("weight")
+    score_text = f"{score}/{max_score}" if max_score is not None else score
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('label') or row.get('id'))}</td>"
+        f"<td>{_html(row.get('status'))}</td>"
+        f"<td>{_html(score_text)}</td>"
+        f"<td>{_html(row.get('weight'))}</td>"
+        f"<td>{_html(row.get('detail'))}</td>"
+        f"<td><code>{_html(row.get('command'))}</code></td>"
+        "</tr>"
+    )
+
+
+def _feature_status_row_html(name: str, row: dict[str, Any]) -> str:
+    detail = row.get("detail") or row.get("message") or row.get("reason") or ""
+    ready = row.get("ready")
+    if ready is None:
+        ready = row.get("state") == "ready"
+    return (
+        "<tr>"
+        f"<td>{_html(name.replace('_', ' '))}</td>"
+        f"<td>{_html(row.get('state'))}</td>"
+        f"<td>{str(bool(ready)).lower()}</td>"
+        f"<td>{_html(detail)}</td>"
+        "</tr>"
+    )
+
+
+def _key_value_section_html(title: str, rows: list[tuple[str, Any]]) -> str:
+    body = "".join(
+        f"<tr><td>{_html(label)}</td><td>{_html(value)}</td></tr>"
+        for label, value in rows
+        if value not in (None, "")
+    )
+    if not body:
+        body = "<tr><td colspan=\"2\" class=\"muted\">No data yet.</td></tr>"
+    return f"""
+<section class="panel">
+  <h2>{_html(title)}</h2>
+  <table><thead><tr><th>Signal</th><th>Value</th></tr></thead><tbody>{body}</tbody></table>
+</section>"""
+
+
+def _list_section_html(title: str, values: Any) -> str:
+    rows = values if isinstance(values, list) else []
+    body = "".join(f"<tr><td>{_html(value)}</td></tr>" for value in rows)
+    if not body:
+        body = "<tr><td class=\"muted\">No data yet.</td></tr>"
+    return f"""
+<section class="panel">
+  <h2>{_html(title)}</h2>
+  <table><tbody>{body}</tbody></table>
+</section>"""
+
+
+def _mapping_section_html(title: str, values: dict[str, Any]) -> str:
+    body = "".join(
+        f"<tr><td>{_html(key)}</td><td>{_html(value)}</td></tr>"
+        for key, value in sorted(values.items())
+    )
+    if not body:
+        body = "<tr><td colspan=\"2\" class=\"muted\">No data yet.</td></tr>"
+    return f"""
+<section class="panel">
+  <h2>{_html(title)}</h2>
+  <table><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody>{body}</tbody></table>
+</section>"""
 
 
 def _dict(value: Any) -> dict[str, Any]:

@@ -57,7 +57,9 @@ The Agent Hub backend is bundled with the VSIX.
 
 Click `Stop` when you are done.
 Click `Dashboard` to open `http://127.0.0.1:8787/dashboard` and jump to
-routing intelligence, optimization, costs, leaderboard, or benchmarks.
+status, readiness, provider health, routing intelligence, optimization, costs,
+leaderboard, benchmarks, repository DNA, workspace memory, workflows, plugins,
+enterprise status, or night mode.
 
 Good first tasks:
 
