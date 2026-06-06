@@ -45,7 +45,7 @@ class LocalResearchProvider(BaseProviderAdapter):
         hits = self._search(query, max_sources=max_sources)
 
         documents: list[dict[str, Any]] = []
-        for hit in hits[:max_sources]:
+        for index, hit in enumerate(hits[:max_sources], start=1):
             text = self._fetch(hit["url"])
             fetched_snippet = _best_snippet(query, text) if text else ""
             snippet = _select_research_snippet(
@@ -62,6 +62,8 @@ class LocalResearchProvider(BaseProviderAdapter):
                     "snippet": snippet,
                     "source": hit.get("source", "web"),
                     "fetch_status": "fetched" if text else "search_snippet",
+                    "source_rank": index,
+                    "quality_score": _snippet_quality(query, snippet),
                 }
             )
 
@@ -73,12 +75,15 @@ class LocalResearchProvider(BaseProviderAdapter):
                     "snippet": hit.get("snippet", ""),
                     "source": hit.get("source", "web"),
                     "fetch_status": "search_snippet",
+                    "source_rank": index,
+                    "quality_score": _snippet_quality(query, str(hit.get("snippet") or "")),
                 }
-                for hit in hits[:max_sources]
+                for index, hit in enumerate(hits[:max_sources], start=1)
                 if hit.get("url") and hit.get("snippet")
             ]
 
         answer = _research_answer(query, documents)
+        confidence = _research_confidence(query, documents, self._last_search_diagnostics)
         return ProviderResult(
             text=answer,
             model=self.agent.model,
@@ -86,6 +91,8 @@ class LocalResearchProvider(BaseProviderAdapter):
                 "local_research": True,
                 "query": query,
                 "source_count": len(documents),
+                "confidence": confidence,
+                "source_quality": _source_quality_summary(documents),
                 "search_attempts": list(self._last_search_diagnostics),
             },
             usage={
@@ -194,6 +201,67 @@ def _snippet_quality(query: str, snippet: str) -> float:
     if sum(1 for char in snippet if ord(char) > 127) > len(snippet) * 0.35:
         noise_penalty += 0.5
     return keyword_hits - noise_penalty
+
+
+def _research_confidence(
+    query: str,
+    documents: list[dict[str, Any]],
+    diagnostics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not documents:
+        return {
+            "level": "low",
+            "score": 0.0,
+            "reason": "no usable source snippets were found",
+        }
+    fetched = sum(1 for document in documents if document.get("fetch_status") == "fetched")
+    strategy_successes = sum(1 for item in diagnostics if item.get("ok"))
+    average_quality = sum(
+        float(document.get("quality_score", 0.0) or 0.0)
+        for document in documents
+    ) / max(1, len(documents))
+    score = min(
+        1.0,
+        0.25
+        + (0.25 if fetched else 0.0)
+        + min(0.25, 0.08 * len(documents))
+        + min(0.15, 0.05 * strategy_successes)
+        + min(0.10, max(0.0, average_quality) * 0.03),
+    )
+    if score >= 0.75:
+        level = "high"
+    elif score >= 0.5:
+        level = "medium"
+    else:
+        level = "low"
+    return {
+        "level": level,
+        "score": round(score, 3),
+        "source_count": len(documents),
+        "fetched_source_count": fetched,
+        "successful_search_strategies": strategy_successes,
+        "average_quality_score": round(average_quality, 3),
+        "query_terms": [word for word in query.lower().split() if len(word) > 2][:12],
+    }
+
+
+def _source_quality_summary(documents: list[dict[str, Any]]) -> dict[str, Any]:
+    if not documents:
+        return {
+            "average_quality_score": 0.0,
+            "fetched_source_count": 0,
+            "search_snippet_count": 0,
+        }
+    fetched = sum(1 for document in documents if document.get("fetch_status") == "fetched")
+    return {
+        "average_quality_score": round(
+            sum(float(document.get("quality_score", 0.0) or 0.0) for document in documents)
+            / max(1, len(documents)),
+            3,
+        ),
+        "fetched_source_count": fetched,
+        "search_snippet_count": len(documents) - fetched,
+    }
 
 
 LocalResearchAdapter = LocalResearchProvider

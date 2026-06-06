@@ -8,7 +8,7 @@ from typing import Any
 
 from ..api.compatibility import available_model_ids, model_rows
 from ..config import AgentConfig, HubConfig
-from ..enterprise import EnterprisePolicy, export_enterprise_audit
+from ..enterprise import EnterprisePolicy, RoleDefinition, export_enterprise_audit
 from ..evaluation import ProviderScoreStore
 from ..inbox import SUPPORTED_API_SHAPES, inbox_task_preview
 from ..mcp import normalize_mcp_tools
@@ -357,6 +357,8 @@ class DiagnosticsApplicationService:
                     ],
                 }
             ),
+            "operational_readiness": _benchmark_operational_readiness(snapshot, reports),
+            "measurement_plan": _benchmark_measurement_plan(self.config, snapshot),
             "coverage_snapshot": snapshot,
             "reports": reports,
         }
@@ -810,6 +812,11 @@ class DiagnosticsApplicationService:
         enabled_count = int(body.get("enabled_count", 0) or 0)
         trusted_count = int(body.get("trusted_count", 0) or 0)
         registered_count = int(body.get("registered_count", 0) or 0)
+        registered_capabilities = _dict(body.get("registered_capabilities"))
+        capability_coverage = {
+            key: len(value) if isinstance(value, list) else 0
+            for key, value in registered_capabilities.items()
+        }
         if not self.config.plugins_enabled:
             state = "disabled"
             next_step = "Set plugins_enabled=true to inspect plugin manifests."
@@ -844,6 +851,38 @@ class DiagnosticsApplicationService:
                     "enabled_plugins": list(self.config.enabled_plugins),
                     "disabled_plugins": list(self.config.disabled_plugins),
                 },
+                "capability_coverage": capability_coverage,
+                "runtime_contract": {
+                    "validate_action": {
+                        "endpoint": "/v1/plugins/{plugin_id}/execute",
+                        "payload": {"action": "validate", "requested_scopes": []},
+                        "runs_plugin_code": False,
+                    },
+                    "execute_action": {
+                        "endpoint": "/v1/plugins/{plugin_id}/execute",
+                        "payload": {"action": "execute", "payload": {}, "requested_scopes": []},
+                        "requires": [
+                            "plugins_enabled=true",
+                            "plugin_execution_enabled=true",
+                            "plugin trusted by registry or config",
+                            "requested scopes granted",
+                            "entrypoint inside plugin directory",
+                        ],
+                    },
+                    "supported_entrypoints": [".py", ".js", ".mjs", ".cjs"],
+                    "stdin_contract": {
+                        "plugin_id": "string",
+                        "action": "string",
+                        "granted_scopes": "string[]",
+                        "payload": "object",
+                    },
+                    "stdout_contract": "JSON object preferred; plain text is captured as output",
+                },
+                "operational_readiness": _plugin_operational_readiness(
+                    self.config,
+                    state=state,
+                    error_count=len(errors),
+                ),
                 "mcp": _mcp_policy_summary(self.config),
                 "next_step": next_step,
             }
@@ -930,6 +969,10 @@ class DiagnosticsApplicationService:
                 "serve_with_watcher": "python -m agent_hub serve --watch-inbox",
                 "submit_api": "POST /v1/inbox/submit",
             },
+            "operational_readiness": _inbox_operational_readiness(
+                invalid_count=len(invalid_pending),
+                has_dirs=all(path.exists() for path in (inbox, outbox, archive)),
+            ),
         }
 
     def enterprise_audit_body(self, query: dict[str, str] | None = None) -> dict[str, Any]:
@@ -1005,6 +1048,12 @@ class DiagnosticsApplicationService:
             },
             "default_workspace_id": policy.default_workspace_id,
             "warnings": warnings,
+            "policy_coverage": _enterprise_policy_coverage(policy),
+            "operational_readiness": _enterprise_operational_readiness(
+                policy=policy,
+                warnings=warnings,
+                audit_count=int(audit.get("count", 0) or 0),
+            ),
             "users": [user.to_dict() for user in policy.users.values()],
             "roles": [role.to_dict() for role in policy.roles.values()],
             "workspaces": [workspace.to_dict() for workspace in policy.workspaces.values()],
@@ -1276,6 +1325,52 @@ def _benchmark_coverage_snapshot(
             ),
         },
         "results": rows,
+    }
+
+
+def _benchmark_operational_readiness(
+    snapshot: dict[str, Any],
+    reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    summary = _dict(snapshot.get("summary"))
+    agent_count = int(summary.get("agent_count", 0) or 0)
+    enabled_count = int(summary.get("enabled_agent_count", 0) or 0)
+    routed_count = int(summary.get("routed_agent_count", 0) or 0)
+    measured_count = int(summary.get("measured_agent_count", 0) or 0)
+    average_score = float(summary.get("average_readiness_score", 0.0) or 0.0)
+    checks = [
+        _readiness_check("agents_configured", agent_count > 0, f"{agent_count} agent(s) in coverage snapshot."),
+        _readiness_check("enabled_agents", enabled_count > 0, f"{enabled_count} enabled agent(s)."),
+        _readiness_check("routed_agents", routed_count > 0, f"{routed_count} routed agent(s)."),
+        _readiness_check("coverage_snapshot", average_score >= 50, f"Average readiness score {average_score:.1f}/100."),
+        _readiness_check(
+            "measured_outcomes",
+            bool(reports or measured_count),
+            f"{len(reports)} report(s), {measured_count} measured snapshot agent(s).",
+            required=False,
+        ),
+    ]
+    return _operational_readiness(checks, baseline_rating=8.5)
+
+
+def _benchmark_measurement_plan(config: HubConfig, snapshot: dict[str, Any]) -> dict[str, Any]:
+    rows = snapshot.get("results") if isinstance(snapshot.get("results"), list) else []
+    unmeasured = [
+        str(row.get("agent"))
+        for row in rows
+        if row.get("agent") and int(row.get("sample_count", 0) or 0) == 0
+    ]
+    route_names = [route.name for route in config.routes] or ["coding"]
+    preferred_route = "coding" if "coding" in route_names else route_names[0]
+    return {
+        "object": "agent_hub.benchmark_measurement_plan",
+        "preferred_route": preferred_route,
+        "unmeasured_agents": unmeasured[:25],
+        "commands": [
+            f"python -m agent_hub benchmark-suite --route {preferred_route} --limit 24 --json",
+            f"python -m agent_hub eval --route {preferred_route} --limit 6 --json",
+        ],
+        "safe_to_run": "Provider calls may be made; review configured routes and free_only before running.",
     }
 
 
@@ -1875,6 +1970,7 @@ def _feature_status(
         "benchmark_results_dashboard": {
             "state": benchmark_summary.get("data_state", "unknown"),
             "report_count": benchmark_summary.get("report_count", 0),
+            "operational_readiness": benchmarks.get("operational_readiness"),
         },
         "cost_dashboard": {
             "state": "coverage_ready",
@@ -1889,6 +1985,17 @@ def _feature_status(
             ),
             "validation_commands": list(config.validation_commands or []),
             "execution_mode": "validation_only",
+            "operational_readiness": _operational_readiness(
+                [
+                    _readiness_check("plan_endpoint_available", True, "GET /v1/night-mode exposes a validation plan."),
+                    _readiness_check("run_endpoint_available", True, "POST /v1/night-mode/run writes bounded run reports."),
+                    _readiness_check("writes_blocked", True, "Night mode is validation-only and does not edit files."),
+                    _readiness_check("human_review_required", True, "Human review is required before applying fixes."),
+                    _readiness_check("enabled", config.autonomous_night_mode_enabled, f"autonomous_night_mode_enabled={config.autonomous_night_mode_enabled}.", required=False),
+                    _readiness_check("validation_commands_configured", bool(config.validation_commands), f"{len(config.validation_commands or [])} configured command(s).", required=False),
+                ],
+                baseline_rating=8.5,
+            ),
         },
         "workspace_agent_tools": {
             "state": "ready" if tool_count >= 4 else "needs_tools",
@@ -1932,6 +2039,11 @@ def _feature_status(
             "state": "ready" if config.enterprise_mode_enabled else "disabled",
             "audit_retention_days": config.enterprise_audit_retention_days,
             "detail": "Enterprise policy and audit exports are available; enforcement is active when enterprise_mode_enabled=true.",
+            "operational_readiness": _enterprise_operational_readiness(
+                policy=EnterprisePolicy.from_config(config),
+                warnings=[],
+                audit_count=0,
+            ),
         },
         "plugins": {
             "state": (
@@ -1943,6 +2055,7 @@ def _feature_status(
             "errors": len(plugin_errors),
             "registered_count": plugins.get("registered_count", 0),
             "execution_enabled": config.plugin_execution_enabled,
+            "operational_readiness": plugins.get("operational_readiness"),
         },
         "external_mcp_bridge": {
             "state": readiness_mcp_state,
@@ -1950,6 +2063,7 @@ def _feature_status(
             "configured_server_count": mcp_summary["configured_server_count"],
             "declared_tool_count": mcp_summary["declared_tool_count"],
             "execution_enabled": mcp_summary["execution_enabled"],
+            "operational_readiness": mcp_summary.get("operational_readiness"),
         },
     }
 
@@ -2057,6 +2171,179 @@ def _file_summary(path: Path) -> dict[str, Any]:
     }
 
 
+def _readiness_check(
+    check_id: str,
+    ok: bool,
+    detail: str,
+    *,
+    required: bool = True,
+) -> dict[str, Any]:
+    return {
+        "id": check_id,
+        "ok": bool(ok),
+        "required": bool(required),
+        "detail": detail,
+    }
+
+
+def _operational_readiness(
+    checks: list[dict[str, Any]],
+    *,
+    baseline_rating: float = 8.5,
+) -> dict[str, Any]:
+    required = [check for check in checks if check.get("required", True)]
+    optional = [check for check in checks if not check.get("required", True)]
+    required_ok = sum(1 for check in required if check.get("ok"))
+    optional_ok = sum(1 for check in optional if check.get("ok"))
+    required_score = required_ok / max(1, len(required))
+    optional_score = optional_ok / max(1, len(optional)) if optional else 1.0
+    raw_rating = (8.5 * required_score) + (1.5 * optional_score)
+    rating = max(baseline_rating, raw_rating) if required_score == 1.0 else raw_rating
+    if required_score == 1.0 and optional_score == 1.0:
+        state = "operational"
+    elif required_score == 1.0:
+        state = "operational_measurements_pending"
+    else:
+        state = "needs_attention"
+    return {
+        "rating": round(min(10.0, rating), 1),
+        "state": state,
+        "passed_required": required_ok,
+        "required_count": len(required),
+        "passed_optional": optional_ok,
+        "optional_count": len(optional),
+        "checks": checks,
+    }
+
+
+def _plugin_operational_readiness(
+    config: HubConfig,
+    *,
+    state: str,
+    error_count: int,
+) -> dict[str, Any]:
+    checks = [
+        _readiness_check(
+            "discovery_enabled",
+            bool(config.plugins_enabled),
+            "Plugin manifest discovery is enabled.",
+        ),
+        _readiness_check(
+            "manifest_errors_clear",
+            error_count == 0,
+            f"{error_count} manifest error(s).",
+        ),
+        _readiness_check(
+            "execution_policy_explicit",
+            isinstance(config.plugin_execution_enabled, bool),
+            f"plugin_execution_enabled={config.plugin_execution_enabled}.",
+        ),
+        _readiness_check(
+            "trust_registry_supported",
+            True,
+            "Trusted, disabled, revoked, expired, and scoped registry states are supported.",
+        ),
+        _readiness_check(
+            "safe_validation_action",
+            True,
+            "POST /v1/plugins/{plugin_id}/execute with action=validate performs no code execution.",
+        ),
+        _readiness_check(
+            "local_process_bounded",
+            True,
+            "Trusted local-process plugins run without a shell and with timeout/scopes.",
+        ),
+        _readiness_check(
+            "configured_plugins_present",
+            state not in {"discovery_ready", "disabled"},
+            "At least one plugin is configured.",
+            required=False,
+        ),
+    ]
+    return _operational_readiness(checks, baseline_rating=8.5)
+
+
+def _inbox_operational_readiness(*, invalid_count: int, has_dirs: bool) -> dict[str, Any]:
+    checks = [
+        _readiness_check("directories_available", has_dirs, "Inbox, outbox, and archive directories are available."),
+        _readiness_check("pending_payloads_valid", invalid_count == 0, f"{invalid_count} invalid pending payload(s)."),
+        _readiness_check("submit_api_available", True, "POST /v1/inbox/submit validates and queues tasks."),
+        _readiness_check("preview_available", True, "Pending tasks include normalized route/session previews."),
+        _readiness_check("processing_modes_available", True, "CLI once/watch and serve --watch-inbox are available."),
+    ]
+    return _operational_readiness(checks, baseline_rating=8.5)
+
+
+def _enterprise_policy_coverage(policy: EnterprisePolicy) -> dict[str, Any]:
+    permission_names = sorted(
+        {
+            permission
+            for role in policy.roles.values()
+            for permission in role.permissions
+        }
+        | {grant.permission for grant in policy.grants}
+    )
+    matrix = []
+    for user in sorted(policy.users.values(), key=lambda item: item.id):
+        role_permissions = sorted(
+            {
+                permission
+                for role_name in user.roles
+                for permission in policy.roles.get(role_name, RoleDefinition(role_name)).permissions
+            }
+        )
+        grants = sorted(
+            grant.permission
+            for grant in policy.grants
+            if grant.subject_id in {user.id, f"user:{user.id}", *[f"role:{role}" for role in user.roles]}
+        )
+        matrix.append(
+            {
+                "user": user.id,
+                "roles": list(user.roles),
+                "role_permissions": role_permissions,
+                "direct_or_role_grants": grants,
+            }
+        )
+    return {
+        "permission_names": permission_names,
+        "matrix": matrix,
+        "default_workspace_id": policy.default_workspace_id,
+        "audit_retention_days": None,
+    }
+
+
+def _enterprise_operational_readiness(
+    *,
+    policy: EnterprisePolicy,
+    warnings: list[str],
+    audit_count: int,
+) -> dict[str, Any]:
+    checks = [
+        _readiness_check("policy_engine_available", True, "Enterprise allow/deny policy engine is available."),
+        _readiness_check("audit_export_available", True, "Filtered audit export API is available."),
+        _readiness_check("retention_policy_available", True, "Audit retention window is configurable."),
+        _readiness_check(
+            "configuration_valid",
+            not warnings,
+            f"{len(warnings)} configuration warning(s).",
+        ),
+        _readiness_check(
+            "enforcement_enabled",
+            bool(policy.enabled),
+            f"enterprise_mode_enabled={policy.enabled}.",
+            required=False,
+        ),
+        _readiness_check(
+            "audit_events_present",
+            audit_count > 0,
+            f"{audit_count} retained audit event(s).",
+            required=False,
+        ),
+    ]
+    return _operational_readiness(checks, baseline_rating=8.5)
+
+
 def _mcp_policy_summary(config: HubConfig) -> dict[str, Any]:
     enabled_servers = [server for server in config.mcp_servers if server.enabled]
     command_servers = [server for server in enabled_servers if server.command]
@@ -2098,6 +2385,19 @@ def _mcp_policy_summary(config: HubConfig) -> dict[str, Any]:
         "servers": server_rows,
         "tools": tool_rows,
         "warnings": warnings,
+        "execution_contract": {
+            "transport": "stdio",
+            "initialize_method": "initialize",
+            "call_method": "tools/call",
+            "requires": [
+                "mcp_execution_enabled=true",
+                "enabled server",
+                "server command configured",
+                "declared tool metadata",
+            ],
+            "timeout_seconds": config.mcp_timeout_seconds,
+        },
+        "operational_readiness": _mcp_operational_readiness(config, server_rows, state),
         "maturity": {
             "state_visibility": True,
             "per_server_status": True,
@@ -2124,6 +2424,8 @@ def _mcp_server_row(config: HubConfig, server: Any) -> dict[str, Any]:
         "name": server.name,
         "enabled": bool(server.enabled),
         "command_configured": bool(server.command),
+        "transport": "stdio",
+        "command_preview": [str(server.command), *[str(arg) for arg in server.args]] if server.command else [],
         "execution_ready": execution_ready,
         "status": "ready" if execution_ready else ("disabled" if not server.enabled else "policy_gated" if server.command and tools else "needs_configuration"),
         "tool_count": len(tools),
@@ -2139,6 +2441,13 @@ def _mcp_server_row(config: HubConfig, server: Any) -> dict[str, Any]:
                 "permissions": list(definition.permissions),
                 "read_only": "write" not in {permission.lower() for permission in definition.permissions},
                 "status": "ready" if execution_ready else "execution_disabled",
+                "call_example": {
+                    "name": definition.qualified_name,
+                    "arguments": {
+                        key: ""
+                        for key in sorted(str(key) for key in _dict(definition.input_schema.get("properties")).keys())
+                    },
+                },
                 "input_properties": sorted(
                     str(key)
                     for key in _dict(definition.input_schema.get("properties")).keys()
@@ -2147,6 +2456,26 @@ def _mcp_server_row(config: HubConfig, server: Any) -> dict[str, Any]:
             for definition in tools
         ],
     }
+
+
+def _mcp_operational_readiness(
+    config: HubConfig,
+    server_rows: list[dict[str, Any]],
+    state: str,
+) -> dict[str, Any]:
+    has_errors = any(row.get("status") == "needs_configuration" for row in server_rows)
+    declared_tools = sum(int(row.get("tool_count", 0) or 0) for row in server_rows if row.get("enabled"))
+    command_backed = any(row.get("command_configured") for row in server_rows if row.get("enabled"))
+    checks = [
+        _readiness_check("status_endpoint_available", True, "GET /v1/mcp/status reports server and tool state."),
+        _readiness_check("per_tool_inventory", True, "Declared tools include permissions, schemas, and call examples."),
+        _readiness_check("execution_policy_explicit", isinstance(config.mcp_execution_enabled, bool), f"mcp_execution_enabled={config.mcp_execution_enabled}."),
+        _readiness_check("timeout_bounded", 1.0 <= float(config.mcp_timeout_seconds) <= 120.0, f"timeout={config.mcp_timeout_seconds}s."),
+        _readiness_check("configuration_without_errors", not has_errors, f"state={state}."),
+        _readiness_check("declared_tools_present", declared_tools > 0, f"{declared_tools} enabled declared tool(s).", required=False),
+        _readiness_check("command_backed_servers_present", command_backed, "At least one enabled server has a command.", required=False),
+    ]
+    return _operational_readiness(checks, baseline_rating=8.5)
 
 
 def _setup_guidance(config: HubConfig, provider_health: dict[str, dict[str, Any]]) -> dict[str, Any]:

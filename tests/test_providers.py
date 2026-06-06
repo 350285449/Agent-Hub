@@ -838,6 +838,10 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("AI news today", result.text)
         self.assertEqual(result.citations, ["https://example.com/a"])
         self.assertEqual(result.search_results[0]["title"], "AI source")
+        self.assertEqual(result.search_results[0]["fetch_status"], "fetched")
+        self.assertIn("confidence", result.raw)
+        self.assertGreater(result.raw["confidence"]["score"], 0)
+        self.assertGreaterEqual(result.search_results[0]["quality_score"], 1)
         search.assert_called_once()
         get_url_text.assert_called_once()
 
@@ -865,6 +869,7 @@ class ProviderTests(unittest.TestCase):
 
         self.assertEqual(result.citations, ["https://example.com/a"])
         self.assertEqual(result.raw["search_attempts"][0]["strategy"], "direct_url")
+        self.assertEqual(result.raw["source_quality"]["fetched_source_count"], 1)
         search.assert_not_called()
 
     def test_local_research_uses_instant_answer_when_html_search_fails(self) -> None:

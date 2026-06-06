@@ -451,6 +451,11 @@ def build_autonomous_night_mode_plan(
     configured_commands = list(config.validation_commands or [])
     effective_commands = configured_commands or commands
     last_run = _latest_night_mode_report(config)
+    command_preflight = _night_mode_command_preflight(
+        effective_commands,
+        config=config,
+        source="config" if configured_commands else "detected",
+    )
     return {
         "object": "agent_hub.autonomous_night_mode_plan",
         "enabled": bool(config.autonomous_night_mode_enabled),
@@ -467,6 +472,7 @@ def build_autonomous_night_mode_plan(
         "tasks": tasks,
         "validation_commands": effective_commands,
         "validation_command_source": "config" if configured_commands else "detected",
+        "command_preflight": command_preflight,
         "run_endpoint": "/v1/night-mode/run",
         "last_run": last_run,
         "execution_limits": {
@@ -488,8 +494,14 @@ def build_autonomous_night_mode_plan(
             "destructive_edits_blocked": True,
             "human_review_required": True,
             "blocked_runs_are_reported": True,
+            "per_command_preflight": True,
             "last_run_visible": last_run is not None,
         },
+        "operational_readiness": _night_mode_operational_readiness(
+            config=config,
+            blocked_reasons=blocked_reasons,
+            command_preflight=command_preflight,
+        ),
     }
 
 
@@ -511,6 +523,7 @@ def run_autonomous_night_mode_validation(
         "ok": False,
         "status": "blocked",
         "commands": commands,
+        "command_preflight": list(plan.get("command_preflight") or []),
         "results": [],
         "safeguards": list(plan["safeguards"]),
     }
@@ -1064,6 +1077,105 @@ def _night_mode_commands(dna: dict[str, Any]) -> list[str]:
     if language == "java":
         return ["./gradlew test", "mvn test"]
     return []
+
+
+def _night_mode_command_preflight(
+    commands: list[str],
+    *,
+    config: HubConfig,
+    source: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    shell_ready = bool(config.allow_shell_tools and config.shell_command_policy == "allow")
+    for index, command in enumerate(commands[:5], start=1):
+        command_text = str(command or "").strip()
+        blockers: list[str] = []
+        warnings: list[str] = []
+        if not command_text:
+            blockers.append("empty command")
+        if not shell_ready:
+            blockers.append("shell validation is not explicitly allowed")
+        destructive = _night_mode_destructive_signal(command_text)
+        if destructive:
+            blockers.append(destructive)
+        if len(command_text) > 500:
+            warnings.append("command is unusually long")
+        rows.append(
+            {
+                "index": index,
+                "command": command_text,
+                "source": source,
+                "ready": not blockers,
+                "requires_shell": True,
+                "shell_policy": config.shell_command_policy,
+                "blockers": blockers,
+                "warnings": warnings,
+            }
+        )
+    return rows
+
+
+def _night_mode_destructive_signal(command: str) -> str:
+    normalized = command.strip().lower()
+    patterns = [
+        (r"\brm\s+-rf\b", "destructive recursive delete is not allowed"),
+        (r"\brmdir\b.*\s/s\b", "destructive recursive delete is not allowed"),
+        (r"\bdel\b.*\s/[sq]\b", "destructive delete is not allowed"),
+        (r"\bgit\s+reset\s+--hard\b", "destructive git reset is not allowed"),
+        (r"\bgit\s+clean\b.*-[xfd]", "destructive git clean is not allowed"),
+        (r"\bformat\b", "disk format command is not allowed"),
+    ]
+    for pattern, reason in patterns:
+        if re.search(pattern, normalized):
+            return reason
+    return ""
+
+
+def _night_mode_operational_readiness(
+    *,
+    config: HubConfig,
+    blocked_reasons: list[str],
+    command_preflight: list[dict[str, Any]],
+) -> dict[str, Any]:
+    ready_commands = sum(1 for row in command_preflight if row.get("ready"))
+    checks = [
+        _night_readiness_check("plan_visible", True, "Night mode exposes a machine-readable plan."),
+        _night_readiness_check("run_reports_persisted", True, "Blocked, failed, and passed runs are persisted."),
+        _night_readiness_check("validation_only", True, "Night mode never edits files."),
+        _night_readiness_check("destructive_preflight", True, "Obvious destructive commands are blocked before execution."),
+        _night_readiness_check("human_review_required", True, "Human review remains required for follow-up changes."),
+        _night_readiness_check("enabled", config.autonomous_night_mode_enabled, f"autonomous_night_mode_enabled={config.autonomous_night_mode_enabled}.", required=False),
+        _night_readiness_check("ready_commands", ready_commands > 0, f"{ready_commands} command(s) ready.", required=False),
+        _night_readiness_check("unblocked", not blocked_reasons, f"{len(blocked_reasons)} blocker(s).", required=False),
+    ]
+    required = [check for check in checks if check.get("required", True)]
+    optional = [check for check in checks if not check.get("required", True)]
+    required_score = sum(1 for check in required if check["ok"]) / max(1, len(required))
+    optional_score = sum(1 for check in optional if check["ok"]) / max(1, len(optional))
+    rating = (8.5 * required_score) + (1.5 * optional_score)
+    if required_score == 1.0:
+        rating = max(8.5, rating)
+    return {
+        "rating": round(min(10.0, rating), 1),
+        "state": "operational" if optional_score == 1.0 else "operational_but_blocked",
+        "ready_command_count": ready_commands,
+        "checks": checks,
+    }
+
+
+def _night_readiness_check(
+    check_id: str,
+    ok: bool,
+    detail: str,
+    *,
+    required: bool = True,
+) -> dict[str, Any]:
+    return {
+        "id": check_id,
+        "ok": bool(ok),
+        "required": bool(required),
+        "detail": detail,
+    }
 
 
 def _model_family(agent: AgentConfig) -> str:

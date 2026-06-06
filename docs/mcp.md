@@ -11,6 +11,10 @@ Agent-Hub now has a bridge shape for external MCP servers.
   server has a configured `command`. Execution is still off by default.
 - Tool calls use a bounded JSON-RPC initialize plus `tools/call` exchange and
   respect the configured `mcp_timeout_seconds`.
+- `GET /v1/mcp/status` reports per-server status, per-tool permissions,
+  input-property inventory, sample call payloads, timeout policy, and an
+  operational-readiness score. This makes a no-execution review possible before
+  enabling external MCP processes.
 
 ## Example
 
@@ -36,6 +40,15 @@ Agent-Hub now has a bridge shape for external MCP servers.
 ```
 
 The normalized tool name is `mcp.local.lookup`.
+
+Status output includes a call example for each declared tool:
+
+```json
+{
+  "name": "mcp.local.lookup",
+  "arguments": {"query": ""}
+}
+```
 
 ## Safety
 

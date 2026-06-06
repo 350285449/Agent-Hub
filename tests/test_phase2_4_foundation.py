@@ -14,7 +14,7 @@ from agent_hub.config import AgentConfig, HubConfig, RouteRule, config_from_dict
 from agent_hub.core.router import AgentRouter
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.observability import record_event
-from agent_hub.plugins import discover_plugins
+from agent_hub.plugins import discover_plugins, execute_plugin
 from agent_hub.security.secrets import masked_agent_config
 from agent_hub.server import AgentHubHTTPServer
 from agent_hub.streaming import normalize_stream_chunk
@@ -292,6 +292,49 @@ class PhaseTwoFourFoundationTests(unittest.TestCase):
             provider = body["registered_capabilities"]["providers"][0]
             self.assertEqual(provider["id"], "provider.demo")
             self.assertEqual(provider["metadata"]["models"], ["demo-model"])
+
+    def test_plugin_validate_action_reports_readiness_without_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "demo"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.py").write_text(
+                "raise SystemExit('should not run during validation')\n",
+                encoding="utf-8",
+            )
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "tool.demo",
+                        "name": "Demo Tool",
+                        "type": "tool",
+                        "entrypoint": "plugin.py",
+                        "enabled_by_default": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                plugin_dirs=[root / "plugins"],
+                trusted_plugins=["tool.demo"],
+                plugin_execution_enabled=True,
+                plugin_capability_grants={"tool.demo": ["tool.register"]},
+            )
+
+            result = execute_plugin(
+                config,
+                plugin_id="tool.demo",
+                action="validate",
+                requested_scopes=["tool.register"],
+            ).to_dict()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["reason"], "plugin_validated")
+            self.assertTrue(result["output"]["checks"]["trusted"])
+            self.assertTrue(result["output"]["execution_would_run"])
+            self.assertEqual(result["error"], "")
 
     def test_untrusted_plugins_do_not_register_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -108,6 +108,8 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertIsNone(costs["empty_state"])
             self.assertEqual(benchmarks["summary"]["data_state"], "baseline_ready")
             self.assertEqual(benchmarks["summary"]["snapshot_result_count"], 1)
+            self.assertGreaterEqual(benchmarks["operational_readiness"]["rating"], 8.5)
+            self.assertEqual(benchmarks["measurement_plan"]["preferred_route"], "coding")
             self.assertEqual(
                 benchmarks["coverage_snapshot"]["results"][0]["measurement_status"],
                 "configured_baseline",
@@ -168,12 +170,17 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertEqual(body["mcp"]["declared_tool_count"], 1)
             self.assertEqual(body["mcp"]["servers"][0]["status"], "policy_gated")
             self.assertEqual(body["mcp"]["tools"][0]["qualified_name"], "mcp.local-tools.repo_search")
+            self.assertIn("runtime_contract", body)
+            self.assertGreaterEqual(body["operational_readiness"]["rating"], 8.5)
+            self.assertEqual(body["runtime_contract"]["validate_action"]["runs_plugin_code"], False)
             self.assertIn("execution disabled by policy", body["mcp"]["warnings"])
 
             mcp = DiagnosticsApplicationService(config).mcp_status_body()
 
             self.assertEqual(mcp["object"], "agent_hub.mcp_status")
             self.assertTrue(mcp["maturity"]["per_tool_permissions"])
+            self.assertGreaterEqual(mcp["operational_readiness"]["rating"], 8.5)
+            self.assertEqual(mcp["tools"][0]["call_example"]["name"], "mcp.local-tools.repo_search")
 
     def test_inbox_status_reports_queue_and_recent_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -204,6 +211,7 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertTrue(body["pending"][0]["valid"])
             self.assertEqual(body["submission"]["endpoint"], "/v1/inbox/submit")
             self.assertIn("process_once", body["commands"])
+            self.assertGreaterEqual(body["operational_readiness"]["rating"], 8.5)
 
     def test_inbox_status_marks_invalid_pending_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -255,6 +263,9 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(body["summary"]["users"], 1)
         self.assertEqual(body["summary"]["grants"], 1)
         self.assertEqual(body["warnings"], [])
+        self.assertGreaterEqual(body["operational_readiness"]["rating"], 8.5)
+        self.assertEqual(body["policy_coverage"]["matrix"][0]["user"], "alice")
+        self.assertIn("workspace_cloud", body["policy_coverage"]["permission_names"])
 
     def test_production_check_passes_for_route_ready_guarded_install(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

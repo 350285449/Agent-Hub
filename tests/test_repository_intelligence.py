@@ -117,6 +117,7 @@ class RepositoryIntelligenceTests(unittest.TestCase):
         self.assertIn("night-ok", report["results"][0]["stdout"])
         self.assertIn("validation-only execution never edits files", report["safeguards"])
         self.assertEqual(report["plan_state"], "ready")
+        self.assertTrue(report["command_preflight"][0]["ready"])
         self.assertIn("duration_seconds", report)
         self.assertTrue(report_exists)
 
@@ -136,6 +137,10 @@ class RepositoryIntelligenceTests(unittest.TestCase):
         self.assertIn("shell validation is not explicitly allowed", plan["blocked_reasons"])
         self.assertFalse(plan["execution_limits"]["writes_allowed"])
         self.assertTrue(plan["maturity"]["human_review_required"])
+        self.assertTrue(plan["maturity"]["per_command_preflight"])
+        self.assertGreaterEqual(plan["operational_readiness"]["rating"], 8.5)
+        self.assertFalse(plan["command_preflight"][0]["ready"])
+        self.assertIn("shell validation is not explicitly allowed", plan["command_preflight"][0]["blockers"])
         self.assertEqual(plan["repository"]["project"], "Service")
         self.assertIsNone(plan["last_run"])
 

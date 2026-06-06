@@ -49,11 +49,24 @@ Example:
 ```
 
 Discovery validates JSON, manifest keys, plugin type, duplicate IDs, and
-whether entrypoints stay inside the configured plugin directory. Agent Hub does
-not execute plugin code yet. Only plugins listed in `trusted_plugins` can
-register manifest metadata for provider, tool, workflow, router strategy, or
-memory/context capabilities. Inspect loaded manifests and registered metadata
-with `GET /v1/plugins`.
+whether entrypoints stay inside the configured plugin directory. Only plugins
+listed in `trusted_plugins` can register manifest metadata for provider, tool,
+workflow, router strategy, or memory/context capabilities. Inspect loaded
+manifests, registered metadata, capability coverage, runtime contract details,
+and operational readiness with `GET /v1/plugins`.
+
+Safe validation is available without running plugin code:
+
+```sh
+curl -X POST http://127.0.0.1:8787/v1/plugins/tool.demo/execute \
+  -H "Content-Type: application/json" \
+  -d '{"action":"validate","requested_scopes":["tool.register"]}'
+```
+
+The validation response reports enabled/trusted/registerable state, sandbox
+policy, missing scopes, entrypoint containment, and whether execution would run
+if `action="execute"` were requested. This is the recommended first step before
+enabling code execution.
 
 Phase 7 also supports a trust registry lifecycle. A registry entry can set
 `status` to `trusted`, `disabled`, `revoked`, or `expired`; can pin `id`,
