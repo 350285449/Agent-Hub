@@ -133,8 +133,8 @@ def _stream_replay_safe(request: Any) -> bool:
     return False
 
 def _stream_recovery_request(request: Any, *, recovery: str, emitted_text: str = "") -> Any:
-    raw = dict(request.raw or {})
-    hub = dict(raw.get("agent_hub") or {})
+    raw = dict(request.raw) if isinstance(request.raw, dict) else {}
+    hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
     hub["stream_recovery_attempt"] = recovery
     raw["agent_hub"] = hub
     partial = str(emitted_text or "").strip()

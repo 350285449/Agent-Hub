@@ -74,8 +74,8 @@ class ContextPreparationService:
         message = selection.to_message()
         if message is None:
             return request
-        raw = dict(request.raw or {})
-        hub = dict(raw.get("agent_hub") or {})
+        raw = dict(request.raw) if isinstance(request.raw, dict) else {}
+        hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
         hub["repo_context"] = selection.to_dict()
         hub["context_strategy"] = classification.context_strategy
         raw["agent_hub"] = hub
@@ -172,12 +172,12 @@ class ContextPreparationService:
                 },
                 *messages,
             ]
-        raw = redact_secrets(dict(request.raw or {}))
+        raw = redact_secrets(dict(request.raw) if isinstance(request.raw, dict) else {})
         if changed and "context" in raw and isinstance(next_context, str):
             raw["context"] = next_context
         if changed and "task" in raw and isinstance(next_task, str):
             raw["task"] = next_task
-        hub = dict(raw.get("agent_hub") or {})
+        hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
         hub["security_context"] = security_context
         raw["agent_hub"] = hub
         return replace(request, messages=messages, task=next_task, context=next_context, raw=raw)
@@ -198,14 +198,14 @@ class ContextPreparationService:
             return request
         if not self.has_tool_capable_candidate(request):
             return request
-        raw = dict(request.raw or {})
+        raw = dict(request.raw) if isinstance(request.raw, dict) else {}
         if isinstance(raw.get("agent_hub_tools"), list) and raw["agent_hub_tools"]:
             return request
         tool_specs = [tool.to_agent_hub_spec() for tool in self.tool_registry.list()]
         if compatibility_reductions_enabled(self.config, request, "minimal_tool_schema"):
             tool_specs = [_minimal_tool_schema(spec) for spec in tool_specs]
         raw["agent_hub_tools"] = tool_specs
-        hub = dict(raw.get("agent_hub") or {})
+        hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
         hub["auto_execute_tools"] = True
         hub["task_classification"] = classification.to_dict()
         raw["agent_hub"] = hub

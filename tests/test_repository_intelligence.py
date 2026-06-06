@@ -144,6 +144,26 @@ class RepositoryIntelligenceTests(unittest.TestCase):
         self.assertEqual(plan["repository"]["project"], "Service")
         self.assertIsNone(plan["last_run"])
 
+    def test_autonomous_night_mode_does_not_run_failed_preflight_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / "state",
+                autonomous_night_mode_enabled=True,
+                allow_shell_tools=True,
+                shell_command_policy="allow",
+                validation_commands=["git reset --hard"],
+            )
+
+            report = run_autonomous_night_mode_validation(dna={}, config=config, timeout_seconds=30)
+
+        self.assertEqual(report["status"], "blocked")
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["results"], [])
+        self.assertEqual(report["reason"], "destructive git reset is not allowed")
+        self.assertFalse(report["command_preflight"][0]["ready"])
+
     def test_autonomous_night_mode_blocked_run_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

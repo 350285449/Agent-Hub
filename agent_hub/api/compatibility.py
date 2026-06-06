@@ -447,7 +447,7 @@ def apply_model_routing(config: HubConfig, request: HubRequest) -> None:
     if normalized == "agent-hub-auto":
         request.route = request.route or ROUTE_MODEL_ALIASES[normalized]
         raw = request.raw if isinstance(request.raw, dict) else {}
-        hub = dict(raw.get("agent_hub") or {})
+        hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
         hub["mode"] = "auto"
         raw["agent_hub"] = hub
         request.raw = raw
@@ -546,9 +546,9 @@ def payload_with_header_metadata(payload: dict[str, Any], headers: Any) -> dict[
 
 
 def attach_internal_client_metadata(request: HubRequest, *, api_shape: str) -> HubRequest:
-    metadata = dict(request.metadata or {})
-    raw = dict(request.raw or {})
-    hub = dict(raw.get("agent_hub") or {})
+    metadata = dict(request.metadata) if isinstance(request.metadata, dict) else {}
+    raw = dict(request.raw) if isinstance(request.raw, dict) else {}
+    hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
     user_agent = str(metadata.get("user_agent") or "")
     detected_client = (
         str(metadata.get("source") or metadata.get("client") or "").strip()

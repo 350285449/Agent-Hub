@@ -202,8 +202,8 @@ class ToolLoopRunner:
 
 
 def tool_loop_raw(request: HubRequest, metadata: ToolLoopMetadata) -> dict[str, Any]:
-    raw = dict(request.raw or {})
-    hub = dict(raw.get("agent_hub") or {})
+    raw = dict(request.raw) if isinstance(request.raw, dict) else {}
+    hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
     hub["tool_loop"] = metadata.to_dict()
     hub["auto_execute_tools"] = True
     raw["agent_hub"] = hub

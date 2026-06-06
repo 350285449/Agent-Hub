@@ -105,7 +105,7 @@ class WorkflowPlanner:
         return "\n\n".join(part for part in [instruction, "Task:\n" + task, prior] if part)
 
     def stage_raw(self, request: HubRequest, workflow_id: str, kind: str, stage: WorkflowStage) -> dict[str, Any]:
-        raw = dict(request.raw or {})
+        raw = dict(request.raw) if isinstance(request.raw, dict) else {}
         raw["workflow_id"] = workflow_id
         raw["workflow"] = kind
         raw["workflow_stage"] = stage.name

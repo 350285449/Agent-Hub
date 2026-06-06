@@ -714,24 +714,30 @@ def default_agent_names() -> list[str]:
 def config_from_dict(raw: dict[str, Any]) -> HubConfig:
     """Convert the JSON-compatible config shape into dataclass instances."""
 
+    raw = raw if isinstance(raw, dict) else {}
     routing = _normalize_routing_config(raw.get("routing"))
-    agents = {
-        item["name"]: AgentConfig(
-            name=item["name"],
-            provider=item["provider"],
-            model=item.get("model", item["name"]),
-            enabled=item.get("enabled", True),
-            free=item.get("free"),
-            provider_type=item.get("provider_type"),
-            api_key_env=item.get("api_key_env"),
-            api_key=item.get("api_key"),
-            base_url=_expand_env_string(item.get("base_url")),
-            chat_completions_path=item.get("chat_completions_path"),
-            timeout_seconds=float(item.get("timeout_seconds", 120.0)),
-            max_tokens=item.get("max_tokens"),
-            headers={str(key): _expand_env_string(value) for key, value in dict(item.get("headers", {})).items()},
-            cooldown_seconds=float(item.get("cooldown_seconds", 120.0)),
-            context_window=item.get("context_window"),
+    agents: dict[str, AgentConfig] = {}
+    for item in _dict_list(raw.get("agents")):
+        name = str(item.get("name") or "").strip()
+        provider = str(item.get("provider") or "").strip()
+        if not name or not provider:
+            continue
+        agents[name] = AgentConfig(
+            name=name,
+            provider=provider,
+            model=str(item.get("model") or name),
+            enabled=_bool_with_default(item.get("enabled"), True),
+            free=_optional_bool(item.get("free")),
+            provider_type=_optional_string(item.get("provider_type")),
+            api_key_env=_optional_string(item.get("api_key_env")),
+            api_key=_optional_string(item.get("api_key")),
+            base_url=_optional_string(_expand_env_string(item.get("base_url"))),
+            chat_completions_path=_optional_string(item.get("chat_completions_path")),
+            timeout_seconds=_normalize_positive_float(item.get("timeout_seconds"), 120.0, minimum=1.0, maximum=3600.0),
+            max_tokens=_optional_int(item.get("max_tokens")),
+            headers=_string_map(item.get("headers"), expand_env=True),
+            cooldown_seconds=_normalize_positive_float(item.get("cooldown_seconds"), 120.0, minimum=0.0, maximum=604800.0),
+            context_window=_optional_int(item.get("context_window")),
             coding_score=_optional_float(item.get("coding_score")),
             reasoning_score=_optional_float(item.get("reasoning_score")),
             speed_score=_optional_float(item.get("speed_score")),
@@ -742,7 +748,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             supports_streaming=_optional_bool(item.get("supports_streaming")),
             supports_vision=_optional_bool(item.get("supports_vision")),
             supports_function_calling=_optional_bool(item.get("supports_function_calling")),
-            priority=float(item.get("priority", 0.0)),
+            priority=_float_with_default(item.get("priority"), 0.0),
             privacy_mode=str(item.get("privacy_mode") or "safe_for_code"),
             local_only=_bool_with_default(item.get("local_only"), False),
             safe_for_code=_bool_with_default(item.get("safe_for_code"), True),
@@ -752,39 +758,38 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
                 False,
             ),
         )
-        for item in raw.get("agents", [])
-    }
     routes = [
         RouteRule(
-            name=item["name"],
-            agents=list(item.get("agents", [])),
-            keywords=list(item.get("keywords", [])),
+            name=str(item.get("name") or "").strip(),
+            agents=_string_list(item.get("agents")),
+            keywords=_string_list(item.get("keywords")),
         )
-        for item in raw.get("routes", [])
+        for item in _dict_list(raw.get("routes"))
+        if str(item.get("name") or "").strip()
     ]
     mcp_servers = [
         MCPServerConfig(
             name=str(item.get("name") or ""),
             enabled=_bool_with_default(item.get("enabled"), True),
             command=item.get("command") if isinstance(item.get("command"), str) else None,
-            args=[str(arg) for arg in item.get("args", []) if isinstance(arg, (str, int, float))],
-            env={str(key): str(value) for key, value in dict(item.get("env", {})).items()},
-            tools=[dict(tool) for tool in item.get("tools", []) if isinstance(tool, dict)],
-            permissions=[str(permission) for permission in item.get("permissions", []) if isinstance(permission, str)],
+            args=_string_list(item.get("args")),
+            env=_string_map(item.get("env")),
+            tools=_dict_list(item.get("tools")),
+            permissions=_string_list(item.get("permissions")),
             description=str(item.get("description") or ""),
         )
-        for item in raw.get("mcp_servers", [])
-        if isinstance(item, dict) and str(item.get("name") or "").strip()
+        for item in _dict_list(raw.get("mcp_servers"))
+        if str(item.get("name") or "").strip()
     ]
     return HubConfig(
-        host=raw.get("host", "127.0.0.1"),
-        port=int(raw.get("port", 8787)),
-        state_dir=Path(raw.get("state_dir", ".agent-hub/state")),
-        inbox_dir=Path(raw.get("inbox_dir", ".agent-hub/inbox")),
-        outbox_dir=Path(raw.get("outbox_dir", ".agent-hub/outbox")),
-        archive_dir=Path(raw.get("archive_dir", ".agent-hub/archive")),
-        workspace_dir=Path(raw.get("workspace_dir", ".")),
-        agent_max_steps=int(raw.get("agent_max_steps", 8)),
+        host=str(raw.get("host") or "127.0.0.1"),
+        port=_normalize_positive_int(raw.get("port"), 8787, minimum=1, maximum=65535),
+        state_dir=_path_with_default(raw.get("state_dir"), ".agent-hub/state"),
+        inbox_dir=_path_with_default(raw.get("inbox_dir"), ".agent-hub/inbox"),
+        outbox_dir=_path_with_default(raw.get("outbox_dir"), ".agent-hub/outbox"),
+        archive_dir=_path_with_default(raw.get("archive_dir"), ".agent-hub/archive"),
+        workspace_dir=_path_with_default(raw.get("workspace_dir"), "."),
+        agent_max_steps=_normalize_positive_int(raw.get("agent_max_steps"), 8, minimum=1, maximum=50),
         agent_context_budget_tokens=_normalize_agent_context_budget(
             raw.get("agent_context_budget_tokens", 32_000)
         ),
@@ -862,25 +867,12 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         ),
         plugin_dirs=[
             Path(str(item))
-            for item in raw.get("plugin_dirs", [])
-            if isinstance(item, (str, os.PathLike)) and str(item).strip()
+            for item in _string_list(raw.get("plugin_dirs"))
         ],
         plugins_enabled=_bool_with_default(raw.get("plugins_enabled"), True),
-        enabled_plugins=[
-            str(item)
-            for item in raw.get("enabled_plugins", [])
-            if isinstance(item, str) and item.strip()
-        ],
-        disabled_plugins=[
-            str(item)
-            for item in raw.get("disabled_plugins", [])
-            if isinstance(item, str) and item.strip()
-        ],
-        trusted_plugins=[
-            str(item)
-            for item in raw.get("trusted_plugins", [])
-            if isinstance(item, str) and item.strip()
-        ],
+        enabled_plugins=_string_list(raw.get("enabled_plugins")),
+        disabled_plugins=_string_list(raw.get("disabled_plugins")),
+        trusted_plugins=_string_list(raw.get("trusted_plugins")),
         plugin_trust_registry=(
             Path(str(raw.get("plugin_trust_registry")))
             if raw.get("plugin_trust_registry") not in (None, "")
@@ -914,9 +906,12 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         ),
         routing_memory_retention_days=max(
             1,
-            _int_with_default(
-                raw.get("routing_memory_retention_days", os.environ.get("ROUTING_MEMORY_RETENTION_DAYS")),
-                30,
+            min(
+                3650,
+                _int_with_default(
+                    raw.get("routing_memory_retention_days", os.environ.get("ROUTING_MEMORY_RETENTION_DAYS")),
+                    30,
+                ),
             ),
         ),
         repository_dna_enabled=_bool_with_default(raw.get("repository_dna_enabled"), True),
@@ -945,14 +940,23 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             True,
         ),
         auto_detect_local_models=_bool_with_default(raw.get("auto_detect_local_models"), True),
-        local_model_probe_timeout_seconds=float(
-            raw.get("local_model_probe_timeout_seconds", 0.35)
+        local_model_probe_timeout_seconds=_normalize_positive_float(
+            raw.get("local_model_probe_timeout_seconds"),
+            0.35,
+            minimum=0.01,
+            maximum=30.0,
         ),
-        quota_cooldown_seconds=float(
-            raw.get("quota_cooldown_seconds", routing["cooldown_quota_seconds"])
+        quota_cooldown_seconds=_normalize_positive_float(
+            raw.get("quota_cooldown_seconds", routing["cooldown_quota_seconds"]),
+            float(routing["cooldown_quota_seconds"]),
+            minimum=0.0,
+            maximum=604800.0,
         ),
-        rate_limit_cooldown_seconds=float(
-            raw.get("rate_limit_cooldown_seconds", routing["cooldown_rate_limit_seconds"])
+        rate_limit_cooldown_seconds=_normalize_positive_float(
+            raw.get("rate_limit_cooldown_seconds", routing["cooldown_rate_limit_seconds"]),
+            float(routing["cooldown_rate_limit_seconds"]),
+            minimum=0.0,
+            maximum=86400.0,
         ),
         routing=routing,
         approval_mode=_normalize_approval_mode(raw.get("approval_mode", "safe")),
@@ -968,13 +972,14 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         debug_echo_enabled=_bool_with_default(raw.get("debug_echo_enabled"), False),
         fast_write_finalize=_bool_with_default(raw.get("fast_write_finalize"), False),
         validation_mode=_normalize_validation_mode(raw.get("validation_mode", "basic")),
-        validation_commands=[
-            str(item)
-            for item in raw.get("validation_commands", [])
-            if isinstance(item, str) and item.strip()
-        ],
+        validation_commands=_string_list(raw.get("validation_commands")),
         auto_validate_after_edits=_bool_with_default(raw.get("auto_validate_after_edits"), True),
-        validation_repair_attempts=int(raw.get("validation_repair_attempts", 3)),
+        validation_repair_attempts=_normalize_positive_int(
+            raw.get("validation_repair_attempts"),
+            3,
+            minimum=0,
+            maximum=50,
+        ),
         prefer_multi_file_patches=_bool_with_default(raw.get("prefer_multi_file_patches"), True),
         context_change_bar_enabled=_bool_with_default(
             raw.get("context_change_bar_enabled"),
@@ -990,14 +995,18 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             raw.get("rollback_on_validation_failure"),
             True,
         ),
-        workspace_checkpoint_retention=int(
-            raw.get("workspace_checkpoint_retention", raw.get("checkpoint_retention", 5))
+        workspace_checkpoint_retention=max(
+            0,
+            min(
+                100,
+                _int_with_default(raw.get("workspace_checkpoint_retention", raw.get("checkpoint_retention")), 5),
+            ),
         ),
-        default_route=list(raw.get("default_route", agents.keys())),
+        default_route=_string_list(raw.get("default_route"), default=list(agents.keys())),
         routes=routes,
         agents=agents,
         mcp_servers=mcp_servers,
-        group_roles=dict(raw.get("group_roles", {})),
+        group_roles=_string_map(raw.get("group_roles")),
         include_raw_responses=_bool_with_default(raw.get("include_raw_responses"), False),
         expose_routing_details=_bool_with_default(raw.get("expose_routing_details"), False),
     )
@@ -1242,6 +1251,12 @@ def _resolve_config_path(path: Path, base: Path) -> Path:
     return (base / expanded).resolve()
 
 
+def _path_with_default(value: Any, default: str) -> Path:
+    if value in (None, ""):
+        return Path(default)
+    return Path(str(value))
+
+
 def _is_local_or_private_url(value: str | None) -> bool:
     """Return True when a URL targets a local or private-network host."""
 
@@ -1322,6 +1337,22 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_string(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _optional_bool(value: Any) -> bool | None:
@@ -1633,6 +1664,33 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _string_list(value: Any, *, default: list[str] | None = None) -> list[str]:
+    if value is None:
+        return list(default or [])
+    if isinstance(value, (str, os.PathLike)):
+        text = str(value).strip()
+        return [text] if text else list(default or [])
+    if not isinstance(value, list):
+        return list(default or [])
+    return [
+        str(item).strip()
+        for item in value
+        if isinstance(item, (str, int, float, os.PathLike)) and str(item).strip()
+    ]
+
+
+def _string_map(value: Any, *, expand_env: bool = False) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        if key in (None, "") or item in (None, ""):
+            continue
+        mapped = _expand_env_string(item) if expand_env else item
+        result[str(key)] = str(mapped)
+    return result
 
 
 def _string_list_map(value: Any) -> dict[str, list[str]]:

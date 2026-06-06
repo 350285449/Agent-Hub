@@ -262,6 +262,42 @@ class PhaseTwoFourFoundationTests(unittest.TestCase):
             self.assertFalse(result.plugins[0].sandbox["code_execution"])
             self.assertFalse(result.plugins[0].sandbox["entrypoint_allowed"])
 
+    def test_plugin_entrypoint_cannot_escape_to_sibling_plugin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugins = root / "plugins"
+            plugin_dir = plugins / "demo"
+            sibling_dir = plugins / "sibling"
+            plugin_dir.mkdir(parents=True)
+            sibling_dir.mkdir(parents=True)
+            (sibling_dir / "plugin.py").write_text("print('wrong plugin')\n", encoding="utf-8")
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "tool.demo",
+                        "name": "Demo Tool",
+                        "type": "tool",
+                        "entrypoint": "../sibling/plugin.py",
+                        "enabled_by_default": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                plugin_dirs=[plugins],
+                trusted_plugins=["tool.demo"],
+                plugin_execution_enabled=True,
+            )
+
+            result = discover_plugins(config)
+
+        self.assertEqual(len(result.plugins), 1)
+        self.assertFalse(result.plugins[0].sandbox["entrypoint_allowed"])
+        self.assertFalse(result.plugins[0].sandbox["code_execution"])
+        self.assertEqual(result.plugins[0].registration_reason, "entrypoint_escapes_plugin_directory")
+
     def test_trusted_plugins_register_metadata_only_capabilities(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

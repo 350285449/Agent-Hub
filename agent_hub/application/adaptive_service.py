@@ -213,7 +213,7 @@ class AdaptiveApplicationService:
 
 def _with_workflow_selection_metadata(response: Any, selection: dict[str, Any]) -> Any:
     raw = dict(response.raw) if isinstance(getattr(response, "raw", None), dict) else {}
-    hub = dict(raw.get("agent_hub") or {})
+    hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
     hub["workflow_selection"] = selection
     hub["workflow_pattern"] = selection.get("pattern")
     raw["agent_hub"] = hub
@@ -277,8 +277,8 @@ def _workflow_role_plan(pattern: str) -> list[dict[str, Any]]:
 
 
 def _role_request(request: HubRequest, role: str, prefer: str) -> HubRequest:
-    raw = dict(request.raw or {})
-    hub = dict(raw.get("agent_hub") or {})
+    raw = dict(request.raw) if isinstance(request.raw, dict) else {}
+    hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
     hub["workflow_role"] = role
     hub["prefer"] = prefer
     raw["agent_hub"] = hub

@@ -875,7 +875,7 @@ class AgentRouter:
             stream_id=f"stream-{uuid.uuid4().hex}" if stream else None,
         )
         raw = dict(prepared.raw or {})
-        hub = dict(raw.get("agent_hub") or {})
+        hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
         hub["context_usage"] = usage
         hub.setdefault("auto_retry", _routing_bool(self.config, "auto_retry", True))
         hub.setdefault("auto_failover", _routing_bool(self.config, "auto_failover", True))
@@ -930,11 +930,11 @@ class AgentRouter:
         if not budget.adjusted:
             return request, limit_usage
 
-        raw = dict(request.raw or {})
+        raw = dict(request.raw) if isinstance(request.raw, dict) else {}
         for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
             if key in raw:
                 raw[key] = int(budget.effective)
-        hub = dict(raw.get("agent_hub") or {})
+        hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
         hub["max_tokens_adjusted"] = {
             "requested": int(budget.requested),
             "effective": int(budget.effective),
@@ -1893,7 +1893,7 @@ class AgentRouter:
             raw = merge_tool_loop_metadata(raw if isinstance(raw, dict) else {}, tool_loop_metadata)
         if self.config.expose_routing_details and isinstance(raw, dict):
             raw = dict(raw)
-            agent_metadata = dict(raw.get("agent_hub") or {})
+            agent_metadata = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
             selected_health = self.health_snapshot().get(agent.name, {})
             agent_metadata["selected_health"] = selected_health
             agent_metadata["active_model"] = {
@@ -3555,7 +3555,7 @@ def _context_usage(request: HubRequest) -> dict[str, Any]:
 
 def _request_workflow_pattern(request: HubRequest) -> str:
     raw = request.raw if isinstance(request.raw, dict) else {}
-    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
     for value in (
         hub.get("workflow_pattern"),
         raw.get("workflow_pattern"),
@@ -3585,8 +3585,8 @@ def _continuation_request(request: HubRequest, partial_text: str, reason: str) -
     partial = str(partial_text or "").strip()
     if not partial:
         return request
-    raw = dict(request.raw or {})
-    hub = dict(raw.get("agent_hub") or {})
+    raw = dict(request.raw) if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
     hub["continuation_after_output_limit"] = True
     hub["continuation_reason"] = reason
     raw["agent_hub"] = hub
@@ -3618,8 +3618,8 @@ def _merge_continuation_result(
     raw_reason: str,
 ) -> ProviderResult:
     suffix = _trim_text_overlap(str(prefix or ""), result.text or "")
-    raw = dict(result.raw or {})
-    metadata = dict(raw.get("agent_hub") or {})
+    raw = dict(result.raw) if isinstance(result.raw, dict) else {}
+    metadata = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
     metadata["continued_from_partial"] = True
     metadata["continuation_reason"] = raw_reason
     metadata["deduplicated_prefix_chars"] = max(0, len(result.text or "") - len(suffix))

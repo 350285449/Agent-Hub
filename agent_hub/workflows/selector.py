@@ -188,7 +188,7 @@ class WorkflowSelector:
 
 
 def with_workflow_selection_raw(request: HubRequest, selection: WorkflowSelection) -> dict[str, Any]:
-    raw = dict(request.raw or {})
+    raw = dict(request.raw) if isinstance(request.raw, dict) else {}
     raw["workflow_pattern"] = selection.pattern
     raw["workflow_selection"] = selection.pattern
     hub_input = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
@@ -197,7 +197,7 @@ def with_workflow_selection_raw(request: HubRequest, selection: WorkflowSelectio
     if preset and preset.get("routing_mode"):
         raw["routing_mode"] = preset["routing_mode"]
     if selection.pattern == "team_reviewed":
-        group = dict(raw.get("group_agent") or {})
+        group = dict(raw.get("group_agent")) if isinstance(raw.get("group_agent"), dict) else {}
         group.setdefault("plan_candidates", 2)
         group.setdefault("worker_candidates", 4)
         raw["group_agent"] = group

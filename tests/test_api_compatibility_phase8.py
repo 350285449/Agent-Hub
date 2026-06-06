@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_hub.api.compatibility import (
+    apply_model_routing,
+    attach_internal_client_metadata,
     available_model_ids,
     model_rows,
     openai_model_rows,
@@ -14,7 +16,7 @@ from agent_hub.api.compatibility import (
 )
 from agent_hub.config import AgentConfig, HubConfig, RouteRule
 from agent_hub.core.router import AgentRouter
-from agent_hub.models import FailoverEvent, HubResponse
+from agent_hub.models import FailoverEvent, HubRequest, HubResponse
 
 
 class ApiCompatibilityPhaseEightTests(unittest.TestCase):
@@ -100,6 +102,23 @@ class ApiCompatibilityPhaseEightTests(unittest.TestCase):
         self.assertEqual(headers["X-Agent-Hub-Provider-Score"], "0.91")
         self.assertEqual(headers["X-AgentHub-Fallback"], "fallback-model")
         self.assertEqual(safe_header_value("hello\r\nworld"), "hello  world")
+
+    def test_malformed_agent_hub_metadata_is_ignored_when_attaching_internal_metadata(self) -> None:
+        request = HubRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            session_id="s",
+            api_shape="openai-chat",
+            raw={"model": "agent-hub-auto", "agent_hub": "not-a-dict"},
+            metadata={"user_agent": "cline"},
+        )
+
+        apply_model_routing(HubConfig(), request)
+        updated = attach_internal_client_metadata(request, api_shape="openai-chat")
+
+        self.assertEqual(updated.route, "cloud-agent")
+        self.assertEqual(updated.raw["agent_hub"]["mode"], "auto")
+        self.assertEqual(updated.raw["agent_hub"]["source"], "cline")
+        self.assertTrue(updated.raw["agent_hub"]["health_tracking_enabled"])
 
 
 class _FakeRouter:

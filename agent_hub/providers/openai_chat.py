@@ -78,8 +78,9 @@ class OpenAIChatProvider(BaseProviderAdapter):
                 yield chunk
 
     def _payload(self, request: HubRequest) -> dict[str, Any]:
+        raw = request.raw if isinstance(request.raw, dict) else {}
         payload = _copy_allowed(
-            request.raw,
+            raw,
             {
                 "frequency_penalty",
                 "function_call",
@@ -108,13 +109,13 @@ class OpenAIChatProvider(BaseProviderAdapter):
         agent_tools = _request_tool_specs(request)
         legacy_functions = (
             not _agent_hub_tool_specs(request)
-            and "tools" not in request.raw
-            and isinstance(request.raw.get("functions"), list)
+            and "tools" not in raw
+            and isinstance(raw.get("functions"), list)
         )
         if agent_tools and not legacy_functions:
             payload["tools"] = _openai_tool_specs(agent_tools)
             converted_choice = _openai_tool_choice(
-                request.raw.get("tool_choice", request.raw.get("function_call"))
+                raw.get("tool_choice", raw.get("function_call"))
             )
             if converted_choice is not None:
                 payload["tool_choice"] = converted_choice
@@ -123,7 +124,7 @@ class OpenAIChatProvider(BaseProviderAdapter):
         payload["model"] = self.agent.model
         payload["messages"] = _openai_messages(request.messages)
         if request.max_tokens is not None:
-            if "max_completion_tokens" in request.raw:
+            if "max_completion_tokens" in raw:
                 payload["max_completion_tokens"] = request.max_tokens
             else:
                 payload["max_tokens"] = request.max_tokens

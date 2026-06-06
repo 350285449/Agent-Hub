@@ -180,6 +180,7 @@ def _codex_prompt_optimized(request: HubRequest) -> bool:
     if env is not None:
         return env.strip().lower() not in {"0", "false", "off", "no"}
     options = _agent_hub_options(request)
+    raw = request.raw if isinstance(request.raw, dict) else {}
     if any(
         bool(options.get(key))
         for key in (
@@ -190,14 +191,14 @@ def _codex_prompt_optimized(request: HubRequest) -> bool:
         )
     ):
         return True
-    context_mode = str(options.get("context_mode") or request.raw.get("context_mode") or "").lower()
+    context_mode = str(options.get("context_mode") or raw.get("context_mode") or "").lower()
     if context_mode == "minimal":
         return True
     budget = _positive_int(
         options.get("codex_cli_prompt_budget_tokens")
         or options.get("context_budget_tokens")
         or options.get("max_context_tokens")
-        or request.raw.get("agent_context_budget_tokens")
+        or raw.get("agent_context_budget_tokens")
     )
     return budget is not None and budget <= 4_000
 

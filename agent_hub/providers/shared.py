@@ -1052,8 +1052,9 @@ def _request_int(
     minimum: int,
     maximum: int,
 ) -> int:
+    raw = request.raw if isinstance(request.raw, dict) else {}
     try:
-        value = int(request.raw.get(key, default))
+        value = int(raw.get(key, default))
     except (TypeError, ValueError):
         value = default
     return max(minimum, min(value, maximum))
@@ -1106,7 +1107,9 @@ class _TextExtractor(HTMLParser):
             self.parts.append(data)
 
 
-def _copy_allowed(source: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
+def _copy_allowed(source: dict[str, Any] | Any, allowed: set[str]) -> dict[str, Any]:
+    if not isinstance(source, dict):
+        return {}
     return {key: value for key, value in source.items() if key in allowed}
 
 

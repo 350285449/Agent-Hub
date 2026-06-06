@@ -104,12 +104,13 @@ def plugin_sandbox_policy(
     trusted: bool = False,
 ) -> dict[str, Any]:
     root_path = Path(root).expanduser().resolve()
+    plugin_root = manifest.path.parent.resolve() if manifest.path else root_path
     entrypoint = None
     entrypoint_allowed = False
     if manifest.entrypoint:
-        candidate = (manifest.path.parent / manifest.entrypoint).resolve() if manifest.path else root_path
+        candidate = (plugin_root / manifest.entrypoint).resolve()
         entrypoint = str(candidate)
-        entrypoint_allowed = _within(candidate, root_path)
+        entrypoint_allowed = _within(candidate, plugin_root)
     else:
         entrypoint_allowed = True
     scopes = normalize_capability_scopes(granted_scopes or [])
@@ -138,6 +139,7 @@ def plugin_sandbox_policy(
         "execution_enabled": execution.execution_enabled,
         "backend": execution.backend,
         "root": str(root_path),
+        "plugin_root": str(plugin_root),
         "entrypoint": entrypoint,
         "entrypoint_allowed": entrypoint_allowed,
         "allowed_permissions": list(manifest.permissions),

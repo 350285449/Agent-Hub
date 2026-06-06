@@ -382,6 +382,91 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(agent.priority, 75)
         self.assertEqual(config.group_roles["coder"], "groq-qwen")
 
+    def test_config_from_dict_normalizes_string_booleans_and_routes(self) -> None:
+        config = config_from_dict(
+            {
+                "port": "not-a-port",
+                "state_dir": None,
+                "agent_max_steps": "bad",
+                "local_model_probe_timeout_seconds": "bad",
+                "quota_cooldown_seconds": "bad",
+                "rate_limit_cooldown_seconds": "bad",
+                "validation_repair_attempts": "bad",
+                "workspace_checkpoint_retention": "bad",
+                "agents": [
+                    {
+                        "name": "local",
+                        "provider": "echo",
+                        "enabled": "false",
+                        "free": "false",
+                        "headers": "not-a-map",
+                        "timeout_seconds": "not-a-number",
+                    }
+                ],
+                "routes": [{"name": "solo", "agents": "local", "keywords": "debug"}],
+                "default_route": "local",
+                "validation_commands": "python -m pytest",
+                "group_roles": "not-a-map",
+                "mcp_servers": [{"name": "tools", "enabled": "false", "args": "serve", "env": "bad"}],
+            }
+        )
+
+        agent = config.agents["local"]
+        self.assertEqual(config.port, 8787)
+        self.assertEqual(config.state_dir, Path(".agent-hub/state"))
+        self.assertEqual(config.agent_max_steps, 8)
+        self.assertEqual(config.local_model_probe_timeout_seconds, 0.35)
+        self.assertEqual(config.quota_cooldown_seconds, config.routing["cooldown_quota_seconds"])
+        self.assertEqual(config.rate_limit_cooldown_seconds, config.routing["cooldown_rate_limit_seconds"])
+        self.assertEqual(config.validation_repair_attempts, 3)
+        self.assertEqual(config.workspace_checkpoint_retention, 5)
+        self.assertFalse(agent.enabled)
+        self.assertFalse(is_free_agent(agent))
+        self.assertEqual(agent.headers, {})
+        self.assertEqual(agent.timeout_seconds, 120.0)
+        self.assertEqual(config.default_route, ["local"])
+        self.assertEqual(config.routes[0].agents, ["local"])
+        self.assertEqual(config.routes[0].keywords, ["debug"])
+        self.assertEqual(config.validation_commands, ["python -m pytest"])
+        self.assertEqual(config.group_roles, {})
+        self.assertFalse(config.mcp_servers[0].enabled)
+        self.assertEqual(config.mcp_servers[0].args, ["serve"])
+        self.assertEqual(config.mcp_servers[0].env, {})
+
+    def test_config_from_dict_clamps_runtime_limits(self) -> None:
+        config = config_from_dict(
+            {
+                "port": 999999,
+                "agent_max_steps": 999,
+                "routing_memory_retention_days": 999999,
+                "validation_repair_attempts": 999,
+                "workspace_checkpoint_retention": 999,
+                "agents": [],
+            }
+        )
+
+        self.assertEqual(config.port, 65535)
+        self.assertEqual(config.agent_max_steps, 50)
+        self.assertEqual(config.routing_memory_retention_days, 3650)
+        self.assertEqual(config.validation_repair_attempts, 50)
+        self.assertEqual(config.workspace_checkpoint_retention, 100)
+
+        minimums = config_from_dict(
+            {
+                "port": -1,
+                "agent_max_steps": -1,
+                "routing_memory_retention_days": -1,
+                "validation_repair_attempts": -1,
+                "workspace_checkpoint_retention": -1,
+                "agents": [],
+            }
+        )
+        self.assertEqual(minimums.port, 1)
+        self.assertEqual(minimums.agent_max_steps, 1)
+        self.assertEqual(minimums.routing_memory_retention_days, 1)
+        self.assertEqual(minimums.validation_repair_attempts, 0)
+        self.assertEqual(minimums.workspace_checkpoint_retention, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

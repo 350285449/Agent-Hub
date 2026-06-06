@@ -78,6 +78,28 @@ class ToolCompatibilityTests(unittest.TestCase):
         self.assertEqual(result.finish_reason, None)
         self.assertNotIn("choices", result.raw)
 
+    def test_malformed_raw_and_metadata_are_treated_as_empty(self) -> None:
+        config = HubConfig()
+        agent = AgentConfig(name="plain", provider="openai-compatible", model="m")
+        request = _tool_request()
+        request.raw["agent_hub"] = "not-a-dict"
+        request.metadata = "not-a-dict"  # type: ignore[assignment]
+
+        prepared = prepare_tool_compatibility_request(config, agent, request)
+        result = normalize_emulated_tool_result(
+            prepared,
+            ProviderResult(
+                text='{"tool_call":{"name":"read_file","arguments":{"path":"README.md"}}}',
+                model="m",
+                raw="not-a-dict",  # type: ignore[arg-type]
+            ),
+        )
+
+        self.assertEqual(prepared.raw["agent_hub"]["tool_compatibility"]["mode"], "emulated")
+        self.assertEqual(prepared.metadata["tool_compatibility"]["mode"], "emulated")
+        self.assertEqual(result.finish_reason, "tool_calls")
+        self.assertEqual(result.raw["agent_hub_compatibility"]["tool_mode"], "emulated")
+
     def test_recommendations_include_emulated_tool_fallbacks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(

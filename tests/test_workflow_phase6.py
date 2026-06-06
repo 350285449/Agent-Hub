@@ -37,6 +37,20 @@ class WorkflowModernizationPhaseSixTests(unittest.TestCase):
         self.assertEqual(planner.role_agent("planner"), "plan-agent")
         self.assertTrue(planner.patch_summary_requested(request))
 
+    def test_stage_raw_treats_malformed_raw_as_empty(self) -> None:
+        planner = WorkflowPlanner(HubConfig())
+        request = HubRequest(
+            session_id="wf",
+            messages=[{"role": "user", "content": "edit app.py"}],
+            raw="not-a-dict",  # type: ignore[arg-type]
+        )
+        stage = WorkflowStage("plan", "planner", "reasoning")
+
+        raw = planner.stage_raw(request, "wf_1", "code", stage)
+
+        self.assertEqual(raw["workflow_id"], "wf_1")
+        self.assertEqual(raw["agent_hub"]["workflow_stage"], "plan")
+
     def test_planner_owns_review_retry_and_files_touched_policy(self) -> None:
         planner = WorkflowPlanner(HubConfig())
         memory = WorkflowMemory(workflow_id="wf_1", kind="code", task="edit app.py")

@@ -57,8 +57,9 @@ class GeminiProvider(BaseProviderAdapter):
         return _join_url(base_url, f"/v1beta/{quote(model_path, safe='/')}:generateContent")
 
     def _payload(self, request: HubRequest) -> dict[str, Any]:
+        raw = request.raw if isinstance(request.raw, dict) else {}
         payload = _copy_allowed(
-            request.raw,
+            raw,
             {
                 "cachedContent",
                 "safetySettings",
@@ -70,15 +71,12 @@ class GeminiProvider(BaseProviderAdapter):
         if agent_tools:
             payload["tools"] = _gemini_tool_specs(agent_tools)
             converted_choice = _gemini_tool_choice(
-                request.raw.get("tool_choice", request.raw.get("function_call"))
+                raw.get("tool_choice", raw.get("function_call"))
             )
             if converted_choice is not None:
                 payload["toolConfig"] = converted_choice
-        generation_config = dict(
-            request.raw.get("generationConfig")
-            or request.raw.get("generation_config")
-            or {}
-        )
+        generation_source = raw.get("generationConfig") or raw.get("generation_config")
+        generation_config = dict(generation_source) if isinstance(generation_source, dict) else {}
         system_parts: list[str] = []
         contents: list[dict[str, Any]] = []
         call_names: dict[str, str] = {}

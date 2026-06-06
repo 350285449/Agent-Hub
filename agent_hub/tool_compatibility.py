@@ -82,8 +82,8 @@ def prepare_tool_compatibility_request(
     if agent_supports_tools(agent) or not agent_can_emulate_tools(config, agent) or not specs:
         return request
 
-    raw = dict(request.raw or {})
-    hub = dict(raw.get("agent_hub") or {})
+    raw = dict(request.raw) if isinstance(request.raw, dict) else {}
+    hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
     client_owned_tools = bool(
         (isinstance(raw.get("tools"), list) and raw["tools"])
         or (isinstance(raw.get("functions"), list) and raw["functions"])
@@ -102,7 +102,7 @@ def prepare_tool_compatibility_request(
     for key in ("agent_hub_tools", "function_call", "functions", "tool_choice", "tools"):
         raw.pop(key, None)
 
-    metadata = dict(request.metadata or {})
+    metadata = dict(request.metadata) if isinstance(request.metadata, dict) else {}
     metadata["tool_compatibility"] = compatibility
     messages = _emulation_messages(request.messages, specs)
     return replace(request, raw=raw, metadata=metadata, messages=messages)
@@ -125,7 +125,7 @@ def normalize_emulated_tool_result(
     if not calls:
         return result
 
-    raw = dict(result.raw or {})
+    raw = dict(result.raw) if isinstance(result.raw, dict) else {}
     choices = raw.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
         first = dict(choices[0])
@@ -148,7 +148,11 @@ def normalize_emulated_tool_result(
                 "finish_reason": "tool_calls",
             }
         ]
-    bridge = dict(raw.get("agent_hub_compatibility") or {})
+    bridge = (
+        dict(raw.get("agent_hub_compatibility"))
+        if isinstance(raw.get("agent_hub_compatibility"), dict)
+        else {}
+    )
     bridge["tool_mode"] = "emulated"
     bridge["tool_names"] = [call["function"]["name"] for call in calls]
     raw["agent_hub_compatibility"] = bridge

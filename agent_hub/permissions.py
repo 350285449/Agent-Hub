@@ -328,7 +328,7 @@ def mark_trusted_approval(request: HubRequest, *, source: str) -> HubRequest:
 
     from dataclasses import replace
 
-    metadata = dict(request.metadata or {})
+    metadata = dict(request.metadata) if isinstance(request.metadata, dict) else {}
     metadata["_agent_hub_trusted_approval"] = _TRUSTED_APPROVAL_MARKER
     metadata["_agent_hub_trusted_approval_source"] = str(source or "trusted-session")
     return replace(request, metadata=metadata)

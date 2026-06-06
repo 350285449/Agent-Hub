@@ -60,8 +60,9 @@ class AnthropicMessagesProvider(BaseProviderAdapter):
         return normalize_anthropic_result(raw, default_model=self.agent.model)
 
     def _payload(self, request: HubRequest) -> dict[str, Any]:
+        raw = request.raw if isinstance(request.raw, dict) else {}
         payload = _copy_allowed(
-            request.raw,
+            raw,
             {
                 "metadata",
                 "service_tier",
@@ -78,7 +79,7 @@ class AnthropicMessagesProvider(BaseProviderAdapter):
         if agent_tools:
             payload["tools"] = _anthropic_tool_specs(agent_tools)
             converted_choice = _anthropic_tool_choice(
-                request.raw.get("tool_choice", request.raw.get("function_call"))
+                raw.get("tool_choice", raw.get("function_call"))
             )
             if converted_choice is not None:
                 payload["tool_choice"] = converted_choice
@@ -129,8 +130,8 @@ class AnthropicMessagesProvider(BaseProviderAdapter):
             payload["temperature"] = request.temperature
         if system_parts:
             payload["system"] = "\n\n".join(system_parts)
-        elif "system" in request.raw:
-            payload["system"] = request.raw["system"]
+        elif "system" in raw:
+            payload["system"] = raw["system"]
         return payload
 
 

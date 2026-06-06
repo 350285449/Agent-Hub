@@ -749,7 +749,7 @@ def _role_raw(
     role: str,
     reasoning_state: WorkspaceReasoningState | None = None,
 ) -> dict[str, Any]:
-    raw = dict(request.raw or {})
+    raw = dict(request.raw) if isinstance(request.raw, dict) else {}
     raw["team_agent_role"] = role
     raw["mode"] = "group-agent"
     if reasoning_state is not None:

@@ -1057,7 +1057,7 @@ class AgentRunner:
         stopped: bool,
         reasoning_state: WorkspaceReasoningState | None = None,
     ) -> HubResponse:
-        raw = dict(response.raw) if response else {}
+        raw = dict(response.raw) if response and isinstance(response.raw, dict) else {}
         existing_metadata = raw.get("agent_hub")
         base_metadata = existing_metadata if isinstance(existing_metadata, dict) else {}
         raw["agent_hub"] = {
@@ -1884,7 +1884,7 @@ def _agent_step_raw(
     repair_attempts_max: int,
     reasoning_state: WorkspaceReasoningState,
 ) -> dict[str, Any]:
-    raw = dict(request.raw or {})
+    raw = dict(request.raw) if isinstance(request.raw, dict) else {}
     tools = agent_tool_definitions(toolbox.allow_shell)
     if toolbox.shell_command_policy == "deny":
         tools = [tool for tool in tools if tool.get("name") != "run_command"]

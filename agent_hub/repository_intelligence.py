@@ -536,6 +536,21 @@ def run_autonomous_night_mode_validation(
     if not commands:
         report["reason"] = "No validation commands were detected or configured."
         return _write_night_mode_report(report, config)
+    blocked_preflight = [
+        row
+        for row in report["command_preflight"]
+        if isinstance(row, dict) and not row.get("ready")
+    ]
+    if blocked_preflight:
+        first = blocked_preflight[0]
+        blockers = [
+            str(item)
+            for item in first.get("blockers", [])
+            if str(item).strip()
+        ]
+        report["reason"] = blockers[0] if blockers else "Night validation command failed preflight."
+        report["status"] = "blocked"
+        return _write_night_mode_report(report, config)
 
     report["status"] = "running"
     per_command_timeout = max(1, min(int(timeout_seconds or 180), 600))
@@ -1118,7 +1133,8 @@ def _night_mode_command_preflight(
 def _night_mode_destructive_signal(command: str) -> str:
     normalized = command.strip().lower()
     patterns = [
-        (r"\brm\s+-rf\b", "destructive recursive delete is not allowed"),
+        (r"\brm\s+-[^\s]*r[^\s]*f[^\s]*\b", "destructive recursive delete is not allowed"),
+        (r"\brm\s+-[^\s]*f[^\s]*r[^\s]*\b", "destructive recursive delete is not allowed"),
         (r"\brmdir\b.*\s/s\b", "destructive recursive delete is not allowed"),
         (r"\bdel\b.*\s/[sq]\b", "destructive delete is not allowed"),
         (r"\bgit\s+reset\s+--hard\b", "destructive git reset is not allowed"),

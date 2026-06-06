@@ -330,6 +330,50 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(headers["Authorization"], "Bearer ghp_key")
         self.assertEqual(headers["Accept"], "application/vnd.github+json")
 
+    def test_provider_payload_builders_treat_malformed_raw_as_empty(self) -> None:
+        openai_agent = AgentConfig(
+            name="local",
+            provider="openai-compatible",
+            model="local-model",
+            base_url="http://127.0.0.1:9999",
+        )
+        anthropic_agent = AgentConfig(
+            name="claude",
+            provider="anthropic",
+            model="claude-test",
+            api_key="key",
+        )
+        gemini_agent = AgentConfig(
+            name="gemini",
+            provider="gemini",
+            model="gemini-test",
+            api_key="key",
+        )
+        malformed = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "hello"}],
+            raw="not-a-dict",  # type: ignore[arg-type]
+        )
+        bad_generation_config = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "hello"}],
+            raw={"generationConfig": "not-a-dict"},
+        )
+
+        with patch("agent_hub.providers._post_json") as post_json:
+            post_json.side_effect = [
+                {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {}},
+                {"content": [{"type": "text", "text": "ok"}], "usage": {}},
+                {"candidates": [{"content": {"parts": [{"text": "ok"}]}}], "usageMetadata": {}},
+            ]
+            OpenAIChatProvider(openai_agent).complete(malformed)
+            AnthropicMessagesProvider(anthropic_agent).complete(malformed)
+            GeminiProvider(gemini_agent).complete(bad_generation_config)
+
+        self.assertEqual(post_json.call_args_list[0].kwargs["payload"]["model"], "local-model")
+        self.assertEqual(post_json.call_args_list[1].kwargs["payload"]["model"], "claude-test")
+        self.assertNotIn("generationConfig", post_json.call_args_list[2].kwargs["payload"])
+
     def test_gemini_provider_translates_request_and_response(self) -> None:
         agent = AgentConfig(
             name="gemini",
@@ -844,6 +888,32 @@ class ProviderTests(unittest.TestCase):
         self.assertGreaterEqual(result.search_results[0]["quality_score"], 1)
         search.assert_called_once()
         get_url_text.assert_called_once()
+
+    def test_local_research_treats_malformed_raw_options_as_defaults(self) -> None:
+        agent = AgentConfig(
+            name="local-research",
+            provider="local-research",
+            model="local-extractive-research",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "Agent Hub research"}],
+            raw="not-a-dict",  # type: ignore[arg-type]
+        )
+
+        with (
+            patch("agent_hub.providers._search_with_duckduckgo") as search,
+            patch("agent_hub.providers._get_url_text") as get_url_text,
+        ):
+            search.return_value = [
+                {"title": "Agent Hub", "url": "https://example.com/hub", "snippet": "Agent Hub routes models."}
+            ]
+            get_url_text.return_value = ("text/plain", "Agent Hub routes models with local research.")
+            result = LocalResearchProvider(agent).complete(request)
+
+        self.assertEqual(result.raw["query"], "Agent Hub research")
+        self.assertEqual(result.raw["source_count"], 1)
+        search.assert_called_once()
 
     def test_local_research_direct_url_survives_search_outage(self) -> None:
         agent = AgentConfig(
