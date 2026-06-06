@@ -10,6 +10,8 @@ from ..api.compatibility import available_model_ids, model_rows
 from ..config import AgentConfig, HubConfig
 from ..enterprise import EnterprisePolicy, export_enterprise_audit
 from ..evaluation import ProviderScoreStore
+from ..inbox import SUPPORTED_API_SHAPES, inbox_task_preview
+from ..mcp import normalize_mcp_tools
 from ..models import HubRequest
 from ..plugins import discover_plugins
 from ..server_routes.middleware import api_token, public_bind_host
@@ -131,8 +133,12 @@ BACKEND_FEATURES = {
     "config_migration": True,
     "json_inbox_processing": True,
     "inbox_status_reporting": True,
+    "inbox_submission_api": True,
     "mcp_policy_summary": True,
+    "mcp_status_dashboard": True,
     "provider_route_readiness_policy": True,
+    "night_mode_run_reports": True,
+    "extension_contract_endpoint": True,
     "events_endpoint": True,
     "deployment_templates": True,
     "readiness_scorecard": True,
@@ -844,6 +850,34 @@ class DiagnosticsApplicationService:
         )
         return body
 
+    def mcp_status_body(self) -> dict[str, Any]:
+        return {
+            "object": "agent_hub.mcp_status",
+            **_mcp_policy_summary(self.config),
+        }
+
+    def extension_contract_body(self) -> dict[str, Any]:
+        contract = _extension_feature_contract()
+        return {
+            "object": "agent_hub.extension_contract",
+            "backend_version": BACKEND_VERSION,
+            "build": build_metadata(),
+            "contract": contract,
+            "features": BACKEND_FEATURES,
+            "summary": {
+                "ok": bool(contract.get("ok")),
+                "available": bool(contract.get("available")),
+                "required_count": int(contract.get("required_count", 0) or 0),
+                "missing_count": len(contract.get("missing", [])) if isinstance(contract.get("missing"), list) else 0,
+            },
+            "maturity": {
+                "version_reported": True,
+                "build_metadata_reported": True,
+                "required_feature_diff": True,
+                "machine_readable": True,
+            },
+        }
+
     def inbox_status_body(self) -> dict[str, Any]:
         inbox = Path(self.config.inbox_dir)
         outbox = Path(self.config.outbox_dir)
@@ -853,9 +887,13 @@ class DiagnosticsApplicationService:
         pending = [path for path in pending if not path.name.endswith(".processing.json")]
         outputs = sorted(outbox.glob("*.json"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True) if outbox.exists() else []
         archived = sorted(archive.glob("*.json"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True) if archive.exists() else []
+        pending_summaries = [inbox_task_preview(path) for path in pending[:25]]
+        processing_summaries = [inbox_task_preview(path) for path in processing[:10]]
+        invalid_pending = [row for row in pending_summaries if not row.get("valid")]
+        oldest_pending = min((_float(row.get("modified_at")) or time.time()) for row in pending_summaries) if pending_summaries else None
         return {
             "object": "agent_hub.inbox_status",
-            "state": "pending" if pending else ("processing" if processing else "idle"),
+            "state": "needs_attention" if invalid_pending else ("pending" if pending else ("processing" if processing else "idle")),
             "directories": {
                 "inbox": str(inbox),
                 "outbox": str(outbox),
@@ -864,18 +902,33 @@ class DiagnosticsApplicationService:
             "counts": {
                 "pending": len(pending),
                 "processing": len(processing),
+                "invalid_pending": len(invalid_pending),
+                "valid_pending": len(pending_summaries) - len(invalid_pending),
                 "recent_outputs": len(outputs),
                 "archived": len(archived),
             },
-            "pending": [_file_summary(path) for path in pending[:25]],
-            "processing": [_file_summary(path) for path in processing[:10]],
+            "queue_health": {
+                "ready_to_process": bool(pending_summaries) and not invalid_pending,
+                "oldest_pending_age_seconds": round(max(0.0, time.time() - oldest_pending), 2) if oldest_pending else 0,
+                "preview_limit": 25,
+                "invalid_files": [row.get("name") for row in invalid_pending[:10]],
+            },
+            "pending": pending_summaries,
+            "processing": processing_summaries,
             "recent_outputs": [_file_summary(path) for path in outputs[:25]],
             "recent_archive": [_file_summary(path) for path in archived[:25]],
-            "supported_api_shapes": ["native", "openai-chat", "anthropic-messages"],
+            "supported_api_shapes": list(SUPPORTED_API_SHAPES),
+            "submission": {
+                "endpoint": "/v1/inbox/submit",
+                "method": "POST",
+                "accepted_payloads": ["native task/input/prompt", "native messages", "openai-chat messages", "anthropic-messages"],
+                "optional_fields": ["task_id", "api_shape", "response_shape", "agent_mode"],
+            },
             "commands": {
                 "process_once": "python -m agent_hub once",
                 "watch": "python -m agent_hub watch",
                 "serve_with_watcher": "python -m agent_hub serve --watch-inbox",
+                "submit_api": "POST /v1/inbox/submit",
             },
         }
 
@@ -1469,6 +1522,7 @@ def _extension_feature_contract() -> dict[str, Any]:
             "ok": True,
             "available": False,
             "detail": "VS Code extension source is not bundled in this install.",
+            "required": [],
             "missing": [],
         }
     try:
@@ -1478,6 +1532,7 @@ def _extension_feature_contract() -> dict[str, Any]:
             "ok": False,
             "available": True,
             "detail": f"Could not read VS Code extension source: {exc}",
+            "required": [],
             "missing": [],
         }
     match = re.search(r"const REQUIRED_BACKEND_FEATURES = \[(?P<body>.*?)\];", source, re.DOTALL)
@@ -1486,6 +1541,7 @@ def _extension_feature_contract() -> dict[str, Any]:
             "ok": False,
             "available": True,
             "detail": "VS Code extension does not declare REQUIRED_BACKEND_FEATURES.",
+            "required": [],
             "missing": [],
         }
     required = sorted(set(re.findall(r'"([^"]+)"', match.group("body"))))
@@ -1498,6 +1554,7 @@ def _extension_feature_contract() -> dict[str, Any]:
             if not missing
             else "Missing backend features: " + ", ".join(missing)
         ),
+        "required": required,
         "required_count": len(required),
         "missing": missing,
     }
@@ -2003,12 +2060,10 @@ def _file_summary(path: Path) -> dict[str, Any]:
 def _mcp_policy_summary(config: HubConfig) -> dict[str, Any]:
     enabled_servers = [server for server in config.mcp_servers if server.enabled]
     command_servers = [server for server in enabled_servers if server.command]
-    declared_tools = sum(
-        1
-        for server in enabled_servers
-        for tool in server.tools
-        if isinstance(tool, dict) and isinstance(tool.get("name"), str) and tool.get("name").strip()
-    )
+    server_rows = [_mcp_server_row(config, server) for server in config.mcp_servers]
+    tool_rows = [tool for server in server_rows for tool in server["tools"]]
+    warnings = [warning for server in server_rows for warning in server["warnings"]]
+    declared_tools = len([tool for tool in tool_rows if tool.get("server_enabled")])
     execution_enabled = bool(config.mcp_execution_enabled)
     if not enabled_servers:
         state = "not_configured"
@@ -2040,6 +2095,57 @@ def _mcp_policy_summary(config: HubConfig) -> dict[str, Any]:
         "enabled_server_count": len(enabled_servers),
         "command_server_count": len(command_servers),
         "declared_tool_count": declared_tools,
+        "servers": server_rows,
+        "tools": tool_rows,
+        "warnings": warnings,
+        "maturity": {
+            "state_visibility": True,
+            "per_server_status": True,
+            "per_tool_permissions": True,
+            "stdio_policy_gate": True,
+            "timeout_bounded": 1.0 <= float(config.mcp_timeout_seconds) <= 120.0,
+        },
+    }
+
+
+def _mcp_server_row(config: HubConfig, server: Any) -> dict[str, Any]:
+    tools = normalize_mcp_tools(server)
+    execution_ready = bool(config.mcp_execution_enabled and server.enabled and server.command and tools)
+    warnings: list[str] = []
+    if not server.enabled:
+        warnings.append("server disabled")
+    if server.enabled and not server.command:
+        warnings.append("missing command")
+    if server.enabled and not tools:
+        warnings.append("no declared tools")
+    if server.enabled and server.command and tools and not config.mcp_execution_enabled:
+        warnings.append("execution disabled by policy")
+    return {
+        "name": server.name,
+        "enabled": bool(server.enabled),
+        "command_configured": bool(server.command),
+        "execution_ready": execution_ready,
+        "status": "ready" if execution_ready else ("disabled" if not server.enabled else "policy_gated" if server.command and tools else "needs_configuration"),
+        "tool_count": len(tools),
+        "permissions": list(server.permissions),
+        "warnings": warnings,
+        "tools": [
+            {
+                "server": definition.server,
+                "server_enabled": bool(server.enabled),
+                "name": definition.name,
+                "qualified_name": definition.qualified_name,
+                "description": definition.description,
+                "permissions": list(definition.permissions),
+                "read_only": "write" not in {permission.lower() for permission in definition.permissions},
+                "status": "ready" if execution_ready else "execution_disabled",
+                "input_properties": sorted(
+                    str(key)
+                    for key in _dict(definition.input_schema.get("properties")).keys()
+                ),
+            }
+            for definition in tools
+        ],
     }
 
 

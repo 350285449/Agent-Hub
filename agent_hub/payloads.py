@@ -52,7 +52,7 @@ def request_from_payload(payload: dict[str, Any], api_shape: str = "native") -> 
 def request_from_native(payload: dict[str, Any]) -> HubRequest:
     session_id = _session_id(payload)
     messages = _message_list(payload.get("messages"))
-    task = payload.get("task") or payload.get("input") or payload.get("prompt")
+    task = payload.get("task") or payload.get("input") or payload.get("prompt") or payload.get("message")
     context = payload.get("context")
     if not messages:
         messages = _messages_from_task(task=task, context=context)

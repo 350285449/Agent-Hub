@@ -166,6 +166,14 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertFalse(body["execution_policy"]["plugin_execution_enabled"])
             self.assertEqual(body["mcp"]["state"], "configured_execution_disabled")
             self.assertEqual(body["mcp"]["declared_tool_count"], 1)
+            self.assertEqual(body["mcp"]["servers"][0]["status"], "policy_gated")
+            self.assertEqual(body["mcp"]["tools"][0]["qualified_name"], "mcp.local-tools.repo_search")
+            self.assertIn("execution disabled by policy", body["mcp"]["warnings"])
+
+            mcp = DiagnosticsApplicationService(config).mcp_status_body()
+
+            self.assertEqual(mcp["object"], "agent_hub.mcp_status")
+            self.assertTrue(mcp["maturity"]["per_tool_permissions"])
 
     def test_inbox_status_reports_queue_and_recent_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,10 +196,42 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertEqual(body["state"], "pending")
             self.assertEqual(body["counts"]["pending"], 1)
             self.assertEqual(body["counts"]["processing"], 1)
+            self.assertEqual(body["counts"]["invalid_pending"], 0)
+            self.assertTrue(body["queue_health"]["ready_to_process"])
             self.assertEqual(body["counts"]["recent_outputs"], 1)
             self.assertEqual(body["counts"]["archived"], 1)
             self.assertEqual(body["pending"][0]["name"], "task.json")
+            self.assertTrue(body["pending"][0]["valid"])
+            self.assertEqual(body["submission"]["endpoint"], "/v1/inbox/submit")
             self.assertIn("process_once", body["commands"])
+
+    def test_inbox_status_marks_invalid_pending_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root)
+            config.inbox_dir = root / "inbox"
+            config.outbox_dir = root / "outbox"
+            config.archive_dir = root / "archive"
+            config.inbox_dir.mkdir()
+            config.outbox_dir.mkdir()
+            config.archive_dir.mkdir()
+            (config.inbox_dir / "broken.json").write_text("{", encoding="utf-8")
+
+            body = DiagnosticsApplicationService(config).inbox_status_body()
+
+            self.assertEqual(body["state"], "needs_attention")
+            self.assertEqual(body["counts"]["invalid_pending"], 1)
+            self.assertFalse(body["queue_health"]["ready_to_process"])
+            self.assertEqual(body["queue_health"]["invalid_files"], ["broken.json"])
+
+    def test_extension_contract_body_exposes_required_backend_features(self) -> None:
+        body = DiagnosticsApplicationService(HubConfig()).extension_contract_body()
+
+        self.assertEqual(body["object"], "agent_hub.extension_contract")
+        self.assertTrue(body["summary"]["ok"], body["contract"])
+        self.assertGreater(body["summary"]["required_count"], 0)
+        self.assertEqual(body["summary"]["missing_count"], 0)
+        self.assertTrue(body["maturity"]["machine_readable"])
 
     def test_enterprise_status_summarizes_policy_and_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

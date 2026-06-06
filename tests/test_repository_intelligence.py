@@ -109,12 +109,16 @@ class RepositoryIntelligenceTests(unittest.TestCase):
             )
 
             report = run_autonomous_night_mode_validation(dna={}, config=config, timeout_seconds=30)
+            report_exists = Path(report["report_path"]).exists()
 
         self.assertEqual(report["object"], "agent_hub.autonomous_night_mode_run")
         self.assertTrue(report["ok"], report.get("reason"))
         self.assertEqual(report["status"], "passed")
         self.assertIn("night-ok", report["results"][0]["stdout"])
         self.assertIn("validation-only execution never edits files", report["safeguards"])
+        self.assertEqual(report["plan_state"], "ready")
+        self.assertIn("duration_seconds", report)
+        self.assertTrue(report_exists)
 
     def test_autonomous_night_mode_plan_exposes_blockers_and_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -133,6 +137,22 @@ class RepositoryIntelligenceTests(unittest.TestCase):
         self.assertFalse(plan["execution_limits"]["writes_allowed"])
         self.assertTrue(plan["maturity"]["human_review_required"])
         self.assertEqual(plan["repository"]["project"], "Service")
+        self.assertIsNone(plan["last_run"])
+
+    def test_autonomous_night_mode_blocked_run_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(workspace_dir=root, state_dir=root / "state")
+
+            report = run_autonomous_night_mode_validation(dna={}, config=config)
+            plan = build_autonomous_night_mode_plan(dna={}, config=config)
+            report_exists = Path(report["report_path"]).exists()
+
+        self.assertEqual(report["status"], "blocked")
+        self.assertEqual(report["reason"], "autonomous_night_mode_enabled=false")
+        self.assertTrue(report_exists)
+        self.assertEqual(plan["last_run"]["status"], "blocked")
+        self.assertEqual(plan["last_run"]["report_path"], report["report_path"])
 
 
 class _UnusedRunner:

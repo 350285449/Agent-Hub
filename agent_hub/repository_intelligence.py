@@ -450,6 +450,7 @@ def build_autonomous_night_mode_plan(
         blocked_reasons.append("shell validation is not explicitly allowed")
     configured_commands = list(config.validation_commands or [])
     effective_commands = configured_commands or commands
+    last_run = _latest_night_mode_report(config)
     return {
         "object": "agent_hub.autonomous_night_mode_plan",
         "enabled": bool(config.autonomous_night_mode_enabled),
@@ -466,6 +467,8 @@ def build_autonomous_night_mode_plan(
         "tasks": tasks,
         "validation_commands": effective_commands,
         "validation_command_source": "config" if configured_commands else "detected",
+        "run_endpoint": "/v1/night-mode/run",
+        "last_run": last_run,
         "execution_limits": {
             "max_commands": 5,
             "max_timeout_seconds": 600,
@@ -484,6 +487,8 @@ def build_autonomous_night_mode_plan(
             "bounded_execution": True,
             "destructive_edits_blocked": True,
             "human_review_required": True,
+            "blocked_runs_are_reported": True,
+            "last_run_visible": last_run is not None,
         },
     }
 
@@ -501,6 +506,8 @@ def run_autonomous_night_mode_validation(
         "mode": "validation_only",
         "started_at": time.time(),
         "enabled": bool(config.autonomous_night_mode_enabled),
+        "plan_state": plan.get("state"),
+        "blocked_reasons": list(plan.get("blocked_reasons") or []),
         "ok": False,
         "status": "blocked",
         "commands": commands,
@@ -509,13 +516,13 @@ def run_autonomous_night_mode_validation(
     }
     if not config.autonomous_night_mode_enabled:
         report["reason"] = "autonomous_night_mode_enabled=false"
-        return report
+        return _write_night_mode_report(report, config)
     if not config.allow_shell_tools or config.shell_command_policy != "allow":
         report["reason"] = "Night validation requires allow_shell_tools=true and shell_command_policy=allow."
-        return report
+        return _write_night_mode_report(report, config)
     if not commands:
         report["reason"] = "No validation commands were detected or configured."
-        return report
+        return _write_night_mode_report(report, config)
 
     report["status"] = "running"
     per_command_timeout = max(1, min(int(timeout_seconds or 180), 600))
@@ -543,11 +550,50 @@ def run_autonomous_night_mode_validation(
         result.get("returncode") == 0 for result in report["results"]
     )
     report["status"] = "passed" if report["ok"] else "failed"
+    return _write_night_mode_report(report, config)
+
+
+def _write_night_mode_report(report: dict[str, Any], config: HubConfig) -> dict[str, Any]:
+    report.setdefault("finished_at", time.time())
+    report["duration_seconds"] = round(
+        max(0.0, float(report["finished_at"]) - float(report.get("started_at") or report["finished_at"])),
+        3,
+    )
     reports_dir = Path(config.state_dir) / "night_mode_reports"
     report_path = reports_dir / f"night-validation-{int(report['started_at'])}.json"
     report["report_path"] = str(report_path)
     _atomic_write_text(report_path, json.dumps(report, indent=2, ensure_ascii=False))
     return report
+
+
+def _latest_night_mode_report(config: HubConfig) -> dict[str, Any] | None:
+    reports_dir = Path(config.state_dir) / "night_mode_reports"
+    if not reports_dir.exists():
+        return None
+    candidates = sorted(
+        reports_dir.glob("night-validation-*.json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        return {
+            "status": data.get("status"),
+            "ok": bool(data.get("ok")),
+            "reason": data.get("reason"),
+            "started_at": data.get("started_at"),
+            "finished_at": data.get("finished_at"),
+            "duration_seconds": data.get("duration_seconds"),
+            "command_count": len(data.get("commands", [])) if isinstance(data.get("commands"), list) else 0,
+            "result_count": len(data.get("results", [])) if isinstance(data.get("results"), list) else 0,
+            "report_path": str(path),
+        }
+    return None
 
 
 def _dependencies_and_frameworks(root: Path, package_files: list[str]) -> tuple[list[str], list[str]]:

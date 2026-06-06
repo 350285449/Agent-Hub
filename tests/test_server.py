@@ -703,6 +703,8 @@ class ServerCompatibilityTests(unittest.TestCase):
                 tools = _get_text(f"{base}/dashboard/tools")
                 workflows = _get_text(f"{base}/dashboard/workflows")
                 plugins = _get_text(f"{base}/dashboard/plugins")
+                mcp = _get_text(f"{base}/dashboard/mcp")
+                extension_contract = _get_text(f"{base}/dashboard/extension-contract")
                 enterprise = _get_text(f"{base}/dashboard/enterprise")
                 repository_dna = _get_text(f"{base}/dashboard/repository-dna")
                 workspace_memory = _get_text(f"{base}/dashboard/workspace-memory")
@@ -712,6 +714,8 @@ class ServerCompatibilityTests(unittest.TestCase):
                 leaderboard_json = _get_json(f"{base}/v1/model-leaderboard")
                 benchmarks_json = _get_json(f"{base}/v1/benchmarks")
                 inbox_json = _get_json(f"{base}/v1/inbox/status")
+                mcp_json = _get_json(f"{base}/v1/mcp/status")
+                extension_json = _get_json(f"{base}/v1/extension-contract")
             finally:
                 _stop(server, thread)
 
@@ -745,6 +749,10 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("Recent Runs", workflows)
             self.assertIn("Agent Hub Plugins", plugins)
             self.assertIn("Discovered Plugins", plugins)
+            self.assertIn("Agent Hub MCP", mcp)
+            self.assertIn("MCP Servers", mcp)
+            self.assertIn("Agent Hub Extension Contract", extension_contract)
+            self.assertIn("Required Backend Features", extension_contract)
             self.assertIn("Agent Hub Enterprise", enterprise)
             self.assertIn("Enterprise users", enterprise)
             self.assertIn("Agent Hub Repository DNA", repository_dna)
@@ -760,6 +768,28 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(leaderboard_json["summary"]["baseline_agent_count"], 1)
             self.assertEqual(benchmarks_json["summary"]["data_state"], "baseline_ready")
             self.assertEqual(inbox_json["object"], "agent_hub.inbox_status")
+            self.assertEqual(mcp_json["object"], "agent_hub.mcp_status")
+            self.assertEqual(extension_json["object"], "agent_hub.extension_contract")
+
+    def test_inbox_submit_endpoint_queues_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                submitted = _post_json(
+                    f"{base}/v1/inbox/submit",
+                    {"task_id": "server-task", "task": "queued from api"},
+                )
+                status = _get_json(f"{base}/v1/inbox/status")
+            finally:
+                _stop(server, thread)
+
+            self.assertTrue(submitted["accepted"])
+            self.assertEqual(submitted["task"]["name"], "server-task.json")
+            self.assertEqual(status["counts"]["pending"], 1)
+            self.assertTrue(status["pending"][0]["valid"])
 
     def test_readiness_endpoint_exposes_scorecard(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

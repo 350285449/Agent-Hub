@@ -87,6 +87,14 @@ def handle_get(handler: object, path: str) -> bool:
         body = handler.server.diagnostics_service.plugins_body()
         handler._send_html(_plugins_dashboard_html(body))
         return True
+    if path == "/dashboard/mcp":
+        body = handler.server.diagnostics_service.mcp_status_body()
+        handler._send_html(_mcp_dashboard_html(body))
+        return True
+    if path == "/dashboard/extension-contract":
+        body = handler.server.diagnostics_service.extension_contract_body()
+        handler._send_html(_extension_contract_dashboard_html(body))
+        return True
     if path == "/dashboard/enterprise":
         body = handler.server.diagnostics_service.enterprise_status_body()
         handler._send_html(_enterprise_dashboard_html(body))
@@ -191,6 +199,12 @@ def handle_get(handler: object, path: str) -> bool:
     if path == "/v1/plugins":
         handler._send_diagnostics_json(handler.server.diagnostics_service.plugins_body())
         return True
+    if path == "/v1/mcp/status":
+        handler._send_diagnostics_json(handler.server.diagnostics_service.mcp_status_body())
+        return True
+    if path == "/v1/extension-contract":
+        handler._send_diagnostics_json(handler.server.diagnostics_service.extension_contract_body())
+        return True
     if path == "/v1/enterprise/audit":
         handler._send_diagnostics_json(handler.server.diagnostics_service.enterprise_audit_body(request_query(handler.path)))
         return True
@@ -201,6 +215,35 @@ def handle_get(handler: object, path: str) -> bool:
 
 
 def handle_post(handler: object, path: str, payload: dict[str, Any]) -> bool:
+    if path == "/v1/inbox/submit":
+        from ..inbox import enqueue_task, inbox_task_preview
+
+        try:
+            task_path = enqueue_task(
+                handler.server.config,
+                payload,
+                task_id=str(payload.get("task_id") or payload.get("id") or ""),
+            )
+        except ValueError as exc:
+            handler._send_json(
+                {
+                    "object": "agent_hub.inbox_submission",
+                    "accepted": False,
+                    "error": {"type": "invalid_inbox_task", "message": str(exc)},
+                },
+                status=400,
+            )
+            return True
+        handler._send_diagnostics_json(
+            {
+                "object": "agent_hub.inbox_submission",
+                "accepted": True,
+                "path": str(task_path),
+                "task": inbox_task_preview(task_path),
+                "status_url": "/v1/inbox/status",
+            }
+        )
+        return True
     if path == "/v1/night-mode/run":
         from ..repository_intelligence import run_autonomous_night_mode_validation
 
@@ -674,6 +717,85 @@ def _plugins_dashboard_html(body: dict[str, Any]) -> str:
     )
 
 
+def _mcp_dashboard_html(body: dict[str, Any]) -> str:
+    servers = body.get("servers") if isinstance(body.get("servers"), list) else []
+    tools = body.get("tools") if isinstance(body.get("tools"), list) else []
+    warnings = body.get("warnings") if isinstance(body.get("warnings"), list) else []
+    server_rows = "".join(_mcp_server_row_html(row) for row in servers if isinstance(row, dict))
+    tool_rows = "".join(_mcp_tool_row_html(row) for row in tools if isinstance(row, dict))
+    if not server_rows:
+        server_rows = "<tr><td colspan=\"6\" class=\"muted\">No MCP servers configured.</td></tr>"
+    if not tool_rows:
+        tool_rows = "<tr><td colspan=\"6\" class=\"muted\">No MCP tools declared.</td></tr>"
+    content = "\n".join(
+        [
+            f"""
+<section class="panel">
+  <h2>MCP Servers</h2>
+  <table><thead><tr><th>Name</th><th>Status</th><th>Enabled</th><th>Command</th><th>Tools</th><th>Warnings</th></tr></thead><tbody>{server_rows}</tbody></table>
+</section>""",
+            f"""
+<section class="panel">
+  <h2>MCP Tools</h2>
+  <table><thead><tr><th>Name</th><th>Server</th><th>Status</th><th>Read only</th><th>Permissions</th><th>Inputs</th></tr></thead><tbody>{tool_rows}</tbody></table>
+</section>""",
+            _list_section_html("Warnings", warnings),
+        ]
+    )
+    cards = [
+        ("State", body.get("state", "unknown")),
+        ("Servers", body.get("configured_server_count", 0)),
+        ("Tools", body.get("declared_tool_count", 0)),
+        ("Execution", str(bool(body.get("execution_enabled"))).lower()),
+    ]
+    return _dashboard_page(
+        "Agent Hub MCP",
+        "External MCP server and tool status with policy-gated stdio execution details.",
+        cards,
+        content,
+        body,
+        json_path="/v1/mcp/status",
+    )
+
+
+def _extension_contract_dashboard_html(body: dict[str, Any]) -> str:
+    contract = _dict(body.get("contract"))
+    summary = _dict(body.get("summary"))
+    missing = contract.get("missing") if isinstance(contract.get("missing"), list) else []
+    required = contract.get("required") if isinstance(contract.get("required"), list) else []
+    content = "\n".join(
+        [
+            _key_value_section_html(
+                "Contract",
+                [
+                    ("OK", str(bool(contract.get("ok"))).lower()),
+                    ("Extension source available", str(bool(contract.get("available"))).lower()),
+                    ("Backend version", body.get("backend_version")),
+                    ("Required features", summary.get("required_count", 0)),
+                    ("Missing features", summary.get("missing_count", 0)),
+                    ("Detail", contract.get("detail")),
+                ],
+            ),
+            _list_section_html("Required Backend Features", required),
+            _list_section_html("Missing Backend Features", missing),
+        ]
+    )
+    cards = [
+        ("OK", str(bool(contract.get("ok"))).lower()),
+        ("Required", summary.get("required_count", 0)),
+        ("Missing", summary.get("missing_count", 0)),
+        ("Version", body.get("backend_version", "unknown")),
+    ]
+    return _dashboard_page(
+        "Agent Hub Extension Contract",
+        "Machine-readable backend feature contract for the VS Code extension.",
+        cards,
+        content,
+        body,
+        json_path="/v1/extension-contract",
+    )
+
+
 def _enterprise_dashboard_html(body: dict[str, Any]) -> str:
     summary = _dict(body.get("summary"))
     warnings = body.get("warnings") if isinstance(body.get("warnings"), list) else []
@@ -887,23 +1009,30 @@ def _workspace_memory_dashboard_html(body: dict[str, Any]) -> str:
 
 
 def _night_mode_dashboard_html(body: dict[str, Any]) -> str:
+    last_run = _dict(body.get("last_run"))
     content = "\n".join(
         [
             _list_section_html("Planned Tasks", body.get("tasks")),
             _list_section_html("Validation Commands", body.get("validation_commands")),
+            _list_section_html("Blocked Reasons", body.get("blocked_reasons")),
             _list_section_html("Safeguards", body.get("safeguards")),
             _key_value_section_html(
                 "Plan Metadata",
                 [
                     ("Enabled", str(bool(body.get("enabled"))).lower()),
                     ("Mode", body.get("mode")),
+                    ("State", body.get("state")),
                     ("Repository profile", body.get("repository_profile_id")),
+                    ("Run endpoint", body.get("run_endpoint")),
+                    ("Last run status", last_run.get("status") or "none"),
+                    ("Last run report", last_run.get("report_path") or "none"),
                 ],
             ),
         ]
     )
     cards = [
         ("Enabled", str(bool(body.get("enabled"))).lower()),
+        ("State", body.get("state", "unknown")),
         ("Mode", body.get("mode", "plan_only")),
         ("Tasks", len(body.get("tasks", [])) if isinstance(body.get("tasks"), list) else 0),
         ("Commands", len(body.get("validation_commands", [])) if isinstance(body.get("validation_commands"), list) else 0),
@@ -921,14 +1050,26 @@ def _night_mode_dashboard_html(body: dict[str, Any]) -> str:
 def _inbox_dashboard_html(body: dict[str, Any]) -> str:
     counts = _dict(body.get("counts"))
     commands = _dict(body.get("commands"))
+    health = _dict(body.get("queue_health"))
+    submission = _dict(body.get("submission"))
     cards = [
         ("State", body.get("state", "unknown")),
         ("Pending", counts.get("pending", 0)),
+        ("Invalid", counts.get("invalid_pending", 0)),
         ("Processing", counts.get("processing", 0)),
         ("Recent outputs", counts.get("recent_outputs", 0)),
     ]
     content = "\n".join(
         [
+            _key_value_section_html(
+                "Queue Health",
+                [
+                    ("Ready to process", str(bool(health.get("ready_to_process"))).lower()),
+                    ("Oldest pending age seconds", health.get("oldest_pending_age_seconds", 0)),
+                    ("Invalid files", ", ".join(str(item) for item in health.get("invalid_files", []) or []) or "none"),
+                    ("Submit endpoint", submission.get("endpoint", "/v1/inbox/submit")),
+                ],
+            ),
             _key_value_section_html(
                 "Directories",
                 [(key, value) for key, value in _dict(body.get("directories")).items()],
@@ -1251,6 +1392,35 @@ def _plugin_row_html(row: dict[str, Any]) -> str:
     )
 
 
+def _mcp_server_row_html(row: dict[str, Any]) -> str:
+    warnings = row.get("warnings") if isinstance(row.get("warnings"), list) else []
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('name'))}</td>"
+        f"<td>{_html(row.get('status'))}</td>"
+        f"<td>{str(bool(row.get('enabled'))).lower()}</td>"
+        f"<td>{str(bool(row.get('command_configured'))).lower()}</td>"
+        f"<td>{_html(row.get('tool_count', 0))}</td>"
+        f"<td>{_html(', '.join(str(item) for item in warnings))}</td>"
+        "</tr>"
+    )
+
+
+def _mcp_tool_row_html(row: dict[str, Any]) -> str:
+    permissions = row.get("permissions") if isinstance(row.get("permissions"), list) else []
+    inputs = row.get("input_properties") if isinstance(row.get("input_properties"), list) else []
+    return (
+        "<tr>"
+        f"<td><code>{_html(row.get('qualified_name') or row.get('name'))}</code></td>"
+        f"<td>{_html(row.get('server'))}</td>"
+        f"<td>{_html(row.get('status'))}</td>"
+        f"<td>{str(bool(row.get('read_only'))).lower()}</td>"
+        f"<td>{_html(', '.join(str(item) for item in permissions))}</td>"
+        f"<td>{_html(', '.join(str(item) for item in inputs))}</td>"
+        "</tr>"
+    )
+
+
 def _enterprise_rows_section_html(title: str, rows: list[Any]) -> str:
     body = "".join(
         f"<tr><td>{_html(_dict(row).get('id') or _dict(row).get('name'))}</td><td>{_html(json.dumps(row, ensure_ascii=False, default=str))}</td></tr>"
@@ -1366,7 +1536,10 @@ def _inbox_file_table_html(title: str, values: Any) -> str:
     body = "".join(
         "<tr>"
         f"<td>{_html(_dict(row).get('name'))}</td>"
-        f"<td>{_html(_dict(row).get('bytes', 0))}</td>"
+        f"<td>{_html('yes' if _dict(row).get('valid', True) else 'no')}</td>"
+        f"<td>{_html(_dict(row).get('api_shape') or '')}</td>"
+        f"<td>{_html(_dict(row).get('message_count') if _dict(row).get('message_count') is not None else '')}</td>"
+        f"<td>{_html(_dict(row).get('preview') or _dict(row).get('error') or '')}</td>"
         f"<td>{_html(_timestamp(_dict(row).get('modified_at')))}</td>"
         f"<td><code>{_html(_dict(row).get('path'))}</code></td>"
         "</tr>"
@@ -1374,11 +1547,11 @@ def _inbox_file_table_html(title: str, values: Any) -> str:
         if isinstance(row, dict)
     )
     if not body:
-        body = "<tr><td colspan=\"4\" class=\"muted\">No files.</td></tr>"
+        body = "<tr><td colspan=\"7\" class=\"muted\">No files.</td></tr>"
     return f"""
 <section class="panel">
   <h2>{_html(title)}</h2>
-  <table><thead><tr><th>Name</th><th>Bytes</th><th>Modified</th><th>Path</th></tr></thead><tbody>{body}</tbody></table>
+  <table><thead><tr><th>Name</th><th>Valid</th><th>Shape</th><th>Messages</th><th>Preview/Error</th><th>Modified</th><th>Path</th></tr></thead><tbody>{body}</tbody></table>
 </section>"""
 
 
