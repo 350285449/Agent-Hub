@@ -2,7 +2,7 @@
 
 ## Next release
 
-- Target version: `0.8.9`
+- Target version: `9.0.0`
 - Purpose: publish the dashboard entry points, Ollama Desktop first-run setup,
   baseline-ready diagnostics dashboards, Ollama cloud defaults, API-key model
   overrides, explicit local control selection, API key management, local model
@@ -66,5 +66,5 @@ The resulting `.vsix` can be published with `npm run publish` from `vscode-exten
 
 ## Notes
 
-- The current `package.json` version is `0.8.9`.
-- If you want this release to be published, run `npm run package` from `vscode-extension` and publish the resulting `0.8.9` VSIX.
+- The current `package.json` version is `9.0.0`.
+- If you want this release to be published, run `npm run package` from `vscode-extension` and publish the resulting `9.0.0` VSIX.

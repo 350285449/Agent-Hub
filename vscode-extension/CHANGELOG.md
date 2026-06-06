@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.9
+## 9.0.0
 
 - Improves cost, benchmark, model leaderboard, workflow, and routing-memory diagnostics with baseline-ready states.
 - Adds live local-research fallbacks, opt-in MCP/plugin execution, enterprise status, and night-mode validation surfaces.
