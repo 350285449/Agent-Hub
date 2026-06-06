@@ -8,4 +8,4 @@ Marketplace screenshot placeholders:
 - `cline-setup-helper.png`
 - `claude-code-setup-helper.png`
 
-Capture these from a clean VS Code window after installing the `0.8.8` VSIX.
+Capture these from a clean VS Code window after installing the `0.8.9` VSIX.

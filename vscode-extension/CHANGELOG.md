@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.9
+
+- Improves cost, benchmark, model leaderboard, workflow, and routing-memory diagnostics with baseline-ready states.
+- Adds live local-research fallbacks, opt-in MCP/plugin execution, enterprise status, and night-mode validation surfaces.
+- Syncs extension and backend release metadata for the updated VSIX package.
+
 ## 0.8.8
 
 - Returns Cline-visible repair instructions when trusted cloud provider approval blocks a request.
