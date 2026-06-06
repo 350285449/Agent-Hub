@@ -155,13 +155,86 @@ def _tools_body(router: AgentRouter) -> dict[str, Any]:
     }
 
 def _workflow_status_body(config: HubConfig) -> dict[str, Any]:
+    from ..workflows.selector import WORKFLOW_PATTERNS, WORKFLOW_PRESETS
+
     events = recent_events(config.state_dir, "workflows", limit=100)
+    grouped = _workflow_runs(events)
+    active = [run for run in grouped if run.get("status") == "running"]
+    finished = [run for run in grouped if run.get("status") in {"finished", "cancelled"}]
     return {
         "object": "agent_hub.workflow_status",
+        "enabled": True,
+        "data_state": "measured_ready" if events else "baseline_ready",
+        "summary": {
+            "recent_event_count": len(events),
+            "recent_run_count": len(grouped),
+            "active_run_count": len(active),
+            "finished_run_count": len(finished),
+            "preset_count": len(WORKFLOW_PRESETS),
+            "pattern_count": len(WORKFLOW_PATTERNS),
+            "adaptive_workflow_upgrades_enabled": config.adaptive_workflow_upgrades_enabled,
+        },
+        "empty_state": None
+        if events
+        else {
+            "title": "Workflow engine is ready",
+            "message": (
+                "Deterministic workflow presets and auto-selection are available. "
+                "Recent runs will appear here after /v1/auto or /v1/workflows/* calls."
+            ),
+            "actions": [
+                "POST /v1/routing/simulate to preview workflow selection.",
+                "POST /v1/auto to execute the selected workflow.",
+                "GET /v1/workflow-presets to inspect preset inputs.",
+            ],
+        },
+        "patterns": sorted(WORKFLOW_PATTERNS),
+        "presets": [
+            {"id": name, **dict(value)}
+            for name, value in sorted(WORKFLOW_PRESETS.items())
+            if isinstance(value, dict)
+        ],
+        "runs": grouped,
         "recent": events,
-        "active": [],
+        "active": active,
         "count": len(events),
     }
+
+
+def _workflow_runs(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        workflow_id = str(event.get("workflow_id") or event.get("id") or "").strip()
+        if not workflow_id:
+            continue
+        grouped.setdefault(workflow_id, []).append(event)
+    runs: list[dict[str, Any]] = []
+    for workflow_id, rows in grouped.items():
+        rows = sorted(rows, key=lambda row: _safe_float(row.get("time"), 0.0))
+        first = rows[0]
+        last = rows[-1]
+        event_types = [str(row.get("type") or "") for row in rows]
+        terminal = next(
+            (event for event in reversed(rows) if str(event.get("type") or "") in {"workflow_finished", "workflow_cancelled"}),
+            None,
+        )
+        status = "running"
+        if terminal:
+            status = "cancelled" if terminal.get("type") == "workflow_cancelled" else "finished"
+        runs.append(
+            {
+                "workflow_id": workflow_id,
+                "workflow": last.get("workflow") or first.get("workflow") or "",
+                "workflow_pattern": last.get("workflow_pattern") or first.get("workflow_pattern") or "",
+                "status": status,
+                "started_at": first.get("time"),
+                "updated_at": last.get("time"),
+                "stage_count": sum(1 for event_type in event_types if event_type == "workflow_stage_finished"),
+                "final_status": last.get("final_status") or "",
+                "events": rows[-20:],
+            }
+        )
+    return sorted(runs, key=lambda row: _safe_float(row.get("updated_at"), 0.0), reverse=True)
 
 def _plugins_body(config: HubConfig) -> dict[str, Any]:
     return DiagnosticsApplicationService(config).plugins_body()

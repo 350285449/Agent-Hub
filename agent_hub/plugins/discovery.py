@@ -48,6 +48,7 @@ def discover_plugins(config: HubConfig) -> PluginDiscoveryResult:
                 root=directory,
                 granted_scopes=trust.granted_scopes,
                 execution_enabled=bool(getattr(config, "plugin_execution_enabled", False)),
+                trusted=trust.trusted,
             )
             registerable, reason = _registration_status(enabled, trust.trusted, sandbox, trust.reason)
             result.plugins.append(
@@ -100,6 +101,7 @@ def plugin_sandbox_policy(
     root: str | Path,
     granted_scopes: list[str] | None = None,
     execution_enabled: bool = False,
+    trusted: bool = False,
 ) -> dict[str, Any]:
     root_path = Path(root).expanduser().resolve()
     entrypoint = None
@@ -111,14 +113,30 @@ def plugin_sandbox_policy(
     else:
         entrypoint_allowed = True
     scopes = normalize_capability_scopes(granted_scopes or [])
+    requested_backend = (
+        str(manifest.metadata.get("sandbox_backend") or "local_process")
+        if manifest.entrypoint
+        else "disabled"
+    )
+    backend = requested_backend if requested_backend in {"local_process", "docker", "wasm"} else "disabled"
+    code_execution = bool(
+        execution_enabled
+        and trusted
+        and entrypoint_allowed
+        and entrypoint
+        and backend == "local_process"
+    )
     execution = PluginExecutionSandbox(
-        execution_enabled=execution_enabled,
+        execution_enabled=code_execution,
         granted_scopes=scopes,
+        backend=backend if code_execution else "disabled",
+        entrypoint=entrypoint,
     )
     return {
-        "manifest_only": True,
-        "code_execution": False,
+        "manifest_only": not code_execution,
+        "code_execution": code_execution,
         "execution_enabled": execution.execution_enabled,
+        "backend": execution.backend,
         "root": str(root_path),
         "entrypoint": entrypoint,
         "entrypoint_allowed": entrypoint_allowed,

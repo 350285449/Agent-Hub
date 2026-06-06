@@ -8,7 +8,7 @@ from agent_hub.application import AdaptiveApplicationService
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.core.router import AgentRouter
 from agent_hub.models import HubRequest
-from agent_hub.repository_intelligence import RepositoryIntelligenceStore
+from agent_hub.repository_intelligence import RepositoryIntelligenceStore, run_autonomous_night_mode_validation
 
 
 class RepositoryIntelligenceTests(unittest.TestCase):
@@ -91,6 +91,26 @@ class RepositoryIntelligenceTests(unittest.TestCase):
         self.assertIn("model_performance_database", simulation)
         self.assertIn("autonomous_night_mode", simulation)
         self.assertIn("ai_team_visualization", simulation)
+
+    def test_autonomous_night_mode_runs_validation_only_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / "state",
+                autonomous_night_mode_enabled=True,
+                allow_shell_tools=True,
+                shell_command_policy="allow",
+                validation_commands=["python -c \"print('night-ok')\""],
+            )
+
+            report = run_autonomous_night_mode_validation(dna={}, config=config, timeout_seconds=30)
+
+        self.assertEqual(report["object"], "agent_hub.autonomous_night_mode_run")
+        self.assertTrue(report["ok"], report.get("reason"))
+        self.assertEqual(report["status"], "passed")
+        self.assertIn("night-ok", report["results"][0]["stdout"])
+        self.assertIn("validation-only execution never edits files", report["safeguards"])
 
 
 class _UnusedRunner:

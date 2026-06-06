@@ -182,6 +182,17 @@ class VscodeExtensionContributionTests(unittest.TestCase):
             self.assertIn(feature, required)
             self.assertTrue(BACKEND_FEATURES[feature])
 
+    def test_extension_test_script_runs_runtime_policy_tests(self) -> None:
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        runtime_policy = EXTENSION_DIR / "runtime-policy.js"
+        runtime_test = EXTENSION_DIR / "test" / "runtime-policy.test.js"
+
+        self.assertIn("node --test test/*.test.js", package["scripts"]["test"])
+        self.assertIn('require("./runtime-policy")', source)
+        self.assertTrue(runtime_policy.exists())
+        self.assertTrue(runtime_test.exists())
+
     def test_cline_compatibility_setting_is_enabled_by_default(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
         setting = package["contributes"]["configuration"]["properties"]["agentHub.clineCompatibilityMode"]

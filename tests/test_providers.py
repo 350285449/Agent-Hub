@@ -841,6 +841,60 @@ class ProviderTests(unittest.TestCase):
         search.assert_called_once()
         get_url_text.assert_called_once()
 
+    def test_local_research_direct_url_survives_search_outage(self) -> None:
+        agent = AgentConfig(
+            name="local-research",
+            provider="local-research",
+            model="local-extractive-research",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "Summarize https://example.com/a"}],
+            raw={"max_sources": 1},
+        )
+
+        with (
+            patch("agent_hub.providers._search_with_duckduckgo") as search,
+            patch("agent_hub.providers._get_url_text") as get_url_text,
+        ):
+            get_url_text.return_value = (
+                "text/html",
+                "<html><body>Example source contains enough useful summary text for research.</body></html>",
+            )
+            result = LocalResearchProvider(agent).complete(request)
+
+        self.assertEqual(result.citations, ["https://example.com/a"])
+        self.assertEqual(result.raw["search_attempts"][0]["strategy"], "direct_url")
+        search.assert_not_called()
+
+    def test_local_research_uses_instant_answer_when_html_search_fails(self) -> None:
+        agent = AgentConfig(
+            name="local-research",
+            provider="local-research",
+            model="local-extractive-research",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "Agent Hub"}],
+            raw={"max_sources": 1},
+        )
+
+        with (
+            patch("agent_hub.providers._search_with_duckduckgo", side_effect=ProviderError("blocked")),
+            patch("agent_hub.providers._search_with_duckduckgo_instant") as instant,
+            patch("agent_hub.providers._get_url_text") as get_url_text,
+        ):
+            instant.return_value = [
+                {"title": "Agent Hub", "url": "https://example.com/hub", "snippet": "Agent Hub routes models."}
+            ]
+            get_url_text.return_value = ("text/plain", "Agent Hub routes models with useful source handling.")
+            result = LocalResearchProvider(agent).complete(request)
+
+        self.assertEqual(result.citations, ["https://example.com/hub"])
+        self.assertEqual(result.raw["search_attempts"][1]["strategy"], "duckduckgo_html")
+        self.assertFalse(result.raw["search_attempts"][1]["ok"])
+        self.assertEqual(result.raw["search_attempts"][2]["strategy"], "duckduckgo_instant")
+
 
 if __name__ == "__main__":
     unittest.main()

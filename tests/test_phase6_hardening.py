@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import threading
 import time
@@ -14,7 +15,7 @@ from agent_hub.config_migration import migrate_config_data, migrate_config_file
 from agent_hub.enterprise import EnterprisePolicy, enterprise_audit_events, export_enterprise_audit
 from agent_hub.observability import record_event
 from agent_hub.permissions import PermissionManager, PermissionRequest
-from agent_hub.plugins import CAPABILITY_SCOPES, PluginExecutionRequest, PluginExecutionSandbox, discover_plugins, manifest_hash_from_data
+from agent_hub.plugins import CAPABILITY_SCOPES, PluginExecutionRequest, PluginExecutionSandbox, discover_plugins, execute_plugin, manifest_hash_from_data
 from agent_hub.server import AgentHubHTTPServer
 
 
@@ -235,9 +236,61 @@ class PhaseSixPluginTrustTests(unittest.TestCase):
                 self.assertFalse(result.ok)
                 if backend == "disabled":
                     self.assertEqual(result.reason, "plugin_execution_disabled")
+                elif backend == "local_process":
+                    self.assertEqual(result.reason, "plugin_entrypoint_missing")
                 else:
                     self.assertEqual(result.reason, "plugin_code_execution_not_implemented")
                 self.assertEqual(result.backend, backend)
+
+    def test_trusted_plugin_executes_local_process_json_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "demo"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.py").write_text(
+                "\n".join(
+                    [
+                        "import json, sys",
+                        "request = json.loads(sys.stdin.read() or '{}')",
+                        "json.dump({'ok': True, 'echo': request['payload'].get('value')}, sys.stdout)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "tool.demo",
+                        "name": "Demo Tool",
+                        "type": "tool",
+                        "entrypoint": "plugin.py",
+                        "enabled_by_default": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                plugin_dirs=[root / "plugins"],
+                trusted_plugins=["tool.demo"],
+                plugin_execution_enabled=True,
+                plugin_capability_grants={"tool.demo": ["tool.register"]},
+            )
+
+            discovered = discover_plugins(config).to_dict()["plugins"][0]
+            result = execute_plugin(
+                config,
+                plugin_id="tool.demo",
+                action="run",
+                payload={"value": "hello"},
+                requested_scopes=["tool.register"],
+            )
+
+        self.assertTrue(discovered["sandbox"]["code_execution"])
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.reason, "plugin_executed")
+        self.assertEqual(result.output["echo"], "hello")
 
     def test_plugin_execution_enforces_each_capability_scope(self) -> None:
         for scope in sorted(CAPABILITY_SCOPES):

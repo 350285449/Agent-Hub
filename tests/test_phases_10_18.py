@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import threading
 import unittest
@@ -13,7 +14,7 @@ from agent_hub.mcp import MCPServerRegistry
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.repository import RepoContextSelector, RepositoryIndexer
 from agent_hub.server import AgentHubHTTPServer
-from agent_hub.tools import ToolCall, ToolExecutionContext, ToolExecutionPipeline, create_builtin_registry, openai_tool_specs
+from agent_hub.tools import ToolCall, ToolExecutionContext, ToolExecutionPipeline, ToolRegistry, create_builtin_registry, openai_tool_specs
 from agent_hub.workflows import WorkflowEngine
 from agent_hub.core.router import AgentRouter
 
@@ -134,7 +135,53 @@ class MCPRepoWorkflowEvaluationStatusTests(unittest.TestCase):
         tools = registry.agent_hub_tools()
 
         self.assertEqual(tools[0].name, "mcp.local.lookup")
-        self.assertEqual(tools[0].metadata["mcp"]["status"], "future_ready")
+        self.assertEqual(tools[0].metadata["mcp"]["status"], "execution_disabled")
+
+    def test_mcp_stdio_tool_executes_when_explicitly_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            server_script = root / "mcp_server.py"
+            server_script.write_text(
+                "\n".join(
+                    [
+                        "import json, sys",
+                        "for line in sys.stdin:",
+                        "    message = json.loads(line)",
+                        "    if message.get('id') == 1:",
+                        "        print(json.dumps({'jsonrpc':'2.0','id':1,'result':{'capabilities':{}}}), flush=True)",
+                        "    if message.get('id') == 2:",
+                        "        args = message['params']['arguments']",
+                        "        print(json.dumps({'jsonrpc':'2.0','id':2,'result':{'content':[{'type':'text','text':args.get('query','')}]}}), flush=True)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = config_from_dict(
+                {
+                    "workspace_dir": str(root),
+                    "state_dir": str(root / "state"),
+                    "agents": [],
+                    "mcp_execution_enabled": True,
+                    "mcp_servers": [
+                        {
+                            "name": "local",
+                            "command": sys.executable,
+                            "args": [str(server_script)],
+                            "tools": [{"name": "lookup", "permissions": ["read"]}],
+                        }
+                    ],
+                }
+            )
+            tool_registry = ToolRegistry()
+            tool_registry.extend(MCPServerRegistry(config).agent_hub_tools())
+            result = ToolExecutionPipeline(tool_registry).execute(
+                ToolCall(name="mcp.local.lookup", arguments={"query": "symbol"}),
+                ToolExecutionContext(config=config),
+            )
+
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.content["content"][0]["text"], "symbol")
+        self.assertEqual(result.metadata["mcp"]["status"], "executed")
 
     def test_repository_index_selection_size_and_important_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -111,6 +111,47 @@ def handle_get(handler: object, path: str) -> bool:
     if path == "/v1/enterprise/audit":
         handler._send_diagnostics_json(handler.server.diagnostics_service.enterprise_audit_body(request_query(handler.path)))
         return True
+    if path == "/v1/enterprise/status":
+        handler._send_diagnostics_json(handler.server.diagnostics_service.enterprise_status_body())
+        return True
+    return False
+
+
+def handle_post(handler: object, path: str, payload: dict[str, Any]) -> bool:
+    if path == "/v1/night-mode/run":
+        from ..repository_intelligence import run_autonomous_night_mode_validation
+
+        dna = handler.server.router.repository_intelligence.repository_dna()
+        handler._send_diagnostics_json(
+            run_autonomous_night_mode_validation(
+                dna=dna,
+                config=handler.server.config,
+                timeout_seconds=_int(payload.get("timeout_seconds")) or 180,
+            )
+        )
+        return True
+    if path.startswith("/v1/plugins/") and path.endswith("/execute"):
+        from ..plugins import execute_plugin
+
+        plugin_id = path[len("/v1/plugins/") : -len("/execute")].strip("/")
+        result = execute_plugin(
+            handler.server.config,
+            plugin_id=plugin_id,
+            action=str(payload.get("action") or "execute"),
+            payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else {},
+            requested_scopes=[
+                str(scope)
+                for scope in payload.get("requested_scopes", [])
+                if isinstance(scope, str)
+            ],
+        )
+        handler._send_diagnostics_json(
+            {
+                "object": "agent_hub.plugin_execution",
+                "result": result.to_dict(),
+            }
+        )
+        return True
     return False
 
 
@@ -132,11 +173,26 @@ def _cost_dashboard_html(body: dict[str, Any]) -> str:
     cards = [
         ("Known cost", _money(body.get("known_cost_usd"))),
         ("Average known cost", _money(body.get("average_known_cost_usd"))),
-        ("Providers tracked", summary.get("providers_tracked", 0)),
+        ("Pricing coverage", _percent(summary.get("pricing_coverage_rate"))),
         ("State", summary.get("data_state", "unknown")),
     ]
+    pricing_rows = "".join(
+        _pricing_catalog_row_html(row)
+        for row in body.get("pricing_catalog", [])
+        if isinstance(row, dict)
+    )
+    if not pricing_rows:
+        pricing_rows = "<tr><td colspan=\"6\" class=\"muted\">No configured agents.</td></tr>"
     content = "\n".join(
         [
+            f"""
+<section class="panel">
+  <h2>Pricing Coverage</h2>
+  <table>
+    <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Status</th><th>Input / Output per 1M</th><th>1K in + 500 out</th></tr></thead>
+    <tbody>{pricing_rows}</tbody>
+  </table>
+</section>""",
             _mapping_table_html("Cost By Provider", _dict(body.get("cost_by_provider")), value_header="Cost"),
             _mapping_table_html("Cost By Model", _dict(body.get("cost_by_model")), value_header="Cost"),
             _mapping_table_html("Cost By Task Type", _dict(body.get("cost_by_task_type")), value_header="Cost"),
@@ -159,7 +215,7 @@ def _model_leaderboard_dashboard_html(body: dict[str, Any]) -> str:
     cards = [
         ("Agents", summary.get("agent_count", len(rows))),
         ("Measured agents", summary.get("measured_agent_count", 0)),
-        ("Samples", summary.get("sample_count", 0)),
+        ("Baseline agents", summary.get("baseline_agent_count", 0)),
         ("Best model", summary.get("best_model") or "waiting for data"),
     ]
     table_rows = "".join(_leaderboard_row_html(row) for row in rows if isinstance(row, dict))
@@ -186,16 +242,30 @@ def _model_leaderboard_dashboard_html(body: dict[str, Any]) -> str:
 def _benchmark_results_dashboard_html(body: dict[str, Any]) -> str:
     summary = _dict(body.get("summary"))
     reports = body.get("reports") if isinstance(body.get("reports"), list) else []
+    snapshot = _dict(body.get("coverage_snapshot"))
+    snapshot_rows = snapshot.get("results") if isinstance(snapshot.get("results"), list) else []
     cards = [
         ("Reports", summary.get("report_count", len(reports))),
         ("Latest", summary.get("latest_report") or "none"),
-        ("Results", summary.get("total_result_count", 0)),
+        ("Coverage rows", summary.get("snapshot_result_count", len(snapshot_rows))),
         ("State", summary.get("data_state", "unknown")),
     ]
     table_rows = "".join(_benchmark_report_row_html(row) for row in reports if isinstance(row, dict))
     if not table_rows:
         table_rows = "<tr><td colspan=\"5\" class=\"muted\">No benchmark reports found.</td></tr>"
+    snapshot_table_rows = "".join(
+        _benchmark_snapshot_row_html(row) for row in snapshot_rows if isinstance(row, dict)
+    )
+    if not snapshot_table_rows:
+        snapshot_table_rows = "<tr><td colspan=\"7\" class=\"muted\">No benchmark coverage rows.</td></tr>"
     content = f"""
+<section class="panel">
+  <h2>Benchmark Coverage Snapshot</h2>
+  <table>
+    <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Readiness</th><th>Samples</th><th>Latency</th><th>Status</th></tr></thead>
+    <tbody>{snapshot_table_rows}</tbody>
+  </table>
+</section>
 <section class="panel">
   <h2>Recent Reports</h2>
   <table>
@@ -223,6 +293,7 @@ def _dashboard_page(
     json_path: str,
 ) -> str:
     empty = _empty_state_html(body.get("empty_state"))
+    notice = _empty_state_html(body.get("measurement_notice"))
     card_html = "".join(
         f"<div class=\"card\"><strong>{_html(value)}</strong><span>{_html(label)}</span></div>"
         for label, value in cards
@@ -250,6 +321,7 @@ details{{margin-top:18px}} summary{{cursor:pointer;color:#67e8f9}} pre{{white-sp
   <p><a href="/dashboard">Back to Agent Hub</a> | <a href="{_html(json_path)}">JSON</a></p>
   <div class="cards">{card_html}</div>
   {empty}
+  {notice}
   {content}
   <details><summary>Raw payload</summary><pre>{payload}</pre></details>
 </main></body></html>"""
@@ -286,13 +358,14 @@ def _leaderboard_row_html(row: dict[str, Any]) -> str:
     samples = _int(row.get("samples"))
     success = _percent(row.get("success_rate")) if samples else "waiting"
     cost = f"{_money(row.get('cost_per_million_input'))} in / {_money(row.get('cost_per_million_output'))} out"
+    score = row.get("overall_score") if samples else row.get("ranking_score", row.get("baseline_score"))
     return (
         "<tr>"
         f"<td>{_html(row.get('rank', ''))}</td>"
         f"<td>{_html(row.get('agent'))}</td>"
         f"<td>{_html(row.get('provider'))}</td>"
         f"<td>{_html(row.get('model'))}</td>"
-        f"<td>{_html(_number(row.get('overall_score')))}</td>"
+        f"<td>{_html(_number(score))}</td>"
         f"<td>{_html(success)}</td>"
         f"<td>{_html(samples)}</td>"
         f"<td>{_html(_latency(row.get('average_latency_ms')))}</td>"
@@ -318,6 +391,38 @@ def _benchmark_report_row_html(row: dict[str, Any]) -> str:
         f"<td>{_html(winner)}</td>"
         f"<td>{_html(len(results))}</td>"
         f"<td>{_html(', '.join(detail) or 'summary unavailable')}</td>"
+        "</tr>"
+    )
+
+
+def _pricing_catalog_row_html(row: dict[str, Any]) -> str:
+    estimate = _dict(row.get("sample_estimate"))
+    prices = (
+        f"{_money(row.get('cost_per_million_input'))} / "
+        f"{_money(row.get('cost_per_million_output'))}"
+    )
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('agent'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(row.get('pricing_status'))}</td>"
+        f"<td>{_html(prices)}</td>"
+        f"<td>{_html(_money(estimate.get('estimated_cost_usd')))}</td>"
+        "</tr>"
+    )
+
+
+def _benchmark_snapshot_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('agent'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(row.get('benchmark_readiness_score'))}/100</td>"
+        f"<td>{_html(_int(row.get('sample_count')))}</td>"
+        f"<td>{_html(_latency(row.get('average_latency_ms')))}</td>"
+        f"<td>{_html(row.get('measurement_status'))}</td>"
         "</tr>"
     )
 

@@ -192,10 +192,15 @@ class RoutingMemoryTests(unittest.TestCase):
 
             self.assertEqual(stats["object"], "agent_hub.routing_memory.stats")
             self.assertGreaterEqual(stats["total_records"], 1)
+            self.assertEqual(stats["summary"]["data_state"], "measured_ready")
+            self.assertIn("feedback", stats["summary"]["signals_tracked"])
             self.assertEqual(recent["object"], "agent_hub.routing_memory.recent")
             self.assertTrue(decision["found"])
             self.assertEqual(reset["object"], "agent_hub.routing_memory.reset")
             self.assertEqual(after["total_records"], 0)
+            self.assertEqual(after["summary"]["data_state"], "baseline_ready")
+            self.assertIsNotNone(after["empty_state"])
+            self.assertIn("privacy", after["baseline_policy"])
 
 
 class _Provider:

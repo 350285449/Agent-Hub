@@ -1,7 +1,8 @@
 # Plugins
 
 Agent Hub includes a plugin SDK foundation for local, community-owned
-extensions. This pass is manifest-only and safe by default.
+extensions. Discovery is manifest-first and safe by default; trusted plugins
+can opt into bounded local-process JSON execution.
 
 Supported manifest types:
 
@@ -64,8 +65,20 @@ and can grant capability scopes such as
 `network.call`. Unsigned entries without a hash are rejected unless
 `plugin_allow_unsigned` is explicitly enabled.
 
-Plugin execution remains disabled by default. The sandbox interface checks
-requested scopes against configured grants and then denies execution unless
-`plugin_execution_enabled` is enabled. Future sandbox backends are named
-`disabled`, `local_process`, `docker`, and `wasm`, but unrestricted third-party
-imports are not run by Agent Hub.
+Plugin execution remains disabled by default. When `plugin_execution_enabled`
+is true, a plugin is trusted, its entrypoint stays inside the plugin directory,
+and requested scopes are granted, Agent Hub can run a bounded `local_process`
+plugin contract. The entrypoint receives JSON on stdin:
+
+```json
+{
+  "plugin_id": "tool.demo",
+  "action": "run",
+  "granted_scopes": ["tool.register"],
+  "payload": {"value": "hello"}
+}
+```
+
+It should return JSON on stdout. Python and Node entrypoints are supported; the
+process is launched without a shell. Future sandbox backend names remain
+`disabled`, `docker`, and `wasm`, but only `local_process` executes today.

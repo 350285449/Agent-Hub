@@ -209,9 +209,9 @@ Agent-Hub is organized around modular backend systems:
 - Repository context: indexes files, important package/config files, imports,
   changed files, and compact evidence for coding/review/debug/refactor tasks.
 - Provider evaluation: stores benchmark scores and feeds them back into routing.
-- Plugin SDK foundation: discovers local manifest-only provider, tool,
-  workflow, router-strategy, and memory/context plugins without executing
-  third-party code.
+- Plugin SDK foundation: discovers local provider, tool, workflow,
+  router-strategy, and memory/context plugins, and lets trusted plugins opt
+  into bounded local-process JSON execution.
 - Dashboard: `/dashboard`, `/dashboard/routing-intelligence`,
   `/dashboard/optimization`, `/v1/status`, `/v1/routing-history`, and
   `/v1/provider-scores` explain model selection, rejected candidates, adaptive
@@ -699,8 +699,8 @@ OpenAI-compatible tools. It also includes `setup_guidance`, an actionable
 readiness summary with the next setup step, missing provider/API-key actions,
 local-model probe issues, and approval-mode warnings. The companion
 `readiness` object gives a weighted 0-100 score, 1-10 rating, next action, and
-feature maturity states so foundation-level or data-waiting features are not
-reported as indistinguishable from fully ready ones.
+feature maturity states so baseline-ready, opt-in, policy-gated, measured, and
+needs-action features are not reported as indistinguishable from each other.
 
 Runtime health is persisted in `.agent-hub/state/provider_health.json`.
 Agent-Hub stores rolling success/failure counts, timeout counts, average
@@ -801,7 +801,10 @@ Additional visibility endpoints:
 - `GET /v1/tools`
 - `GET /v1/workflows/status`
 - `GET /v1/plugins`
+- `POST /v1/plugins/{plugin_id}/execute`
 - `GET /v1/enterprise/audit`
+- `GET /v1/enterprise/status`
+- `POST /v1/night-mode/run`
 
 When `host` is `0.0.0.0` or another public bind address, these diagnostics
 endpoints require `diagnostics_auth_token` or `diagnostics_auth_token_env`.
@@ -810,8 +813,9 @@ is in `docs/config-reference.md`.
 
 Phase 6 adds platform hardening without enabling risky behavior by default:
 plugin manifests can be trusted by registry hash/signature or explicit
-allowlist, plugin execution remains disabled behind a deny-by-default sandbox
-interface, enterprise permission decisions are audited to local state, and
+allowlist, trusted plugin local-process execution remains disabled behind a
+deny-by-default sandbox interface, enterprise permission decisions are audited
+and summarized to local state, and
 `python -m agent_hub migrate-config` can detect and write small config key
 migrations.
 

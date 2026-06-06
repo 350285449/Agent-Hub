@@ -31,9 +31,9 @@ incremental chunks.
 6. Add config defaults or provider presets if appropriate.
 7. Add tests for payload translation, errors, streaming, and tool handling.
 
-Provider plugins can be described with a manifest under `.agent-hub/plugins`,
-but Agent Hub currently treats plugins as manifest-only metadata and does not
-execute third-party plugin code. See `docs/plugins.md`.
+Provider plugins can be described with a manifest under `.agent-hub/plugins`.
+Discovery is manifest-first by default, and trusted plugins can opt into
+bounded local-process JSON execution. See `docs/plugins.md`.
 
 ## Codex CLI Provider
 

@@ -7,8 +7,10 @@ Agent-Hub now has a bridge shape for external MCP servers.
 - `mcp_servers` can be declared in config.
 - Declared MCP tool metadata is normalized into Agent-Hub `Tool` objects.
 - MCP-shaped tools use the same registry and permission pipeline as built-ins.
-- External protocol execution is marked `future_ready` and returns a clear
-  unsupported result.
+- Stdio MCP execution is available when `mcp_execution_enabled` is true and the
+  server has a configured `command`. Execution is still off by default.
+- Tool calls use a bounded JSON-RPC initialize plus `tools/call` exchange and
+  respect the configured `mcp_timeout_seconds`.
 
 ## Example
 
@@ -35,8 +37,9 @@ Agent-Hub now has a bridge shape for external MCP servers.
 
 The normalized tool name is `mcp.local.lookup`.
 
-## Future Plan
+## Safety
 
-The next bridge step is a real stdio/SSE MCP client that discovers tools at
-server startup, executes calls through the same permission layer, and streams
-tool events into the dashboard.
+MCP servers are external processes. Keep `mcp_execution_enabled` false unless
+you trust the configured command and tool definitions. Agent Hub launches the
+server without a shell and times out tool calls, but it does not sandbox the
+external process.

@@ -8,7 +8,7 @@ import sys
 import urllib.error
 import urllib.request
 from html.parser import HTMLParser
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 from typing import Any
 
 from ..config import AgentConfig, normalize_provider
@@ -789,6 +789,104 @@ def _search_with_duckduckgo(query: str, limit: int, timeout: float) -> list[dict
         if len(hits) >= limit:
             break
     return hits
+
+
+def _search_with_duckduckgo_instant(query: str, limit: int, timeout: float) -> list[dict[str, str]]:
+    url = "https://api.duckduckgo.com/?" + urlencode(
+        {
+            "q": query,
+            "format": "json",
+            "no_html": "1",
+            "skip_disambig": "1",
+        }
+    )
+    get_url_text = _facade_callable("_get_url_text", _get_url_text)
+    _content_type, text = get_url_text(url, timeout=timeout, max_bytes=300_000)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ProviderError(
+            "DuckDuckGo instant answer returned invalid JSON",
+            retryable=True,
+            error_type="invalid_provider_response",
+        ) from exc
+    hits: list[dict[str, str]] = []
+    abstract_url = payload.get("AbstractURL") if isinstance(payload, dict) else None
+    if isinstance(abstract_url, str) and abstract_url:
+        hits.append(
+            {
+                "title": _clean_text(str(payload.get("Heading") or abstract_url)),
+                "url": abstract_url,
+                "snippet": _clean_text(str(payload.get("AbstractText") or "")),
+            }
+        )
+    related = payload.get("RelatedTopics") if isinstance(payload, dict) else []
+    for item in _flatten_related_topics(related):
+        url_value = item.get("FirstURL")
+        if not isinstance(url_value, str) or not url_value:
+            continue
+        host = (urlparse(url_value).hostname or "").lower()
+        if "duckduckgo.com" in host:
+            continue
+        hits.append(
+            {
+                "title": _clean_text(str(item.get("Text") or url_value)).split(" - ", 1)[0],
+                "url": url_value,
+                "snippet": _clean_text(str(item.get("Text") or "")),
+            }
+        )
+        if len(hits) >= limit:
+            break
+    return _dedupe_hits(hits)[:limit]
+
+
+def _search_with_wikipedia(query: str, limit: int, timeout: float) -> list[dict[str, str]]:
+    url = "https://en.wikipedia.org/w/api.php?" + urlencode(
+        {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "srlimit": limit,
+            "format": "json",
+            "utf8": "1",
+        }
+    )
+    get_url_text = _facade_callable("_get_url_text", _get_url_text)
+    _content_type, text = get_url_text(url, timeout=timeout, max_bytes=300_000)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ProviderError(
+            "Wikipedia search returned invalid JSON",
+            retryable=True,
+            error_type="invalid_provider_response",
+        ) from exc
+    search = payload.get("query", {}).get("search", []) if isinstance(payload, dict) else []
+    hits: list[dict[str, str]] = []
+    for item in search if isinstance(search, list) else []:
+        if not isinstance(item, dict) or not item.get("title"):
+            continue
+        title = _clean_text(str(item["title"]))
+        hits.append(
+            {
+                "title": title,
+                "url": "https://en.wikipedia.org/wiki/" + quote(title.replace(" ", "_"), safe="_()"),
+                "snippet": _html_to_text(str(item.get("snippet") or "")),
+            }
+        )
+    return hits[:limit]
+
+
+def _flatten_related_topics(value: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("Topics"), list):
+            rows.extend(_flatten_related_topics(item["Topics"]))
+        else:
+            rows.append(item)
+    return rows
 
 
 def _get_url_text(url: str, timeout: float, max_bytes: int) -> tuple[str, str]:

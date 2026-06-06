@@ -286,11 +286,53 @@ class RoutingMemoryStore:
 
     def stats(self) -> dict[str, Any]:
         rows = self._read_recent(limit=MAX_MEMORY_READ)
+        data_state = "measured_ready" if rows else ("baseline_ready" if self.enabled else "disabled")
         return {
             "object": "agent_hub.routing_memory.stats",
             "enabled": self.enabled,
             "store_prompts": self.store_prompts,
             "retention_days": self.retention_days,
+            "summary": {
+                "data_state": data_state,
+                "total_records": len(rows),
+                "signals_tracked": [
+                    "task_type",
+                    "provider",
+                    "model",
+                    "latency",
+                    "failover",
+                    "cost",
+                    "feedback",
+                    "repository_profile",
+                ],
+                "prompt_storage": "hash_or_disabled" if not self.store_prompts else "enabled",
+            },
+            "empty_state": None
+            if rows
+            else {
+                "title": "Routing memory is ready for outcome samples"
+                if self.enabled
+                else "Routing memory is disabled",
+                "message": (
+                    "Agent Hub will learn provider, model, cost, latency, failover, and feedback "
+                    "patterns as routed requests complete."
+                    if self.enabled
+                    else "Enable routing_memory_enabled to collect local routing outcome history."
+                ),
+                "actions": [
+                    "Send requests through Agent Hub.",
+                    "Record feedback with POST /v1/feedback.",
+                    "Inspect recent records at /v1/routing-memory/recent.",
+                ]
+                if self.enabled
+                else ["Set routing_memory_enabled=true."],
+            },
+            "baseline_policy": {
+                "store_prompts": self.store_prompts,
+                "retention_days": self.retention_days,
+                "max_records": MAX_MEMORY_READ,
+                "privacy": "Prompts are not stored unless routing_memory_store_prompts=true.",
+            },
             "total_records": len(rows),
             "most_successful_models_by_task_type": _most_successful_models(rows),
             "failure_prone_models_by_task_type": _failure_prone_models(rows),

@@ -8,6 +8,7 @@ from .models import (
     PluginManifest,
 )
 from .sandbox import PluginExecutionRequest, PluginExecutionResult, PluginExecutionSandbox
+from .runtime import execute_plugin
 from .trust import CAPABILITY_SCOPES, manifest_hash_from_data
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "PluginExecutionSandbox",
     "CAPABILITY_SCOPES",
     "discover_plugins",
+    "execute_plugin",
     "load_plugin_manifest",
     "manifest_hash_from_data",
     "plugin_directories",

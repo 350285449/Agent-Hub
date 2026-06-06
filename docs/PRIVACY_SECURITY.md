@@ -16,9 +16,9 @@ Storage and injected into the backend environment when the server is started.
 
 Provider keys and authorization-like headers are masked before being exposed by
 security helper models. Plugin discovery is sandboxed to configured local
-plugin directories and is manifest-only: Agent Hub validates plugin metadata,
+plugin directories and is manifest-first: Agent Hub validates plugin metadata,
 entrypoint paths, trust registry entries, manifest hashes, and optional
-signatures, but does not execute plugin code.
+signatures before any trusted local-process execution is allowed.
 
 When the HTTP server is bound to a public host, every endpoint requires
 `Authorization: Bearer <token>` or `X-Agent-Hub-API-Token`. Set

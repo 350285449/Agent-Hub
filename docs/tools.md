@@ -67,5 +67,7 @@ OpenAI-compatible `tools` entries. Tool calls can be normalized with
 ## MCP Bridge
 
 Configured MCP tool metadata is normalized into `Tool` objects with the same
-permission pipeline. Full external MCP stdio/SSE execution is future-ready and
-returns a clear unsupported result instead of pretending to run a server.
+permission pipeline. Stdio MCP execution is available as an explicit opt-in:
+set `mcp_execution_enabled=true` and configure `mcp_timeout_seconds` to bound
+tool calls. SSE MCP transports remain out of scope for the local runtime and
+return a clear unsupported result instead of pretending to run a server.

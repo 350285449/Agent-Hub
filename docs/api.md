@@ -140,7 +140,14 @@ curl http://127.0.0.1:8787/v1/events
 curl http://127.0.0.1:8787/v1/tools
 curl http://127.0.0.1:8787/v1/workflows/status
 curl http://127.0.0.1:8787/v1/plugins
+curl -X POST http://127.0.0.1:8787/v1/plugins/tool.demo/execute \
+  -H "Content-Type: application/json" \
+  -d '{"action":"run","requested_scopes":["tool.register"],"payload":{"value":"hello"}}'
 curl http://127.0.0.1:8787/v1/enterprise/audit
+curl http://127.0.0.1:8787/v1/enterprise/status
+curl -X POST http://127.0.0.1:8787/v1/night-mode/run \
+  -H "Content-Type: application/json" \
+  -d '{"timeout_seconds":180}'
 ```
 
 If Agent Hub is configured with a public bind host such as `0.0.0.0`, every
@@ -156,7 +163,12 @@ masking API keys, bearer tokens, auth headers, and secret-looking strings.
 rating, state, next action, scored readiness items, and feature maturity states.
 It distinguishes route-ready providers from merely configured providers, and it
 marks data-backed dashboards, plugins, MCP bridge, and night mode with honest
-ready/needs-data/foundation/plan-only states.
+coverage-ready, execution-disabled, or validation-ready states.
+
+`/v1/enterprise/status` summarizes enterprise users, roles, workspaces, grants,
+recent allow/deny audit counts, and configuration warnings. `/v1/night-mode/run`
+executes configured validation commands only when autonomous night mode and
+shell execution policy are explicitly enabled; it never edits files.
 
 `/v1/production-check` returns `agent_hub.production_check`: a strict acceptance
 gate with weighted checks, failed major/critical checks, warnings, readiness

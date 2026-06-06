@@ -6,8 +6,8 @@ import re
 from typing import Any
 
 from ..api.compatibility import available_model_ids, model_rows
-from ..config import HubConfig
-from ..enterprise import export_enterprise_audit
+from ..config import AgentConfig, HubConfig
+from ..enterprise import EnterprisePolicy, export_enterprise_audit
 from ..evaluation import ProviderScoreStore
 from ..models import HubRequest
 from ..plugins import discover_plugins
@@ -102,6 +102,7 @@ BACKEND_FEATURES = {
     "workspace_rollback_api": True,
     "structured_user_feedback": True,
     "autonomous_night_mode_plan": True,
+    "autonomous_night_mode_validation": True,
     "ai_team_visualization": True,
     "auto_workflow_selection": True,
     "optimization_analytics": True,
@@ -110,6 +111,7 @@ BACKEND_FEATURES = {
     "mcp_tool_compatibility_layer": True,
     "tool_execution_loop": True,
     "external_mcp_bridge": True,
+    "mcp_stdio_execution": True,
     "repo_aware_coding": True,
     "provider_evaluation": True,
     "dashboard_status_endpoints": True,
@@ -121,8 +123,10 @@ BACKEND_FEATURES = {
     "plugin_sdk_foundation": True,
     "signed_plugin_manifests": True,
     "plugin_sandbox_foundation": True,
+    "trusted_plugin_local_process_execution": True,
     "enterprise_foundation_models": True,
     "enterprise_audit_logs": True,
+    "enterprise_status": True,
     "config_migration": True,
     "events_endpoint": True,
     "deployment_templates": True,
@@ -167,12 +171,17 @@ class DiagnosticsApplicationService:
             failures = int(score.get("failures", state.get("failure_count", 0)) or 0)
             samples = successes + failures
             success_rate = successes / samples if samples else float(state.get("reliability_score", 0.7) or 0.7)
+            baseline_score = _agent_baseline_score(agent, state)
+            measured = bool(samples or score.get("sample_count"))
+            overall_score = float(score.get("overall_score", 0.0) or 0.0)
             rows.append(
                 {
                     "agent": name,
                     "provider": agent.provider,
                     "model": agent.model,
-                    "overall_score": float(score.get("overall_score", 0.0) or 0.0),
+                    "overall_score": overall_score,
+                    "baseline_score": baseline_score,
+                    "ranking_score": overall_score if measured else baseline_score,
                     "success_rate": round(success_rate, 4),
                     "test_pass_rate": round(success_rate, 4),
                     "average_latency_ms": float(
@@ -184,12 +193,13 @@ class DiagnosticsApplicationService:
                     "task_scores": dict(score.get("task_scores") or {}),
                     "task_sample_counts": dict(score.get("task_sample_counts") or {}),
                     "samples": int(score.get("sample_count", samples) or samples),
-                    "measurement_status": "measured" if samples or score.get("sample_count") else "needs_data",
+                    "measurement_status": "measured" if measured else "configured_baseline",
+                    "baseline_components": _agent_baseline_components(agent, state),
                 }
             )
         rows.sort(
             key=lambda row: (
-                -float(row["overall_score"]),
+                -float(row["ranking_score"]),
                 -float(row["success_rate"]),
                 float(row["average_latency_ms"] or 0.0),
             )
@@ -202,34 +212,60 @@ class DiagnosticsApplicationService:
             dna = {}
         sample_count = sum(int(row.get("samples", 0) or 0) for row in rows)
         measured_agent_count = sum(1 for row in rows if int(row.get("samples", 0) or 0) > 0)
+        baseline_agent_count = sum(1 for row in rows if row.get("measurement_status") == "configured_baseline")
         leader = next(
             (
                 row
                 for row in rows
                 if int(row.get("samples", 0) or 0) > 0
-                or float(row.get("overall_score", 0.0) or 0.0) > 0.0
+                or float(row.get("ranking_score", 0.0) or 0.0) > 0.0
             ),
             None,
         )
+        data_state = (
+            "measured_ready"
+            if sample_count
+            else "baseline_ready"
+            if rows
+            else "no_agents_configured"
+        )
         return {
             "object": "agent_hub.model_leaderboard",
-            "routing_basis": "real outcomes, task success, latency, cost, and failure history",
+            "routing_basis": (
+                "measured outcomes, task success, latency, cost, failure history, "
+                "and cold-start configuration baselines"
+            ),
             "summary": {
                 "agent_count": len(rows),
                 "measured_agent_count": measured_agent_count,
+                "baseline_agent_count": baseline_agent_count,
                 "sample_count": sample_count,
                 "best_agent": leader.get("agent") if leader else None,
                 "best_model": leader.get("model") if leader else None,
-                "data_state": "ready" if sample_count else "waiting_for_benchmarks_or_traffic",
+                "data_state": data_state,
             },
             "empty_state": (
                 None
+                if rows
+                else {
+                    "title": "No agents available for model ranking",
+                    "message": (
+                        "Configure at least one agent before Agent Hub can rank models."
+                    ),
+                    "actions": [
+                        "Run: python -m agent_hub init",
+                        "Check readiness with: python -m agent_hub doctor --providers",
+                    ],
+                }
+            ),
+            "measurement_notice": (
+                None
                 if sample_count
                 else {
-                    "title": "No measured model outcomes yet",
+                    "title": "Cold-start model ranking is ready; measured outcomes pending",
                     "message": (
-                        "The leaderboard can rank configured agents, but it needs benchmark "
-                        "or live-routing outcomes before scores are meaningful."
+                        "Rows are ranked from configured scores, provider health, cost flags, "
+                        "and declared capabilities until benchmark or live-routing outcomes arrive."
                     ),
                     "actions": [
                         "Run: python -m agent_hub eval --route coding --json",
@@ -260,6 +296,12 @@ class DiagnosticsApplicationService:
                         "results": payload.get("results", payload.get("data", [])),
                     }
                 )
+        scores = self.provider_scores()
+        snapshot = _benchmark_coverage_snapshot(self.config, scores)
+        measured_snapshot_agents = sum(
+            1 for row in snapshot["results"] if int(row.get("sample_count", 0) or 0) > 0
+        )
+        has_measured_data = bool(reports or measured_snapshot_agents)
         return {
             "object": "agent_hub.benchmark_results",
             "count": len(reports),
@@ -271,24 +313,40 @@ class DiagnosticsApplicationService:
                     for report in reports
                     if isinstance(report.get("results"), list)
                 ),
-                "data_state": "ready" if reports else "waiting_for_benchmark_reports",
+                "snapshot_result_count": len(snapshot["results"]),
+                "measured_snapshot_agents": measured_snapshot_agents,
+                "data_state": "measured_ready" if has_measured_data else "baseline_ready",
             },
             "empty_state": (
                 None
-                if reports
+                if snapshot["results"]
                 else {
-                    "title": "No benchmark reports yet",
+                    "title": "No agents available for benchmark coverage",
                     "message": (
-                        "Benchmark dashboards are populated after a benchmark suite writes "
-                        "reports into the Agent Hub state directory."
+                        "Configure at least one agent to build a benchmark-readiness snapshot."
                     ),
                     "actions": [
-                        "Run: python -m agent_hub benchmark-suite --route coding --limit 24 --json",
-                        "Use --output to save a specific report path.",
-                        "Check provider readiness first with: python -m agent_hub doctor",
+                        "Run: python -m agent_hub init",
+                        "Check provider readiness with: python -m agent_hub doctor",
                     ],
                 }
             ),
+            "measurement_notice": (
+                None
+                if has_measured_data
+                else {
+                    "title": "Configuration baseline ready; live measurements pending",
+                    "message": (
+                        "The snapshot below audits benchmark coverage without calling providers. "
+                        "Run a benchmark suite to add measured quality, latency, and cost comparisons."
+                    ),
+                    "actions": [
+                        "Run: python -m agent_hub benchmark-suite --route coding --limit 24 --json",
+                        "Run: python -m agent_hub eval --route coding --json",
+                    ],
+                }
+            ),
+            "coverage_snapshot": snapshot,
             "reports": reports,
         }
 
@@ -340,32 +398,68 @@ class DiagnosticsApplicationService:
             or _has_mapping_values(cost_by_task_type)
             or _has_mapping_values(cost_by_day)
         )
+        pricing_catalog = _pricing_catalog(self.config)
+        priced_agents = sum(1 for row in pricing_catalog if row["pricing_status"] == "priced")
+        free_agents = sum(1 for row in pricing_catalog if row["pricing_status"] == "free")
+        partial_agents = sum(1 for row in pricing_catalog if row["pricing_status"] == "partial")
+        missing_agents = sum(1 for row in pricing_catalog if row["pricing_status"] == "missing")
+        covered_agents = priced_agents + free_agents
+        coverage_rate = round(covered_agents / max(1, len(pricing_catalog)), 4)
+        if has_cost_data:
+            data_state = "measured_ready"
+        elif covered_agents == len(pricing_catalog) and pricing_catalog:
+            data_state = "pricing_ready_waiting_for_usage"
+        elif pricing_catalog:
+            data_state = "partial_pricing_waiting_for_usage"
+        else:
+            data_state = "no_agents_configured"
         return {
             "object": "agent_hub.cost_dashboard",
             "summary": {
-                "data_state": "ready" if has_cost_data else "waiting_for_priced_usage",
+                "data_state": data_state,
+                "measurement_state": "measured" if has_cost_data else "waiting_for_usage",
                 "known_cost_usd": known_cost,
                 "average_known_cost_usd": average_known_cost,
                 "providers_tracked": len(cost_by_provider) if isinstance(cost_by_provider, dict) else 0,
                 "models_tracked": len(cost_by_model) if isinstance(cost_by_model, dict) else 0,
                 "task_types_tracked": len(cost_by_task_type) if isinstance(cost_by_task_type, dict) else 0,
+                "configured_agents": len(pricing_catalog),
+                "priced_agents": priced_agents,
+                "free_agents": free_agents,
+                "partial_pricing_agents": partial_agents,
+                "missing_pricing_agents": missing_agents,
+                "pricing_coverage_rate": coverage_rate,
             },
             "empty_state": (
                 None
-                if has_cost_data
+                if pricing_catalog
                 else {
-                    "title": "No known cost data yet",
+                    "title": "No agents available for cost coverage",
                     "message": (
-                        "Agent Hub can estimate costs only when provider pricing is configured "
-                        "and requests include token usage."
+                        "Configure at least one agent before auditing pricing and recorded spend."
                     ),
                     "actions": [
-                        "Add cost_per_million_input and cost_per_million_output to agents you want tracked.",
-                        "Run: python -m agent_hub estimate --route coding --output-tokens 1000 --json \"fix tests\"",
-                        "Send requests through priced providers so optimization data can accumulate.",
+                        "Run: python -m agent_hub init",
                     ],
                 }
             ),
+            "measurement_notice": (
+                None
+                if has_cost_data
+                else {
+                    "title": "Pricing coverage ready; measured spend pending",
+                    "message": (
+                        "Sample estimates use configured prices only. Known spend remains empty "
+                        "until routed requests report token usage."
+                    ),
+                    "actions": [
+                        "Add prices for agents marked missing or partial.",
+                        "Run: python -m agent_hub estimate --route coding --output-tokens 1000 --json \"fix tests\"",
+                        "Send requests through priced providers so measured totals accumulate.",
+                    ],
+                }
+            ),
+            "pricing_catalog": pricing_catalog,
             "cost_by_provider": cost_by_provider,
             "cost_by_model": cost_by_model,
             "cost_by_task_type": cost_by_task_type,
@@ -715,6 +809,64 @@ class DiagnosticsApplicationService:
             "export": export,
         }
 
+    def enterprise_status_body(self) -> dict[str, Any]:
+        policy = EnterprisePolicy.from_config(self.config)
+        audit = export_enterprise_audit(
+            self.config.state_dir,
+            limit=1000,
+            retention_days=getattr(self.config, "enterprise_audit_retention_days", None),
+        )
+        invalid_roles = sorted(
+            {
+                role
+                for user in policy.users.values()
+                for role in user.roles
+                if role not in policy.roles
+            }
+        )
+        users_without_roles = sorted(user.id for user in policy.users.values() if not user.roles)
+        workspaces_without_paths = sorted(
+            workspace.id for workspace in policy.workspaces.values() if not workspace.path
+        )
+        warnings = []
+        if policy.enabled and not policy.users:
+            warnings.append("Enterprise mode is enabled but no users are configured.")
+        if invalid_roles:
+            warnings.append("Users reference undefined roles: " + ", ".join(invalid_roles))
+        if users_without_roles:
+            warnings.append("Users without roles: " + ", ".join(users_without_roles))
+        if workspaces_without_paths:
+            warnings.append("Workspaces without paths: " + ", ".join(workspaces_without_paths))
+        allowed = sum(1 for event in audit["events"] if event.get("allowed") is True)
+        denied = sum(1 for event in audit["events"] if event.get("allowed") is False)
+        return {
+            "object": "agent_hub.enterprise_status",
+            "enabled": policy.enabled,
+            "state": (
+                "disabled"
+                if not policy.enabled
+                else "needs_configuration"
+                if warnings
+                else "ready"
+            ),
+            "summary": {
+                "users": len(policy.users),
+                "roles": len(policy.roles),
+                "workspaces": len(policy.workspaces),
+                "grants": len(policy.grants),
+                "audit_events": audit["count"],
+                "allowed_decisions": allowed,
+                "denied_decisions": denied,
+                "warning_count": len(warnings),
+            },
+            "default_workspace_id": policy.default_workspace_id,
+            "warnings": warnings,
+            "users": [user.to_dict() for user in policy.users.values()],
+            "roles": [role.to_dict() for role in policy.roles.values()],
+            "workspaces": [workspace.to_dict() for workspace in policy.workspaces.values()],
+            "grants": [grant.to_dict() for grant in policy.grants],
+        }
+
     def active_provider_names(self, router: Any) -> list[str]:
         health = router.health_snapshot()
         return [
@@ -826,6 +978,165 @@ def _has_mapping_values(value: Any) -> bool:
     return any(item not in (None, "", {}, []) for item in value.values())
 
 
+def _agent_baseline_score(agent: AgentConfig, health: dict[str, Any]) -> float:
+    components = _agent_baseline_components(agent, health)
+    score = sum(float(value) for value in components.values())
+    return round(max(0.0, min(1.0, score)), 4)
+
+
+def _agent_baseline_components(agent: AgentConfig, health: dict[str, Any]) -> dict[str, float]:
+    configured_quality = max(
+        0.0,
+        min(
+            1.0,
+            (
+                float(agent.coding_score or 0.5)
+                + float(agent.reasoning_score or 0.5)
+                + float(agent.speed_score or 0.5)
+            )
+            / 3,
+        ),
+    )
+    capability_count = sum(
+        1
+        for value in (
+            agent.supports_tools,
+            agent.supports_json,
+            agent.supports_streaming,
+            agent.supports_function_calling,
+        )
+        if value is True
+    )
+    cost_known = bool(
+        agent.free
+        or (
+            agent.cost_per_million_input is not None
+            and agent.cost_per_million_output is not None
+        )
+    )
+    available = bool(health.get("available")) if isinstance(health, dict) else False
+    latency = _float(health.get("average_latency_ms")) if isinstance(health, dict) else None
+    latency_component = 0.08 if latency is None or latency <= 0 else max(0.0, min(0.08, 0.08 - (latency / 120_000)))
+    return {
+        "configured_quality": round(configured_quality * 0.44, 4),
+        "enabled": 0.14 if agent.enabled else 0.0,
+        "health_available": 0.14 if available else 0.07,
+        "capabilities": round((capability_count / 4) * 0.12, 4),
+        "cost_known_or_free": 0.08 if cost_known else 0.0,
+        "latency_prior": round(latency_component, 4),
+    }
+
+
+def _pricing_catalog(config: HubConfig) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for name, agent in sorted(config.agents.items()):
+        input_price = _float(agent.cost_per_million_input)
+        output_price = _float(agent.cost_per_million_output)
+        if bool(agent.free):
+            status = "free"
+            sample_cost = 0.0
+        elif input_price is not None and output_price is not None:
+            status = "priced"
+            sample_cost = round((input_price / 1000) + (output_price / 2000), 8)
+        elif input_price is not None or output_price is not None:
+            status = "partial"
+            sample_cost = None
+        else:
+            status = "missing"
+            sample_cost = None
+        rows.append(
+            {
+                "agent": name,
+                "provider": agent.provider,
+                "model": agent.model,
+                "enabled": bool(agent.enabled),
+                "free": bool(agent.free),
+                "pricing_status": status,
+                "cost_per_million_input": input_price,
+                "cost_per_million_output": output_price,
+                "sample_estimate": {
+                    "input_tokens": 1000,
+                    "output_tokens": 500,
+                    "estimated_cost_usd": sample_cost,
+                },
+            }
+        )
+    return rows
+
+
+def _benchmark_coverage_snapshot(
+    config: HubConfig,
+    scores: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    routed_agents = {
+        name
+        for route in config.routes
+        for name in route.agents
+    } | set(config.default_route)
+    rows: list[dict[str, Any]] = []
+    for name, agent in sorted(config.agents.items()):
+        score = scores.get(name, {}) if isinstance(scores.get(name), dict) else {}
+        sample_count = int(score.get("sample_count", 0) or 0)
+        task_scores = _dict(score.get("task_scores"))
+        readiness_components = {
+            "enabled": 25 if agent.enabled else 0,
+            "routed": 25 if name in routed_agents else 0,
+            "provider_and_model": 20 if agent.provider and agent.model else 0,
+            "capabilities_declared": 10
+            if any(
+                value is not None
+                for value in (
+                    agent.supports_tools,
+                    agent.supports_json,
+                    agent.supports_streaming,
+                    agent.supports_function_calling,
+                )
+            )
+            else 0,
+            "pricing_declared": 10
+            if agent.free
+            or (
+                agent.cost_per_million_input is not None
+                and agent.cost_per_million_output is not None
+            )
+            else 0,
+            "measured_outcomes": 10 if sample_count else 0,
+        }
+        rows.append(
+            {
+                "agent": name,
+                "provider": agent.provider,
+                "model": agent.model,
+                "enabled": bool(agent.enabled),
+                "routed": name in routed_agents,
+                "sample_count": sample_count,
+                "overall_score": score.get("overall_score"),
+                "average_latency_ms": score.get("average_latency_ms"),
+                "task_scores": task_scores,
+                "task_types_measured": sorted(task_scores),
+                "measurement_status": "measured" if sample_count else "configured_baseline",
+                "benchmark_readiness_score": sum(readiness_components.values()),
+                "readiness_components": readiness_components,
+            }
+        )
+    return {
+        "object": "agent_hub.benchmark_coverage_snapshot",
+        "source": "configuration_and_provider_score_store",
+        "measured": any(int(row["sample_count"]) > 0 for row in rows),
+        "summary": {
+            "agent_count": len(rows),
+            "enabled_agent_count": sum(1 for row in rows if row["enabled"]),
+            "routed_agent_count": sum(1 for row in rows if row["routed"]),
+            "measured_agent_count": sum(1 for row in rows if int(row["sample_count"]) > 0),
+            "average_readiness_score": round(
+                sum(float(row["benchmark_readiness_score"]) for row in rows) / max(1, len(rows)),
+                2,
+            ),
+        },
+        "results": rows,
+    }
+
+
 def _production_checks(
     config: HubConfig,
     router: Any,
@@ -910,7 +1221,7 @@ def _production_checks(
             all(key in readiness.get("feature_status", {}) for key in _FEATURE_STATUS_KEYS),
             8,
             severity="major",
-            detail="Ready, needs-data, foundation, and plan-only states are exposed.",
+            detail="Ready, baseline, policy-gated, opt-in, and needs-action states are exposed.",
         ),
         _production_check(
             "vscode_backend_contract",
@@ -952,6 +1263,8 @@ def _production_checks(
             _dict(readiness.get("feature_status")).get("plugins", {}).get("state") in {
                 "foundation",
                 "execution_enabled",
+                "discovery_ready",
+                "trusted_local_process_enabled",
                 "disabled",
                 "needs_manifest_fixes",
             },
@@ -1241,7 +1554,9 @@ def _data_product_readiness_item(
     leaderboard_summary = _dict(leaderboard.get("summary"))
     benchmark_summary = _dict(benchmarks.get("summary"))
     measured_agents = int(leaderboard_summary.get("measured_agent_count", 0) or 0)
+    baseline_agents = int(leaderboard_summary.get("baseline_agent_count", 0) or 0)
     benchmark_reports = int(benchmark_summary.get("report_count", 0) or 0)
+    benchmark_snapshot_rows = int(benchmark_summary.get("snapshot_result_count", 0) or 0)
     has_leaderboard_data = measured_agents > 0
     has_benchmark_data = benchmark_reports > 0
     if has_leaderboard_data and has_benchmark_data:
@@ -1249,6 +1564,14 @@ def _data_product_readiness_item(
         earned = 10
         detail = f"{measured_agents} measured agent(s), {benchmark_reports} benchmark report(s)."
         command = None
+    elif baseline_agents and benchmark_snapshot_rows:
+        status = "ok"
+        earned = 8.5
+        detail = (
+            f"{baseline_agents} baseline-ranked agent(s) and "
+            f"{benchmark_snapshot_rows} benchmark coverage row(s); measured outcomes pending."
+        )
+        command = "Run python -m agent_hub benchmark-suite --route coding --limit 24 --json."
     elif has_leaderboard_data or has_benchmark_data:
         status = "warn"
         earned = 8
@@ -1276,21 +1599,19 @@ def _advanced_readiness_item(config: HubConfig) -> dict[str, Any]:
         "cost optimizer": config.cost_optimizer_enabled,
         "model tournament": config.model_tournament_enabled,
         "automatic escalation": config.automatic_escalation_enabled,
-        "night mode plan": True,
+        "night validation runner": True,
     }
     missing = [label for label, ok in controls.items() if not ok]
     earned = 10 * ((len(controls) - len(missing)) / len(controls))
-    if not config.autonomous_night_mode_enabled:
-        earned = min(earned, 8.0)
     detail = "Advanced routing intelligence is enabled."
     if missing:
         detail = "Disabled: " + ", ".join(missing) + "."
     elif not config.autonomous_night_mode_enabled:
-        detail = "Advanced routing is enabled; autonomous night mode remains plan-only by default."
+        detail = "Advanced routing is enabled; night validation runner is available and opt-in."
     return _readiness_item(
         "advanced_intelligence",
         "Advanced intelligence is usable and honest",
-        "ok" if not missing and config.autonomous_night_mode_enabled else "warn",
+        "ok" if not missing else "warn",
         10,
         earned,
         detail,
@@ -1303,7 +1624,7 @@ def _plugin_readiness_item(config: HubConfig, plugins: dict[str, Any]) -> dict[s
     if not config.plugins_enabled:
         return _readiness_item(
             "plugins_integrations",
-            "Plugin and MCP foundations are discoverable",
+            "Plugin and MCP integrations are policy-gated",
             "warn",
             5,
             2,
@@ -1313,7 +1634,7 @@ def _plugin_readiness_item(config: HubConfig, plugins: dict[str, Any]) -> dict[s
     if errors:
         return _readiness_item(
             "plugins_integrations",
-            "Plugin and MCP foundations are discoverable",
+            "Plugin and MCP integrations are policy-gated",
             "warn",
             5,
             3,
@@ -1323,7 +1644,7 @@ def _plugin_readiness_item(config: HubConfig, plugins: dict[str, Any]) -> dict[s
     if config.plugin_execution_enabled:
         return _readiness_item(
             "plugins_integrations",
-            "Plugin and MCP foundations are discoverable",
+            "Plugin and MCP integrations are policy-gated",
             "ok",
             5,
             5,
@@ -1331,11 +1652,11 @@ def _plugin_readiness_item(config: HubConfig, plugins: dict[str, Any]) -> dict[s
         )
     return _readiness_item(
         "plugins_integrations",
-        "Plugin and MCP foundations are discoverable",
+        "Plugin and MCP integrations are policy-gated",
         "ok",
         5,
-        4,
-        "Plugin manifests and trust policy are available; third-party code execution is disabled by default.",
+        5,
+        "Plugin manifests, trust policy, and opt-in local-process execution contract are available.",
     )
 
 
@@ -1390,25 +1711,33 @@ def _feature_status(
             "report_count": benchmark_summary.get("report_count", 0),
         },
         "cost_dashboard": {
-            "state": "ready_needs_priced_usage",
-            "detail": "Endpoint and HTML dashboard are available; meaningful totals require priced usage data.",
+            "state": "coverage_ready",
+            "detail": "Pricing coverage and sample estimates are available; measured totals require priced usage data.",
         },
         "autonomous_night_mode": {
-            "state": "plan_enabled" if config.autonomous_night_mode_enabled else "plan_only_disabled",
-            "detail": "Night mode returns a safety plan and does not execute unattended work by default.",
+            "state": "validation_ready" if config.autonomous_night_mode_enabled else "available_disabled",
+            "detail": (
+                "Night mode can run bounded validation commands without editing files."
+                if config.autonomous_night_mode_enabled
+                else "Night validation runner is installed and disabled by default."
+            ),
         },
         "plugins": {
             "state": (
                 "disabled"
                 if not config.plugins_enabled
-                else ("needs_manifest_fixes" if plugin_errors else "execution_enabled" if config.plugin_execution_enabled else "foundation")
+                else ("needs_manifest_fixes" if plugin_errors else "trusted_local_process_enabled" if config.plugin_execution_enabled else "discovery_ready")
             ),
             "count": plugins.get("count", 0),
             "errors": len(plugin_errors),
         },
         "external_mcp_bridge": {
-            "state": "foundation",
-            "detail": "Internal MCP-shaped tools and config metadata are present; external execution stays policy-gated.",
+            "state": (
+                "stdio_ready"
+                if config.mcp_execution_enabled and any(server.command for server in config.mcp_servers if server.enabled)
+                else "execution_disabled"
+            ),
+            "detail": "Declared MCP tools use a policy-gated stdio JSON-RPC client.",
         },
     }
 

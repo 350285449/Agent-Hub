@@ -13,6 +13,7 @@ from typing import Any
 
 from .config import AgentConfig, HubConfig, normalize_provider
 from .repository import RepositoryIndex, RepositoryIndexer
+from .security.command_runner import CommandExecutionRequest, CommandRunnerError, run_workspace_command
 
 
 REPOSITORY_INTELLIGENCE_FILE = "repository_intelligence.json"
@@ -442,8 +443,8 @@ def build_autonomous_night_mode_plan(
         tasks.insert(1, "Skip high-risk areas without explicit approval: " + ", ".join(risks[:4]))
     return {
         "object": "agent_hub.autonomous_night_mode_plan",
-        "enabled": False,
-        "mode": "plan_only",
+        "enabled": bool(config.autonomous_night_mode_enabled),
+        "mode": "validation_only" if config.autonomous_night_mode_enabled else "plan_only",
         "repository_profile_id": dna_dict.get("profile_id", ""),
         "tasks": tasks,
         "validation_commands": commands,
@@ -452,8 +453,71 @@ def build_autonomous_night_mode_plan(
             "human review required before PR creation",
             "respect provider and shell permission policy",
             "stop after repeated validation failure",
+            "validation-only execution never edits files",
         ],
     }
+
+
+def run_autonomous_night_mode_validation(
+    *,
+    dna: RepositoryDNA | dict[str, Any] | None,
+    config: HubConfig,
+    timeout_seconds: int = 180,
+) -> dict[str, Any]:
+    plan = build_autonomous_night_mode_plan(dna=dna, config=config)
+    commands = list(config.validation_commands or plan["validation_commands"])[:5]
+    report: dict[str, Any] = {
+        "object": "agent_hub.autonomous_night_mode_run",
+        "mode": "validation_only",
+        "started_at": time.time(),
+        "enabled": bool(config.autonomous_night_mode_enabled),
+        "ok": False,
+        "status": "blocked",
+        "commands": commands,
+        "results": [],
+        "safeguards": list(plan["safeguards"]),
+    }
+    if not config.autonomous_night_mode_enabled:
+        report["reason"] = "autonomous_night_mode_enabled=false"
+        return report
+    if not config.allow_shell_tools or config.shell_command_policy != "allow":
+        report["reason"] = "Night validation requires allow_shell_tools=true and shell_command_policy=allow."
+        return report
+    if not commands:
+        report["reason"] = "No validation commands were detected or configured."
+        return report
+
+    report["status"] = "running"
+    per_command_timeout = max(1, min(int(timeout_seconds or 180), 600))
+    for command in commands:
+        try:
+            result = run_workspace_command(
+                CommandExecutionRequest(
+                    command=command,
+                    workspace_dir=config.workspace_dir,
+                    timeout_seconds=per_command_timeout,
+                    state_dir=config.state_dir,
+                    source="autonomous_night_mode_validation",
+                )
+            ).to_dict()
+            result["stdout"] = str(result.get("stdout") or "")[-20_000:]
+            result["stderr"] = str(result.get("stderr") or "")[-20_000:]
+            report["results"].append(result)
+            if int(result.get("returncode", 1)) != 0:
+                break
+        except (CommandRunnerError, subprocess.TimeoutExpired, OSError) as exc:
+            report["results"].append({"command": command, "returncode": None, "error": str(exc)})
+            break
+    report["finished_at"] = time.time()
+    report["ok"] = bool(report["results"]) and all(
+        result.get("returncode") == 0 for result in report["results"]
+    )
+    report["status"] = "passed" if report["ok"] else "failed"
+    reports_dir = Path(config.state_dir) / "night_mode_reports"
+    report_path = reports_dir / f"night-validation-{int(report['started_at'])}.json"
+    report["report_path"] = str(report_path)
+    _atomic_write_text(report_path, json.dumps(report, indent=2, ensure_ascii=False))
+    return report
 
 
 def _dependencies_and_frameworks(root: Path, package_files: list[str]) -> tuple[list[str], list[str]]:
@@ -1107,4 +1171,5 @@ __all__ = [
     "build_cost_optimizer_summary",
     "build_model_performance_database",
     "build_autonomous_night_mode_plan",
+    "run_autonomous_night_mode_validation",
 ]

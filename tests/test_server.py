@@ -698,15 +698,18 @@ class ServerCompatibilityTests(unittest.TestCase):
             finally:
                 _stop(server, thread)
 
-            self.assertIn("No known cost data yet", costs)
+            self.assertIn("Pricing coverage ready; measured spend pending", costs)
+            self.assertIn("Pricing Coverage", costs)
             self.assertIn("Raw payload", costs)
-            self.assertIn("No measured model outcomes yet", leaderboard)
+            self.assertIn("Baseline agents", leaderboard)
             self.assertIn("Ranked Models", leaderboard)
-            self.assertIn("No benchmark reports yet", benchmarks)
+            self.assertIn("Configuration baseline ready; live measurements pending", benchmarks)
+            self.assertIn("Benchmark Coverage Snapshot", benchmarks)
             self.assertIn("Recent Reports", benchmarks)
-            self.assertEqual(costs_json["summary"]["data_state"], "waiting_for_priced_usage")
-            self.assertEqual(leaderboard_json["summary"]["data_state"], "waiting_for_benchmarks_or_traffic")
-            self.assertEqual(benchmarks_json["summary"]["data_state"], "waiting_for_benchmark_reports")
+            self.assertEqual(costs_json["summary"]["data_state"], "pricing_ready_waiting_for_usage")
+            self.assertEqual(leaderboard_json["summary"]["data_state"], "baseline_ready")
+            self.assertEqual(leaderboard_json["summary"]["baseline_agent_count"], 1)
+            self.assertEqual(benchmarks_json["summary"]["data_state"], "baseline_ready")
 
     def test_readiness_endpoint_exposes_scorecard(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -724,7 +727,7 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(readiness["object"], "agent_hub.readiness")
             self.assertIn("score", readiness)
             self.assertTrue(any(item["id"] == "route_ready_provider" for item in readiness["items"]))
-            self.assertEqual(readiness["feature_status"]["external_mcp_bridge"]["state"], "foundation")
+            self.assertEqual(readiness["feature_status"]["external_mcp_bridge"]["state"], "execution_disabled")
             self.assertEqual(readiness["feature_status"]["universal_compatibility"]["state"], "ready")
             self.assertTrue(
                 readiness["feature_status"]["universal_compatibility"]["tool_emulation_enabled"]

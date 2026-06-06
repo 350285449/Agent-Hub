@@ -198,6 +198,8 @@ class HubConfig:
     plugin_allow_unsigned: bool = False
     plugin_execution_enabled: bool = False
     plugin_capability_grants: dict[str, list[str]] = field(default_factory=dict)
+    mcp_execution_enabled: bool = False
+    mcp_timeout_seconds: float = 20.0
     free_only: bool = True
     enable_load_balancing: bool = True
     adaptive_learning_enabled: bool = True
@@ -892,6 +894,8 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         plugin_allow_unsigned=_bool_with_default(raw.get("plugin_allow_unsigned"), False),
         plugin_execution_enabled=_bool_with_default(raw.get("plugin_execution_enabled"), False),
         plugin_capability_grants=_string_list_map(raw.get("plugin_capability_grants")),
+        mcp_execution_enabled=_bool_with_default(raw.get("mcp_execution_enabled"), False),
+        mcp_timeout_seconds=max(1.0, min(120.0, _float_with_default(raw.get("mcp_timeout_seconds"), 20.0))),
         free_only=_bool_with_default(raw.get("free_only"), True),
         enable_load_balancing=_bool_with_default(raw.get("enable_load_balancing"), True),
         adaptive_learning_enabled=_bool_with_default(raw.get("adaptive_learning_enabled"), True),
@@ -1091,6 +1095,8 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "plugin_allow_unsigned": config.plugin_allow_unsigned,
         "plugin_execution_enabled": config.plugin_execution_enabled,
         "plugin_capability_grants": config.plugin_capability_grants,
+        "mcp_execution_enabled": config.mcp_execution_enabled,
+        "mcp_timeout_seconds": config.mcp_timeout_seconds,
         "free_only": config.free_only,
         "enable_load_balancing": config.enable_load_balancing,
         "adaptive_learning_enabled": config.adaptive_learning_enabled,

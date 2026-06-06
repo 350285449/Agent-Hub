@@ -394,6 +394,11 @@ class PhaseTwoFourFoundationTests(unittest.TestCase):
             self.assertEqual(plugins["object"], "agent_hub.plugins")
             self.assertEqual(events["object"], "agent_hub.events")
             self.assertEqual(workflows["object"], "agent_hub.workflow_status")
+            self.assertEqual(workflows["data_state"], "baseline_ready")
+            self.assertGreater(workflows["summary"]["preset_count"], 0)
+            self.assertGreater(workflows["summary"]["pattern_count"], 0)
+            self.assertTrue(workflows["presets"])
+            self.assertIsNotNone(workflows["empty_state"])
 
     def test_public_bind_diagnostics_require_auth_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

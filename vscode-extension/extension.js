@@ -7,6 +7,7 @@ const fs = require("fs");
 const http = require("http");
 const https = require("https");
 const path = require("path");
+const runtimePolicy = require("./runtime-policy");
 
 let serverProcess = null;
 let modelPullProcess = null;
@@ -364,8 +365,7 @@ class PermissionManager {
 }
 
 function normalizeApprovalMode(value) {
-  const mode = typeof value === "string" ? value.toLowerCase() : "";
-  return APPROVAL_MODES.has(mode) ? mode : "ask";
+  return runtimePolicy.normalizeApprovalMode(value);
 }
 
 async function requestPermission(action) {
@@ -7325,13 +7325,7 @@ function parsePythonCommand(value) {
 }
 
 function splitCommandLine(value) {
-  const parts = [];
-  const pattern = /"([^"]+)"|'([^']+)'|(\S+)/g;
-  let match;
-  while ((match = pattern.exec(value)) !== null) {
-    parts.push(match[1] || match[2] || match[3]);
-  }
-  return parts;
+  return runtimePolicy.splitCommandLine(value);
 }
 
 function dedupePythonCandidates(candidates) {
@@ -9833,10 +9827,7 @@ function serverSupportsNativeStreaming(health) {
 }
 
 function missingBackendFeatures(health) {
-  const features = health && health.features && typeof health.features === "object"
-    ? health.features
-    : {};
-  return REQUIRED_BACKEND_FEATURES.filter((feature) => features[feature] !== true);
+  return runtimePolicy.missingBackendFeatures(health, REQUIRED_BACKEND_FEATURES);
 }
 
 function serverSupportsRequiredBackend(health) {

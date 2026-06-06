@@ -201,6 +201,8 @@ class ConfigTests(unittest.TestCase):
                 "plugin_allow_unsigned": True,
                 "plugin_execution_enabled": False,
                 "plugin_capability_grants": {"provider.demo": ["provider.read"]},
+                "mcp_execution_enabled": True,
+                "mcp_timeout_seconds": 15,
                 "enterprise_mode_enabled": True,
                 "enterprise_default_workspace_id": "workspace-1",
                 "enterprise_users": [{"id": "alice", "roles": ["developer"]}],
@@ -227,6 +229,8 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(data["plugin_allow_unsigned"])
         self.assertFalse(data["plugin_execution_enabled"])
         self.assertEqual(data["plugin_capability_grants"], {"provider.demo": ["provider.read"]})
+        self.assertTrue(data["mcp_execution_enabled"])
+        self.assertEqual(data["mcp_timeout_seconds"], 15)
         self.assertTrue(data["enterprise_mode_enabled"])
         self.assertEqual(data["enterprise_users"][0]["id"], "alice")
         self.assertEqual(data["enterprise_audit_retention_days"], 30)

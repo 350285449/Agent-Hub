@@ -96,12 +96,22 @@ class ApplicationServiceTests(unittest.TestCase):
             costs = service.cost_dashboard_body({})
             benchmarks = service.benchmark_results_body()
 
-            self.assertEqual(leaderboard["summary"]["data_state"], "waiting_for_benchmarks_or_traffic")
-            self.assertEqual(leaderboard["empty_state"]["title"], "No measured model outcomes yet")
-            self.assertEqual(costs["summary"]["data_state"], "waiting_for_priced_usage")
-            self.assertEqual(costs["empty_state"]["title"], "No known cost data yet")
-            self.assertEqual(benchmarks["summary"]["data_state"], "waiting_for_benchmark_reports")
-            self.assertEqual(benchmarks["empty_state"]["title"], "No benchmark reports yet")
+            self.assertEqual(leaderboard["summary"]["data_state"], "baseline_ready")
+            self.assertEqual(leaderboard["summary"]["baseline_agent_count"], 1)
+            self.assertIsNone(leaderboard["empty_state"])
+            self.assertEqual(leaderboard["data"][0]["measurement_status"], "configured_baseline")
+            self.assertGreater(leaderboard["data"][0]["ranking_score"], 0)
+            self.assertEqual(costs["summary"]["data_state"], "partial_pricing_waiting_for_usage")
+            self.assertEqual(costs["summary"]["configured_agents"], 1)
+            self.assertEqual(costs["pricing_catalog"][0]["pricing_status"], "missing")
+            self.assertIsNone(costs["empty_state"])
+            self.assertEqual(benchmarks["summary"]["data_state"], "baseline_ready")
+            self.assertEqual(benchmarks["summary"]["snapshot_result_count"], 1)
+            self.assertEqual(
+                benchmarks["coverage_snapshot"]["results"][0]["measurement_status"],
+                "configured_baseline",
+            )
+            self.assertIsNone(benchmarks["empty_state"])
 
     def test_readiness_score_rewards_real_route_ready_health(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,6 +129,29 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertEqual(readiness["state"], "production_ready")
             self.assertEqual(readiness["feature_status"]["provider_routing"]["state"], "ready")
             self.assertTrue(any(item["id"] == "security_guardrails" for item in readiness["items"]))
+
+    def test_enterprise_status_summarizes_policy_and_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                enterprise_mode_enabled=True,
+                enterprise_users=[{"id": "alice", "roles": ["developer"]}],
+                enterprise_roles=[{"name": "developer", "permissions": ["workspace_cloud"]}],
+                enterprise_permission_grants=[
+                    {"subject_id": "alice", "workspace_id": "default", "permission": "workspace_cloud"}
+                ],
+            )
+            service = DiagnosticsApplicationService(config)
+
+            body = service.enterprise_status_body()
+
+        self.assertEqual(body["object"], "agent_hub.enterprise_status")
+        self.assertEqual(body["state"], "ready")
+        self.assertEqual(body["summary"]["users"], 1)
+        self.assertEqual(body["summary"]["grants"], 1)
+        self.assertEqual(body["warnings"], [])
 
     def test_production_check_passes_for_route_ready_guarded_install(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
