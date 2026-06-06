@@ -59,6 +59,19 @@ AGENT_HUB_RUN_REAL_PROVIDER_STRESS=1 python scripts/real_provider_stress.py
 The harness exercises repeated provider calls and failover reporting without
 requiring API keys in the normal test suite.
 
+For a clean second-machine acceptance check, clone the repo on that machine and
+run:
+
+```sh
+python scripts/fresh_machine_acceptance.py --json
+```
+
+The script creates a temporary workspace and virtual environment, installs the
+checkout, starts the server on a free localhost port, checks core HTTP
+surfaces, and routes one diagnostic request through the local `echo` provider.
+It does not require Ollama, LM Studio, API keys, provider quota, or existing
+`.agent-hub` state.
+
 For production-style local use, start from
 `examples/agent-hub.production.json` and adjust provider keys, routes, plugin
 directories, and context limits for your environment.

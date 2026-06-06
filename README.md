@@ -753,6 +753,7 @@ python scripts/generate_backend_snapshot.py
 python scripts/validate_backend_drift.py
 Push-Location vscode-extension; npm ci; npm run prepare-backend; Pop-Location
 python scripts/validate_release.py
+python scripts/fresh_machine_acceptance.py
 python -m pytest -m "not integration and not stress" --cov=agent_hub
 python -m pytest -m packaging
 ```
@@ -760,6 +761,19 @@ python -m pytest -m packaging
 CI also runs a fresh-install proof job: `pip install -e .`, `agent-hub doctor`,
 then `pytest -m "not integration and not stress"` after installing `.[test]`.
 The main CI matrix publishes `coverage.xml` as a workflow artifact.
+
+For a second machine, clean VM, or copied checkout, run:
+
+```powershell
+python scripts/fresh_machine_acceptance.py --json
+```
+
+That check creates a temporary workspace, installs the checkout into a temporary
+virtual environment, starts Agent Hub on a free localhost port, verifies health,
+models, readiness, dashboard, and status endpoints, then routes a diagnostic
+request through the local `echo` provider. It intentionally does not require
+Ollama, LM Studio, API keys, provider quota, or this machine's `.agent-hub`
+state.
 
 Optional slower lanes:
 

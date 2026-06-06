@@ -99,7 +99,7 @@
   "include_raw_responses": false,
   "expose_routing_details": false,
   "default_route": [
-    "ollama-local",
+    "ollama-qwen-coder",
     "openai-compatible-example"
   ],
   "routes": [
@@ -107,7 +107,7 @@
       "name": "cloud-agent",
       "keywords": [],
       "agents": [
-        "ollama-local",
+        "ollama-qwen-coder",
         "openai-compatible-example"
       ]
     },
@@ -121,23 +121,23 @@
         "test"
       ],
       "agents": [
-        "ollama-local",
+        "ollama-qwen-coder",
         "openai-compatible-example"
       ]
     }
   ],
   "agents": [
     {
-      "name": "ollama-local",
-      "provider": "ollama",
-      "provider_type": "ollama",
+      "name": "ollama-qwen-coder",
+      "provider": "openai-compatible",
+      "provider_type": "openai-compatible",
       "base_url": "http://127.0.0.1:11434",
-      "model": "qwen2.5-coder",
+      "model": "qwen2.5-coder:7b",
       "enabled": true,
       "free": true,
       "context_window": 32768,
       "supports_streaming": true,
-      "supports_tools": false
+      "supports_tools": true
     },
     {
       "name": "codex-cli",
@@ -181,8 +181,8 @@
     }
   ],
   "group_roles": {
-    "planner": "ollama-local",
-    "coder": "ollama-local",
-    "reviewer": "ollama-local"
+    "planner": "ollama-qwen-coder",
+    "coder": "ollama-qwen-coder",
+    "reviewer": "ollama-qwen-coder"
   }
 }

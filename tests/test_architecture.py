@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_hub.config import AgentConfig, HubConfig
+from agent_hub.config import AgentConfig, HubConfig, free_local_config
 from agent_hub.core.provider_manager import ProviderManager
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.providers import OpenAIChatProvider, create_provider
@@ -33,6 +33,24 @@ class ArchitectureTests(unittest.TestCase):
         self.assertIn("agent-hub.config.json", ignore_text)
         self.assertIn("config.example.json", ignore_text)
         self.assertNotIn('"api_key"', example.read_text(encoding="utf-8"))
+        canonical = free_local_config()
+        agents = {
+            item.get("name"): item
+            for item in data.get("agents", [])
+            if isinstance(item, dict)
+        }
+        self.assertIn("ollama-qwen-coder", agents)
+        self.assertEqual(
+            agents["ollama-qwen-coder"]["model"],
+            canonical.agents["ollama-qwen-coder"].model,
+        )
+        self.assertTrue(agents["ollama-qwen-coder"]["supports_tools"])
+        known_agents = set(agents)
+        for route in data.get("routes", []):
+            if isinstance(route, dict):
+                self.assertLessEqual(set(route.get("agents", [])), known_agents)
+        for role_agent in data.get("group_roles", {}).values():
+            self.assertIn(role_agent, known_agents)
 
         if (root / ".git").exists():
             check = subprocess.run(

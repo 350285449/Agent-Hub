@@ -11,6 +11,7 @@ PACKAGING_NAMES = {
 
 INTEGRATION_NAMES = {
     "test_api_golden_fixtures.py",
+    "test_fresh_machine_acceptance.py",
     "test_server.py",
     "test_smoke.py",
     "test_team_agent_runner.py",

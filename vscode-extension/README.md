@@ -101,7 +101,7 @@ the command palette to verify setup before a real task.
 ## Ollama Setup
 
 1. Install Ollama.
-2. Pull a coding model, for example `ollama pull qwen2.5-coder`.
+2. Pull a coding model, for example `ollama pull qwen2.5-coder:7b`.
 3. Start the Ollama app or run `ollama serve`.
 4. Click `Start` in Agent Hub, then open `Health` to confirm the local provider is reachable.
 
