@@ -2,8 +2,11 @@
 
 ## Next release
 
-- Target version: `0.4.18`
-- Purpose: publish the chat Settings menu with Ollama cloud defaults, API-key model overrides, explicit local control selection, API key management, local model selection, fast local finalization for file edits, and shell-first workspace-agent behavior
+- Target version: `0.8.9`
+- Purpose: publish the dashboard entry points, Ollama Desktop first-run setup,
+  baseline-ready diagnostics dashboards, Ollama cloud defaults, API-key model
+  overrides, explicit local control selection, API key management, local model
+  selection, and current workspace-agent behavior.
 
 ## Summary
 
@@ -36,6 +39,9 @@ This update file records the next VS Code extension release and the key change s
 - If Ollama is running with a coder model, the Local control route uses it; LM Studio remains a local fallback.
 - The chat UI can save provider API keys into VS Code secret storage and inject them into Agent Hub on startup.
 - The chat UI scans LM Studio and Ollama for installed local models before offering Ollama install choices with approximate storage sizes.
+- The extension now opens the official Ollama Desktop download page when local model setup cannot find the `ollama` command.
+- The sidebar and command palette now expose `Agent Hub: Open Dashboard` for the browser diagnostics dashboard.
+- The browser dashboard links current routing intelligence, optimization, costs, model leaderboard, benchmark, readiness, production-check, enterprise, and night-mode diagnostics surfaces.
 - A one-command installer now packages the VSIX, detects the VS Code CLI, installs the extension, and warns when Python 3.11+ is missing.
 - The chat header now has a Settings menu for provider mode, server settings, local model selection, output access, API keys, and server actions.
 - The chat Settings menu can switch Cloud routing to API-key models first and update hosted model IDs for Codex/OpenAI, Claude, Gemini, and ChatGPT.
@@ -60,5 +66,5 @@ The resulting `.vsix` can be published with `npm run publish` from `vscode-exten
 
 ## Notes
 
-- The current `package.json` version is `0.4.18`.
-- If you want this release to be published, run `npm run package` from `vscode-extension` and publish the resulting `0.4.18` VSIX.
+- The current `package.json` version is `0.8.9`.
+- If you want this release to be published, run `npm run package` from `vscode-extension` and publish the resulting `0.8.9` VSIX.

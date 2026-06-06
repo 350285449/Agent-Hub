@@ -52,6 +52,7 @@ const CODEX_CLI_REPO_FILES = 1;
 const CODEX_CLI_REPO_CHARS = 1800;
 const CODEX_CLI_NPM_PACKAGE = "@openai/codex@latest";
 const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
+const OLLAMA_DOWNLOAD_URL = "https://ollama.com/download";
 const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
 const CODEX_CLI_AGENT_NAME = "codex-cli";
 const HOSTED_CLOUD_AGENT_NAMES = ["codex", "claude", "gemini", "chatgpt"];
@@ -416,10 +417,12 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.stopServer", stopServer),
     vscode.commands.registerCommand("agentHub.restartServer", restartServer),
     vscode.commands.registerCommand("agentHub.checkHealth", checkHealth),
+    vscode.commands.registerCommand("agentHub.openDashboard", () => openAgentHubDashboard("/dashboard")),
     vscode.commands.registerCommand("agentHub.openSettings", openAgentHubSettings),
     vscode.commands.registerCommand("agentHub.enableTokenSafeMode", enableTokenSafeModeCommand),
     vscode.commands.registerCommand("agentHub.enableCodexCliMode", enableCodexCliModeCommand),
     vscode.commands.registerCommand("agentHub.installCodexCli", installCodexCliCommand),
+    vscode.commands.registerCommand("agentHub.installOllamaDesktop", installOllamaDesktopCommand),
     vscode.commands.registerCommand("agentHub.status", showStatus),
     vscode.commands.registerCommand("agentHub.ask", askAgent),
     vscode.commands.registerCommand("agentHub.codeAgent", runCodingAgent),
@@ -528,6 +531,15 @@ class AgentHubSidebarProvider {
     if (message.type === "installCodexCli") {
       await installCodexCliCommand();
       await this.refresh();
+      return;
+    }
+    if (message.type === "installOllamaDesktop") {
+      await installOllamaDesktopCommand();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "openDashboard") {
+      await openAgentHubDashboard("/dashboard");
       return;
     }
     if (message.type === "askAgent") {
@@ -2562,6 +2574,10 @@ function sidebarHtml(webview, logoPath) {
           <span class="button-main">Chat</span>
           <span class="button-meta">Open chat</span>
         </button>
+        <button class="command-button" id="quickDashboard" type="button" title="Open the Agent Hub dashboard in your browser">
+          <span class="button-main">Dashboard</span>
+          <span class="button-meta">Browser</span>
+        </button>
         <button class="command-button" id="quickSettings" type="button" title="Open Agent Hub settings">
           <span class="button-main">Settings</span>
           <span class="button-meta">Models</span>
@@ -3664,6 +3680,7 @@ function sidebarHtml(webview, logoPath) {
       }
     });
     document.getElementById("openChat").addEventListener("click", () => post("openChat"));
+    document.getElementById("quickDashboard").addEventListener("click", () => post("openDashboard"));
     document.getElementById("quickSettings").addEventListener("click", () => post("openSettings"));
     document.getElementById("quickTokenSafeMode").addEventListener("click", () => post("enableTokenSafeMode"));
     document.getElementById("quickCodexCliMode").addEventListener("click", () => post("enableCodexCliMode"));
@@ -4111,6 +4128,21 @@ async function handleChatMessage(panel, message) {
     return;
   }
 
+  if (message.type === "openDashboard") {
+    await openAgentHubDashboard("/dashboard");
+    return;
+  }
+
+  if (message.type === "installOllamaDesktop") {
+    const result = await installOllamaDesktopCommand({ showAlreadyInstalled: false });
+    panel.webview.postMessage({
+      type: "modelPullStatus",
+      running: false,
+      text: result.message
+    });
+    return;
+  }
+
   if (message.type === "chooseLocalModel") {
     await chooseLocalModel(panel);
     return;
@@ -4411,6 +4443,50 @@ async function installCodexCliCommand(options = {}) {
 
   openCodexCliTerminal(command);
   const message = "Opened a terminal to install Codex CLI. After login finishes, run Agent Hub: Use Codex CLI Without API Key again.";
+  vscode.window.showInformationMessage(message);
+  return {
+    ok: true,
+    cancelled: false,
+    message
+  };
+}
+
+async function installOllamaDesktopCommand(options = {}) {
+  const status = await ollamaDesktopStatus();
+  if (status.installed && options.force !== true && options.showAlreadyInstalled !== false) {
+    const versionText = status.version ? ` (${status.version})` : "";
+    const chooseModel = "Choose Local Model";
+    const choice = await vscode.window.showInformationMessage(
+      `Ollama is already installed${versionText}.`,
+      chooseModel,
+      "Close"
+    );
+    if (choice === chooseModel && chatPanel) {
+      await chooseLocalModel(chatPanel);
+    }
+    return {
+      ok: true,
+      cancelled: false,
+      message: "Ollama is already installed."
+    };
+  }
+
+  if (!(await requestPermission({
+    category: "model_download",
+    description: "Agent Hub wants to open the official Ollama Desktop download page.",
+    resource: OLLAMA_DOWNLOAD_URL,
+    risk: "medium",
+    detail: "Install Ollama Desktop, restart VS Code if the ollama command is not detected, then use Choose Local Model to pull qwen2.5-coder:7b."
+  }))) {
+    return {
+      ok: false,
+      cancelled: true,
+      message: "Ollama Desktop install was cancelled."
+    };
+  }
+
+  await vscode.env.openExternal(vscode.Uri.parse(OLLAMA_DOWNLOAD_URL));
+  const message = "Opened the official Ollama Desktop download page. Install Ollama, restart VS Code if PATH is not updated, then choose a local model.";
   vscode.window.showInformationMessage(message);
   return {
     ok: true,
@@ -4968,6 +5044,17 @@ async function chooseLocalModel(panel) {
       return;
     }
     await saveLocalModelChoice(panel, picked.source);
+    return;
+  }
+
+  const ollamaStatus = await ollamaDesktopStatus();
+  if (!ollamaStatus.installed) {
+    const result = await installOllamaDesktopCommand({ showAlreadyInstalled: false });
+    panel.webview.postMessage({
+      type: "modelPullStatus",
+      running: false,
+      text: result.message
+    });
     return;
   }
 
@@ -6093,7 +6180,9 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
                 <button class="secondary" id="startServer" type="button">Start Agent Hub</button>
                 <button class="secondary" id="restartServer" type="button">Restart</button>
                 <button class="secondary" id="checkStatus" type="button">Status</button>
+                <button class="secondary" id="openDashboard" type="button">Dashboard</button>
                 <button class="secondary" id="pullModel" type="button">Choose Local Model</button>
+                <button class="secondary" id="installOllamaDesktop" type="button">Install Ollama</button>
                 <button class="secondary" id="openOutput" type="button">Open Logs</button>
               </div>
             </div>
@@ -6867,6 +6956,13 @@ ${apiKeyFieldsHtml()}
 
     document.getElementById("openOutput").addEventListener("click", () => {
       vscode.postMessage({ type: "openOutput" });
+    });
+    document.getElementById("openDashboard").addEventListener("click", () => {
+      vscode.postMessage({ type: "openDashboard" });
+    });
+    document.getElementById("installOllamaDesktop").addEventListener("click", () => {
+      status.textContent = "Opening Ollama download...";
+      vscode.postMessage({ type: "installOllamaDesktop" });
     });
 
     for (const chip of document.querySelectorAll("[data-prompt]")) {
@@ -8777,7 +8873,7 @@ function backupConfigFile(configPath) {
 function formatOllamaError(error) {
   const raw = error && error.message ? String(error.message) : String(error || "Unknown error");
   if (error && error.code === "ENOENT") {
-    return "Ollama was not found on PATH. Install Ollama, restart VS Code, then run the pull again.";
+    return "Ollama was not found on PATH. Install Ollama Desktop, restart VS Code, then run the pull again.";
   }
   return `Could not run Ollama: ${raw}`;
 }
@@ -8836,6 +8932,25 @@ function requestExternalJson(urlString, timeoutMs) {
 async function codexCliStatus() {
   try {
     const { stdout, stderr } = await execFile("codex", ["--version"], {
+      shell: process.platform === "win32",
+      timeout: 5000
+    });
+    const version = String(stdout || stderr || "").trim().split(/\r?\n/).find(Boolean) || "";
+    return {
+      installed: true,
+      version
+    };
+  } catch (_error) {
+    return {
+      installed: false,
+      version: ""
+    };
+  }
+}
+
+async function ollamaDesktopStatus() {
+  try {
+    const { stdout, stderr } = await execFile("ollama", ["--version"], {
       shell: process.platform === "win32",
       timeout: 5000
     });

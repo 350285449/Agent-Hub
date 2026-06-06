@@ -11,6 +11,8 @@ workflow selection, failover, and local workspace safety.
 - Keep workspace tool use behind approvals, path limits, and command safety checks.
 - Preserve Cline, Roo Code, Continue, and Claude Code tool/context payloads.
 - Inspect provider health, token usage, routing decisions, limits, and logs in VS Code.
+- Open the browser dashboard from the sidebar for routing intelligence, costs,
+  benchmarks, and model leaderboard pages.
 - See the Routing Intelligence panel for selected model, selected workflow,
   risk level, repository/context signal, routing reasons, and fallback options.
 
@@ -18,7 +20,8 @@ workflow selection, failover, and local workspace safety.
 
 - Provider health dashboard with latency, quota, reliability, and cooldown state.
 - Routing Intelligence panel and logs so you can see why a model won or failed over.
-- Cost and latency estimates for adaptive routing and workflow optimization.
+- Cost dashboard, model leaderboard, benchmark empty states, and latency
+  estimates for adaptive routing and workflow optimization.
 - Presets for Private, Fast, Cheap, and Best Coding routing modes.
 - Exportable debug bundle for Cline, provider, routing, and backend diagnostics.
 
@@ -53,6 +56,8 @@ The Agent Hub backend is bundled with the VSIX.
 4. Click `Send`.
 
 Click `Stop` when you are done.
+Click `Dashboard` to open `http://127.0.0.1:8787/dashboard` and jump to
+routing intelligence, optimization, costs, leaderboard, or benchmarks.
 
 Good first tasks:
 
@@ -72,6 +77,7 @@ Pick one path:
 
 - Open `Settings` and save an OpenAI, Claude, Gemini, Groq, OpenRouter, or other API key.
 - Start Ollama or LM Studio locally and let Agent Hub route to the local endpoint.
+- Run `Agent Hub: Install Ollama Desktop` if the `ollama` command is not present, then choose a local model.
 - Run `Agent Hub: Install Codex CLI`, sign in, then use `Agent Hub: Use Codex CLI Without API Key`.
 - Connect Cline, Roo Code, Continue, Claude Code, or another OpenAI-compatible tool.
 
@@ -100,7 +106,7 @@ the command palette to verify setup before a real task.
 
 ## Ollama Setup
 
-1. Install Ollama.
+1. Install Ollama Desktop from `https://ollama.com/download`, or run `Agent Hub: Install Ollama Desktop`.
 2. Pull a coding model, for example `ollama pull qwen2.5-coder:7b`.
 3. Start the Ollama app or run `ollama serve`.
 4. Click `Start` in Agent Hub, then open `Health` to confirm the local provider is reachable.

@@ -61,10 +61,12 @@
     "onCommand:agentHub.stopServer",
     "onCommand:agentHub.restartServer",
     "onCommand:agentHub.checkHealth",
+    "onCommand:agentHub.openDashboard",
     "onCommand:agentHub.openSettings",
     "onCommand:agentHub.enableTokenSafeMode",
     "onCommand:agentHub.enableCodexCliMode",
     "onCommand:agentHub.installCodexCli",
+    "onCommand:agentHub.installOllamaDesktop",
     "onCommand:agentHub.status",
     "onCommand:agentHub.ask",
     "onCommand:agentHub.codeAgent",
@@ -78,6 +80,10 @@
     "onCommand:agentHub.copyClaudeCodeConfig",
     "onCommand:agentHub.testAnthropicEndpoint",
     "onCommand:agentHub.showClaudeCodeSetup",
+    "onCommand:agentHub.rollbackLatestCheckpoint",
+    "onCommand:agentHub.openModelLeaderboard",
+    "onCommand:agentHub.openCostDashboard",
+    "onCommand:agentHub.openBenchmarkResults",
     "onCommand:agentHub.openOutput"
   ],
   "main": "./extension.js",
@@ -157,6 +163,10 @@
         "title": "Agent Hub: Check Health"
       },
       {
+        "command": "agentHub.openDashboard",
+        "title": "Agent Hub: Open Dashboard"
+      },
+      {
         "command": "agentHub.openSettings",
         "title": "Agent Hub: Open Settings"
       },
@@ -173,6 +183,11 @@
       {
         "command": "agentHub.installCodexCli",
         "title": "Agent Hub: Install Codex CLI",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "agentHub.installOllamaDesktop",
+        "title": "Agent Hub: Install Ollama Desktop",
         "icon": "$(cloud-download)"
       },
       {

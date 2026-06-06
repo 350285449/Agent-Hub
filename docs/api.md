@@ -186,6 +186,13 @@ per-workflow rows such as best planner, best worker, average cost, average time,
 success rate, and failover recovery counts. It also shows successful models by
 task type, failure-prone models, provider latency, fallback frequency,
 cost/performance winner, and memory influence per request.
+`/dashboard/costs` renders estimated provider spend and empty-state guidance
+from `/v1/cost-dashboard`. `/dashboard/model-leaderboard` renders configured
+models with measured-vs-waiting status from `/v1/model-leaderboard`.
+`/dashboard/benchmarks` renders benchmark report guidance and recent reports
+from `/v1/benchmarks`.
+The VS Code extension exposes the same browser entry point through
+`Agent Hub: Open Dashboard` and the sidebar `Dashboard` button.
 `POST /v1/routing/simulate` previews the auto workflow selection, router
 decision, fallback candidates, and workflow role candidate plans without calling
 a provider or changing adaptive state.

@@ -4,6 +4,8 @@
 
 - Improves cost, benchmark, model leaderboard, workflow, and routing-memory diagnostics with baseline-ready states.
 - Adds live local-research fallbacks, opt-in MCP/plugin execution, enterprise status, and night-mode validation surfaces.
+- Adds a sidebar/command-palette dashboard button for the browser diagnostics dashboard.
+- Adds an Ollama Desktop installer command and first-run prompt when local model setup cannot find `ollama`.
 - Syncs extension and backend release metadata for the updated VSIX package.
 
 ## 0.8.8

@@ -213,9 +213,13 @@ Agent-Hub is organized around modular backend systems:
   router-strategy, and memory/context plugins, and lets trusted plugins opt
   into bounded local-process JSON execution.
 - Dashboard: `/dashboard`, `/dashboard/routing-intelligence`,
-  `/dashboard/optimization`, `/v1/status`, `/v1/routing-history`, and
-  `/v1/provider-scores` explain model selection, rejected candidates, adaptive
-  optimization, retry recovery, and tool/workflow activity.
+  `/dashboard/optimization`, `/dashboard/costs`,
+  `/dashboard/model-leaderboard`, `/dashboard/benchmarks`, `/v1/status`,
+  `/v1/readiness`, `/v1/production-check`, `/v1/routing-history`,
+  `/v1/provider-scores`, `/v1/provider-health`, `/v1/cost-dashboard`,
+  `/v1/model-leaderboard`, and `/v1/benchmarks` explain model selection,
+  rejected candidates, adaptive optimization, costs, benchmark readiness,
+  retry recovery, and tool/workflow activity.
 
 More detail lives in `docs/why-agent-hub.md`, `docs/architecture.md`,
 `docs/adaptive-workspace-intelligence.md`,
@@ -462,6 +466,9 @@ Or use the VS Code extension command `Agent Hub: Open Chat`.
 On first run, the VS Code sidebar checks backend availability, Python version,
 config file, provider/API-key state, local Ollama/LM Studio availability, and
 then guides you to the primary `Start Server` action.
+Use the sidebar `Dashboard` button or the command `Agent Hub: Open Dashboard`
+to open the browser dashboard for provider health, routing intelligence,
+costs, benchmarks, and model leaderboard pages.
 Cloud control starts with Ollama cloud model IDs in fresh VS Code configs. Those
 models run through Ollama Cloud, not on your local CPU/GPU. To put hosted API-key
 models first, open the chat `Settings` menu, set `Cloud route` to `API-key
@@ -603,6 +610,11 @@ Open the chat `Settings` menu to switch Cloud route priority to API-key models,
 change hosted model IDs, or choose Local for direct local-only control.
 `hybrid` follows the same Cloud route priority and then falls through remaining
 providers.
+If local control is selected and Ollama is not installed, run
+`Agent Hub: Install Ollama Desktop` or click `Install Ollama` in chat settings.
+The extension opens the official Ollama download page; after installation,
+restart VS Code if needed, then use `Choose Local Model` to pull
+`qwen2.5-coder:7b` or another local model.
 
 ## Cline And Claude Code
 
@@ -740,6 +752,11 @@ redacted.
 
 Dashboard pages avoid raw empty JSON when data has not accumulated yet:
 
+- `/dashboard` links to all current HTML diagnostics pages.
+- `/dashboard/routing-intelligence` shows selected model/workflow, reasons,
+  rejected candidates, provider rankings, and fallback options.
+- `/dashboard/optimization` shows adaptive routing, routing memory, workflow,
+  model, provider, cost, latency, retry, and recovery analytics.
 - `/dashboard/costs` explains missing pricing/usage data and links to the cost JSON.
 - `/dashboard/model-leaderboard` shows configured models plus measured-vs-waiting status.
 - `/dashboard/benchmarks` explains how to generate benchmark reports.
