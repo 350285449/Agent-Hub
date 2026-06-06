@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub - Local-First AI Model Router",
   "description": "Cline, Codex and Claude Code compatible AI model router with free-model routing, workspace agents, and cost-saving local-first orchestration.",
-  "version": "9.0.0",
+  "version": "9.1.0",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
@@ -107,7 +107,7 @@
     "publish": "npm run prepare-backend && npm run validate-release && npx @vscode/vsce publish --allow-missing-repository"
   },
   "devDependencies": {
-    "@vscode/vsce": "^3.9.1"
+    "@vscode/vsce": "^3.9.2"
   },
   "contributes": {
     "chatParticipants": [

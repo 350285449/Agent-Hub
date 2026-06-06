@@ -1,5 +1,11 @@
 # Changelog
 
+## 9.1.0
+
+- Upgrades the VS Code sidebar and chat webviews with a more polished agent-workspace visual system.
+- Syncs extension and backend release metadata for the next package.
+- Adds install verification, packaging checks, and command-runner hardening.
+
 ## 9.0.0
 
 - Improves cost, benchmark, model leaderboard, workflow, and routing-memory diagnostics with baseline-ready states.

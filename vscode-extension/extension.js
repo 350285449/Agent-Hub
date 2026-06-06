@@ -1760,8 +1760,9 @@ function sidebarHtml(webview, logoPath) {
       --app-fg: var(--vscode-sideBar-foreground, var(--vscode-foreground, #d4d4d4));
       --border: var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border, rgba(127, 127, 127, 0.22)));
       --subtle-border: color-mix(in srgb, var(--app-fg) 18%, transparent);
-      --panel: var(--vscode-sideBarSectionHeader-background, var(--app-bg));
-      --card: var(--vscode-input-background, color-mix(in srgb, var(--app-bg) 88%, var(--app-fg) 12%));
+      --panel: color-mix(in srgb, var(--vscode-sideBarSectionHeader-background, var(--app-bg)) 88%, var(--app-fg) 12%);
+      --panel-soft: color-mix(in srgb, var(--app-bg) 91%, var(--app-fg) 9%);
+      --card: color-mix(in srgb, var(--vscode-input-background, var(--app-bg)) 82%, var(--app-fg) 18%);
       --muted: var(--vscode-descriptionForeground, var(--vscode-disabledForeground, #8b949e));
       --button: var(--vscode-button-background, #0e639c);
       --button-fg: var(--vscode-button-foreground, #ffffff);
@@ -1773,6 +1774,12 @@ function sidebarHtml(webview, logoPath) {
       --error: var(--vscode-errorForeground, #f85149);
       --ok: var(--vscode-testing-iconPassed, #3fb950);
       --warn: var(--vscode-testing-iconQueued, #d29922);
+      --accent: color-mix(in srgb, var(--button) 78%, #2dd4bf 22%);
+      --accent-soft: color-mix(in srgb, var(--accent) 18%, transparent);
+      --ok-soft: color-mix(in srgb, var(--ok) 18%, transparent);
+      --warn-soft: color-mix(in srgb, var(--warn) 18%, transparent);
+      --error-soft: color-mix(in srgb, var(--error) 18%, transparent);
+      --shadow: 0 8px 22px rgba(0, 0, 0, 0.20);
     }
 
     * {
@@ -1782,26 +1789,39 @@ function sidebarHtml(webview, logoPath) {
     body {
       margin: 0;
       color: var(--app-fg);
-      background: var(--app-bg);
+      background:
+        linear-gradient(180deg, var(--accent-soft), transparent 180px),
+        linear-gradient(135deg, color-mix(in srgb, var(--ok) 7%, transparent), transparent 38%),
+        var(--app-bg);
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
     }
 
     .shell {
       min-width: 0;
+      display: grid;
+      gap: 8px;
+      padding: 8px;
     }
 
     header,
     section,
     details.panel {
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--border);
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--panel) 92%, transparent);
+      box-shadow: var(--shadow);
     }
 
     header {
       display: flex;
       align-items: center;
       gap: 8px;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      backdrop-filter: blur(16px);
     }
 
     .brand {
@@ -1811,9 +1831,25 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .hero {
+      position: relative;
       display: grid;
       gap: 10px;
-      background: var(--panel);
+      overflow: hidden;
+      border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--accent) 18%, var(--panel)) 0%, var(--panel) 48%, color-mix(in srgb, var(--ok) 12%, var(--panel)) 100%);
+    }
+
+    .hero::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-top: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
+      pointer-events: none;
+    }
+
+    .hero > * {
+      position: relative;
     }
 
     .hero-head {
@@ -1832,13 +1868,16 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .health-card {
-      display: none;
+      display: flex;
       align-items: baseline;
       justify-content: flex-end;
       gap: 5px;
       min-width: 0;
       color: var(--app-fg);
-      background: transparent;
+      border: 1px solid color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+      border-radius: 8px;
+      padding: 6px 8px;
+      background: var(--ok-soft);
     }
 
     .health-label {
@@ -1856,19 +1895,22 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .hero-state-strip {
-      display: none;
-      align-items: center;
-      gap: 12px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
       min-width: 0;
-      flex-wrap: wrap;
     }
 
     .state-pill {
       display: inline-flex;
-      align-items: baseline;
-      gap: 4px;
+      flex-direction: column;
+      gap: 2px;
       color: var(--app-fg);
       min-width: 0;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 7px;
+      background: color-mix(in srgb, var(--card) 76%, transparent);
     }
 
     .state-pill span {
@@ -1889,7 +1931,10 @@ function sidebarHtml(webview, logoPath) {
       display: grid;
       gap: 6px;
       color: var(--app-fg);
-      background: transparent;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 9px;
+      background: color-mix(in srgb, var(--card) 84%, transparent);
     }
 
     .hero-card-title {
@@ -1901,7 +1946,7 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .progress-track {
-      height: 4px;
+      height: 6px;
       overflow: hidden;
       border-radius: 999px;
       background: var(--progress-bg);
@@ -1912,7 +1957,7 @@ function sidebarHtml(webview, logoPath) {
       width: 0%;
       height: 100%;
       border-radius: inherit;
-      background: var(--button);
+      background: linear-gradient(90deg, var(--accent), var(--ok));
       transition: width 160ms ease-out;
     }
 
@@ -1924,7 +1969,7 @@ function sidebarHtml(webview, logoPath) {
 
     .stat-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
       gap: 8px;
       margin-top: 8px;
     }
@@ -1943,9 +1988,10 @@ function sidebarHtml(webview, logoPath) {
     .routing-summary-item {
       min-width: 0;
       border: 1px solid var(--subtle-border);
-      border-radius: 7px;
-      padding: 7px;
-      background: var(--card);
+      border-radius: 8px;
+      padding: 8px;
+      background: color-mix(in srgb, var(--card) 88%, transparent);
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 9%, transparent);
     }
 
     .routing-summary-item span,
@@ -1978,10 +2024,10 @@ function sidebarHtml(webview, logoPath) {
     .flow-step {
       min-width: 0;
       border: 1px solid var(--subtle-border);
-      border-radius: 7px;
+      border-radius: 8px;
       padding: 7px 5px;
       text-align: center;
-      background: var(--card);
+      background: color-mix(in srgb, var(--card) 85%, transparent);
     }
 
     .flow-step strong,
@@ -2008,6 +2054,7 @@ function sidebarHtml(webview, logoPath) {
 
     .flow-step[data-status="active"] {
       border-color: var(--button);
+      background: color-mix(in srgb, var(--accent) 16%, var(--card));
       box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--button) 30%, transparent);
     }
 
@@ -2028,20 +2075,20 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .template-button {
-      min-height: 40px;
+      min-height: 44px;
     }
 
     .killer-button {
       margin-top: 6px;
-      min-height: 34px;
+      min-height: 38px;
     }
 
     .trust-row {
       min-width: 0;
       border: 1px solid var(--subtle-border);
-      border-radius: 7px;
-      padding: 7px;
-      background: var(--card);
+      border-radius: 8px;
+      padding: 8px;
+      background: color-mix(in srgb, var(--card) 86%, transparent);
     }
 
     .trust-row strong,
@@ -2066,6 +2113,11 @@ function sidebarHtml(webview, logoPath) {
       color: var(--ok);
     }
 
+    .trust-row[data-ok="true"] {
+      border-color: color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--ok) 10%, var(--card));
+    }
+
     .tool-chip-list {
       display: flex;
       flex-wrap: wrap;
@@ -2077,14 +2129,14 @@ function sidebarHtml(webview, logoPath) {
       max-width: 100%;
       border: 1px solid var(--subtle-border);
       border-radius: 999px;
-      padding: 2px 7px;
+      padding: 3px 8px;
       color: var(--muted);
       font-size: 10px;
       line-height: 1.4;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      background: transparent;
+      background: color-mix(in srgb, var(--card) 72%, transparent);
     }
 
     .tool-chip[data-kind="blocked"] {
@@ -2096,7 +2148,7 @@ function sidebarHtml(webview, logoPath) {
       border: 1px solid var(--subtle-border);
       border-radius: 8px;
       padding: 8px;
-      background: var(--card);
+      background: color-mix(in srgb, var(--card) 86%, transparent);
     }
 
     .help-menu > summary {
@@ -2148,21 +2200,24 @@ function sidebarHtml(webview, logoPath) {
       display: grid;
       gap: 4px;
       min-width: 0;
-      border: 1px solid var(--border);
+      border: 1px solid var(--subtle-border);
       border-radius: 8px;
-      padding: 9px;
+      padding: 10px;
       color: var(--app-fg);
-      background: var(--panel);
+      background: color-mix(in srgb, var(--card) 82%, transparent);
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 8%, transparent);
     }
 
     .stat-card.featured {
       grid-column: 1 / -1;
-      padding: 11px;
-      background: var(--card);
+      padding: 12px;
+      border-color: color-mix(in srgb, var(--accent) 44%, var(--subtle-border));
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--accent) 17%, var(--card)), color-mix(in srgb, var(--ok) 12%, var(--card)));
     }
 
     .stat-value {
-      font-size: 18px;
+      font-size: 19px;
       font-weight: 700;
       line-height: 1.15;
       overflow-wrap: anywhere;
@@ -2182,7 +2237,7 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .mini-meter {
-      height: 5px;
+      height: 6px;
       overflow: hidden;
       border-radius: 999px;
       background: var(--progress-bg);
@@ -2192,7 +2247,7 @@ function sidebarHtml(webview, logoPath) {
       height: 100%;
       width: 0%;
       border-radius: inherit;
-      background: var(--ok);
+      background: linear-gradient(90deg, var(--accent), var(--ok));
       transition: width 160ms ease-out;
     }
 
@@ -2205,8 +2260,9 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .insight-row {
-      border-left: 3px solid var(--button);
-      padding-left: 8px;
+      border-left: 3px solid var(--accent);
+      padding-left: 9px;
+      background: color-mix(in srgb, var(--accent) 7%, var(--card));
     }
 
     .insight-row[data-tone="ok"] {
@@ -2226,6 +2282,7 @@ function sidebarHtml(webview, logoPath) {
       height: 22px;
       border-radius: 5px;
       flex: 0 0 auto;
+      box-shadow: 0 0 0 1px var(--subtle-border);
     }
 
     h1,
@@ -2276,14 +2333,16 @@ function sidebarHtml(webview, logoPath) {
       justify-content: center;
       border: 1px solid var(--subtle-border);
       border-radius: 999px;
-      padding: 2px 7px;
+      padding: 3px 8px;
       font-size: 11px;
       color: var(--muted);
-      background: transparent;
+      background: color-mix(in srgb, var(--card) 72%, transparent);
     }
 
     .status[data-state="Running"] {
       color: var(--ok);
+      border-color: color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+      background: var(--ok-soft);
     }
 
     .status[data-state="Ready"] {
@@ -2292,10 +2351,14 @@ function sidebarHtml(webview, logoPath) {
 
     .status[data-state="Starting"] {
       color: var(--warn);
+      border-color: color-mix(in srgb, var(--warn) 44%, var(--subtle-border));
+      background: var(--warn-soft);
     }
 
     .status[data-state="Error"] {
       color: var(--error);
+      border-color: color-mix(in srgb, var(--error) 44%, var(--subtle-border));
+      background: var(--error-soft);
     }
 
     .actions {
@@ -2315,22 +2378,40 @@ function sidebarHtml(webview, logoPath) {
 
     button {
       width: 100%;
-      min-height: 28px;
+      min-height: 30px;
       border: 1px solid var(--subtle-border);
-      border-radius: 5px;
-      padding: 5px 7px;
+      border-radius: 6px;
+      padding: 6px 8px;
       color: var(--secondary-fg);
       background: var(--secondary);
       font: inherit;
       cursor: pointer;
       text-align: center;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
     }
 
     .command-button {
+      position: relative;
       display: grid;
       gap: 1px;
       align-content: center;
       text-align: left;
+      min-height: 42px;
+      border-radius: 8px;
+      padding: 8px 9px;
+      background: color-mix(in srgb, var(--secondary) 78%, var(--card));
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 8%, transparent);
+    }
+
+    .command-button::after {
+      content: "";
+      position: absolute;
+      inset: 7px 6px auto auto;
+      width: 5px;
+      height: 5px;
+      border-radius: 999px;
+      background: var(--accent);
+      opacity: 0.68;
     }
 
     .button-main,
@@ -2355,6 +2436,8 @@ function sidebarHtml(webview, logoPath) {
 
     button:hover {
       background: var(--secondary-hover);
+      border-color: color-mix(in srgb, var(--accent) 42%, var(--subtle-border));
+      transform: translateY(-1px);
     }
 
     button:focus-visible {
@@ -2369,6 +2452,7 @@ function sidebarHtml(webview, logoPath) {
 
     button:disabled:hover {
       background: var(--secondary);
+      transform: none;
     }
 
     button.primary:disabled:hover {
@@ -2377,18 +2461,20 @@ function sidebarHtml(webview, logoPath) {
 
     .hero-server-action {
       min-height: 54px;
-      border-radius: 7px;
+      border-radius: 8px;
       padding: 12px 14px;
       font-size: 14px;
       font-weight: 700;
       letter-spacing: 0;
       text-transform: uppercase;
-      box-shadow: 0 0 0 1px color-mix(in srgb, var(--button) 35%, transparent);
+      box-shadow:
+        0 10px 22px color-mix(in srgb, var(--button) 26%, transparent),
+        inset 0 1px 0 color-mix(in srgb, #ffffff 18%, transparent);
     }
 
     .hero-server-action[data-state="Running"] {
       color: #ffffff;
-      background: var(--ok);
+      background: linear-gradient(135deg, var(--ok), color-mix(in srgb, var(--ok) 70%, var(--accent)));
       box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 40%, transparent);
     }
 
@@ -2437,10 +2523,10 @@ function sidebarHtml(webview, logoPath) {
       max-height: 120px;
       resize: vertical;
       border: 1px solid var(--subtle-border);
-      border-radius: 6px;
-      padding: 7px;
+      border-radius: 8px;
+      padding: 8px;
       color: var(--app-fg);
-      background: var(--card);
+      background: color-mix(in srgb, var(--card) 92%, transparent);
       font: inherit;
       line-height: 1.35;
     }
@@ -2472,7 +2558,7 @@ function sidebarHtml(webview, logoPath) {
     button.primary {
       border-color: transparent;
       color: var(--button-fg);
-      background: var(--button);
+      background: linear-gradient(135deg, var(--button), var(--accent));
       font-weight: 600;
     }
 
@@ -2503,10 +2589,11 @@ function sidebarHtml(webview, logoPath) {
     .row {
       display: grid;
       gap: 2px;
-      padding: 6px 8px;
+      padding: 8px 9px;
       border: 1px solid var(--subtle-border);
-      border-radius: 7px;
-      background: var(--card);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--card) 86%, transparent);
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 7%, transparent);
     }
 
     .main {
@@ -2517,6 +2604,36 @@ function sidebarHtml(webview, logoPath) {
     .empty {
       color: var(--muted);
       font-size: 12px;
+    }
+
+    @media (max-width: 280px) {
+      .shell {
+        padding: 6px;
+      }
+
+      header,
+      section,
+      details.panel {
+        padding: 8px;
+      }
+
+      .hero-head,
+      .task-submit-row,
+      .actions,
+      .routing-summary-grid,
+      .template-grid,
+      .trust-grid,
+      .hero-state-strip {
+        grid-template-columns: 1fr;
+      }
+
+      .health-card {
+        justify-content: flex-start;
+      }
+
+      .flow-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
     }
   </style>
 </head>
@@ -5477,6 +5594,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       --app-bg: var(--vscode-editor-background, var(--vscode-sideBar-background, #1f2328));
       --app-fg: var(--vscode-foreground, var(--vscode-sideBar-foreground, #d4d4d4));
       --border: var(--vscode-panel-border, var(--vscode-sideBarSectionHeader-border, rgba(127, 127, 127, 0.35)));
+      --subtle-border: color-mix(in srgb, var(--app-fg) 18%, transparent);
       --muted: var(--vscode-descriptionForeground, var(--vscode-disabledForeground, #8b949e));
       --input: var(--vscode-input-background, var(--app-bg));
       --input-fg: var(--vscode-input-foreground, var(--app-fg));
@@ -5491,7 +5609,12 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       --surface: var(--vscode-editorWidget-background, var(--vscode-input-background, rgba(127, 127, 127, 0.08)));
       --surface-alt: var(--vscode-sideBarSectionHeader-background, rgba(127, 127, 127, 0.12));
       --ok: var(--vscode-testing-iconPassed, #3fb950);
+      --warn: var(--vscode-testing-iconQueued, #d29922);
       --error: var(--vscode-errorForeground, #f85149);
+      --accent: color-mix(in srgb, var(--button) 76%, #2dd4bf 24%);
+      --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+      --panel: color-mix(in srgb, var(--surface) 88%, var(--app-fg) 12%);
+      --shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
     }
 
     * {
@@ -5501,7 +5624,10 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     body {
       margin: 0;
       color: var(--app-fg);
-      background: var(--app-bg);
+      background:
+        linear-gradient(180deg, var(--accent-soft), transparent 220px),
+        linear-gradient(135deg, color-mix(in srgb, var(--ok) 7%, transparent), transparent 42%),
+        var(--app-bg);
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
     }
@@ -5518,8 +5644,14 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      padding: 12px 14px;
+      position: sticky;
+      top: 0;
+      z-index: 15;
+      padding: 10px 14px;
       border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--app-bg) 88%, transparent);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.14);
     }
 
     .brand {
@@ -5530,11 +5662,14 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     }
 
     .logo {
-      width: 28px;
-      height: 28px;
-      border-radius: 6px;
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
       object-fit: cover;
       flex: 0 0 auto;
+      box-shadow:
+        0 0 0 1px var(--subtle-border),
+        0 8px 18px color-mix(in srgb, var(--accent) 22%, transparent);
     }
 
     h1 {
@@ -5545,9 +5680,16 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     }
 
     .status {
+      max-width: min(340px, 36vw);
+      border: 1px solid var(--subtle-border);
+      border-radius: 999px;
+      padding: 4px 9px;
       color: var(--muted);
       font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
       white-space: nowrap;
+      background: color-mix(in srgb, var(--surface) 84%, transparent);
     }
 
     .header-actions {
@@ -5588,8 +5730,10 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       border-radius: 8px;
       padding: 12px;
       color: var(--app-fg);
-      background: var(--app-bg);
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--accent) 8%, var(--panel)), var(--panel));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
     }
 
     .models-menu[hidden] {
@@ -5626,12 +5770,14 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     .model-row {
       display: grid;
       gap: 2px;
-      padding: 7px 0;
-      border-top: 1px solid var(--border);
+      padding: 9px;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--surface) 86%, transparent);
     }
 
     .model-row:first-child {
-      border-top: 0;
+      border-top: 1px solid var(--subtle-border);
     }
 
     .model-main {
@@ -5657,8 +5803,10 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       border-radius: 8px;
       padding: 12px;
       color: var(--app-fg);
-      background: var(--app-bg);
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--accent) 8%, var(--panel)), var(--panel));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
     }
 
     .settings-menu[hidden] {
@@ -5705,10 +5853,18 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       gap: 5px;
       color: var(--app-fg);
       font-size: 12px;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 8px;
+      background: color-mix(in srgb, var(--surface) 78%, transparent);
     }
 
     .settings-check {
       color: var(--app-fg);
+      border: 1px solid var(--subtle-border);
+      border-radius: 999px;
+      padding: 5px 8px;
+      background: color-mix(in srgb, var(--surface) 72%, transparent);
     }
 
     .settings-message {
@@ -5722,7 +5878,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       align-content: start;
       gap: 14px;
       overflow-y: auto;
-      padding: 14px;
+      padding: 18px 14px;
     }
 
     .message-list {
@@ -5737,10 +5893,12 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       gap: 12px;
       width: min(980px, 100%);
       margin: 0 auto;
-      border: 1px solid var(--border);
+      border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
       border-radius: 8px;
-      padding: 14px;
-      background: var(--surface);
+      padding: 16px;
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, var(--surface)), color-mix(in srgb, var(--ok) 9%, var(--surface)));
+      box-shadow: var(--shadow);
     }
 
     .welcome[hidden] {
@@ -5749,7 +5907,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
 
     .welcome-title {
       color: var(--app-fg);
-      font-size: 16px;
+      font-size: 18px;
       font-weight: 600;
     }
 
@@ -5766,9 +5924,12 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     }
 
     .prompt-chip {
-      min-height: 42px;
+      min-height: 48px;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 9px 10px;
       color: var(--secondary-fg);
-      background: var(--secondary);
+      background: color-mix(in srgb, var(--secondary) 78%, var(--surface));
       text-align: left;
     }
 
@@ -5787,25 +5948,29 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       color: var(--muted);
       font-size: 11px;
       text-transform: uppercase;
+      letter-spacing: 0;
     }
 
     .bubble {
-      border: 1px solid var(--border);
+      border: 1px solid var(--subtle-border);
       border-radius: 8px;
-      padding: 10px 12px;
+      padding: 11px 13px;
       line-height: 1.5;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       color: var(--app-fg);
-      background: var(--surface);
+      background: color-mix(in srgb, var(--surface) 88%, transparent);
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 7%, transparent);
     }
 
     .user .bubble {
-      background: var(--bubble);
+      border-color: color-mix(in srgb, var(--accent) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--accent) 15%, var(--bubble));
     }
 
     .assistant .bubble {
       border-left: 3px solid var(--ok);
+      background: color-mix(in srgb, var(--surface) 92%, var(--ok) 8%);
     }
 
     .error .bubble {
@@ -5836,6 +6001,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       display: flex;
       gap: 6px;
       margin-top: 6px;
+      flex-wrap: wrap;
     }
 
     .feedback button {
@@ -5847,9 +6013,15 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     form {
       display: grid;
       gap: 8px;
-      padding: 12px 14px 14px;
+      margin: 0 auto 12px;
+      width: min(980px, calc(100% - 28px));
+      padding: 10px;
       border-top: 1px solid var(--border);
-      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--surface-alt) 90%, var(--accent) 10%), var(--surface-alt));
+      box-shadow: var(--shadow);
     }
 
     textarea {
@@ -5858,10 +6030,10 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       max-height: 220px;
       resize: vertical;
       border: 1px solid var(--input-border);
-      border-radius: 6px;
-      padding: 9px 10px;
+      border-radius: 8px;
+      padding: 10px 11px;
       color: var(--input-fg);
-      background: var(--input);
+      background: color-mix(in srgb, var(--input) 92%, transparent);
       font: inherit;
       line-height: 1.45;
     }
@@ -5887,7 +6059,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       border-radius: 6px;
       padding: 5px 8px;
       color: var(--input-fg);
-      background: var(--input);
+      background: color-mix(in srgb, var(--input) 92%, transparent);
       font: inherit;
     }
 
@@ -5900,27 +6072,30 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       border-radius: 6px;
       padding: 6px 8px;
       color: var(--input-fg);
-      background: var(--input);
+      background: color-mix(in srgb, var(--input) 92%, transparent);
       font: inherit;
     }
 
     button {
-      border: 0;
+      border: 1px solid transparent;
       border-radius: 6px;
       padding: 6px 10px;
       color: var(--button-fg);
-      background: var(--button);
+      background: linear-gradient(135deg, var(--button), var(--accent));
       font: inherit;
       cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
     }
 
     button:hover {
       background: var(--button-hover);
+      transform: translateY(-1px);
     }
 
     button.secondary {
+      border-color: var(--subtle-border);
       color: var(--secondary-fg);
-      background: var(--secondary);
+      background: color-mix(in srgb, var(--secondary) 86%, var(--surface));
     }
 
     button.secondary:hover {
@@ -5933,6 +6108,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     textarea:disabled {
       opacity: 0.65;
       cursor: default;
+      transform: none;
     }
 
     label {
@@ -5947,7 +6123,8 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     .key-panel {
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 8px 10px;
+      padding: 9px 10px;
+      background: color-mix(in srgb, var(--surface) 78%, transparent);
     }
 
     .key-panel summary {
@@ -5994,11 +6171,33 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
 
       header {
         align-items: flex-start;
+        flex-direction: column;
       }
 
       .header-actions {
-        flex-direction: column;
-        align-items: flex-end;
+        width: 100%;
+        justify-content: space-between;
+        align-items: stretch;
+      }
+
+      .status,
+      #modelsToggle {
+        max-width: 100%;
+      }
+
+      .models-wrap,
+      .settings-wrap {
+        width: 100%;
+      }
+
+      .models-wrap > button,
+      .settings-wrap > button {
+        width: 100%;
+      }
+
+      form {
+        width: calc(100% - 20px);
+        margin-bottom: 10px;
       }
     }
   </style>
@@ -6511,8 +6710,8 @@ ${apiKeyFieldsHtml()}
       const wrapper = document.createElement("div");
       wrapper.className = "feedback";
       const options = [
-        ["👍", "up", "good"],
-        ["👎", "down", "bad"],
+        ["Good", "up", "good"],
+        ["Bad", "down", "bad"],
         ["Worked", "up", "worked"],
         ["Failed", "down", "failed"],
         ["Too expensive", "down", "too_expensive"],
