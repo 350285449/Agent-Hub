@@ -8,7 +8,11 @@ from agent_hub.application import AdaptiveApplicationService
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.core.router import AgentRouter
 from agent_hub.models import HubRequest
-from agent_hub.repository_intelligence import RepositoryIntelligenceStore, run_autonomous_night_mode_validation
+from agent_hub.repository_intelligence import (
+    RepositoryIntelligenceStore,
+    build_autonomous_night_mode_plan,
+    run_autonomous_night_mode_validation,
+)
 
 
 class RepositoryIntelligenceTests(unittest.TestCase):
@@ -111,6 +115,24 @@ class RepositoryIntelligenceTests(unittest.TestCase):
         self.assertEqual(report["status"], "passed")
         self.assertIn("night-ok", report["results"][0]["stdout"])
         self.assertIn("validation-only execution never edits files", report["safeguards"])
+
+    def test_autonomous_night_mode_plan_exposes_blockers_and_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(workspace_dir=root, state_dir=root / "state")
+
+            plan = build_autonomous_night_mode_plan(
+                dna={"project": "Service", "language": "python", "testing": "Weak", "risk_areas": ["Auth"]},
+                config=config,
+            )
+
+        self.assertEqual(plan["object"], "agent_hub.autonomous_night_mode_plan")
+        self.assertEqual(plan["state"], "blocked")
+        self.assertIn("autonomous_night_mode_enabled=false", plan["blocked_reasons"])
+        self.assertIn("shell validation is not explicitly allowed", plan["blocked_reasons"])
+        self.assertFalse(plan["execution_limits"]["writes_allowed"])
+        self.assertTrue(plan["maturity"]["human_review_required"])
+        self.assertEqual(plan["repository"]["project"], "Service")
 
 
 class _UnusedRunner:

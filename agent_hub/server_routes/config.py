@@ -119,6 +119,10 @@ def handle_get(handler: object, path: str) -> bool:
         body = build_autonomous_night_mode_plan(dna=dna, config=handler.server.config)
         handler._send_html(_night_mode_dashboard_html(body))
         return True
+    if path == "/dashboard/inbox":
+        body = handler.server.diagnostics_service.inbox_status_body()
+        handler._send_html(_inbox_dashboard_html(body))
+        return True
     if path == "/v1/events":
         handler._send_diagnostics_json(server_module._events_body(handler.server.config))
         return True
@@ -174,6 +178,9 @@ def handle_get(handler: object, path: str) -> bool:
         handler._send_diagnostics_json(
             build_autonomous_night_mode_plan(dna=dna, config=handler.server.config)
         )
+        return True
+    if path == "/v1/inbox/status":
+        handler._send_diagnostics_json(handler.server.diagnostics_service.inbox_status_body())
         return True
     if path == "/v1/tools":
         handler._send_diagnostics_json(server_module._tools_body(handler.server.router))
@@ -911,6 +918,41 @@ def _night_mode_dashboard_html(body: dict[str, Any]) -> str:
     )
 
 
+def _inbox_dashboard_html(body: dict[str, Any]) -> str:
+    counts = _dict(body.get("counts"))
+    commands = _dict(body.get("commands"))
+    cards = [
+        ("State", body.get("state", "unknown")),
+        ("Pending", counts.get("pending", 0)),
+        ("Processing", counts.get("processing", 0)),
+        ("Recent outputs", counts.get("recent_outputs", 0)),
+    ]
+    content = "\n".join(
+        [
+            _key_value_section_html(
+                "Directories",
+                [(key, value) for key, value in _dict(body.get("directories")).items()],
+            ),
+            _inbox_file_table_html("Pending Tasks", body.get("pending")),
+            _inbox_file_table_html("Processing Tasks", body.get("processing")),
+            _inbox_file_table_html("Recent Outputs", body.get("recent_outputs")),
+            _inbox_file_table_html("Recent Archive", body.get("recent_archive")),
+            _key_value_section_html(
+                "Commands",
+                [(key, value) for key, value in commands.items()],
+            ),
+        ]
+    )
+    return _dashboard_page(
+        "Agent Hub Inbox",
+        "JSON task queue status for one-shot processing, watcher mode, and serve --watch-inbox.",
+        cards,
+        content,
+        body,
+        json_path="/v1/inbox/status",
+    )
+
+
 def _dashboard_page(
     title: str,
     subtitle: str,
@@ -1316,6 +1358,27 @@ def _list_section_html(title: str, values: Any) -> str:
 <section class="panel">
   <h2>{_html(title)}</h2>
   <table><tbody>{body}</tbody></table>
+</section>"""
+
+
+def _inbox_file_table_html(title: str, values: Any) -> str:
+    rows = values if isinstance(values, list) else []
+    body = "".join(
+        "<tr>"
+        f"<td>{_html(_dict(row).get('name'))}</td>"
+        f"<td>{_html(_dict(row).get('bytes', 0))}</td>"
+        f"<td>{_html(_timestamp(_dict(row).get('modified_at')))}</td>"
+        f"<td><code>{_html(_dict(row).get('path'))}</code></td>"
+        "</tr>"
+        for row in rows
+        if isinstance(row, dict)
+    )
+    if not body:
+        body = "<tr><td colspan=\"4\" class=\"muted\">No files.</td></tr>"
+    return f"""
+<section class="panel">
+  <h2>{_html(title)}</h2>
+  <table><thead><tr><th>Name</th><th>Bytes</th><th>Modified</th><th>Path</th></tr></thead><tbody>{body}</tbody></table>
 </section>"""
 
 

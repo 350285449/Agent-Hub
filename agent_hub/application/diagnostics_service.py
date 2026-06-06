@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 from ..api.compatibility import available_model_ids, model_rows
@@ -128,6 +129,10 @@ BACKEND_FEATURES = {
     "enterprise_audit_logs": True,
     "enterprise_status": True,
     "config_migration": True,
+    "json_inbox_processing": True,
+    "inbox_status_reporting": True,
+    "mcp_policy_summary": True,
+    "provider_route_readiness_policy": True,
     "events_endpoint": True,
     "deployment_templates": True,
     "readiness_scorecard": True,
@@ -706,11 +711,7 @@ class DiagnosticsApplicationService:
             "provider_health": provider_health,
             "providers": router.provider_status(),
             "capability_graph": router.capability_graph(),
-            "active_providers": [
-                name
-                for name, agent in sorted(config.agents.items())
-                if agent.enabled and provider_health.get(name, {}).get("available")
-            ],
+            "active_providers": _active_names(config, provider_health),
             "limits": self.limits_body(router),
             "recommendations": router.recommend(
                 HubRequest(
@@ -769,7 +770,7 @@ class DiagnosticsApplicationService:
             "active_providers": [
                 row["agent"]
                 for row in providers
-                if row.get("available")
+                if row.get("route_ready")
             ],
             "providers": providers,
             "limits": providers,
@@ -779,6 +780,18 @@ class DiagnosticsApplicationService:
                 for row in providers
                 if row.get("cooldown_until")
             },
+            "blocked_models": [
+                {
+                    "agent": row["agent"],
+                    "provider": row["provider"],
+                    "model": row["model"],
+                    "reason": row.get("route_ready_reason") or "not route-ready",
+                    "cooldown_until": row.get("cooldown_until"),
+                    "unavailable_until": row.get("unavailable_until"),
+                }
+                for row in providers
+                if not row.get("route_ready")
+            ],
             "available_models": self.available_model_ids(router),
             "failed_models": failed_models,
             "fallback_models": failed_models,
@@ -786,7 +799,85 @@ class DiagnosticsApplicationService:
         }
 
     def plugins_body(self) -> dict[str, Any]:
-        return discover_plugins(self.config).to_dict()
+        body = discover_plugins(self.config).to_dict()
+        errors = body.get("errors") if isinstance(body.get("errors"), list) else []
+        enabled_count = int(body.get("enabled_count", 0) or 0)
+        trusted_count = int(body.get("trusted_count", 0) or 0)
+        registered_count = int(body.get("registered_count", 0) or 0)
+        if not self.config.plugins_enabled:
+            state = "disabled"
+            next_step = "Set plugins_enabled=true to inspect plugin manifests."
+        elif errors:
+            state = "needs_manifest_fixes"
+            next_step = "Fix plugin manifest errors reported in the errors list."
+        elif self.config.plugin_execution_enabled:
+            state = "trusted_local_process_enabled"
+            next_step = "Keep trusted_plugins and plugin_capability_grants scoped to the minimum required capabilities."
+        elif enabled_count or trusted_count or registered_count:
+            state = "metadata_ready_execution_disabled"
+            next_step = "Enable plugin_execution_enabled only for trusted plugins that need local process execution."
+        else:
+            state = "discovery_ready"
+            next_step = "Add a plugin.json under .agent-hub/plugins/<plugin-id>/ to register local extensions."
+        body.update(
+            {
+                "state": state,
+                "summary": {
+                    "state": state,
+                    "plugin_count": int(body.get("count", 0) or 0),
+                    "enabled_count": enabled_count,
+                    "trusted_count": trusted_count,
+                    "registered_count": registered_count,
+                    "error_count": len(errors),
+                    "execution_enabled": bool(self.config.plugin_execution_enabled),
+                },
+                "execution_policy": {
+                    "plugins_enabled": bool(self.config.plugins_enabled),
+                    "plugin_execution_enabled": bool(self.config.plugin_execution_enabled),
+                    "trusted_plugins": list(self.config.trusted_plugins),
+                    "enabled_plugins": list(self.config.enabled_plugins),
+                    "disabled_plugins": list(self.config.disabled_plugins),
+                },
+                "mcp": _mcp_policy_summary(self.config),
+                "next_step": next_step,
+            }
+        )
+        return body
+
+    def inbox_status_body(self) -> dict[str, Any]:
+        inbox = Path(self.config.inbox_dir)
+        outbox = Path(self.config.outbox_dir)
+        archive = Path(self.config.archive_dir)
+        pending = sorted(inbox.glob("*.json")) if inbox.exists() else []
+        processing = [path for path in pending if path.name.endswith(".processing.json")]
+        pending = [path for path in pending if not path.name.endswith(".processing.json")]
+        outputs = sorted(outbox.glob("*.json"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True) if outbox.exists() else []
+        archived = sorted(archive.glob("*.json"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True) if archive.exists() else []
+        return {
+            "object": "agent_hub.inbox_status",
+            "state": "pending" if pending else ("processing" if processing else "idle"),
+            "directories": {
+                "inbox": str(inbox),
+                "outbox": str(outbox),
+                "archive": str(archive),
+            },
+            "counts": {
+                "pending": len(pending),
+                "processing": len(processing),
+                "recent_outputs": len(outputs),
+                "archived": len(archived),
+            },
+            "pending": [_file_summary(path) for path in pending[:25]],
+            "processing": [_file_summary(path) for path in processing[:10]],
+            "recent_outputs": [_file_summary(path) for path in outputs[:25]],
+            "recent_archive": [_file_summary(path) for path in archived[:25]],
+            "supported_api_shapes": ["native", "openai-chat", "anthropic-messages"],
+            "commands": {
+                "process_once": "python -m agent_hub once",
+                "watch": "python -m agent_hub watch",
+                "serve_with_watcher": "python -m agent_hub serve --watch-inbox",
+            },
+        }
 
     def enterprise_audit_body(self, query: dict[str, str] | None = None) -> dict[str, Any]:
         query = query or {}
@@ -869,11 +960,7 @@ class DiagnosticsApplicationService:
 
     def active_provider_names(self, router: Any) -> list[str]:
         health = router.health_snapshot()
-        return [
-            name
-            for name, agent in sorted(self.config.agents.items())
-            if agent.enabled and health.get(name, {}).get("available")
-        ]
+        return _active_names(self.config, health)
 
     def available_model_ids(self, router: Any) -> list[str]:
         return available_model_ids(self.config, router)
@@ -916,6 +1003,8 @@ def _provider_limit_row(
         "stream_interruption_count": health.get("stream_interruption_count", 0),
         "success_count": health.get("success_count", 0),
         "failure_count": health.get("failure_count", 0),
+        "route_ready": _route_ready_health(agent, health),
+        "route_ready_reason": _route_ready_reason(agent, health),
     }
 
 
@@ -1201,7 +1290,7 @@ def _production_checks(
         _production_check(
             "security_guardrails",
             "Security guardrails are production-safe",
-            security.get("status") != "action",
+            security.get("status") == "ok",
             20,
             severity="critical",
             detail=str(security.get("detail") or ""),
@@ -1333,6 +1422,12 @@ _FEATURE_STATUS_KEYS = {
     "benchmark_results_dashboard",
     "cost_dashboard",
     "autonomous_night_mode",
+    "workspace_agent_tools",
+    "team_agent_mode",
+    "adaptive_learning",
+    "repository_intelligence",
+    "json_inbox",
+    "enterprise_governance",
     "plugins",
     "external_mcp_bridge",
 }
@@ -1670,13 +1765,27 @@ def _feature_status(
     benchmarks: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
     active_names = _active_names(config, provider_health)
+    blocked = _blocked_provider_rows(config, provider_health)
+    route_ready_detail = ", ".join(active_names[:8]) if active_names else "No provider reports as route-ready."
+    if blocked:
+        route_ready_detail += " Blocked: " + "; ".join(
+            f"{row['agent']}: {row['reason']}" for row in blocked[:4]
+        )
     leaderboard_summary = _dict(leaderboard.get("summary"))
     benchmark_summary = _dict(benchmarks.get("summary"))
     plugin_errors = plugins.get("errors") if isinstance(plugins.get("errors"), list) else []
+    mcp_summary = _mcp_policy_summary(config)
+    readiness_mcp_state = mcp_summary["state"]
+    if readiness_mcp_state == "not_configured":
+        readiness_mcp_state = "execution_disabled"
+    tool_count = 4 + int(mcp_summary["declared_tool_count"])
     return {
         "provider_routing": {
             "state": "ready" if active_names else "needs_setup",
-            "detail": ", ".join(active_names[:8]) if active_names else "No provider reports as available.",
+            "detail": route_ready_detail,
+            "active_count": len(active_names),
+            "blocked_count": len(blocked),
+            "blocked": blocked[:8],
         },
         "universal_compatibility": {
             "state": "ready" if universal_compatibility_enabled(config) else "disabled",
@@ -1721,6 +1830,51 @@ def _feature_status(
                 if config.autonomous_night_mode_enabled
                 else "Night validation runner is installed and disabled by default."
             ),
+            "validation_commands": list(config.validation_commands or []),
+            "execution_mode": "validation_only",
+        },
+        "workspace_agent_tools": {
+            "state": "ready" if tool_count >= 4 else "needs_tools",
+            "registered_tool_count": tool_count,
+            "builtin_tools": ["file_read", "file_write", "search_repo", "shell_execute"],
+            "shell_policy": config.shell_command_policy,
+            "shell_tools_enabled": bool(config.allow_shell_tools),
+            "mutating_tools_guarded": config.approval_mode in {"ask", "safe", "readonly", "deny"},
+            "detail": "Workspace tools are registered; mutating and shell operations are policy-gated.",
+        },
+        "team_agent_mode": {
+            "state": "ready",
+            "patterns": ["planner", "researcher", "coder", "reviewer", "finalizer"],
+            "max_steps": config.agent_max_steps,
+            "detail": "Single-agent, group-agent, and workflow engine paths share router and provider health state.",
+        },
+        "adaptive_learning": {
+            "state": "ready" if config.adaptive_learning_enabled and config.routing_memory_enabled else "disabled",
+            "adaptive_learning_enabled": config.adaptive_learning_enabled,
+            "adaptive_routing_enabled": config.adaptive_routing_enabled,
+            "routing_memory_enabled": config.routing_memory_enabled,
+            "feedback_endpoint": "/v1/feedback",
+            "detail": "Routing memory, feedback, simulation, and optimization dashboards are available.",
+        },
+        "repository_intelligence": {
+            "state": "ready" if config.repository_dna_enabled and config.workspace_memory_enabled else "disabled",
+            "repository_dna_enabled": config.repository_dna_enabled,
+            "workspace_memory_enabled": config.workspace_memory_enabled,
+            "failure_prediction_enabled": config.failure_prediction_enabled,
+            "detail": "Repository DNA and workspace memory are exposed to routing and dashboards.",
+        },
+        "json_inbox": {
+            "state": "ready",
+            "inbox_dir": str(config.inbox_dir),
+            "outbox_dir": str(config.outbox_dir),
+            "archive_dir": str(config.archive_dir),
+            "supported_api_shapes": ["native", "openai-chat", "anthropic-messages"],
+            "detail": "JSON task inbox supports one-shot processing, watcher mode, and serve --watch-inbox.",
+        },
+        "enterprise_governance": {
+            "state": "ready" if config.enterprise_mode_enabled else "disabled",
+            "audit_retention_days": config.enterprise_audit_retention_days,
+            "detail": "Enterprise policy and audit exports are available; enforcement is active when enterprise_mode_enabled=true.",
         },
         "plugins": {
             "state": (
@@ -1730,14 +1884,15 @@ def _feature_status(
             ),
             "count": plugins.get("count", 0),
             "errors": len(plugin_errors),
+            "registered_count": plugins.get("registered_count", 0),
+            "execution_enabled": config.plugin_execution_enabled,
         },
         "external_mcp_bridge": {
-            "state": (
-                "stdio_ready"
-                if config.mcp_execution_enabled and any(server.command for server in config.mcp_servers if server.enabled)
-                else "execution_disabled"
-            ),
-            "detail": "Declared MCP tools use a policy-gated stdio JSON-RPC client.",
+            "state": readiness_mcp_state,
+            "detail": mcp_summary["detail"],
+            "configured_server_count": mcp_summary["configured_server_count"],
+            "declared_tool_count": mcp_summary["declared_tool_count"],
+            "execution_enabled": mcp_summary["execution_enabled"],
         },
     }
 
@@ -1770,8 +1925,55 @@ def _active_names(config: HubConfig, provider_health: dict[str, dict[str, Any]])
     return [
         name
         for name, agent in sorted(config.agents.items())
-        if agent.enabled and provider_health.get(name, {}).get("available")
+        if _route_ready_health(agent, provider_health.get(name, {}))
     ]
+
+
+def _blocked_provider_rows(
+    config: HubConfig,
+    provider_health: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for name, agent in sorted(config.agents.items()):
+        if not agent.enabled:
+            continue
+        health = provider_health.get(name, {})
+        if _route_ready_health(agent, health):
+            continue
+        rows.append(
+            {
+                "agent": name,
+                "provider": agent.provider,
+                "model": agent.model,
+                "reason": _route_ready_reason(agent, health),
+            }
+        )
+    return rows
+
+
+def _route_ready_health(agent: Any, health: Any) -> bool:
+    return _route_ready_reason(agent, health) == ""
+
+
+def _route_ready_reason(agent: Any, health: Any) -> str:
+    if not getattr(agent, "enabled", False):
+        return "agent disabled"
+    if not isinstance(health, dict) or not health.get("available"):
+        return "provider unavailable"
+    now = time.time()
+    cooldown = _float(health.get("cooldown_until")) or 0.0
+    unavailable = _float(health.get("unavailable_until")) or 0.0
+    if max(cooldown, unavailable) > now:
+        return "provider cooling down"
+    if bool(health.get("quota_exhausted")):
+        return "quota exhausted"
+    if bool(health.get("rate_limited")):
+        return "rate limited"
+    for field in ("requests_remaining", "quota_remaining", "credits_remaining"):
+        remaining = _float(health.get(field))
+        if remaining is not None and remaining <= 0:
+            return field.replace("_", " ") + " exhausted"
+    return ""
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -1785,6 +1987,62 @@ def _float(value: Any) -> float | None:
         return None
 
 
+def _file_summary(path: Path) -> dict[str, Any]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"name": path.name, "path": str(path), "missing": True}
+    return {
+        "name": path.name,
+        "path": str(path),
+        "bytes": stat.st_size,
+        "modified_at": stat.st_mtime,
+    }
+
+
+def _mcp_policy_summary(config: HubConfig) -> dict[str, Any]:
+    enabled_servers = [server for server in config.mcp_servers if server.enabled]
+    command_servers = [server for server in enabled_servers if server.command]
+    declared_tools = sum(
+        1
+        for server in enabled_servers
+        for tool in server.tools
+        if isinstance(tool, dict) and isinstance(tool.get("name"), str) and tool.get("name").strip()
+    )
+    execution_enabled = bool(config.mcp_execution_enabled)
+    if not enabled_servers:
+        state = "not_configured"
+        detail = "No MCP servers are configured."
+        next_step = "Add mcp_servers entries to agent-hub.config.json when you need external MCP tools."
+    elif execution_enabled and command_servers and declared_tools:
+        state = "stdio_ready"
+        detail = "MCP stdio execution is enabled for configured command-backed servers."
+        next_step = "Keep MCP permissions scoped to the minimum required tool capabilities."
+    elif command_servers and declared_tools:
+        state = "configured_execution_disabled"
+        detail = "MCP tools are declared but execution is disabled by policy."
+        next_step = "Set mcp_execution_enabled=true only for trusted local MCP servers."
+    elif declared_tools:
+        state = "metadata_only"
+        detail = "MCP tools are declared, but no enabled server command can execute them."
+        next_step = "Add a command for each MCP server that should run over stdio."
+    else:
+        state = "needs_tools"
+        detail = "MCP servers are configured without declared tools."
+        next_step = "Declare tools under each enabled mcp_servers entry."
+    return {
+        "state": state,
+        "detail": detail,
+        "next_step": next_step,
+        "execution_enabled": execution_enabled,
+        "timeout_seconds": config.mcp_timeout_seconds,
+        "configured_server_count": len(config.mcp_servers),
+        "enabled_server_count": len(enabled_servers),
+        "command_server_count": len(command_servers),
+        "declared_tool_count": declared_tools,
+    }
+
+
 def _setup_guidance(config: HubConfig, provider_health: dict[str, dict[str, Any]]) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     agents = list(config.agents.values())
@@ -1792,7 +2050,7 @@ def _setup_guidance(config: HubConfig, provider_health: dict[str, dict[str, Any]
     active_agents = [
         agent
         for agent in enabled_agents
-        if provider_health.get(agent.name, {}).get("available")
+        if _route_ready_health(agent, provider_health.get(agent.name, {}))
     ]
     if not agents:
         items.append(

@@ -126,12 +126,15 @@ from .server_routes.diagnostics import (
 
 DIAGNOSTIC_ENDPOINTS = {
     "/v1/provider-health",
+    "/v1/provider-scores",
     "/v1/routing-memory/stats",
     "/v1/routing-memory/recent",
     "/v1/routing/status",
     "/v1/routing/last-decision",
     "/v1/routing-intelligence",
     "/v1/routing/test-failover",
+    "/v1/routing-history",
+    "/v1/inbox/status",
     "/v1/limits",
     "/v1/usage",
     "/v1/client-sources",
@@ -891,6 +894,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 "Automation And Admin",
                 [
                     ("Night Mode", "/dashboard/night-mode", "Validation plan and safeguards"),
+                    ("Inbox", "/dashboard/inbox", "Queued JSON tasks, outputs, and archive status"),
                     ("Events", "/dashboard/events", "Internal, routing, workflow, adaptive events"),
                     ("Plugins", "/dashboard/plugins", "Discovered plugin capabilities"),
                     ("Enterprise", "/dashboard/enterprise", "Users, roles, workspaces, audit status"),

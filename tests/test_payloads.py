@@ -163,6 +163,7 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(anthropic["model"], "stable-alias")
         self.assertNotIn("agent_hub", anthropic)
         self.assertNotIn("citations", anthropic)
+        self.assertEqual(native["request_id"], "hub-1")
         self.assertEqual(native["model"], "stable-alias")
         self.assertNotIn("agent", native)
         self.assertNotIn("failover", native)

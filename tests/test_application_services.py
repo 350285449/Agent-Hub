@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from agent_hub.application import AdaptiveApplicationService, DiagnosticsApplicationService
-from agent_hub.config import AgentConfig, HubConfig
+from agent_hub.config import AgentConfig, HubConfig, MCPServerConfig
 from agent_hub.core.router import AgentRouter
 from agent_hub.evaluation import BenchmarkResult, ProviderScoreStore
 from agent_hub.models import HubRequest, ProviderResult
@@ -130,6 +131,68 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertEqual(readiness["feature_status"]["provider_routing"]["state"], "ready")
             self.assertTrue(any(item["id"] == "security_guardrails" for item in readiness["items"]))
 
+    def test_readiness_treats_cooling_down_provider_as_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            router = AgentRouter(config, provider_factory=_Provider)
+            service = DiagnosticsApplicationService(config)
+
+            readiness = service.readiness_body(
+                router,
+                provider_health={"coder": {"available": True, "cooldown_until": time.time() + 3600}},
+            )
+
+            provider_status = readiness["feature_status"]["provider_routing"]
+            self.assertEqual(provider_status["state"], "needs_setup")
+            self.assertEqual(provider_status["active_count"], 0)
+            self.assertEqual(provider_status["blocked"][0]["agent"], "coder")
+            self.assertEqual(provider_status["blocked"][0]["reason"], "provider cooling down")
+
+    def test_plugins_body_exposes_policy_and_mcp_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            config.mcp_servers = [
+                MCPServerConfig(
+                    name="local-tools",
+                    command="node",
+                    tools=[{"name": "repo_search", "description": "Search the repository"}],
+                )
+            ]
+
+            body = DiagnosticsApplicationService(config).plugins_body()
+
+            self.assertEqual(body["object"], "agent_hub.plugins")
+            self.assertEqual(body["state"], "discovery_ready")
+            self.assertFalse(body["execution_policy"]["plugin_execution_enabled"])
+            self.assertEqual(body["mcp"]["state"], "configured_execution_disabled")
+            self.assertEqual(body["mcp"]["declared_tool_count"], 1)
+
+    def test_inbox_status_reports_queue_and_recent_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root)
+            config.inbox_dir = root / "inbox"
+            config.outbox_dir = root / "outbox"
+            config.archive_dir = root / "archive"
+            config.inbox_dir.mkdir()
+            config.outbox_dir.mkdir()
+            config.archive_dir.mkdir()
+            (config.inbox_dir / "task.json").write_text('{"message":"hello"}', encoding="utf-8")
+            (config.inbox_dir / "task.processing.json").write_text('{"message":"busy"}', encoding="utf-8")
+            (config.outbox_dir / "done.json").write_text('{"ok":true}', encoding="utf-8")
+            (config.archive_dir / "old.json").write_text('{"archived":true}', encoding="utf-8")
+
+            body = DiagnosticsApplicationService(config).inbox_status_body()
+
+            self.assertEqual(body["object"], "agent_hub.inbox_status")
+            self.assertEqual(body["state"], "pending")
+            self.assertEqual(body["counts"]["pending"], 1)
+            self.assertEqual(body["counts"]["processing"], 1)
+            self.assertEqual(body["counts"]["recent_outputs"], 1)
+            self.assertEqual(body["counts"]["archived"], 1)
+            self.assertEqual(body["pending"][0]["name"], "task.json")
+            self.assertIn("process_once", body["commands"])
+
     def test_enterprise_status_summarizes_policy_and_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -170,6 +233,24 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertTrue(report["ok"])
             self.assertGreaterEqual(report["rating"], 9.0)
             self.assertTrue(any(check["id"] == "vscode_backend_contract" for check in report["checks"]))
+
+    def test_production_check_flags_auto_approval_as_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            config.agents["coder"].supports_tools = True
+            config.agents["coder"].supports_function_calling = True
+            config.approval_mode = "auto"
+            router = AgentRouter(config, provider_factory=_Provider)
+
+            report = DiagnosticsApplicationService(config).production_check_body(
+                router,
+                provider_health={"coder": {"available": True}},
+            )
+
+            checks = {check["id"]: check for check in report["checks"]}
+            self.assertFalse(checks["security_guardrails"]["ok"])
+            self.assertFalse(report["ok"])
+            self.assertLess(report["score"], 100)
 
     def test_production_check_reports_readiness_and_metadata_warnings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

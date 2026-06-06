@@ -441,13 +441,37 @@ def build_autonomous_night_mode_plan(
         tasks.insert(1, "Identify missing smoke tests before code edits")
     if risks:
         tasks.insert(1, "Skip high-risk areas without explicit approval: " + ", ".join(risks[:4]))
+    blocked_reasons = []
+    if not config.autonomous_night_mode_enabled:
+        blocked_reasons.append("autonomous_night_mode_enabled=false")
+    if not commands and not config.validation_commands:
+        blocked_reasons.append("no validation commands detected")
+    if not config.allow_shell_tools or config.shell_command_policy != "allow":
+        blocked_reasons.append("shell validation is not explicitly allowed")
+    configured_commands = list(config.validation_commands or [])
+    effective_commands = configured_commands or commands
     return {
         "object": "agent_hub.autonomous_night_mode_plan",
         "enabled": bool(config.autonomous_night_mode_enabled),
         "mode": "validation_only" if config.autonomous_night_mode_enabled else "plan_only",
+        "state": "ready" if not blocked_reasons else "blocked",
+        "blocked_reasons": blocked_reasons,
         "repository_profile_id": dna_dict.get("profile_id", ""),
+        "repository": {
+            "project": dna_dict.get("project", ""),
+            "language": dna_dict.get("language", ""),
+            "testing": testing,
+            "risk_areas": risks[:8],
+        },
         "tasks": tasks,
-        "validation_commands": commands,
+        "validation_commands": effective_commands,
+        "validation_command_source": "config" if configured_commands else "detected",
+        "execution_limits": {
+            "max_commands": 5,
+            "max_timeout_seconds": 600,
+            "writes_allowed": False,
+            "network_policy": "inherits provider and shell permission policy",
+        },
         "safeguards": [
             "no destructive git commands",
             "human review required before PR creation",
@@ -455,6 +479,12 @@ def build_autonomous_night_mode_plan(
             "stop after repeated validation failure",
             "validation-only execution never edits files",
         ],
+        "maturity": {
+            "state_visibility": True,
+            "bounded_execution": True,
+            "destructive_edits_blocked": True,
+            "human_review_required": True,
+        },
     }
 
 

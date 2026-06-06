@@ -141,6 +141,7 @@ class HubResponse:
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "id": self.request_id,
+            "request_id": self.request_id,
             "object": "agent_hub.response",
             "session_id": self.session_id,
             "model": self.public_model or self.model,

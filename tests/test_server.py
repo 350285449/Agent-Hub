@@ -707,9 +707,11 @@ class ServerCompatibilityTests(unittest.TestCase):
                 repository_dna = _get_text(f"{base}/dashboard/repository-dna")
                 workspace_memory = _get_text(f"{base}/dashboard/workspace-memory")
                 night_mode = _get_text(f"{base}/dashboard/night-mode")
+                inbox = _get_text(f"{base}/dashboard/inbox")
                 costs_json = _get_json(f"{base}/v1/cost-dashboard")
                 leaderboard_json = _get_json(f"{base}/v1/model-leaderboard")
                 benchmarks_json = _get_json(f"{base}/v1/benchmarks")
+                inbox_json = _get_json(f"{base}/v1/inbox/status")
             finally:
                 _stop(server, thread)
 
@@ -751,10 +753,13 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("Remembered Facts", workspace_memory)
             self.assertIn("Agent Hub Night Mode", night_mode)
             self.assertIn("Planned Tasks", night_mode)
+            self.assertIn("Agent Hub Inbox", inbox)
+            self.assertIn("Pending Tasks", inbox)
             self.assertEqual(costs_json["summary"]["data_state"], "pricing_ready_waiting_for_usage")
             self.assertEqual(leaderboard_json["summary"]["data_state"], "baseline_ready")
             self.assertEqual(leaderboard_json["summary"]["baseline_agent_count"], 1)
             self.assertEqual(benchmarks_json["summary"]["data_state"], "baseline_ready")
+            self.assertEqual(inbox_json["object"], "agent_hub.inbox_status")
 
     def test_readiness_endpoint_exposes_scorecard(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
