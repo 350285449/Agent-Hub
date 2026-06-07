@@ -11,6 +11,7 @@ from typing import Any
 SNAPSHOT_SCHEMA_VERSION = 1
 SNAPSHOT_MANIFEST_NAME = "SNAPSHOT.json"
 SNAPSHOT_EXTRAS = ("pyproject.toml", "README.md", "release.json")
+SNAPSHOT_EXTRA_DIRS = ("benchmarks",)
 REQUIRED_SNAPSHOT_FILES = (
     "agent_hub/__init__.py",
     "agent_hub/__main__.py",
@@ -149,6 +150,13 @@ def source_files(root: Path) -> list[SnapshotFile]:
         path = root / name
         if path.exists() and path.is_file() and _included(path):
             files.append(snapshot_file(path, name))
+    for name in SNAPSHOT_EXTRA_DIRS:
+        directory = root / name
+        if not directory.exists() or not directory.is_dir() or not _included(directory):
+            continue
+        for path in sorted(directory.rglob("*"), key=lambda item: _posix(item.relative_to(root))):
+            if path.is_file() and _included(path):
+                files.append(snapshot_file(path, _posix(path.relative_to(root))))
     return files
 
 

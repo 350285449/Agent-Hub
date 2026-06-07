@@ -279,6 +279,9 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent Hub Optimization</title>
   <style>
+    * {{
+      box-sizing: border-box;
+    }}
     body {{
       margin: 0;
       padding: 28px;
@@ -287,15 +290,16 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.45;
     }}
-    main {{ max-width: 1180px; margin: 0 auto; }}
+    main {{ width: 100%; max-width: 1180px; margin: 0 auto; overflow-x: hidden; }}
     header {{ margin-bottom: 18px; }}
+    section {{ width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; }}
     h1 {{ margin: 0 0 6px; font-size: 28px; }}
     h2 {{ margin: 28px 0 10px; font-size: 18px; }}
-    p {{ margin: 0 0 14px; color: #5f6368; }}
+    p {{ margin: 0 0 14px; color: #5f6368; overflow-wrap: break-word; }}
     a {{ color: #0b57d0; }}
     .cards {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
       margin: 16px 0 8px;
     }}
@@ -305,10 +309,11 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
       padding: 14px;
       background: #fff;
     }}
-    .card strong {{ display: block; font-size: 24px; color: #111827; }}
+    .card strong {{ display: block; font-size: 24px; line-height: 1.12; color: #111827; overflow-wrap: anywhere; }}
     .card span {{ display: block; margin-top: 3px; color: #5f6368; font-size: 13px; }}
     table {{
       width: 100%;
+      min-width: 680px;
       border-collapse: collapse;
       background: #fff;
       border: 1px solid #d8dde6;
@@ -321,12 +326,20 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
       text-align: left;
       font-size: 13px;
       vertical-align: top;
+      overflow-wrap: anywhere;
     }}
     th {{ color: #374151; background: #eef2f7; font-weight: 650; }}
     tr:last-child td {{ border-bottom: 0; }}
-    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }}
+    .grid > * {{ min-width: 0; overflow-x: auto; }}
     .note {{ color: #5f6368; font-size: 13px; margin-top: 8px; }}
     code {{ padding: 2px 5px; border-radius: 4px; background: #eef2f7; }}
+    @media (max-width: 640px) {{
+      body {{ padding: 16px; }}
+      h1 {{ font-size: 24px; }}
+      .cards {{ grid-template-columns: 1fr; }}
+      table {{ min-width: 100%; }}
+    }}
   </style>
 </head>
 <body>
@@ -334,7 +347,7 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
     <header>
       <h1>Optimization Dashboard</h1>
       <p>Adaptive routing, workflow selection, cost, latency, and provider effectiveness.</p>
-      <p><a href="/dashboard">Back to Agent Hub</a> · <a href="/v1/optimization">JSON</a></p>
+      <p><a href="/dashboard">Back to Agent Hub</a> | <a href="/v1/optimization">JSON</a></p>
     </header>
     <section class="cards">
       <div class="card"><strong>{_html(_percent_label(workflow_rate.get("rate")))}</strong><span>workflow success over {_html(workflow_rate.get("attempts", 0))} sample(s)</span></div>
@@ -431,6 +444,9 @@ def _routing_intelligence_dashboard_html(intelligence: dict[str, Any]) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent Hub Routing Intelligence</title>
   <style>
+    * {{
+      box-sizing: border-box;
+    }}
     body {{
       margin: 0;
       padding: 28px;
@@ -438,16 +454,18 @@ def _routing_intelligence_dashboard_html(intelligence: dict[str, Any]) -> str:
       background: #f6f7f9;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.45;
+      overflow-x: hidden;
     }}
-    main {{ max-width: 1220px; margin: 0 auto; }}
+    main {{ width: 100%; max-width: 1220px; margin: 0 auto; overflow-x: hidden; }}
     header {{ margin-bottom: 18px; }}
+    section {{ width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; }}
     h1 {{ margin: 0 0 6px; font-size: 28px; }}
     h2 {{ margin: 28px 0 10px; font-size: 18px; }}
-    p {{ margin: 0 0 14px; color: #5f6368; }}
+    p {{ margin: 0 0 14px; color: #5f6368; overflow-wrap: break-word; }}
     a {{ color: #0b57d0; }}
     .cards {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
       margin: 16px 0 8px;
     }}
@@ -457,11 +475,13 @@ def _routing_intelligence_dashboard_html(intelligence: dict[str, Any]) -> str:
       padding: 14px;
       background: #fff;
     }}
-    .card strong {{ display: block; font-size: 22px; color: #111827; overflow-wrap: anywhere; }}
+    .card strong {{ display: block; font-size: 22px; line-height: 1.14; color: #111827; overflow-wrap: anywhere; }}
     .card span {{ display: block; margin-top: 3px; color: #5f6368; font-size: 13px; }}
-    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }}
+    .grid > * {{ min-width: 0; overflow-x: auto; }}
     table {{
       width: 100%;
+      min-width: 680px;
       border-collapse: collapse;
       background: #fff;
       border: 1px solid #d8dde6;
@@ -474,11 +494,18 @@ def _routing_intelligence_dashboard_html(intelligence: dict[str, Any]) -> str:
       text-align: left;
       font-size: 13px;
       vertical-align: top;
+      overflow-wrap: anywhere;
     }}
     th {{ color: #374151; background: #eef2f7; font-weight: 650; }}
     tr:last-child td {{ border-bottom: 0; }}
     .note {{ color: #5f6368; font-size: 13px; margin-top: 8px; }}
     code {{ padding: 2px 5px; border-radius: 4px; background: #eef2f7; }}
+    @media (max-width: 640px) {{
+      body {{ padding: 16px; }}
+      h1 {{ font-size: 24px; }}
+      .cards {{ grid-template-columns: 1fr; }}
+      table {{ min-width: 100%; }}
+    }}
   </style>
 </head>
 <body>

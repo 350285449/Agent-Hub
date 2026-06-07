@@ -1,5 +1,10 @@
 # Changelog
 
+## 9.3.0
+
+- Syncs extension and backend release metadata for the next package.
+- Adds install verification, packaging checks, and command-runner hardening.
+
 ## 9.2.0
 
 - Redesigns the Agent Hub sidebar and browser dashboard into a denser command-center UI with richer model, routing, health, audit, and workflow surfaces.

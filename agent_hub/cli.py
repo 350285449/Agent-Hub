@@ -31,9 +31,11 @@ from .commands_provider import (
     _agent_rows,
     _apply_routing_preset,
     _benchmark,
+    _benchmark_run,
     _benchmark_suite,
     _enable_cloud_provider,
     _estimate,
+    _explain_route,
     _eval_providers,
     _health_report,
     _local_models_report,
@@ -45,6 +47,7 @@ from .commands_provider import (
     _recommend,
     _route_test,
     _route_diagnose,
+    _route_history,
     _routing_preset_rows,
 )
 from .commands_server import (
@@ -289,9 +292,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Respect config free_only=false. By default this command forces free_only=true.",
     )
 
-    benchmark_parser = subparsers.add_parser("benchmark", help="Run a small route latency benchmark.")
+    benchmark_parser = subparsers.add_parser("benchmark", help="Run route benchmarks and proof reports.")
+    benchmark_parser.add_argument("action", nargs="?", default="", help="Use 'run' for proof benchmarks.")
     benchmark_parser.add_argument("--route", default="cloud-agent")
     benchmark_parser.add_argument("--prompt", default="Reply with one short sentence.")
+    benchmark_parser.add_argument("--baseline", default="", help="Baseline agent/model. Defaults to user default.")
+    benchmark_parser.add_argument("--limit", type=int, default=50, help="Maximum proof benchmark tasks.")
+    benchmark_parser.add_argument("--corpus", default="", help="Benchmark corpus directory.")
+    benchmark_parser.add_argument("--output-dir", default="", help="Directory for benchmark-report files.")
     benchmark_parser.add_argument("--json", action="store_true")
 
     benchmark_suite_parser = subparsers.add_parser(
@@ -337,6 +345,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Estimated output tokens used for known cost calculation.",
     )
     route_diagnose_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    explain_route_parser = subparsers.add_parser(
+        "explain-route",
+        help="Explain provider/model ranking without calling a provider.",
+    )
+    explain_route_parser.add_argument("prompt", nargs="*", default=["Explain routing."])
+    explain_route_parser.add_argument("--route", default="cloud-agent")
+    explain_route_parser.add_argument(
+        "--prefer",
+        choices=["balanced", "coding", "reasoning", "speed"],
+        default="balanced",
+        help="Recommendation bias.",
+    )
+    explain_route_parser.add_argument("--needs-tools", action="store_true")
+    explain_route_parser.add_argument("--output-tokens", type=int, default=1024)
+    explain_route_parser.add_argument("--json", action="store_true")
+
+    route_history_parser = subparsers.add_parser(
+        "route-history",
+        help="Show how routing distribution changed over recent weeks.",
+    )
+    route_history_parser.add_argument("--weeks", type=int, default=4)
+    route_history_parser.add_argument("--json", action="store_true")
 
     export_logs_parser = subparsers.add_parser("export-logs", help="Export recent diagnostic logs.")
     export_logs_parser.add_argument("--format", choices=["json", "markdown", "zip"], default="json")
@@ -611,6 +642,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(response.to_native_dict(include_routing_details=True), indent=2, ensure_ascii=False))
         return 0
     if command == "benchmark":
+        if args.action == "run":
+            return _benchmark_run(
+                config,
+                route=args.route,
+                baseline=args.baseline,
+                limit=args.limit,
+                corpus=args.corpus,
+                output_dir=args.output_dir,
+                as_json=args.json,
+            )
+        if args.action:
+            parser.error(f"Unknown benchmark action {args.action!r}")
         return _benchmark(config, route=args.route, prompt=args.prompt, as_json=args.json)
     if command == "benchmark-suite":
         return _benchmark_suite(
@@ -634,6 +677,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             needs_tools=args.needs_tools,
             as_json=args.json,
         )
+    if command == "explain-route":
+        return _explain_route(
+            config,
+            route=args.route,
+            prompt=" ".join(args.prompt),
+            output_tokens=args.output_tokens,
+            prefer=args.prefer,
+            needs_tools=args.needs_tools,
+            as_json=args.json,
+        )
+    if command == "route-history":
+        return _route_history(config, weeks=args.weeks, as_json=args.json)
     if command == "chat":
         if not args.allow_cloud:
             config.free_only = True

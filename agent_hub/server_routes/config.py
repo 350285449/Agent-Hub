@@ -6,6 +6,8 @@ import json
 from typing import Any
 
 from .middleware import request_query
+from ..learning_proof import learning_dashboard_body
+from ..measurement import usage_ledger_summary
 from ..observability import usage_snapshot
 
 
@@ -20,6 +22,10 @@ def handle_get(handler: object, path: str) -> bool:
         return True
     if path == "/dashboard/optimization":
         handler._send_html(server_module._optimization_dashboard_html(handler.server.adaptive_service.optimization_summary()))
+        return True
+    if path == "/dashboard/learning":
+        body = learning_dashboard_body(handler.server.config, handler.server.router)
+        handler._send_html(_learning_dashboard_html(body))
         return True
     if path == "/dashboard/routing-intelligence":
         optimization = handler.server.adaptive_service.optimization_summary()
@@ -69,6 +75,7 @@ def handle_get(handler: object, path: str) -> bool:
             handler.server.config.state_dir,
             handler.server.router.health_snapshot(include_history=True),
         )
+        body["usage_ledger"] = usage_ledger_summary(handler.server.config)
         handler._send_html(_usage_dashboard_html(body))
         return True
     if path == "/dashboard/events":
@@ -136,6 +143,14 @@ def handle_get(handler: object, path: str) -> bool:
         return True
     if path == "/v1/optimization":
         handler._send_diagnostics_json(handler.server.adaptive_service.optimization_summary())
+        return True
+    if path == "/v1/learning":
+        handler._send_diagnostics_json(learning_dashboard_body(handler.server.config, handler.server.router))
+        return True
+    if path == "/v1/route-history":
+        from ..learning_proof import route_history_body
+
+        handler._send_diagnostics_json(route_history_body(handler.server.config))
         return True
     if path == "/v1/cost-dashboard":
         handler._send_diagnostics_json(
@@ -296,9 +311,16 @@ a{{color:#67e8f9}}
 
 def _cost_dashboard_html(body: dict[str, Any]) -> str:
     summary = _dict(body.get("summary"))
+    ledger = _dict(body.get("usage_ledger"))
+    ledger_sources = _dict(ledger.get("measurement_sources"))
+    ledger_confidence = _dict(ledger.get("confidence"))
     cards = [
         ("Known cost", _money(body.get("known_cost_usd"))),
         ("Average known cost", _money(body.get("average_known_cost_usd"))),
+        ("Ledger requests", ledger.get("request_count", 0)),
+        ("Success / failure", f"{_int(ledger.get('success_count'))} / {_int(ledger.get('failure_count'))}"),
+        ("Usage confidence", ledger_confidence.get("level", "none")),
+        ("Actual usage", _percent((_float(ledger_confidence.get("actual_usage_pct")) or 0.0) / 100)),
         ("Pricing coverage", _percent(summary.get("pricing_coverage_rate"))),
         ("State", summary.get("data_state", "unknown")),
     ]
@@ -311,6 +333,7 @@ def _cost_dashboard_html(body: dict[str, Any]) -> str:
         pricing_rows = "<tr><td colspan=\"6\" class=\"muted\">No configured agents.</td></tr>"
     content = "\n".join(
         [
+            _usage_ledger_section_html(ledger),
             f"""
 <section class="panel">
   <h2>Pricing Coverage</h2>
@@ -566,6 +589,8 @@ def _limits_dashboard_html(body: dict[str, Any]) -> str:
 
 
 def _usage_dashboard_html(body: dict[str, Any]) -> str:
+    ledger = _dict(body.get("usage_ledger"))
+    ledger_confidence = _dict(ledger.get("confidence"))
     tool_rows = "".join(_event_row_html(row) for row in body.get("recent_tool_executions", []) if isinstance(row, dict))
     if not tool_rows:
         tool_rows = "<tr><td colspan=\"5\" class=\"muted\">No recent tool executions.</td></tr>"
@@ -573,6 +598,7 @@ def _usage_dashboard_html(body: dict[str, Any]) -> str:
     if not permission_rows:
         permission_rows = "<tr><td colspan=\"5\" class=\"muted\">No recent permission events.</td></tr>"
     content = f"""
+{_usage_ledger_section_html(ledger)}
 <section class="panel">
   <h2>Recent Tool Executions</h2>
   <table><thead><tr><th>Time</th><th>Type</th><th>Agent</th><th>Model</th><th>Detail</th></tr></thead><tbody>{tool_rows}</tbody></table>
@@ -585,7 +611,9 @@ def _usage_dashboard_html(body: dict[str, Any]) -> str:
         ("Input tokens", body.get("input_tokens", 0)),
         ("Output tokens", body.get("output_tokens", 0)),
         ("Provider calls", _int(body.get("successful_provider_calls")) + _int(body.get("failed_provider_calls"))),
-        ("Tool executions", body.get("tool_executions", 0)),
+        ("Ledger requests", ledger.get("request_count", 0)),
+        ("Routes success/failure", f"{_int(ledger.get('success_count'))}/{_int(ledger.get('failure_count'))}"),
+        ("Confidence", ledger_confidence.get("level", "none")),
     ]
     return _dashboard_page(
         "Agent Hub Usage",
@@ -887,6 +915,62 @@ def _routing_history_dashboard_html(body: dict[str, Any]) -> str:
     )
 
 
+def _learning_dashboard_html(body: dict[str, Any]) -> str:
+    summary = _dict(body.get("summary"))
+    models = body.get("models") if isinstance(body.get("models"), list) else []
+    changes = body.get("routing_changes") if isinstance(body.get("routing_changes"), list) else []
+    history = _dict(body.get("route_history"))
+    model_rows = "".join(_learning_model_row_html(row) for row in models if isinstance(row, dict))
+    if not model_rows:
+        model_rows = "<tr><td colspan=\"8\" class=\"muted\">No learning samples have been recorded yet.</td></tr>"
+    change_rows = "".join(_learning_change_row_html(row) for row in changes if isinstance(row, dict))
+    if not change_rows:
+        change_rows = "<tr><td colspan=\"5\" class=\"muted\">No adaptive routing changes have been recorded yet.</td></tr>"
+    history_rows = "".join(
+        _route_history_week_row_html(row)
+        for row in history.get("weeks", [])
+        if isinstance(row, dict)
+    )
+    if not history_rows:
+        history_rows = "<tr><td colspan=\"3\" class=\"muted\">No route history events have been recorded yet.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>Last 30 Days</h2>
+  <table>
+    <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Success</th><th>Failures</th><th>Latency</th><th>Adaptive</th><th>Samples</th></tr></thead>
+    <tbody>{model_rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Routing Changed</h2>
+  <table>
+    <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Direction</th><th>Reason</th></tr></thead>
+    <tbody>{change_rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Route History</h2>
+  <table>
+    <thead><tr><th>Week</th><th>Routes</th><th>Distribution</th></tr></thead>
+    <tbody>{history_rows}</tbody>
+  </table>
+</section>"""
+    cards = [
+        ("Routes", summary.get("routes", 0)),
+        ("Success", summary.get("successes", 0)),
+        ("Failure", summary.get("failures", 0)),
+        ("Routing changes", summary.get("routing_changes", 0)),
+    ]
+    return _dashboard_page(
+        "Agent Hub Learning",
+        "Adaptive routing proof from provider outcomes, route shifts, and recent distribution.",
+        cards,
+        content,
+        body,
+        json_path="/v1/learning",
+    )
+
+
 def _readiness_dashboard_html(body: dict[str, Any]) -> str:
     items = body.get("items") if isinstance(body.get("items"), list) else []
     feature_status = _dict(body.get("feature_status"))
@@ -1111,25 +1195,27 @@ def _dashboard_page(
     )
     payload = html.escape(json.dumps(body, indent=2, ensure_ascii=False))
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>{_html(title)}</title>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{_html(title)}</title>
 <style>
 :root{{color-scheme:dark}}
-body{{font-family:Inter,Segoe UI,Arial,sans-serif;margin:0;background:#0f172a;color:#e5e7eb}}
+*{{box-sizing:border-box}}
+body{{font-family:Inter,Segoe UI,Arial,sans-serif;margin:0;background:#0f172a;color:#e5e7eb;line-height:1.45;overflow-x:hidden}}
 header{{padding:24px 32px;border-bottom:1px solid #334155;background:#111827}}
-main{{padding:24px 32px;max-width:1280px;margin:auto}}
+main{{width:100%;max-width:1280px;margin:auto;padding:24px 32px;overflow-x:hidden}}
 h1{{margin:0 0 6px;font-size:28px}} h2{{margin:0 0 14px;font-size:18px}}
-p{{color:#cbd5e1}} a{{color:#67e8f9}} code,pre{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}}
+p{{color:#cbd5e1;overflow-wrap:break-word}} a{{color:#67e8f9}} code,pre{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}}
 .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:20px 0}}
-.card,.panel,.empty{{border:1px solid #334155;background:#111827;border-radius:12px;padding:16px}}
-.card strong{{display:block;font-size:22px;margin-bottom:4px}} .card span,.muted{{color:#94a3b8}}
+.card,.panel,.empty{{max-width:100%;border:1px solid #334155;background:#111827;border-radius:8px;padding:16px}}
+.card strong{{display:block;font-size:22px;line-height:1.14;margin-bottom:4px;overflow-wrap:anywhere}} .card span,.muted{{color:#94a3b8}}
 .link-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:20px 0}}
-.link-card{{display:block;border:1px solid #334155;background:#111827;border-radius:12px;padding:14px;text-decoration:none}}
+.link-card{{display:block;border:1px solid #334155;background:#111827;border-radius:8px;padding:14px;text-decoration:none}}
 .link-card strong,.link-card span{{display:block}} .link-card span{{color:#94a3b8;margin-top:4px}}
 .link-card:hover{{border-color:#67e8f9;background:#172033}}
-.panel{{margin:16px 0;overflow:auto}} .empty{{border-color:#475569;background:#172033}}
-table{{width:100%;border-collapse:collapse}} th,td{{padding:10px;border-bottom:1px solid #334155;text-align:left;vertical-align:top}}
-th{{color:#93c5fd;font-size:12px;text-transform:uppercase;letter-spacing:.05em}}
-details{{margin-top:18px}} summary{{cursor:pointer;color:#67e8f9}} pre{{white-space:pre-wrap;word-break:break-word;background:#020617;padding:14px;border-radius:10px;overflow:auto}}
+.panel{{margin:16px 0;overflow-x:auto}} .empty{{border-color:#475569;background:#172033}}
+table{{width:100%;min-width:680px;border-collapse:collapse}} th,td{{padding:10px;border-bottom:1px solid #334155;text-align:left;vertical-align:top;overflow-wrap:anywhere}}
+th{{color:#93c5fd;font-size:12px;text-transform:uppercase;letter-spacing:0}}
+details{{margin-top:18px}} summary{{cursor:pointer;color:#67e8f9}} pre{{white-space:pre-wrap;word-break:break-word;background:#020617;padding:14px;border-radius:8px;overflow:auto}}
+@media(max-width:640px){{header,main{{padding:16px}}h1{{font-size:24px}}.cards,.link-grid{{grid-template-columns:1fr}}table{{min-width:100%}}}}
 </style></head><body>
 <header><h1>{_html(title)}</h1><p>{_html(subtitle)}</p></header>
 <main>
@@ -1167,6 +1253,75 @@ def _mapping_table_html(title: str, values: dict[str, Any], *, value_header: str
   <h2>{_html(title)}</h2>
   <table><thead><tr><th>Name</th><th>{_html(value_header)}</th></tr></thead><tbody>{''.join(rows)}</tbody></table>
 </section>"""
+
+
+def _usage_ledger_section_html(ledger: dict[str, Any]) -> str:
+    sources = _dict(ledger.get("measurement_sources"))
+    confidence = _dict(ledger.get("confidence"))
+    source_label = ", ".join(
+        f"{name}: {_int(count)}"
+        for name, count in sorted(sources.items())
+    ) or "none"
+    baseline_rows = "".join(
+        _usage_ledger_baseline_row_html(row)
+        for row in ledger.get("baseline_savings", [])
+        if isinstance(row, dict)
+    )
+    if not baseline_rows:
+        baseline_rows = "<tr><td colspan=\"5\" class=\"muted\">No baseline comparisons have been recorded yet.</td></tr>"
+    recent_rows = "".join(
+        _usage_ledger_request_row_html(row)
+        for row in ledger.get("recent_requests", [])
+        if isinstance(row, dict)
+    )
+    if not recent_rows:
+        recent_rows = "<tr><td colspan=\"8\" class=\"muted\">No usage ledger requests have been recorded yet.</td></tr>"
+    return f"""
+<section class="panel">
+  <h2>Usage Ledger Baselines</h2>
+  <p class="muted">SQLite: {_html(ledger.get("path"))} | requests: {_html(ledger.get("request_count", 0))} | success/failure: {_html(_int(ledger.get("success_count")))}/{_html(_int(ledger.get("failure_count")))} | confidence: {_html(confidence.get("level", "none"))} | actual usage: {_html(confidence.get("actual_usage_pct", 0.0))}% | sources: {_html(source_label)}</p>
+  <table>
+    <thead><tr><th>Baseline</th><th>Requests</th><th>Priced</th><th>Baseline Cost</th><th>Savings</th></tr></thead>
+    <tbody>{baseline_rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Recent Ledger Requests</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Route</th><th>Task</th><th>Provider</th><th>Model</th><th>Cost</th><th>Source</th><th>Status</th></tr></thead>
+    <tbody>{recent_rows}</tbody>
+  </table>
+</section>"""
+
+
+def _usage_ledger_baseline_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('baseline_name'))}</td>"
+        f"<td>{_html(row.get('request_count', 0))}</td>"
+        f"<td>{_html(row.get('priced_count', 0))}</td>"
+        f"<td>{_html(_money(row.get('baseline_cost_usd')))}</td>"
+        f"<td>{_html(_money(row.get('savings_usd')))}</td>"
+        "</tr>"
+    )
+
+
+def _usage_ledger_request_row_html(row: dict[str, Any]) -> str:
+    actual = _float(row.get("cost_usd_actual"))
+    estimated = _float(row.get("cost_usd_estimated"))
+    cost = actual if actual is not None else estimated
+    return (
+        "<tr>"
+        f"<td>{_html(_timestamp(row.get('timestamp')))}</td>"
+        f"<td>{_html(row.get('route'))}</td>"
+        f"<td>{_html(row.get('task_type'))}</td>"
+        f"<td>{_html(row.get('selected_provider'))}</td>"
+        f"<td>{_html(row.get('selected_model'))}</td>"
+        f"<td>{_html(_money(cost))}</td>"
+        f"<td>{_html(row.get('measurement_source') or row.get('cost_source'))}</td>"
+        f"<td>{_html('ok' if row.get('success') else 'failed')}</td>"
+        "</tr>"
+    )
 
 
 def _leaderboard_row_html(row: dict[str, Any]) -> str:
@@ -1469,6 +1624,54 @@ def _routing_history_row_html(row: dict[str, Any]) -> str:
         f"<td>{_html(row.get('provider') or data.get('provider'))}</td>"
         f"<td>{_html(row.get('model') or data.get('model'))}</td>"
         f"<td>{_html(row.get('reason') or row.get('message') or data.get('reason') or data.get('message'))}</td>"
+        "</tr>"
+    )
+
+
+def _learning_model_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('agent'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(_percent(row.get('success_rate')))}</td>"
+        f"<td>{_html(row.get('failures', 0))}</td>"
+        f"<td>{_html(_number(row.get('average_latency_ms')))} ms</td>"
+        f"<td>{_html(row.get('adaptive_bonus', 0.0))}</td>"
+        f"<td>{_html(row.get('attempts', 0))}</td>"
+        "</tr>"
+    )
+
+
+def _learning_change_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('agent'))}</td>"
+        f"<td>{_html(row.get('provider'))}</td>"
+        f"<td>{_html(row.get('model'))}</td>"
+        f"<td>{_html(row.get('direction'))}</td>"
+        f"<td>{_html(row.get('reason'))}</td>"
+        "</tr>"
+    )
+
+
+def _route_history_week_row_html(row: dict[str, Any]) -> str:
+    distribution = row.get("distribution") if isinstance(row.get("distribution"), dict) else {}
+    label = ", ".join(
+        f"{name}: {_number(item.get('percentage'))}%"
+        for name, item in sorted(
+            distribution.items(),
+            key=lambda pair: -(_float(pair[1].get("percentage")) or 0.0)
+            if isinstance(pair[1], dict)
+            else 0.0,
+        )
+        if isinstance(item, dict)
+    ) or "No routes"
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('week'))}</td>"
+        f"<td>{_html(row.get('route_count', 0))}</td>"
+        f"<td>{_html(label)}</td>"
         "</tr>"
     )
 

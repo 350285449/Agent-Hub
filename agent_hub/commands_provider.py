@@ -23,6 +23,10 @@ from .core.router import AgentRouter, RouterError
 from .discovery import fetch_openai_models
 from .evaluation import BenchmarkRunner, ProviderScoreStore, default_benchmark_tasks
 from .evaluation.benchmark_suite import BenchmarkSuiteRunner
+from .evaluation.proof_benchmark import BenchmarkProofRunner
+from .explainability import explain_route_body, format_route_explanation
+from .learning_proof import format_route_history, route_history_body
+from .measurement import estimate_named_baselines
 from .payloads import request_from_payload
 from .provider_presets import (
     FREE_PROVIDER_PRESETS,
@@ -864,6 +868,13 @@ def _estimate(
         "input_tokens": input_tokens,
         "output_tokens": output_estimate,
         "recommendations": enriched,
+        "baseline_comparisons": _baseline_estimate(
+            config,
+            selected=next((row for row in enriched if row.get("available")), enriched[0] if enriched else None),
+            candidates=enriched,
+            input_tokens=input_tokens,
+            output_tokens=output_estimate,
+        ),
     }
     if as_json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
@@ -884,6 +895,7 @@ def _estimate(
                 "routing_explanation",
             ],
         )
+        _print_baseline_estimate(report.get("baseline_comparisons"))
     return 0
 
 
@@ -947,6 +959,13 @@ def _route_diagnose(
         "why_provider_chosen": selected.get("why") if selected else decision.reason,
         "fallback_chain": list(decision.fallback_chain),
         "candidates": candidates,
+        "baseline_comparisons": _baseline_estimate(
+            config,
+            selected=selected,
+            candidates=candidates,
+            input_tokens=input_tokens,
+            output_tokens=output_estimate,
+        ),
     }
     if as_json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
@@ -1016,6 +1035,57 @@ def _print_route_diagnosis(report: dict[str, Any]) -> None:
         print()
         print("Candidates:")
         _print_table(candidates, ["rank", "agent", "provider", "model", "available", "score", "latency_ms"])
+    _print_baseline_estimate(report.get("baseline_comparisons"))
+
+
+def _baseline_estimate(
+    config: Any,
+    *,
+    selected: dict[str, Any] | None,
+    candidates: list[dict[str, Any]],
+    input_tokens: int,
+    output_tokens: int,
+) -> dict[str, Any]:
+    selected_agent = str((selected or {}).get("agent") or "")
+    if not selected_agent:
+        return {
+            "selected_agent": "",
+            "selected_cost_usd": None,
+            "measurement_source": "estimated",
+            "named_baselines": [],
+        }
+    return estimate_named_baselines(
+        config,
+        selected_agent=selected_agent,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        candidate_agents=[
+            str(row.get("agent") or "")
+            for row in candidates
+            if isinstance(row, dict) and row.get("agent")
+        ],
+    )
+
+
+def _print_baseline_estimate(value: Any) -> None:
+    report = value if isinstance(value, dict) else {}
+    rows = report.get("named_baselines") if isinstance(report.get("named_baselines"), list) else []
+    if not rows:
+        return
+    print()
+    print("Named baselines:")
+    _print_table(
+        rows,
+        [
+            "baseline_name",
+            "baseline_agent",
+            "baseline_provider",
+            "baseline_model",
+            "cost_usd",
+            "savings_usd",
+            "savings_pct",
+        ],
+    )
 
 
 def _display_latency(value: Any) -> str:
@@ -1108,6 +1178,92 @@ def _benchmark_suite(
         print("Comparison:")
         _print_table([report["comparison"]], ["winner", "success_rate_delta", "average_score_delta", "latency_delta_ms", "failover_frequency_delta", "cost_savings_usd"])
     return 0 if report.get("comparison", {}).get("winner") else 1
+
+
+def _benchmark_run(
+    config: HubConfig,
+    *,
+    route: str,
+    baseline: str,
+    limit: int,
+    corpus: str,
+    output_dir: str,
+    as_json: bool,
+) -> int:
+    try:
+        report = BenchmarkProofRunner(config).run(
+            route=route,
+            baseline=baseline,
+            limit=limit,
+            corpus_dir=corpus or None,
+            output_dir=output_dir or None,
+        )
+    except (RouterError, ValueError) as exc:
+        if isinstance(exc, RouterError):
+            _print_route_error(exc)
+        else:
+            print(f"Benchmark failed: {exc}")
+        return 1
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        comparison = report.get("comparison", {}) if isinstance(report.get("comparison"), dict) else {}
+        baseline_info = report.get("baseline", {}) if isinstance(report.get("baseline"), dict) else {}
+        print(f"Benchmark proof for route {route}")
+        print(
+            "Baseline: "
+            f"{baseline_info.get('agent')} ({baseline_info.get('provider')}) model={baseline_info.get('model')}"
+        )
+        print(f"Tasks: {report.get('task_count')}")
+        print(f"JSON report: {report.get('report_paths', {}).get('json')}")
+        print(f"Markdown report: {report.get('report_paths', {}).get('markdown')}")
+        print()
+        _print_table(
+            [
+                {
+                    "cost_reduction": comparison.get("cost_reduction"),
+                    "latency_reduction": comparison.get("latency_reduction"),
+                    "success_delta": comparison.get("success_delta"),
+                    "average_score_delta": comparison.get("average_score_delta"),
+                }
+            ],
+            ["cost_reduction", "latency_reduction", "success_delta", "average_score_delta"],
+        )
+    return 0
+
+
+def _explain_route(
+    config: HubConfig,
+    *,
+    route: str,
+    prompt: str,
+    output_tokens: int,
+    prefer: str,
+    needs_tools: bool,
+    as_json: bool,
+) -> int:
+    report = explain_route_body(
+        config,
+        route=route,
+        prompt=prompt,
+        output_tokens=output_tokens,
+        prefer=prefer,
+        needs_tools=needs_tools,
+    )
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(format_route_explanation(report), end="")
+    return 0
+
+
+def _route_history(config: HubConfig, *, weeks: int, as_json: bool) -> int:
+    report = route_history_body(config, weeks=weeks)
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(format_route_history(report), end="")
+    return 0
 
 
 def _eval_providers(config: HubConfig, *, route: str, limit: int, as_json: bool) -> int:

@@ -219,7 +219,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
-        if self._reject_unauthenticated_public_request():
+        if self._reject_unauthenticated_public_request(drain_body=True):
             return
         try:
             payload = self._read_json()
@@ -246,13 +246,26 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"error": "not found"}, status=404)
 
-    def _reject_unauthenticated_public_request(self) -> bool:
+    def _reject_unauthenticated_public_request(self, *, drain_body: bool = False) -> bool:
         auth_error = _api_auth_error(self.server.config, self.headers)
         if auth_error is None:
             return False
+        if drain_body:
+            self._discard_request_body()
         body, status = auth_error
         self._send_json(body, status=status)
         return True
+
+    def _discard_request_body(self) -> None:
+        try:
+            remaining = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 64 * 1024))
+            if not chunk:
+                return
+            remaining -= len(chunk)
 
     def _trusted_request(self, request: HubRequest) -> HubRequest:
         trusted, source = _trusted_approval_from_headers(
@@ -945,6 +958,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 [
                     ("Routing Intelligence", "/dashboard/routing-intelligence", "Reasons, rejected candidates, rankings"),
                     ("Routing History", "/dashboard/routing-history", "Recent selections, fallbacks, failures"),
+                    ("Learning", "/dashboard/learning", "Adaptive proof, route shifts, success rates"),
                     ("Optimization", "/dashboard/optimization", "Adaptive learning and workflow analytics"),
                     ("Provider Scores", "/dashboard/provider-scores", "Stored scores used by routing"),
                 ],

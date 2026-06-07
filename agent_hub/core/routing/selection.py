@@ -27,6 +27,7 @@ from ...events import (
 from ...evaluation import ProviderScoreStore
 from ...mcp import MCPServerRegistry
 from ...models import FailoverEvent, HubRequest, HubResponse, ProviderResult, StructuredError
+from ...measurement import record_completed_request
 from ...payloads import content_to_text, request_text
 from ...providers import Provider, ProviderError, create_provider
 from ...response_normalization import validate_provider_result
@@ -726,6 +727,8 @@ class AgentRouter:
                 if isinstance(result.raw.get("agent_hub_stream"), dict)
                 else None,
                 routing_mode=decision.routing_mode,
+                decision=decision,
+                failover=failover,
             )
             response = self._response_from_result(
                 request_id=request_id,
@@ -2529,6 +2532,8 @@ class AgentRouter:
         request_id: str | None = None,
         first_token_latency_seconds: float | None = None,
         routing_mode: str | None = None,
+        decision: RoutingDecision | None = None,
+        failover: list[FailoverEvent] | None = None,
     ) -> None:
         with self._state_lock:
             health = self._health.setdefault(agent.name, ProviderHealth())
@@ -2593,6 +2598,66 @@ class AgentRouter:
             routing_mode=routing_mode or "",
             final=True,
         )
+        if request_id is not None:
+            self._record_usage_ledger_outcome(
+                request_id=request_id,
+                request=request,
+                agent=agent,
+                model=result.model or agent.model,
+                result=result,
+                success=True,
+                latency_seconds=latency_seconds,
+                failover=failover or [],
+                decision=decision,
+                task_type=(
+                    decision.task_type
+                    if decision is not None and decision.task_type
+                    else self._classify_task(request)
+                ),
+            )
+
+    def _record_usage_ledger_outcome(
+        self,
+        *,
+        request_id: str,
+        request: HubRequest,
+        agent: AgentConfig,
+        model: str,
+        result: ProviderResult,
+        success: bool,
+        latency_seconds: float | None,
+        failover: list[FailoverEvent],
+        decision: RoutingDecision | None,
+        task_type: str,
+    ) -> None:
+        try:
+            context = _context_usage(request)
+            estimated_input = int(
+                context.get("estimated_input_tokens")
+                or context.get("input_tokens")
+                or estimate_input_tokens(request)
+            )
+            estimated_output = expected_output_tokens(request, agent)
+            if estimated_output <= 0:
+                estimated_output = _result_output_tokens(result)
+            record_completed_request(
+                config=self.config,
+                request_id=request_id,
+                request=request,
+                agent=agent,
+                model=model,
+                usage=result.usage,
+                output_text=result.text,
+                latency_seconds=latency_seconds,
+                success=success,
+                failover=failover,
+                candidate_scores=decision.candidate_scores if decision is not None else [],
+                task_type=task_type,
+                input_tokens_estimated=estimated_input,
+                output_tokens_estimated=estimated_output,
+            )
+        except Exception:
+            return
 
     def _record_failure(
         self,
@@ -4116,7 +4181,7 @@ def _routing_explanation_cost_savings(
     candidate_scores: list[dict[str, Any]],
     selected_cost: float | None,
 ) -> dict[str, Any]:
-    costs = [
+    costs: list[tuple[dict[str, Any], float]] = [
         (row, _optional_float(row.get("estimated_cost_usd")))
         for row in candidate_scores
         if isinstance(row, dict)
@@ -4126,21 +4191,135 @@ def _routing_explanation_cost_savings(
         return {
             "estimated_selected_cost_usd": selected_cost,
             "estimated_savings_usd": None,
-            "comparison": "No comparable candidate cost data.",
+            "comparison": "named_estimated_baselines",
+            "measurement_source": "estimated_routing_scorecard",
+            "named_baselines": _routing_cost_baseline_rows(
+                candidate_scores,
+                selected_cost=selected_cost,
+            ),
         }
-    highest_row, highest_cost = max(costs, key=lambda item: item[1] or 0.0)
-    savings = max(0.0, float(highest_cost or 0.0) - selected_cost)
+    baseline_rows = _routing_cost_baseline_rows(candidate_scores, selected_cost=selected_cost)
+    positive_savings = [
+        _optional_float(row.get("savings_usd"))
+        for row in baseline_rows
+        if _optional_float(row.get("savings_usd")) is not None
+        and (_optional_float(row.get("savings_usd")) or 0.0) > 0
+    ]
+    primary = next(
+        (
+            row
+            for row in baseline_rows
+            if row.get("baseline") in {"vs_user_default_model", "vs_static_routing"}
+            and _optional_float(row.get("savings_usd")) is not None
+        ),
+        next((row for row in baseline_rows if _optional_float(row.get("savings_usd")) is not None), {}),
+    )
     return {
         "estimated_selected_cost_usd": round(selected_cost, 8),
-        "estimated_savings_usd": round(savings, 8),
-        "comparison": "vs_most_expensive_ranked_candidate",
-        "baseline": {
-            "agent": highest_row.get("agent"),
-            "provider": highest_row.get("provider"),
-            "model": highest_row.get("model"),
-            "estimated_cost_usd": round(float(highest_cost or 0.0), 8),
-        },
+        "estimated_savings_usd": round(max(positive_savings), 8) if positive_savings else None,
+        "comparison": "named_estimated_baselines",
+        "measurement_source": "estimated_routing_scorecard",
+        "primary_baseline": primary or None,
+        "named_baselines": baseline_rows,
     }
+
+
+def _routing_cost_baseline_rows(
+    candidate_scores: list[dict[str, Any]],
+    *,
+    selected_cost: float | None,
+) -> list[dict[str, Any]]:
+    rows = [row for row in candidate_scores if isinstance(row, dict)]
+    baselines: list[tuple[str, dict[str, Any] | None]] = [
+        ("vs_user_default_model", None),
+        ("vs_claude_sonnet", _find_candidate_by_terms(rows, required=("claude", "sonnet"))),
+        (
+            "vs_gpt_4_1",
+            _find_candidate_by_terms(
+                rows,
+                any_terms=("gpt-4.1", "gpt-4-1", "gpt 4.1"),
+            ),
+        ),
+        ("vs_static_routing", rows[0] if rows else None),
+        ("vs_cheapest_model_only", _cheapest_candidate(rows)),
+    ]
+    return [
+        _routing_cost_baseline_row(name, row, selected_cost=selected_cost)
+        for name, row in baselines
+    ]
+
+
+def _routing_cost_baseline_row(
+    baseline: str,
+    row: dict[str, Any] | None,
+    *,
+    selected_cost: float | None,
+) -> dict[str, Any]:
+    if row is None:
+        return {
+            "baseline": baseline,
+            "status": "unavailable",
+            "reason": "No matching configured candidate with known estimated pricing.",
+            "cost_usd": None,
+            "savings_usd": None,
+            "savings_pct": None,
+        }
+    baseline_cost = _optional_float(row.get("estimated_cost_usd"))
+    if baseline_cost is None or selected_cost is None:
+        return {
+            "baseline": baseline,
+            "agent": row.get("agent"),
+            "provider": row.get("provider"),
+            "model": row.get("model"),
+            "status": "unpriced",
+            "reason": "Candidate is missing complete configured pricing.",
+            "cost_usd": None,
+            "savings_usd": None,
+            "savings_pct": None,
+        }
+    savings = float(baseline_cost) - float(selected_cost)
+    savings_pct = savings / float(baseline_cost) if baseline_cost > 0 else 0.0
+    return {
+        "baseline": baseline,
+        "agent": row.get("agent"),
+        "provider": row.get("provider"),
+        "model": row.get("model"),
+        "status": "priced",
+        "cost_usd": round(float(baseline_cost), 8),
+        "savings_usd": round(savings, 8),
+        "savings_pct": round(savings_pct, 6),
+    }
+
+
+def _find_candidate_by_terms(
+    rows: list[dict[str, Any]],
+    *,
+    required: tuple[str, ...] = (),
+    any_terms: tuple[str, ...] = (),
+) -> dict[str, Any] | None:
+    required = tuple(term.lower() for term in required)
+    any_terms = tuple(term.lower() for term in any_terms)
+    for row in rows:
+        haystack = " ".join(
+            str(row.get(key) or "").lower()
+            for key in ("agent", "provider", "provider_type", "model")
+        )
+        required_match = all(term in haystack for term in required) if required else True
+        any_match = any(term in haystack for term in any_terms) if any_terms else True
+        if required_match and any_match:
+            return row
+    return None
+
+
+def _cheapest_candidate(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    priced = [
+        (row, _optional_float(row.get("estimated_cost_usd")))
+        for row in rows
+    ]
+    priced = [(row, cost) for row, cost in priced if cost is not None]
+    if not priced:
+        return None
+    return min(priced, key=lambda item: (float(item[1] or 0.0), str(item[0].get("agent") or "")))[0]
 
 
 def _routing_explanation_context(
@@ -4172,21 +4351,40 @@ def _fallback_rejections(candidate_scores: list[dict[str, Any]]) -> list[dict[st
         return []
     selected = candidate_scores[0]
     selected_score = _optional_float(selected.get("final_routing_score")) or _optional_float(selected.get("routing_score")) or 0.0
+    selected_cost = _optional_float(selected.get("estimated_cost_usd"))
+    selected_health = selected.get("health") if isinstance(selected.get("health"), dict) else {}
+    selected_reliability = _optional_float(selected_health.get("reliability_score"))
     result: list[dict[str, Any]] = []
     for row in candidate_scores[1:8]:
         final_score = _optional_float(row.get("final_routing_score")) or _optional_float(row.get("routing_score")) or 0.0
         memory_adjustment = _optional_float(row.get("memory_adjustment")) or 0.0
         reasons: list[str] = []
+        row_cost = _optional_float(row.get("estimated_cost_usd"))
+        if selected_cost is not None and row_cost is not None:
+            if selected_cost > 0 and row_cost > selected_cost * 1.2:
+                reasons.append(f"{row_cost / selected_cost:.1f}x higher estimated cost.")
+            elif row_cost < selected_cost * 0.9:
+                reasons.append("Lower estimated cost, but weaker overall routing fit.")
         if final_score < selected_score:
             reasons.append(f"Lower final routing score ({final_score:.2f} vs {selected_score:.2f}).")
         if memory_adjustment < -0.05:
             reasons.append(f"Routing memory penalty {memory_adjustment:+.2f}.")
         elif memory_adjustment > 0.05:
             reasons.append(f"Routing memory boost {memory_adjustment:+.2f} was not enough to win.")
+        health = row.get("health") if isinstance(row.get("health"), dict) else {}
+        reliability = _optional_float(health.get("reliability_score"))
+        if (
+            selected_reliability is not None
+            and reliability is not None
+            and abs(reliability - selected_reliability) <= 0.03
+            and row_cost is not None
+            and selected_cost is not None
+            and row_cost > selected_cost
+        ):
+            reasons.append("Similar success rate, higher cost.")
         repository_adjustment = _optional_float(row.get("repository_dna_adjustment")) or 0.0
         if repository_adjustment > 0.05:
             reasons.append(f"Repository DNA boost {repository_adjustment:+.2f} was not enough to win.")
-        health = row.get("health") if isinstance(row.get("health"), dict) else {}
         if health.get("degraded"):
             reasons.append("Provider health is degraded.")
         if not reasons:

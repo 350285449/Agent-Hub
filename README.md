@@ -5,6 +5,34 @@
 [![packaging](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=packaging)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 [![fresh install](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=fresh%20install)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 
+Stop manually choosing AI models.
+
+Agent-Hub automatically routes coding tasks to the model most likely to succeed,
+then records the evidence: cost, latency, success/failure, rejected candidates,
+and why the winning model was selected.
+
+Measured results are generated locally from your configured providers:
+
+```sh
+agent-hub benchmark run --baseline claude-sonnet --route coding
+```
+
+The command writes reproducible proof to
+`benchmark_reports/benchmark-report.json` and
+`benchmark_reports/benchmark-report.md`, including:
+
+- cost reduction versus your baseline model
+- latency reduction versus your baseline model
+- success-rate delta across the same task corpus
+- per-task selected model, cost, latency, and outcome
+
+| Feature | Agent-Hub | Claude Code | OpenRouter |
+| --- | --- | --- | --- |
+| Multi-provider routing | Yes | No | Partial |
+| Learning | Yes | No | No |
+| Cost optimization | Yes | No | Manual |
+| Explainability | Yes | No | No |
+
 Agent-Hub is an Adaptive AI Orchestration Platform for developer workspaces. It
 accepts local OpenAI, Anthropic, Responses, OpenRouter-style, VS Code, Cline,
 Claude Code, and native requests; classifies the task; understands repository
@@ -755,7 +783,10 @@ Diagnostics:
 python -m agent_hub health --route cloud-agent
 python -m agent_hub metrics --route cloud-agent
 agent-hub route-diagnose --route cloud-agent --needs-tools "fix a failing test"
+agent-hub explain-route --route cloud-agent "fix a failing test"
+agent-hub benchmark run --route cloud-agent --baseline claude-sonnet
 agent-hub benchmark-suite --route cloud-agent --json
+agent-hub route-history --weeks 4
 python -m agent_hub doctor
 agent-hub production-check
 agent-hub debug-bundle --output agent-hub-debug-bundle.zip
@@ -768,6 +799,12 @@ success/failure counts, token usage, and recent failover history. `doctor`
 combines config readiness with the same provider-health and recommendation
 signals. `route-diagnose` shows the selected provider, selected model, skipped
 providers, fallback reason, latency, and estimated cost when configured.
+`explain-route` ranks candidates without making a provider call and prints the
+selected model, scorecard, reasons, and rejected-candidate reasons.
+`benchmark run` compares Agent-Hub routing against a baseline model on the
+reproducible 50-task corpus and writes `benchmark-report.json` plus
+`benchmark-report.md`. `route-history` shows how routing distribution changed
+over recent weeks.
 `production-check` is a strict local acceptance gate: it requires route-ready
 provider health, production-safe security guardrails, honest feature maturity
 states, dashboard contracts, and VS Code/backend feature alignment. It exits
@@ -788,6 +825,7 @@ Dashboard pages avoid raw empty JSON when data has not accumulated yet:
 - `/dashboard/limits` renders quota, cooldown, active model, and fallback state.
 - `/dashboard/usage` renders token totals, provider calls, tools, and permissions.
 - `/dashboard/events` renders internal, routing, workflow, and adaptive events.
+- `/dashboard/learning` renders adaptive proof, model success rates, failures, and route shifts.
 - `/dashboard/tools` renders registered tools and permission requirements.
 - `/dashboard/workflows` renders presets, runs, and workflow status.
 - `/dashboard/plugins` renders discovered plugin capabilities.

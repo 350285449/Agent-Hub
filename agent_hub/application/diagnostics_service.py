@@ -11,6 +11,7 @@ from ..config import AgentConfig, HubConfig
 from ..enterprise import EnterprisePolicy, RoleDefinition, export_enterprise_audit
 from ..evaluation import ProviderScoreStore
 from ..inbox import SUPPORTED_API_SHAPES, inbox_task_preview
+from ..measurement import usage_ledger_summary
 from ..mcp import normalize_mcp_tools
 from ..models import HubRequest
 from ..plugins import discover_plugins
@@ -401,11 +402,21 @@ class DiagnosticsApplicationService:
         cost_by_model = optimization.get("cost_by_model", {})
         cost_by_task_type = optimization.get("cost_by_task_type", {})
         cost_by_day = optimization.get("cost_by_day", {})
+        ledger = usage_ledger_summary(self.config)
+        ledger_request_count = int(ledger.get("request_count") or 0)
+        ledger_sources = _dict(ledger.get("measurement_sources"))
+        ledger_actual_cost = _float(ledger.get("total_actual_cost_usd")) or 0.0
+        ledger_estimated_cost = _float(ledger.get("total_estimated_cost_usd")) or 0.0
         known_cost = optimization.get("known_cost_usd", optimization.get("total_known_cost_usd"))
         average_known_cost = optimization.get("average_known_cost_usd")
+        display_known_cost = known_cost if known_cost is not None else (ledger_actual_cost if ledger_actual_cost > 0 else None)
+        display_average_known_cost = average_known_cost
+        if display_average_known_cost is None and ledger_request_count > 0 and ledger_actual_cost > 0:
+            display_average_known_cost = round(ledger_actual_cost / ledger_request_count, 8)
         has_cost_data = (
             known_cost is not None
             or average_known_cost is not None
+            or ledger_request_count > 0
             or _has_mapping_values(cost_by_provider)
             or _has_mapping_values(cost_by_model)
             or _has_mapping_values(cost_by_task_type)
@@ -431,8 +442,8 @@ class DiagnosticsApplicationService:
             "summary": {
                 "data_state": data_state,
                 "measurement_state": "measured" if has_cost_data else "waiting_for_usage",
-                "known_cost_usd": known_cost,
-                "average_known_cost_usd": average_known_cost,
+                "known_cost_usd": display_known_cost,
+                "average_known_cost_usd": display_average_known_cost,
                 "providers_tracked": len(cost_by_provider) if isinstance(cost_by_provider, dict) else 0,
                 "models_tracked": len(cost_by_model) if isinstance(cost_by_model, dict) else 0,
                 "task_types_tracked": len(cost_by_task_type) if isinstance(cost_by_task_type, dict) else 0,
@@ -442,6 +453,12 @@ class DiagnosticsApplicationService:
                 "partial_pricing_agents": partial_agents,
                 "missing_pricing_agents": missing_agents,
                 "pricing_coverage_rate": coverage_rate,
+                "usage_ledger_requests": ledger_request_count,
+                "actual_usage_requests": int(ledger_sources.get("actual") or 0),
+                "mixed_usage_requests": int(ledger_sources.get("mixed") or 0),
+                "estimated_usage_requests": int(ledger_sources.get("estimated") or 0),
+                "ledger_actual_cost_usd": ledger_actual_cost,
+                "ledger_estimated_cost_usd": ledger_estimated_cost,
             },
             "empty_state": (
                 None
@@ -477,8 +494,9 @@ class DiagnosticsApplicationService:
             "cost_by_model": cost_by_model,
             "cost_by_task_type": cost_by_task_type,
             "cost_by_day": cost_by_day,
-            "known_cost_usd": known_cost,
-            "average_known_cost_usd": average_known_cost,
+            "known_cost_usd": display_known_cost,
+            "average_known_cost_usd": display_average_known_cost,
+            "usage_ledger": ledger,
             "money_saved": optimization.get("cost_optimizer", {}),
         }
 

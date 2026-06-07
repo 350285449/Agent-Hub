@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..measurement import usage_ledger_summary
 from ..observability import metrics_snapshot, permission_snapshot, usage_snapshot
 from ..security.secrets import redact_secrets
 
@@ -21,11 +22,13 @@ def handle_get(handler: object, path: str) -> bool:
         handler._send_diagnostics_json(handler.server.diagnostics_service.limits_body(handler.server.router))
         return True
     if path == "/v1/usage":
+        body = usage_snapshot(
+            handler.server.config.state_dir,
+            handler.server.router.health_snapshot(include_history=True),
+        )
+        body["usage_ledger"] = usage_ledger_summary(handler.server.config)
         handler._send_diagnostics_json(
-            usage_snapshot(
-                handler.server.config.state_dir,
-                handler.server.router.health_snapshot(include_history=True),
-            )
+            body
         )
         return True
     if path == "/health":
@@ -40,12 +43,14 @@ def handle_get(handler: object, path: str) -> bool:
         handler._send_json(handler.server.diagnostics_service.limits_body(handler.server.router))
         return True
     if path == "/usage":
+        body = usage_snapshot(
+            handler.server.config.state_dir,
+            handler.server.router.health_snapshot(include_history=True),
+        )
+        body["usage_ledger"] = usage_ledger_summary(handler.server.config)
         handler._send_json(
             redact_secrets(
-                usage_snapshot(
-                    handler.server.config.state_dir,
-                    handler.server.router.health_snapshot(include_history=True),
-                )
+                body
             )
         )
         return True

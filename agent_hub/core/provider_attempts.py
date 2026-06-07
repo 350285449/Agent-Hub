@@ -366,6 +366,8 @@ class ProviderAttemptExecutor:
                     failover_attempts=len(failover),
                     request_id=request_id,
                     routing_mode=decision.routing_mode,
+                    decision=decision,
+                    failover=failover,
                 )
                 response = router._response_from_result(
                     request_id=request_id,
@@ -463,6 +465,13 @@ class ProviderAttemptExecutor:
                     message=str(exc),
                     failover=[event.to_dict() for event in failover],
                 )
+                self._record_ledger_failure(
+                    request_id=request_id,
+                    request=effective_request,
+                    agent=agent,
+                    failover=failover,
+                    decision=decision,
+                )
                 raise self.router_error_type(
                     str(exc),
                     failover=failover,
@@ -475,6 +484,7 @@ class ProviderAttemptExecutor:
                 request_id=request_id,
                 request=effective_request,
                 failover=failover,
+                decision=decision,
             )
 
         reason = helpers.no_fallback_reason(failover)
@@ -507,6 +517,13 @@ class ProviderAttemptExecutor:
             )
             if effective_request.record_session:
                 router.session_store.record_turn(effective_request, response)
+            self._record_ledger_failure(
+                request_id=request_id,
+                request=effective_request,
+                agent=agent,
+                failover=failover,
+                decision=decision,
+            )
             router._record_route_event(
                 "safe_empty_response_generated",
                 request_id=request_id,
@@ -517,6 +534,18 @@ class ProviderAttemptExecutor:
                 failover=[event.to_dict() for event in failover],
             )
             return response
+        agent = (
+            router.config.agents.get(failover[-1].agent)
+            if failover and failover[-1].agent in router.config.agents
+            else candidates[0]
+        )
+        self._record_ledger_failure(
+            request_id=request_id,
+            request=effective_request,
+            agent=agent,
+            failover=failover,
+            decision=decision,
+        )
         raise self.router_error_type(
             reason,
             failover=failover,
@@ -531,6 +560,7 @@ class ProviderAttemptExecutor:
         request_id: str,
         request: HubRequest,
         failover: list[FailoverEvent],
+        decision: Any,
     ) -> Any:
         helpers = self.helpers
         reason = helpers.no_fallback_reason(failover)
@@ -543,12 +573,50 @@ class ProviderAttemptExecutor:
             error_type=error_type,
             failover=[event.to_dict() for event in failover],
         )
+        agent = None
+        if failover and failover[-1].agent in self.router.config.agents:
+            agent = self.router.config.agents[failover[-1].agent]
+        else:
+            agent = next((item for item in self.router.config.agents.values() if item.enabled), None)
+        if agent is not None:
+            self._record_ledger_failure(
+                request_id=request_id,
+                request=request,
+                agent=agent,
+                failover=failover,
+                decision=decision,
+            )
         raise self.router_error_type(
             reason,
             failover=failover,
             error_type=error_type,
             suggested_fix=helpers.suggested_fix(error_type, failover),
             status_code=helpers.route_status_code(error_type),
+        )
+
+    def _record_ledger_failure(
+        self,
+        *,
+        request_id: str,
+        request: HubRequest,
+        agent: AgentConfig,
+        failover: list[FailoverEvent],
+        decision: Any,
+    ) -> None:
+        recorder = getattr(self.router, "_record_usage_ledger_outcome", None)
+        if not callable(recorder):
+            return
+        recorder(
+            request_id=request_id,
+            request=request,
+            agent=agent,
+            model=agent.model,
+            result=ProviderResult(text="", model=agent.model, usage={}, finish_reason="error"),
+            success=False,
+            latency_seconds=None,
+            failover=failover,
+            decision=decision,
+            task_type=getattr(decision, "task_type", "") or "general",
         )
 
 
