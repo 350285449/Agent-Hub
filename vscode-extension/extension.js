@@ -535,6 +535,11 @@ class AgentHubSidebarProvider {
       await this.refresh();
       return;
     }
+    if (message.type === "toggleAutomatedFeedback") {
+      await toggleAutomatedModelFeedback();
+      await this.refresh();
+      return;
+    }
     if (message.type === "installCodexCli") {
       await installCodexCliCommand();
       await this.refresh();
@@ -675,6 +680,19 @@ async function applySidebarTrustPreset(preset) {
   vscode.window.showInformationMessage(`Agent Hub trust controls set to ${profile.label}.${restart}`);
 }
 
+async function toggleAutomatedModelFeedback(nextValue) {
+  const current = settings().automatedModelFeedback;
+  const enabled = typeof nextValue === "boolean" ? nextValue : !current;
+  const config = vscode.workspace.getConfiguration("agentHub");
+  await config.update("automatedModelFeedback", enabled, vscode.ConfigurationTarget.Global);
+  const message = enabled
+    ? "Automated model feedback is on. Agent Hub will ask a judge model to score successful chat responses."
+    : "Automated model feedback is off.";
+  vscode.window.showInformationMessage(message);
+  postChatSettings(chatPanel, message);
+  return { ok: true, enabled, message };
+}
+
 function updateStatusBar(dashboard = {}) {
   if (!statusBarItem) {
     return;
@@ -705,6 +723,7 @@ async function sidebarDashboardState() {
     tokenSafeMode: isFreeCloudSavingsMode(config),
     codexCliMode: isMaxTokenSaveMode(config) && cloudSettings.cloudRouteMode === "codex-cli",
     autoStart: config.autoStart,
+    automatedModelFeedback: config.automatedModelFeedback,
     extensionVersion: EXTENSION_VERSION,
     activeModel: null,
     providers: [],
@@ -728,6 +747,7 @@ async function sidebarDashboardState() {
     optimization: null,
     routingIntelligence: null,
     routingExplanation: null,
+    modelStats: sidebarModelStats(null, null, null, null),
     orchestrationFlow: sidebarOrchestrationFlow(null, null),
     workflowTemplates: sidebarWorkflowTemplates(),
     workspaceProfile: await sidebarWorkspaceProfile(config, null),
@@ -749,6 +769,9 @@ async function sidebarDashboardState() {
     let routingIntelligence = null;
     let debugContext = null;
     let tools = null;
+    let modelLeaderboard = null;
+    let benchmarks = null;
+    let costDashboard = null;
     try {
       limits = await requestJson("GET", "/limits");
     } catch (_error) {
@@ -789,6 +812,21 @@ async function sidebarDashboardState() {
     } catch (_error) {
       tools = null;
     }
+    try {
+      modelLeaderboard = await requestJson("GET", "/v1/model-leaderboard");
+    } catch (_error) {
+      modelLeaderboard = null;
+    }
+    try {
+      benchmarks = await requestJson("GET", "/v1/benchmarks");
+    } catch (_error) {
+      benchmarks = null;
+    }
+    try {
+      costDashboard = await requestJson("GET", "/v1/cost-dashboard");
+    } catch (_error) {
+      costDashboard = null;
+    }
     dashboard.status = "Running";
     dashboard.statusText = `Running at ${config.serverUrl}`;
     dashboard.health = health;
@@ -808,6 +846,7 @@ async function sidebarDashboardState() {
       metrics.optimization = dashboard.optimization;
     }
     dashboard.statistics = sidebarStatistics(health, usage, metrics, permissions, dashboard.providers, dashboard.limits, debugContext, dashboard.optimization, dashboard.readiness);
+    dashboard.modelStats = sidebarModelStats(dashboard, modelLeaderboard, benchmarks, costDashboard);
     dashboard.insights = sidebarInsightRows(dashboard, metrics);
     dashboard.onboarding = await sidebarOnboardingState(config, health);
     dashboard.workspaceProfile = await sidebarWorkspaceProfile(config, health);
@@ -1065,6 +1104,259 @@ function sidebarStatistics(health, usage, metrics, permissions, providers, limit
     mostEffectiveProviderSuccessRate: Math.round(Number(effectiveProvider.success_rate || 0) * 100),
     healthScore
   };
+}
+
+function sidebarModelStats(dashboard, leaderboard, benchmarks, costDashboard) {
+  const stats = dashboard && dashboard.statistics ? dashboard.statistics : {};
+  const active = dashboard && dashboard.activeModel ? dashboard.activeModel : null;
+  const failedModels = dashboard && Array.isArray(dashboard.failedModels) ? dashboard.failedModels : [];
+  const leaderboardSummary = objectValue(leaderboard && leaderboard.summary);
+  const benchmarkSummary = objectValue(benchmarks && benchmarks.summary);
+  const benchmarkCoverage = objectValue(benchmarks && benchmarks.coverage_snapshot);
+  const benchmarkCoverageSummary = objectValue(benchmarkCoverage.summary);
+  const costSummary = objectValue(costDashboard && costDashboard.summary);
+  const rows = Array.isArray(leaderboard && leaderboard.data) ? leaderboard.data : [];
+  const activeRow = active
+    ? rows.find((row) => (
+      row &&
+      (row.agent === active.agent || row.model === active.model || row.provider === active.provider)
+    ))
+    : null;
+  const leader = rows[0] || activeRow || {};
+  const healthScore = numberOrZero(stats.healthScore);
+  const gatewayOnline = dashboard && dashboard.status === "Running" && numberOrZero(stats.providersAvailable) > 0;
+  const fallbackSignals = numberOrZero(stats.routingFallbacks) + failedModels.length + numberOrZero(stats.recentFailures);
+  const measuredSamples = numberOrZero(leaderboardSummary.sample_count);
+  const measuredAgents = numberOrZero(leaderboardSummary.measured_agent_count);
+  const benchmarkReports = numberOrZero(benchmarkSummary.report_count);
+  const averageReadiness = numberOrZero(benchmarkCoverageSummary.average_readiness_score);
+  const pricingCoverage = Math.round(numberOrZero(costSummary.pricing_coverage_rate) * 100);
+  const knownCost = numberValueOrNull(
+    costSummary.known_cost_usd,
+    costDashboard && costDashboard.known_cost_usd
+  );
+  const averageKnownCost = numberValueOrNull(
+    costSummary.average_known_cost_usd,
+    costDashboard && costDashboard.average_known_cost_usd
+  );
+
+  const incidents = [];
+  if (!gatewayOnline) {
+    incidents.push({
+      label: dashboard && dashboard.status === "Running" ? "No ready provider" : "Gateway offline",
+      detail: dashboard && dashboard.statusText ? dashboard.statusText : "Start Agent Hub to collect model signals.",
+      tone: dashboard && dashboard.status === "Running" ? "error" : "warn"
+    });
+  }
+  for (const failed of failedModels.slice(0, 3)) {
+    incidents.push({
+      label: failed.model || failed.agent || failed.provider || "Provider issue",
+      detail: failed.reason || "Recent provider failure",
+      tone: "error"
+    });
+  }
+  if (!measuredSamples && rows.length) {
+    incidents.push({
+      label: "Measurements pending",
+      detail: "Configured baselines are ranked; live outcomes will sharpen model stats.",
+      tone: "warn"
+    });
+  }
+  if (pricingCoverage > 0 && pricingCoverage < 100) {
+    incidents.push({
+      label: "Pricing coverage partial",
+      detail: `${pricingCoverage}% of configured model pricing is covered.`,
+      tone: "warn"
+    });
+  }
+  if (!incidents.length) {
+    incidents.push({
+      label: "No incident signals",
+      detail: "Provider health, cost, benchmark, and routing signals look clean.",
+      tone: "ok"
+    });
+  }
+
+  const routerRows = rows.slice(0, 6).map((row) => ({
+    agent: row.agent || "",
+    provider: row.provider || "",
+    model: row.model || "",
+    rank: row.rank,
+    score: Math.round(numberOrZero(row.ranking_score || row.overall_score || row.baseline_score)),
+    successRate: Math.round(numberOrZero(row.success_rate) * 100),
+    latencyMs: numberOrZero(row.average_latency_ms),
+    samples: numberOrZero(row.samples),
+    status: row.measurement_status || "configured_baseline",
+    free: !!row.free
+  }));
+
+  return {
+    gateway: {
+      status: gatewayOnline ? "Online" : dashboard && dashboard.status === "Running" ? "Needs provider" : "Offline",
+      detail: active
+        ? [active.provider || active.agent || "provider", active.model || ""].filter(Boolean).join(" / ")
+        : dashboard && dashboard.serverUrl
+          ? dashboard.serverUrl
+          : "No active model yet",
+      tone: gatewayOnline ? "ok" : dashboard && dashboard.status === "Running" ? "error" : "warn"
+    },
+    tiles: [
+      {
+        label: "Gateway",
+        value: gatewayOnline ? "Online" : "Offline",
+        detail: active ? (active.agent || active.provider || "active route") : "no active route",
+        tone: gatewayOnline ? "ok" : "error"
+      },
+      {
+        label: "Sessions",
+        value: compactStatValue(stats.requests || measuredSamples),
+        detail: measuredSamples ? `${measuredSamples} learned sample(s)` : "waiting for requests",
+        tone: measuredSamples ? "info" : "warn"
+      },
+      {
+        label: "Agent Capacity",
+        value: String(numberOrZero(stats.providersAvailable)),
+        detail: `${numberOrZero(stats.providersTotal)} configured provider(s)`,
+        tone: numberOrZero(stats.providersAvailable) ? "ok" : "error"
+      },
+      {
+        label: "Queues",
+        value: String(fallbackSignals),
+        detail: "fallback, failure, and incident signals",
+        tone: fallbackSignals ? "warn" : "ok"
+      },
+      {
+        label: "System Load",
+        value: dashboard && dashboard.status === "Running" ? `${healthScore}%` : "--",
+        detail: "provider health score",
+        tone: healthScore >= 80 ? "ok" : healthScore >= 50 ? "warn" : "error"
+      }
+    ],
+    goldenSignals: [
+      {
+        label: "Traffic",
+        value: compactStatValue(stats.totalCalls || stats.requests),
+        detail: "provider calls"
+      },
+      {
+        label: "Errors",
+        value: compactStatValue(stats.failedCalls || failedModels.length),
+        detail: `${numberOrZero(stats.successRate)}% success`
+      },
+      {
+        label: "Saturation",
+        value: `${numberOrZero(stats.providerAvailabilityPercent)}%`,
+        detail: "provider availability"
+      },
+      {
+        label: "Memory",
+        value: compactStatValue(stats.totalTokens),
+        detail: "tokens used"
+      },
+      {
+        label: "Bench",
+        value: averageReadiness ? `${Math.round(averageReadiness)}%` : "--",
+        detail: benchmarkReports ? `${benchmarkReports} report(s)` : "baseline snapshot"
+      },
+      {
+        label: "Cost",
+        value: moneySummaryText(knownCost, averageKnownCost),
+        detail: pricingCoverage ? `${pricingCoverage}% pricing coverage` : "pricing pending"
+      }
+    ],
+    routerRows,
+    incidents: incidents.slice(0, 5),
+    taskFlow: [
+      {
+        label: "In box",
+        value: compactStatValue(stats.requests),
+        detail: "recent request traces"
+      },
+      {
+        label: "In progress",
+        value: compactStatValue(stats.workflows),
+        detail: "workflow events"
+      },
+      {
+        label: "Done",
+        value: compactStatValue(stats.successfulCalls),
+        detail: "successful provider calls"
+      },
+      {
+        label: "Blocked",
+        value: compactStatValue(numberOrZero(stats.failedCalls) + failedModels.length),
+        detail: "failed calls and provider incidents"
+      }
+    ],
+    auditRows: [
+      {
+        label: "Measured agents",
+        value: `${measuredAgents}/${numberOrZero(leaderboardSummary.agent_count)}`,
+        detail: leaderboardSummary.data_state || "baseline pending"
+      },
+      {
+        label: "Benchmark reports",
+        value: String(benchmarkReports),
+        detail: benchmarkSummary.data_state || "baseline pending"
+      },
+      {
+        label: "Pricing",
+        value: pricingCoverage ? `${pricingCoverage}%` : "--",
+        detail: costSummary.measurement_state || "waiting for usage"
+      },
+      {
+        label: "Auto feedback",
+        value: dashboard && dashboard.automatedModelFeedback ? "On" : "Off",
+        detail: "judge model feedback loop"
+      }
+    ],
+    best: {
+      agent: leader.agent || "",
+      provider: leader.provider || active && active.provider || "",
+      model: leader.model || active && active.model || "",
+      score: Math.round(numberOrZero(leader.ranking_score || leader.overall_score || leader.baseline_score)),
+      status: leader.measurement_status || "waiting"
+    },
+    active: activeRow || active || null
+  };
+}
+
+function objectValue(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function numberValueOrNull(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number)) {
+      return number;
+    }
+  }
+  return null;
+}
+
+function numberOrZero(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function compactStatValue(value) {
+  const number = numberOrZero(value);
+  if (Math.abs(number) >= 1000000) {
+    return `${(number / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
+  }
+  if (Math.abs(number) >= 1000) {
+    return `${(number / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  return String(Math.round(number));
+}
+
+function moneySummaryText(knownCost, averageKnownCost) {
+  const value = knownCost !== null ? knownCost : averageKnownCost;
+  if (value === null) {
+    return "--";
+  }
+  return `$${Number(value || 0).toFixed(value < 0.01 ? 4 : 2)}`;
 }
 
 function sidebarInsightRows(dashboard, metrics) {
@@ -1837,12 +2129,19 @@ function sidebarHtml(webview, logoPath) {
       --error: var(--vscode-errorForeground, #f85149);
       --ok: var(--vscode-testing-iconPassed, #3fb950);
       --warn: var(--vscode-testing-iconQueued, #d29922);
+      --cyan: #22d3ee;
+      --violet: #8b5cf6;
+      --rose: #fb7185;
+      --amber: #f59e0b;
       --accent: color-mix(in srgb, var(--button) 78%, #2dd4bf 22%);
       --accent-soft: color-mix(in srgb, var(--accent) 18%, transparent);
       --ok-soft: color-mix(in srgb, var(--ok) 18%, transparent);
       --warn-soft: color-mix(in srgb, var(--warn) 18%, transparent);
       --error-soft: color-mix(in srgb, var(--error) 18%, transparent);
-      --shadow: 0 8px 22px rgba(0, 0, 0, 0.20);
+      --violet-soft: color-mix(in srgb, var(--violet) 16%, transparent);
+      --cyan-soft: color-mix(in srgb, var(--cyan) 15%, transparent);
+      --panel-line: color-mix(in srgb, var(--app-fg) 9%, transparent);
+      --shadow: 0 12px 28px rgba(0, 0, 0, 0.26);
     }
 
     * {
@@ -1853,27 +2152,43 @@ function sidebarHtml(webview, logoPath) {
       margin: 0;
       color: var(--app-fg);
       background:
-        linear-gradient(180deg, var(--accent-soft), transparent 180px),
-        linear-gradient(135deg, color-mix(in srgb, var(--ok) 7%, transparent), transparent 38%),
+        linear-gradient(180deg, color-mix(in srgb, var(--app-bg) 78%, #020617 22%) 0%, var(--app-bg) 45%),
+        linear-gradient(135deg, var(--cyan-soft), transparent 42%),
+        linear-gradient(215deg, var(--violet-soft), transparent 46%),
         var(--app-bg);
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
     }
 
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(color-mix(in srgb, var(--app-fg) 4%, transparent) 1px, transparent 1px),
+        linear-gradient(90deg, color-mix(in srgb, var(--app-fg) 4%, transparent) 1px, transparent 1px);
+      background-size: 22px 22px;
+      mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent 68%);
+      opacity: 0.45;
+    }
+
     .shell {
       min-width: 0;
       display: grid;
-      gap: 8px;
-      padding: 8px;
+      gap: 10px;
+      padding: 10px;
     }
 
     header,
     section,
     details.panel {
+      position: relative;
       padding: 10px;
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: color-mix(in srgb, var(--panel) 92%, transparent);
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--panel) 96%, var(--app-fg) 4%), color-mix(in srgb, var(--panel) 88%, transparent));
       box-shadow: var(--shadow);
     }
 
@@ -1896,10 +2211,69 @@ function sidebarHtml(webview, logoPath) {
       backdrop-filter: blur(16px);
     }
 
+    .topbar {
+      border-color: color-mix(in srgb, var(--cyan) 24%, var(--border));
+      background:
+        linear-gradient(90deg, color-mix(in srgb, var(--cyan) 10%, var(--panel)), color-mix(in srgb, var(--violet) 8%, var(--panel)));
+      box-shadow:
+        0 10px 26px rgba(0, 0, 0, 0.22),
+        inset 0 1px 0 var(--panel-line);
+    }
+
     .brand {
       min-width: 0;
       display: grid;
       gap: 1px;
+      flex: 1 1 auto;
+    }
+
+    .brand-kicker {
+      color: color-mix(in srgb, var(--cyan) 82%, var(--muted));
+      font-size: 9px;
+      line-height: 1.1;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .topbar-status {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .topbar-chip {
+      max-width: 108px;
+      border: 1px solid var(--subtle-border);
+      border-radius: 999px;
+      padding: 2px 7px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      background: color-mix(in srgb, var(--card) 82%, transparent);
+    }
+
+    .topbar-chip[data-state="Running"] {
+      color: var(--ok);
+      border-color: color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+      background: var(--ok-soft);
+    }
+
+    .topbar-chip[data-state="Starting"] {
+      color: var(--warn);
+      border-color: color-mix(in srgb, var(--warn) 42%, var(--subtle-border));
+      background: var(--warn-soft);
+    }
+
+    .topbar-chip[data-state="Error"],
+    .topbar-chip[data-state="Stopped"] {
+      color: var(--error);
+      border-color: color-mix(in srgb, var(--error) 42%, var(--subtle-border));
+      background: var(--error-soft);
     }
 
     .hero {
@@ -1909,7 +2283,7 @@ function sidebarHtml(webview, logoPath) {
       overflow: hidden;
       border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
       background:
-        linear-gradient(135deg, color-mix(in srgb, var(--accent) 18%, var(--panel)) 0%, var(--panel) 48%, color-mix(in srgb, var(--ok) 12%, var(--panel)) 100%);
+        linear-gradient(135deg, color-mix(in srgb, var(--accent) 20%, var(--panel)) 0%, color-mix(in srgb, var(--panel) 95%, #020617 5%) 48%, color-mix(in srgb, var(--violet) 12%, var(--panel)) 100%);
     }
 
     .hero::before {
@@ -1931,12 +2305,37 @@ function sidebarHtml(webview, logoPath) {
       align-items: start;
     }
 
+    .hero-kicker {
+      color: color-mix(in srgb, var(--cyan) 86%, var(--muted));
+      font-size: 10px;
+      line-height: 1.2;
+      text-transform: uppercase;
+      letter-spacing: 0;
+      margin-bottom: 2px;
+    }
+
+    .hero h2 {
+      font-size: 15px;
+      line-height: 1.2;
+    }
+
     .hero-copy {
       color: var(--muted);
       font-size: 12px;
       line-height: 1.35;
       margin-top: 3px;
       overflow-wrap: anywhere;
+    }
+
+    .command-surface {
+      display: grid;
+      gap: 8px;
+      border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--subtle-border));
+      border-radius: 8px;
+      padding: 8px;
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--card) 90%, var(--accent) 10%), color-mix(in srgb, var(--card) 86%, transparent));
+      box-shadow: inset 0 1px 0 var(--panel-line);
     }
 
     .health-card {
@@ -2027,7 +2426,9 @@ function sidebarHtml(webview, logoPath) {
       border: 1px solid var(--subtle-border);
       border-radius: 8px;
       padding: 7px;
-      background: color-mix(in srgb, var(--card) 76%, transparent);
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--card) 88%, var(--app-fg) 4%), color-mix(in srgb, var(--card) 74%, transparent));
+      box-shadow: inset 0 1px 0 var(--panel-line);
     }
 
     .state-pill::before {
@@ -2039,6 +2440,18 @@ function sidebarHtml(webview, logoPath) {
       border-radius: 999px;
       background: var(--accent);
       opacity: 0.72;
+    }
+
+    .state-pill:nth-child(2)::before {
+      background: var(--violet);
+    }
+
+    .state-pill:nth-child(3)::before {
+      background: var(--cyan);
+    }
+
+    .state-pill:nth-child(4)::before {
+      background: var(--amber);
     }
 
     .state-pill span {
@@ -2071,6 +2484,298 @@ function sidebarHtml(webview, logoPath) {
       justify-content: space-between;
       gap: 8px;
       font-weight: 600;
+    }
+
+    .model-control-plane {
+      display: grid;
+      gap: 10px;
+      border-color: color-mix(in srgb, var(--button) 38%, var(--border));
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--button) 10%, var(--panel)) 0%, color-mix(in srgb, var(--panel) 94%, #020617 6%) 44%, color-mix(in srgb, var(--violet) 10%, var(--panel)) 100%);
+      box-shadow:
+        0 14px 32px rgba(0, 0, 0, 0.30),
+        inset 0 1px 0 var(--panel-line);
+    }
+
+    .inline-toggle {
+      width: auto;
+      min-height: 24px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+
+    .inline-toggle[data-state="on"] {
+      color: var(--button-fg);
+      border-color: color-mix(in srgb, var(--ok) 60%, var(--subtle-border));
+      background: color-mix(in srgb, var(--ok) 62%, var(--button) 38%);
+    }
+
+    .control-plane-status {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 8px;
+      background:
+        linear-gradient(90deg, color-mix(in srgb, var(--cyan) 10%, var(--card)), color-mix(in srgb, var(--card) 88%, transparent));
+      box-shadow: inset 0 1px 0 var(--panel-line);
+    }
+
+    .control-plane-status strong,
+    .control-plane-status span {
+      display: block;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .control-plane-status strong {
+      font-size: 13px;
+      line-height: 1.25;
+    }
+
+    .control-plane-status span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.3;
+      margin-top: 2px;
+    }
+
+    .control-plane-status .status {
+      justify-self: end;
+    }
+
+    .signal-tile-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+      gap: 7px;
+    }
+
+    .signal-tile {
+      min-width: 0;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 8px;
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--card) 92%, var(--app-fg) 4%), color-mix(in srgb, var(--card) 80%, transparent));
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 8%, transparent);
+    }
+
+    .signal-tile:nth-child(2) {
+      border-color: color-mix(in srgb, var(--violet) 38%, var(--subtle-border));
+    }
+
+    .signal-tile:nth-child(3) {
+      border-color: color-mix(in srgb, var(--cyan) 40%, var(--subtle-border));
+    }
+
+    .signal-tile:nth-child(4) {
+      border-color: color-mix(in srgb, var(--rose) 34%, var(--subtle-border));
+    }
+
+    .signal-tile:nth-child(5) {
+      border-color: color-mix(in srgb, var(--amber) 38%, var(--subtle-border));
+    }
+
+    .signal-tile[data-tone="ok"] {
+      border-color: color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--ok) 10%, var(--card));
+    }
+
+    .signal-tile[data-tone="warn"] {
+      border-color: color-mix(in srgb, var(--warn) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--warn) 10%, var(--card));
+    }
+
+    .signal-tile[data-tone="error"] {
+      border-color: color-mix(in srgb, var(--error) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--error) 10%, var(--card));
+    }
+
+    .signal-tile[data-tone="info"] {
+      border-color: color-mix(in srgb, #38bdf8 42%, var(--subtle-border));
+      background: color-mix(in srgb, #38bdf8 10%, var(--card));
+    }
+
+    .signal-tile span,
+    .signal-tile strong,
+    .signal-tile small {
+      display: block;
+      overflow-wrap: anywhere;
+    }
+
+    .signal-tile span {
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.25;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .signal-tile strong {
+      color: var(--app-fg);
+      font-size: 16px;
+      line-height: 1.15;
+      margin-top: 3px;
+    }
+
+    .signal-tile small {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.25;
+      margin-top: 3px;
+    }
+
+    .model-board-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+      gap: 8px;
+    }
+
+    .model-board-grid.compact {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .model-panel {
+      min-width: 0;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 9px;
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--card) 90%, var(--panel) 10%), color-mix(in srgb, var(--card) 78%, transparent));
+      box-shadow: inset 0 1px 0 var(--panel-line);
+    }
+
+    .model-panel h3 {
+      margin: 0 0 7px;
+      color: var(--app-fg);
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.25;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .model-panel h3::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+
+    .model-signal-list,
+    .model-router-list,
+    .mini-flow-list {
+      display: grid;
+      gap: 6px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .model-signal-row,
+    .model-router-row,
+    .mini-flow-row {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+      border: 1px solid color-mix(in srgb, var(--subtle-border) 72%, transparent);
+      border-radius: 7px;
+      padding: 7px;
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--panel-soft) 86%, var(--app-fg) 3%), color-mix(in srgb, var(--panel-soft) 68%, transparent));
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 6%, transparent);
+      transition: border-color 120ms ease, transform 120ms ease;
+    }
+
+    .model-signal-row:hover,
+    .model-router-row:hover,
+    .mini-flow-row:hover {
+      border-color: color-mix(in srgb, var(--accent) 36%, var(--subtle-border));
+      transform: translateY(-1px);
+    }
+
+    .model-router-row {
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      column-gap: 7px;
+    }
+
+    .rank-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 22px;
+      height: 22px;
+      border: 1px solid color-mix(in srgb, var(--button) 45%, var(--subtle-border));
+      border-radius: 999px;
+      color: var(--app-fg);
+      font-size: 10px;
+      background: color-mix(in srgb, var(--button) 18%, var(--card));
+    }
+
+    .model-router-main,
+    .mini-flow-main {
+      min-width: 0;
+      color: var(--app-fg);
+      font-size: 11px;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+
+    .model-router-meta,
+    .mini-flow-meta,
+    .model-signal-row span {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+
+    .router-score {
+      color: var(--ok);
+      font-size: 10px;
+      line-height: 1.2;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .mini-flow-row {
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      column-gap: 8px;
+    }
+
+    .mini-flow-value {
+      color: var(--app-fg);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .mini-flow-row[data-tone="ok"] {
+      border-color: color-mix(in srgb, var(--ok) 36%, var(--subtle-border));
+      background: color-mix(in srgb, var(--ok) 9%, var(--panel-soft));
+    }
+
+    .mini-flow-row[data-tone="warn"] {
+      border-color: color-mix(in srgb, var(--warn) 38%, var(--subtle-border));
+      background: color-mix(in srgb, var(--warn) 9%, var(--panel-soft));
+    }
+
+    .mini-flow-row[data-tone="error"] {
+      border-color: color-mix(in srgb, var(--error) 38%, var(--subtle-border));
+      background: color-mix(in srgb, var(--error) 9%, var(--panel-soft));
+    }
+
+    .incident-stream {
+      min-height: 100%;
     }
 
     .progress-track {
@@ -2438,6 +3143,7 @@ function sidebarHtml(webview, logoPath) {
 
     h1 {
       font-size: 14px;
+      line-height: 1.2;
     }
 
     .section-head {
@@ -2446,6 +3152,23 @@ function sidebarHtml(webview, logoPath) {
       justify-content: space-between;
       gap: 8px;
       margin-bottom: 8px;
+    }
+
+    .section-head h2 {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .section-head h2::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--cyan), var(--violet));
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--cyan) 13%, transparent);
+      flex: 0 0 auto;
     }
 
     details.panel > summary.section-head {
@@ -2459,18 +3182,24 @@ function sidebarHtml(webview, logoPath) {
     }
 
     details.panel > summary.section-head::after {
-      content: "+";
-      min-width: 18px;
+      content: "";
+      width: 18px;
+      height: 18px;
       color: var(--muted);
       text-align: right;
       border: 1px solid var(--subtle-border);
       border-radius: 999px;
-      padding: 0 5px;
-      background: color-mix(in srgb, var(--card) 70%, transparent);
+      background:
+        linear-gradient(var(--muted), var(--muted)) center / 8px 1px no-repeat,
+        linear-gradient(90deg, var(--muted), var(--muted)) center / 1px 8px no-repeat,
+        color-mix(in srgb, var(--card) 70%, transparent);
+      flex: 0 0 auto;
     }
 
     details.panel[open] > summary.section-head::after {
-      content: "-";
+      background:
+        linear-gradient(var(--muted), var(--muted)) center / 8px 1px no-repeat,
+        color-mix(in srgb, var(--card) 70%, transparent);
     }
 
     .status {
@@ -2551,13 +3280,15 @@ function sidebarHtml(webview, logoPath) {
     .command-button {
       position: relative;
       display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
       gap: 1px;
       align-content: center;
       text-align: left;
       min-height: 42px;
       border-radius: 8px;
-      padding: 8px 9px;
-      background: color-mix(in srgb, var(--secondary) 78%, var(--card));
+      padding: 8px 9px 8px 8px;
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--secondary) 82%, var(--cyan) 8%), color-mix(in srgb, var(--secondary) 78%, var(--card)));
       box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 8%, transparent);
     }
 
@@ -2567,20 +3298,38 @@ function sidebarHtml(webview, logoPath) {
         0 8px 18px color-mix(in srgb, var(--accent) 14%, transparent);
     }
 
+    .command-button::before {
+      content: attr(data-icon);
+      grid-row: 1 / span 2;
+      align-self: center;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 23px;
+      height: 23px;
+      margin-right: 2px;
+      border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--subtle-border));
+      border-radius: 999px;
+      color: color-mix(in srgb, var(--cyan) 84%, var(--app-fg));
+      font-size: 10px;
+      font-weight: 700;
+      background: color-mix(in srgb, var(--accent) 12%, var(--card));
+    }
+
     .command-button::after {
       content: "";
       position: absolute;
-      inset: 7px 6px auto auto;
-      width: 5px;
-      height: 5px;
+      inset: auto 8px 5px 38px;
+      height: 2px;
       border-radius: 999px;
-      background: var(--accent);
-      opacity: 0.68;
+      background: linear-gradient(90deg, var(--accent), transparent);
+      opacity: 0.72;
     }
 
     .button-main,
     .button-meta {
       display: block;
+      grid-column: 2;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -2881,7 +3630,8 @@ function sidebarHtml(webview, logoPath) {
       border: 1px dashed var(--subtle-border);
       border-radius: 8px;
       padding: 9px;
-      background: color-mix(in srgb, var(--card) 58%, transparent);
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--card) 72%, var(--cyan) 6%), color-mix(in srgb, var(--card) 58%, transparent));
     }
 
     @media (max-width: 280px) {
@@ -2901,7 +3651,10 @@ function sidebarHtml(webview, logoPath) {
       .routing-summary-grid,
       .template-grid,
       .trust-grid,
-      .hero-state-strip {
+      .hero-state-strip,
+      .control-plane-status,
+      .model-board-grid,
+      .model-board-grid.compact {
         grid-template-columns: 1fr;
       }
 
@@ -2917,17 +3670,23 @@ function sidebarHtml(webview, logoPath) {
 </head>
 <body>
   <div class="shell">
-    <header>
+    <header class="topbar">
       <img src="${logoSrc}" alt="">
       <div class="brand">
+        <div class="brand-kicker">Mission Control</div>
         <h1>Agent Hub</h1>
         <div class="meta" id="extensionVersion">VS Code extension</div>
+      </div>
+      <div class="topbar-status">
+        <span class="topbar-chip" id="headerStatus" data-state="Stopped">Offline</span>
+        <span class="topbar-chip" id="headerRoute">cloud</span>
       </div>
     </header>
     <section class="hero">
       <div class="hero-head">
         <div>
-          <h2>Ask anything</h2>
+          <div class="hero-kicker">Gateway Control Plane</div>
+          <h2>Command Center</h2>
           <div class="hero-copy" id="heroSummary">Checking status</div>
         </div>
         <div class="health-card" id="heroHealthCard" data-state="Stopped" title="Health score is a 0-100 summary of provider availability, success rate, fallbacks, permissions, context pressure, stream failures, and degraded providers. Open Statistics > Help for details.">
@@ -2954,49 +3713,89 @@ function sidebarHtml(webview, logoPath) {
         </div>
       </div>
       <button class="primary hero-server-action" id="heroServerAction" type="button" data-primary-action="start-server" data-state="Stopped">Start</button>
-      <form class="quick-task" id="quickTaskForm">
-        <label for="quickTaskInput">Task</label>
-        <textarea id="quickTaskInput" placeholder="What do you need?"></textarea>
-        <div class="task-submit-row">
-          <div class="task-options">
-            <label><input id="quickTaskIncludeSelection" type="checkbox" checked> Include selection</label>
+      <div class="command-surface">
+        <form class="quick-task" id="quickTaskForm">
+          <label for="quickTaskInput">Task</label>
+          <textarea id="quickTaskInput" placeholder="Describe the change, investigation, or review"></textarea>
+          <div class="task-submit-row">
+            <div class="task-options">
+              <label><input id="quickTaskIncludeSelection" type="checkbox" checked> Include selection</label>
+            </div>
+            <button class="primary" id="quickTaskSend" type="submit">Send</button>
           </div>
-          <button class="primary" id="quickTaskSend" type="submit">Send</button>
-        </div>
-      </form>
+        </form>
+      </div>
       <div class="actions quick-actions">
-        <button class="command-button" id="openChat" type="button" title="Open Agent Hub chat">
+        <button class="command-button" id="openChat" type="button" title="Open Agent Hub chat" data-icon="C">
           <span class="button-main">Chat</span>
           <span class="button-meta">Open chat</span>
         </button>
-        <button class="command-button" id="quickDashboard" type="button" title="Open the Agent Hub dashboard in your browser">
+        <button class="command-button" id="quickDashboard" type="button" title="Open the Agent Hub dashboard in your browser" data-icon="D">
           <span class="button-main">Dashboard</span>
           <span class="button-meta">Browser</span>
         </button>
-        <button class="command-button" id="quickSettings" type="button" title="Open Agent Hub settings">
+        <button class="command-button" id="quickSettings" type="button" title="Open Agent Hub settings" data-icon="S">
           <span class="button-main">Settings</span>
           <span class="button-meta">Models</span>
         </button>
-        <button class="command-button" id="quickTokenSafeMode" type="button" title="Enable Token Safe Mode">
+        <button class="command-button" id="quickTokenSafeMode" type="button" title="Enable Token Safe Mode" data-icon="T">
           <span class="button-main">Token Safe</span>
           <span class="button-meta">Save context</span>
         </button>
-        <button class="command-button" id="quickCodexCliMode" type="button" title="Use Codex CLI without an API key">
+        <button class="command-button" id="quickCodexCliMode" type="button" title="Use Codex CLI without an API key" data-icon="X">
           <span class="button-main">Codex CLI</span>
           <span class="button-meta">No API key</span>
         </button>
-        <button class="command-button" id="quickInstallCodexCli" type="button" title="Install or sign in to Codex CLI">
+        <button class="command-button" id="quickInstallCodexCli" type="button" title="Install or sign in to Codex CLI" data-icon="I">
           <span class="button-main">Install CLI</span>
           <span class="button-meta">Codex setup</span>
         </button>
-        <button class="command-button" id="codeAgent" type="button" title="Run the coding agent">
+        <button class="command-button" id="codeAgent" type="button" title="Run the coding agent" data-icon="A">
           <span class="button-main">Code</span>
           <span class="button-meta">Edit files</span>
         </button>
-        <button class="command-button" id="explainFile" type="button" title="Explain the current file">
+        <button class="command-button" id="explainFile" type="button" title="Explain the current file" data-icon="E">
           <span class="button-main">Explain</span>
           <span class="button-meta">This file</span>
         </button>
+      </div>
+    </section>
+    <section class="model-control-plane">
+      <div class="section-head">
+        <h2>Model Stats</h2>
+        <button class="inline-toggle" id="autoFeedbackToggle" type="button" data-state="off" title="Use a separate judge model to submit adaptive feedback after successful chat responses.">Auto Feedback Off</button>
+      </div>
+      <div class="control-plane-status">
+        <div>
+          <strong id="modelGatewayTitle">Gateway offline</strong>
+          <span id="modelGatewayDetail">Start Agent Hub to collect model signals.</span>
+        </div>
+        <span class="status" id="modelGatewayStatus" data-state="Stopped">Offline</span>
+      </div>
+      <div class="signal-tile-grid" id="modelSignalGrid"></div>
+      <div class="model-board-grid">
+        <div class="model-panel">
+          <h3>Gateway Health + Golden Signals</h3>
+          <ul class="model-signal-list" id="goldenSignalList"></ul>
+        </div>
+        <div class="model-panel">
+          <h3>Session Router</h3>
+          <ul class="model-router-list" id="modelRouterList"></ul>
+        </div>
+      </div>
+      <div class="model-board-grid compact">
+        <div class="model-panel">
+          <h3>Task Flow</h3>
+          <ul class="mini-flow-list" id="modelTaskFlowList"></ul>
+        </div>
+        <div class="model-panel incident-stream">
+          <h3>Security + Audit</h3>
+          <ul class="mini-flow-list" id="modelAuditList"></ul>
+        </div>
+      </div>
+      <div class="model-panel incident-stream">
+        <h3>Incident Stream</h3>
+        <ul class="mini-flow-list" id="modelIncidentList"></ul>
       </div>
     </section>
     <section>
@@ -3194,6 +3993,18 @@ function sidebarHtml(webview, logoPath) {
     const quickTaskForm = document.getElementById("quickTaskForm");
     const quickTaskInput = document.getElementById("quickTaskInput");
     const quickTaskIncludeSelection = document.getElementById("quickTaskIncludeSelection");
+    const headerStatus = document.getElementById("headerStatus");
+    const headerRoute = document.getElementById("headerRoute");
+    const autoFeedbackToggle = document.getElementById("autoFeedbackToggle");
+    const modelGatewayTitle = document.getElementById("modelGatewayTitle");
+    const modelGatewayDetail = document.getElementById("modelGatewayDetail");
+    const modelGatewayStatus = document.getElementById("modelGatewayStatus");
+    const modelSignalGrid = document.getElementById("modelSignalGrid");
+    const goldenSignalList = document.getElementById("goldenSignalList");
+    const modelRouterList = document.getElementById("modelRouterList");
+    const modelTaskFlowList = document.getElementById("modelTaskFlowList");
+    const modelAuditList = document.getElementById("modelAuditList");
+    const modelIncidentList = document.getElementById("modelIncidentList");
 
     function post(type) {
       vscode.postMessage({ type });
@@ -3209,12 +4020,16 @@ function sidebarHtml(webview, logoPath) {
       serverStatus.textContent = status;
       serverStatus.dataset.state = status;
       setText(extensionVersion, dashboard.extensionVersion ? "v" + dashboard.extensionVersion : "VS Code extension");
+      setText(headerStatus, status === "Running" ? "Online" : status);
+      headerStatus.dataset.state = status;
+      setText(headerRoute, compactModeText(dashboard.agentProviderMode || "cloud", dashboard.agentMode || "agent"));
       setText(heroMode, compactModeText(dashboard.agentProviderMode || "cloud", dashboard.agentMode || "agent"));
       setText(heroApproval, dashboard.approvalMode || "ask");
       setText(heroProviders, providerCountText(dashboard.statistics || {}));
       setText(heroReadiness, readinessText(dashboard.readiness));
       renderServerControls(status, dashboard);
       renderSetupSummary(dashboard);
+      renderModelStats(dashboard.modelStats || {}, dashboard.automatedModelFeedback);
       renderOrchestration(dashboard.orchestrationFlow || {});
       renderWorkflowTemplates(dashboard.workflowTemplates || []);
       renderStatistics(dashboard.statistics || {}, dashboard.insights || [], status);
@@ -3362,6 +4177,149 @@ function sidebarHtml(webview, logoPath) {
       return Number.isFinite(score) ? Math.round(score) + "% " + label : label;
     }
 
+    function renderModelStats(stats, automatedFeedback) {
+      const state = stats || {};
+      const gateway = state.gateway || {};
+      modelGatewayTitle.textContent = gateway.status || "Gateway offline";
+      modelGatewayDetail.textContent = gateway.detail || "Start Agent Hub to collect model signals.";
+      modelGatewayStatus.textContent = gateway.status || "Offline";
+      modelGatewayStatus.dataset.state = gatewayStatusState(gateway);
+      autoFeedbackToggle.textContent = automatedFeedback ? "Auto Feedback On" : "Auto Feedback Off";
+      autoFeedbackToggle.dataset.state = automatedFeedback ? "on" : "off";
+      autoFeedbackToggle.title = automatedFeedback
+        ? "Automated model feedback is on. Click to turn it off."
+        : "Ask a separate judge model to submit adaptive feedback after successful chat responses.";
+
+      modelSignalGrid.textContent = "";
+      const tiles = Array.isArray(state.tiles) ? state.tiles : [];
+      for (const tile of tiles) {
+        modelSignalGrid.append(signalTile(tile));
+      }
+      if (!tiles.length) {
+        modelSignalGrid.append(signalTile({
+          label: "Gateway",
+          value: "Offline",
+          detail: "waiting for diagnostics",
+          tone: "warn"
+        }));
+      }
+
+      renderSignalRows(goldenSignalList, state.goldenSignals || []);
+      renderRouterRows(state.routerRows || []);
+      renderMiniFlowRows(modelTaskFlowList, state.taskFlow || [], "No task flow yet");
+      renderMiniFlowRows(modelAuditList, state.auditRows || [], "No audit signals yet");
+      renderMiniFlowRows(modelIncidentList, state.incidents || [], "No incident signals yet");
+    }
+
+    function gatewayStatusState(gateway) {
+      const tone = gateway && gateway.tone ? gateway.tone : "";
+      if (tone === "ok") {
+        return "Running";
+      }
+      if (tone === "error") {
+        return "Error";
+      }
+      return "Starting";
+    }
+
+    function signalTile(tile) {
+      const item = document.createElement("div");
+      item.className = "signal-tile";
+      item.dataset.tone = tile.tone || "info";
+      const label = document.createElement("span");
+      label.textContent = tile.label || "Signal";
+      const value = document.createElement("strong");
+      value.textContent = tile.value || "--";
+      const detail = document.createElement("small");
+      detail.textContent = tile.detail || "";
+      item.append(label, value, detail);
+      return item;
+    }
+
+    function renderSignalRows(list, rows) {
+      list.textContent = "";
+      const items = Array.isArray(rows) ? rows : [];
+      if (!items.length) {
+        list.append(emptyRow("No golden signals yet"));
+        return;
+      }
+      for (const row of items.slice(0, 8)) {
+        const item = document.createElement("li");
+        item.className = "model-signal-row";
+        const main = document.createElement("div");
+        main.className = "mini-flow-main";
+        main.textContent = (row.label || "Signal") + ": " + (row.value || "--");
+        const meta = document.createElement("span");
+        meta.textContent = row.detail || "";
+        item.append(main, meta);
+        list.append(item);
+      }
+    }
+
+    function renderRouterRows(rows) {
+      modelRouterList.textContent = "";
+      const items = Array.isArray(rows) ? rows : [];
+      if (!items.length) {
+        modelRouterList.append(emptyRow("No ranked models yet"));
+        return;
+      }
+      for (const row of items.slice(0, 6)) {
+        const item = document.createElement("li");
+        item.className = "model-router-row";
+        const rank = document.createElement("span");
+        rank.className = "rank-pill";
+        rank.textContent = row.rank ? "#" + row.rank : "-";
+        const text = document.createElement("div");
+        text.className = "model-router-text";
+        const main = document.createElement("div");
+        main.className = "model-router-main";
+        main.textContent = [row.provider || row.agent || "provider", row.model || ""].filter(Boolean).join(" / ");
+        const meta = document.createElement("div");
+        meta.className = "model-router-meta";
+        meta.textContent = [
+          row.status || "baseline",
+          row.samples ? row.samples + " sample(s)" : "",
+          row.latencyMs ? Math.round(row.latencyMs) + " ms" : "",
+          row.free ? "free" : ""
+        ].filter(Boolean).join(" - ");
+        text.append(main, meta);
+        const score = document.createElement("div");
+        score.className = "router-score";
+        score.textContent = row.successRate ? row.successRate + "% ok" : row.score ? row.score + " score" : "--";
+        item.append(rank, text, score);
+        modelRouterList.append(item);
+      }
+    }
+
+    function renderMiniFlowRows(list, rows, emptyText) {
+      list.textContent = "";
+      const items = Array.isArray(rows) ? rows : [];
+      if (!items.length) {
+        list.append(emptyRow(emptyText));
+        return;
+      }
+      for (const row of items.slice(0, 6)) {
+        const item = document.createElement("li");
+        item.className = "mini-flow-row";
+        if (row.tone) {
+          item.dataset.tone = row.tone;
+        }
+        const text = document.createElement("div");
+        const main = document.createElement("div");
+        main.className = "mini-flow-main";
+        main.textContent = row.label || "Signal";
+        const meta = document.createElement("div");
+        meta.className = "mini-flow-meta";
+        meta.textContent = row.detail || "";
+        text.append(main, meta);
+        const value = document.createElement("div");
+        value.className = "mini-flow-value";
+        value.textContent = row.value || "";
+        item.append(text, value);
+        list.append(item);
+      }
+    }
+
     function renderOrchestration(flow) {
       flowStrip.textContent = "";
       const status = flow.status || "Ready";
@@ -3391,6 +4349,7 @@ function sidebarHtml(webview, logoPath) {
         button.type = "button";
         button.className = "command-button template-button";
         button.dataset.prompt = template.prompt || "";
+        button.dataset.icon = "W";
         const main = document.createElement("span");
         main.className = "button-main";
         main.textContent = template.label || "Workflow";
@@ -4185,6 +5144,7 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("quickTokenSafeMode").addEventListener("click", () => post("enableTokenSafeMode"));
     document.getElementById("quickCodexCliMode").addEventListener("click", () => post("enableCodexCliMode"));
     document.getElementById("quickInstallCodexCli").addEventListener("click", () => post("installCodexCli"));
+    autoFeedbackToggle.addEventListener("click", () => post("toggleAutomatedFeedback"));
     document.getElementById("codeAgent").addEventListener("click", () => post("codeAgent"));
     document.getElementById("explainFile").addEventListener("click", () => post("explainFile"));
     document.getElementById("killerWorkflow").addEventListener("click", () => runWorkflowPrompt("Run the issue-to-PR workflow. Take the current issue or selected prompt through the full Agent Hub loop: plan the work, edit the needed files, run the most relevant tests, fix failures once, and summarize a pull request with files changed, validation, and risks. If no issue is selected, inspect the workspace first and choose the highest-impact actionable issue."));
@@ -4682,6 +5642,193 @@ async function sendAdaptiveFeedback(panel, message) {
   }
 }
 
+async function autoSubmitModelFeedback(panel, options) {
+  const requestId = typeof options.responseRequestId === "string" ? options.responseRequestId.trim() : "";
+  const webviewRequestId = typeof options.webviewRequestId === "string" ? options.webviewRequestId : "";
+  if (!requestId) {
+    return;
+  }
+  postAutoFeedbackStatus(panel, webviewRequestId, "Auto feedback: judge model is reviewing the response.", "info");
+  try {
+    const verdict = await judgeModelFeedback(options);
+    await requestJson("POST", "/v1/feedback", {
+      request_id: requestId,
+      rating: verdict.rating,
+      workflow_success: verdict.workflowSuccess,
+      reason: verdict.reason
+    });
+    const label = verdict.rating === "up" ? "positive" : "needs work";
+    postAutoFeedbackStatus(
+      panel,
+      webviewRequestId,
+      `Auto feedback saved: ${label} (${verdict.reason}).`,
+      verdict.rating === "up" ? "ok" : "warn"
+    );
+    output.appendLine(`Automated model feedback saved for ${requestId}: ${verdict.rating}/${verdict.reason} (${verdict.confidence}).`);
+  } catch (error) {
+    postAutoFeedbackStatus(panel, webviewRequestId, "Auto feedback could not be saved. Check Agent Hub output.", "warn");
+    output.appendLine(`Automated model feedback failed for ${requestId}: ${error.message}`);
+  }
+}
+
+async function judgeModelFeedback(options) {
+  const config = options.config || settings();
+  const body = autoFeedbackJudgePayload(options, config, "agent-hub-research");
+  try {
+    return parseJudgeVerdict(chatCompletionContent(await requestJson("POST", "/v1/chat/completions", body)));
+  } catch (error) {
+    output.appendLine(`Automated feedback judge route failed: ${error.message}. Trying coding route.`);
+    const fallbackBody = autoFeedbackJudgePayload(options, config, "agent-hub-coding");
+    return parseJudgeVerdict(chatCompletionContent(await requestJson("POST", "/v1/chat/completions", fallbackBody)));
+  }
+}
+
+function autoFeedbackJudgePayload(options, config, model) {
+  return {
+    model,
+    messages: [
+      {
+        role: "system",
+        content: [
+          "You are Agent Hub's independent model-feedback judge.",
+          "Evaluate whether the assistant response satisfied the user task.",
+          "Return only one compact JSON object with keys rating, workflow_success, reason, confidence, and notes.",
+          "rating must be up or down.",
+          "reason must be one of good, worked, failed, too_expensive, wrong_files.",
+          "Use down when the answer is materially wrong, incomplete, unsafe, edits the wrong files, or admits failure."
+        ].join(" ")
+      },
+      {
+        role: "user",
+        content: [
+          "Original user task:",
+          truncateForJudge(options.userText, 6000),
+          "",
+          "Assistant response:",
+          truncateForJudge(options.assistantText, 10000),
+          "",
+          "Routing and tool summary:",
+          JSON.stringify(feedbackRoutingSummary(options.response), null, 2)
+        ].join("\n")
+      }
+    ],
+    temperature: 0,
+    max_tokens: 260,
+    stream: false,
+    metadata: {
+      source: "vscode-auto-feedback",
+      parent_request_id: options.responseRequestId || "",
+      client: "agent-hub-vscode"
+    },
+    agent_hub: {
+      route: model === "agent-hub-research" ? (config.researchRoute || "research") : codingAgentRoute(config),
+      use_session_history: false,
+      automated_feedback_judge: true,
+      provider_approval_granted: true
+    }
+  };
+}
+
+function feedbackRoutingSummary(response) {
+  const metadata = response && response.agent_hub && typeof response.agent_hub === "object" ? response.agent_hub : {};
+  const tools = Array.isArray(metadata.steps)
+    ? metadata.steps.slice(0, 12).map((step) => ({
+      tool: step && step.tool,
+      ok: !(step && step.result && step.result.ok === false),
+      error: step && step.result && step.result.error
+    }))
+    : [];
+  return {
+    request_id: response && (response.request_id || response.id),
+    model: response && response.model,
+    agent: response && response.agent,
+    provider: response && response.provider,
+    usage: response && response.usage,
+    failover_count: Array.isArray(response && response.failover) ? response.failover.length : 0,
+    tools
+  };
+}
+
+function parseJudgeVerdict(text) {
+  const parsed = parseJsonObjectFromText(text);
+  const rating = parsed && String(parsed.rating || "").toLowerCase() === "down" ? "down" : "up";
+  const workflowSuccess = typeof (parsed && parsed.workflow_success) === "boolean"
+    ? parsed.workflow_success
+    : rating === "up";
+  const reason = normalizeFeedbackReason(parsed && parsed.reason, rating);
+  const confidence = Number(parsed && parsed.confidence);
+  return {
+    rating,
+    workflowSuccess,
+    reason,
+    confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0
+  };
+}
+
+function normalizeFeedbackReason(value, rating) {
+  const allowed = new Set(["good", "worked", "failed", "too_expensive", "wrong_files"]);
+  const reason = String(value || "").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+  if (allowed.has(reason)) {
+    return reason;
+  }
+  return rating === "up" ? "worked" : "failed";
+}
+
+function parseJsonObjectFromText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) {
+    throw new Error("Judge returned an empty response.");
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch (_error) {
+    // Fall through to extracting the first object below.
+  }
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start === -1 || end <= start) {
+    throw new Error("Judge did not return JSON.");
+  }
+  const parsed = JSON.parse(raw.slice(start, end + 1));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Judge JSON was not an object.");
+  }
+  return parsed;
+}
+
+function chatCompletionContent(response) {
+  if (response && Array.isArray(response.choices) && response.choices[0]) {
+    const message = response.choices[0].message;
+    if (message && typeof message.content === "string") {
+      return message.content;
+    }
+  }
+  return responseText(response);
+}
+
+function truncateForJudge(value, limit) {
+  const text = String(value || "");
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit)}\n[truncated ${text.length - limit} chars]`;
+}
+
+function postAutoFeedbackStatus(panel, requestId, text, tone) {
+  if (!panel || !panel.webview) {
+    return;
+  }
+  panel.webview.postMessage({
+    type: "autoFeedbackStatus",
+    requestId,
+    text,
+    tone
+  });
+}
+
 async function saveApiKeysFromWebview(panel, keys) {
   if (!(await requestPermission({
     category: "secret_edit",
@@ -4782,6 +5929,7 @@ function chatSettingsPayload(config) {
     allowShellTools: config.allowShellTools,
     maxTokens: config.maxTokens,
     autoStart: config.autoStart,
+    automatedModelFeedback: config.automatedModelFeedback,
     ...cloudModelSettingsPayload(config)
   };
 }
@@ -5439,7 +6587,8 @@ function normalizeChatSettingsInput(value) {
       agentMaxSteps: cleanSettingInteger(input.agentMaxSteps, current.agentMaxSteps, 1, 100),
       allowShellTools: !!input.allowShellTools,
       maxTokens: cleanOptionalSettingInteger(input.maxTokens, current.maxTokens, 1, 200000),
-      autoStart: !!input.autoStart
+      autoStart: !!input.autoStart,
+      automatedModelFeedback: !!input.automatedModelFeedback
     },
     cloudSettings: {
       cloudRouteMode: normalizeCloudRouteMode(input.cloudRouteMode || "ollama-cloud"),
@@ -6098,8 +7247,19 @@ async function sendChatTurn(panel, message) {
       text: reply || "(empty response)",
       tools: agentToolSteps(response),
       sources: sourceLines(response),
-      response
+      response,
+      autoFeedbackEnabled: !!config.automatedModelFeedback
     });
+    if (config.automatedModelFeedback) {
+      void autoSubmitModelFeedback(panel, {
+        webviewRequestId: requestId,
+        responseRequestId: response && (response.request_id || response.id),
+        userText: text,
+        assistantText: reply || "",
+        response,
+        config
+      });
+    }
   } catch (error) {
     output.appendLine(`Agent Hub chat failed: ${error.message}`);
     panel.webview.postMessage({
@@ -6683,6 +7843,40 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       font-size: 12px;
     }
 
+    .auto-feedback-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      max-width: 100%;
+      margin-top: 6px;
+      border: 1px solid var(--subtle-border);
+      border-radius: 999px;
+      padding: 4px 8px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.25;
+      background: color-mix(in srgb, var(--surface) 84%, transparent);
+    }
+
+    .auto-feedback-status::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: currentColor;
+      flex: 0 0 auto;
+    }
+
+    .auto-feedback-status[data-tone="ok"] {
+      color: var(--ok);
+      border-color: color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+    }
+
+    .auto-feedback-status[data-tone="warn"] {
+      color: var(--warn);
+      border-color: color-mix(in srgb, var(--warn) 42%, var(--subtle-border));
+    }
+
     form {
       display: grid;
       gap: 8px;
@@ -7052,6 +8246,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
             <div class="settings-row">
               <label class="settings-check"><input id="settingAllowShellTools" type="checkbox"> Allow shell tools</label>
               <label class="settings-check"><input id="settingAutoStart" type="checkbox"> Auto-start server</label>
+              <label class="settings-check"><input id="settingAutomatedFeedback" type="checkbox"> Auto model feedback</label>
               <label class="settings-check"><input id="settingApiKeyModelsEnabled" type="checkbox"> Enable API-key models</label>
               <label class="settings-check"><input id="settingFreeCloudPresetsEnabled" type="checkbox"> Enable free cloud presets</label>
               <label class="settings-check"><input id="settingFreeOnly" type="checkbox"> Free-only routing</label>
@@ -7175,7 +8370,8 @@ ${apiKeyFieldsHtml()}
       enableLoadBalancing: document.getElementById("settingLoadBalancing"),
       exposeRoutingDetails: document.getElementById("settingRoutingDetails"),
       allowShellTools: document.getElementById("settingAllowShellTools"),
-      autoStart: document.getElementById("settingAutoStart")
+      autoStart: document.getElementById("settingAutoStart"),
+      automatedModelFeedback: document.getElementById("settingAutomatedFeedback")
     };
     const keyInputs = Object.fromEntries(apiKeyIds.map((id) => [id, document.getElementById("key-" + id)]));
     const keyStates = Object.fromEntries(apiKeyIds.map((id) => [id, document.getElementById("key-" + id + "-state")]));
@@ -7257,6 +8453,7 @@ ${apiKeyFieldsHtml()}
       settingInputs.exposeRoutingDetails.checked = !!next.exposeRoutingDetails;
       settingInputs.allowShellTools.checked = !!next.allowShellTools;
       settingInputs.autoStart.checked = !!next.autoStart;
+      settingInputs.automatedModelFeedback.checked = !!next.automatedModelFeedback;
       if (messageText !== undefined) {
         settingsMessage.textContent = messageText || "";
       }
@@ -7296,7 +8493,8 @@ ${apiKeyFieldsHtml()}
         enableLoadBalancing: settingInputs.enableLoadBalancing.checked,
         exposeRoutingDetails: settingInputs.exposeRoutingDetails.checked,
         allowShellTools: settingInputs.allowShellTools.checked,
-        autoStart: settingInputs.autoStart.checked
+        autoStart: settingInputs.autoStart.checked,
+        automatedModelFeedback: settingInputs.automatedModelFeedback.checked
       };
     }
 
@@ -7395,7 +8593,37 @@ ${apiKeyFieldsHtml()}
       if (options.feedbackRequestId && !options.error) {
         turn.item.append(feedbackControls(options.feedbackRequestId));
       }
+      if (options.autoFeedbackEnabled && options.requestId && !options.error) {
+        turn.item.append(autoFeedbackStatusBadge(options.requestId));
+      }
       transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    function autoFeedbackStatusBadge(requestId) {
+      const badge = document.createElement("div");
+      badge.className = "auto-feedback-status";
+      badge.dataset.requestId = requestId;
+      badge.dataset.tone = "info";
+      badge.textContent = "Auto feedback queued";
+      return badge;
+    }
+
+    function updateAutoFeedbackStatus(message) {
+      const requestId = message && message.requestId ? String(message.requestId) : "";
+      const text = message && message.text ? String(message.text) : "";
+      if (text) {
+        status.textContent = text;
+      }
+      if (!requestId) {
+        return;
+      }
+      const badge = Array.from(document.querySelectorAll(".auto-feedback-status"))
+        .find((item) => item.dataset.requestId === requestId);
+      if (!badge) {
+        return;
+      }
+      badge.textContent = text || "Auto feedback updated";
+      badge.dataset.tone = message.tone || "info";
     }
 
     function feedbackControls(agentHubRequestId) {
@@ -8004,15 +9232,21 @@ ${apiKeyFieldsHtml()}
         }
         return;
       }
+      if (message.type === "autoFeedbackStatus") {
+        updateAutoFeedbackStatus(message);
+        return;
+      }
       if (message.type === "chatResponse") {
         const turn = pending.get(message.requestId);
         pending.delete(message.requestId);
         updateSessionModelsFromResponse(message.response);
         finishLiveMessage(turn, message.text, {
+          requestId: message.requestId,
           tools: message.tools || [],
           sources: message.sources || [],
           routingDetails: routingDetailsLines(message.response),
-          feedbackRequestId: message.response && message.response.id
+          feedbackRequestId: message.response && (message.response.id || message.response.request_id),
+          autoFeedbackEnabled: !!message.autoFeedbackEnabled
         });
         setBusy(false);
         status.textContent = "Ready";
@@ -11191,7 +12425,8 @@ function settings() {
     clineCompatibilityMode: config.get("clineCompatibilityMode", true),
     allowShellTools: config.get("allowShellTools", false),
     maxTokens: normalizeOptionalPositiveInteger(config.get("maxTokens", null)),
-    autoStart: config.get("autoStart", true)
+    autoStart: config.get("autoStart", true),
+    automatedModelFeedback: config.get("automatedModelFeedback", false)
   };
 }
 

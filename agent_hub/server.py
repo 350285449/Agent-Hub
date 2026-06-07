@@ -855,6 +855,80 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         avg_cost = optimization.get("average_known_cost_usd")
         avg_cost_label = f"${float(avg_cost):.4f}" if avg_cost is not None else "unknown"
         avg_latency_label = f"{float(optimization.get('average_latency_ms') or 0):.0f} ms"
+        leaderboard = self.server.diagnostics_service.model_leaderboard_body(self.server.router)
+        benchmarks = self.server.diagnostics_service.benchmark_results_body()
+        cost_dashboard = self.server.diagnostics_service.cost_dashboard_body(optimization)
+        leaderboard_summary = leaderboard.get("summary") if isinstance(leaderboard.get("summary"), dict) else {}
+        benchmark_summary = benchmarks.get("summary") if isinstance(benchmarks.get("summary"), dict) else {}
+        coverage = benchmarks.get("coverage_snapshot") if isinstance(benchmarks.get("coverage_snapshot"), dict) else {}
+        coverage_summary = coverage.get("summary") if isinstance(coverage.get("summary"), dict) else {}
+        cost_summary = cost_dashboard.get("summary") if isinstance(cost_dashboard.get("summary"), dict) else {}
+        token_usage = status.get("token_usage") if isinstance(status.get("token_usage"), dict) else {}
+        fallback_history = status.get("fallback_history") if isinstance(status.get("fallback_history"), list) else []
+        permission_blocked = status.get("permission_blocked_actions") if isinstance(status.get("permission_blocked_actions"), list) else []
+        workflow_progress = status.get("workflow_progress") if isinstance(status.get("workflow_progress"), list) else []
+        leaderboard_rows = leaderboard.get("data") if isinstance(leaderboard.get("data"), list) else []
+        measured_samples = int(leaderboard_summary.get("sample_count") or 0)
+        measured_agents = int(leaderboard_summary.get("measured_agent_count") or 0)
+        benchmark_reports = int(benchmark_summary.get("report_count") or 0)
+        pricing_coverage = float(cost_summary.get("pricing_coverage_rate") or 0.0) * 100
+        known_cost = cost_summary.get("known_cost_usd")
+        known_cost_label = f"${float(known_cost):.4f}" if known_cost is not None else avg_cost_label
+        active_model = " / ".join(
+            item
+            for item in (
+                str(status.get("selected_provider") or ""),
+                str(status.get("selected_model") or ""),
+            )
+            if item
+        ) or active
+        router_rows = "".join(
+            "<li class=\"router-row\">"
+            f"<span class=\"rank\">#{_html(row.get('rank') or '')}</span>"
+            "<span>"
+            f"<strong>{_html(row.get('provider') or row.get('agent') or 'provider')} / {_html(row.get('model') or 'model')}</strong>"
+            f"<small>{_html(row.get('measurement_status') or 'baseline')} - {_html(row.get('samples') or 0)} sample(s) - {_html(round(float(row.get('success_rate') or 0) * 100))}% ok</small>"
+            "</span>"
+            f"<em>{_html(round(float(row.get('ranking_score') or row.get('overall_score') or row.get('baseline_score') or 0)))}</em>"
+            "</li>"
+            for row in leaderboard_rows[:6]
+            if isinstance(row, dict)
+        ) or "<li class=\"empty\">No ranked models yet.</li>"
+        incident_items: list[tuple[str, str, str]] = []
+        if not status["active_providers"]:
+            incident_items.append(("error", "No active provider", "Enable a provider, API key, or local model backend."))
+        if fallback_history:
+            incident_items.append(("warn", f"{len(fallback_history)} fallback signal(s)", "Recent routing had to try alternate providers."))
+        if permission_blocked:
+            incident_items.append(("warn", f"{len(permission_blocked)} approval signal(s)", "Recent actions needed approval or were denied."))
+        if not measured_samples and leaderboard_rows:
+            incident_items.append(("warn", "Measurements pending", "Model stats are using configured baselines until live samples arrive."))
+        if not incident_items:
+            incident_items.append(("ok", "No incident signals", "Provider, routing, benchmark, and approval signals look clean."))
+        incident_rows = "".join(
+            f"<li class=\"incident {tone}\"><strong>{_html(title)}</strong><span>{_html(detail)}</span></li>"
+            for tone, title, detail in incident_items[:5]
+        )
+        task_rows = [
+            ("Inbox", str(status.get("routing_history_count") or 0), "routing events"),
+            ("In Progress", str(len(workflow_progress)), "workflow signals"),
+            ("Done", str(token_usage.get("successful_provider_calls") or 0), "provider successes"),
+            ("Blocked", str(len(fallback_history) + len(permission_blocked)), "fallbacks and approvals"),
+        ]
+        task_flow_rows = "".join(
+            f"<li><span>{_html(label)}</span><strong>{_html(value)}</strong><small>{_html(detail)}</small></li>"
+            for label, value, detail in task_rows
+        )
+        audit_rows = [
+            ("Measured agents", f"{measured_agents}/{leaderboard_summary.get('agent_count') or 0}", str(leaderboard_summary.get("data_state") or "baseline")),
+            ("Benchmarks", str(benchmark_reports), str(benchmark_summary.get("data_state") or "baseline")),
+            ("Pricing", f"{pricing_coverage:.0f}%" if pricing_coverage else "--", str(cost_summary.get("measurement_state") or "waiting")),
+            ("Token usage", str(token_usage.get("total_tokens") or 0), "reported tokens"),
+        ]
+        audit_rows_html = "".join(
+            f"<li><span>{_html(label)}</span><strong>{_html(value)}</strong><small>{_html(detail)}</small></li>"
+            for label, value, detail in audit_rows
+        )
         dashboard_groups = [
             (
                 "Operate",
@@ -919,6 +993,11 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             + "</div></section>"
             for title, links in dashboard_groups
         )
+        rail_links = "\n".join(
+            f"<a href=\"{_html(href)}\">{_html(label)}</a>"
+            for _title, links in dashboard_groups
+            for label, href, _detail in links[:3]
+        )
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -926,186 +1005,533 @@ class AgentHubHandler(BaseHTTPRequestHandler):
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Agent Hub</title>
   <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #070a12;
+      --panel: #101722;
+      --panel-2: #151d2a;
+      --card: #111a26;
+      --line: #273244;
+      --soft-line: rgba(148, 163, 184, 0.18);
+      --text: #e5edf8;
+      --muted: #91a0b5;
+      --cyan: #22d3ee;
+      --green: #22c55e;
+      --violet: #8b5cf6;
+      --amber: #f59e0b;
+      --rose: #fb7185;
+      --red: #ef4444;
+      --shadow: 0 22px 60px rgba(0, 0, 0, 0.38);
+    }}
+    * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      color: #e8e8e8;
-      background: #101418;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.5;
+      color: var(--text);
+      background:
+        linear-gradient(180deg, #0b1020 0%, var(--bg) 46%),
+        linear-gradient(135deg, rgba(34, 211, 238, 0.12), transparent 42%),
+        linear-gradient(220deg, rgba(139, 92, 246, 0.14), transparent 50%);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }}
+    body::before {{
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(148, 163, 184, 0.045) 1px, transparent 1px);
+      background-size: 28px 28px;
+      mask-image: linear-gradient(180deg, rgba(0,0,0,.8), transparent 74%);
+    }}
+    a {{ color: inherit; }}
+    code {{
+      padding: 2px 6px;
+      border: 1px solid var(--soft-line);
+      border-radius: 6px;
+      color: #bfdbfe;
+      background: rgba(15, 23, 42, 0.72);
+    }}
+    .app {{
+      position: relative;
+      display: grid;
+      grid-template-columns: 236px minmax(0, 1fr);
+      min-height: 100vh;
+    }}
+    .rail {{
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 16px 14px;
+      border-right: 1px solid var(--soft-line);
+      background: linear-gradient(180deg, rgba(15, 23, 42, 0.94), rgba(2, 6, 23, 0.86));
+      backdrop-filter: blur(16px);
+      overflow: auto;
+    }}
+    .brand {{
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 18px;
+    }}
+    .mark {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      border: 1px solid rgba(34, 211, 238, 0.36);
+      border-radius: 8px;
+      color: var(--cyan);
+      font-weight: 800;
+      background: rgba(34, 211, 238, 0.10);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }}
+    .brand strong,
+    .brand span {{
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .brand strong {{ font-size: 14px; }}
+    .brand span {{ color: var(--muted); font-size: 12px; }}
+    .rail nav {{
+      display: grid;
+      gap: 4px;
+    }}
+    .rail a {{
+      border: 1px solid transparent;
+      border-radius: 7px;
+      padding: 8px 9px;
+      color: #b8c4d8;
+      text-decoration: none;
+      font-size: 13px;
+    }}
+    .rail a:first-child,
+    .rail a:hover {{
+      border-color: rgba(34, 211, 238, 0.24);
+      color: var(--text);
+      background: rgba(34, 211, 238, 0.09);
     }}
     main {{
-      max-width: 1180px;
-      margin: 0 auto;
-      padding: 28px;
+      width: min(1420px, 100%);
+      padding: 18px 22px 36px;
     }}
-    h1 {{
-      margin: 0 0 8px;
-      font-size: 30px;
+    .topline {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 14px;
     }}
-    h2 {{
-      margin: 0 0 12px;
-      font-size: 18px;
+    .crumb {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .status {{
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border: 1px solid rgba(34, 197, 94, 0.34);
+      border-radius: 999px;
+      padding: 5px 10px;
+      color: #bbf7d0;
+      background: rgba(34, 197, 94, 0.10);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .status::before {{
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--green);
+      box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.13);
     }}
     .hero {{
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 16px;
-      align-items: start;
-      margin-bottom: 18px;
+      grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.9fr);
+      gap: 14px;
+      align-items: stretch;
+      margin-bottom: 14px;
     }}
-    .hero p {{
+    .hero-card,
+    .panel,
+    .metric,
+    .nav-card {{
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      background: linear-gradient(180deg, rgba(21, 29, 42, 0.94), rgba(10, 15, 24, 0.92));
+      box-shadow: var(--shadow), inset 0 1px 0 rgba(255,255,255,.055);
+    }}
+    .hero-card {{
+      position: relative;
+      overflow: hidden;
+      padding: 20px;
+      border-color: rgba(34, 211, 238, 0.28);
+    }}
+    .hero-card::before {{
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--cyan), var(--violet), transparent);
+    }}
+    .eyebrow {{
+      margin: 0 0 7px;
+      color: var(--cyan);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }}
+    h1 {{
       margin: 0;
-      color: #b8c0cc;
+      font-size: 42px;
+      line-height: 0.98;
     }}
-    .status {{
-      display: inline-block;
-      padding: 4px 9px;
-      border-radius: 999px;
-      color: #122313;
-      background: #8ee99a;
-      font-weight: 600;
+    .hero-card p {{
+      max-width: 720px;
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 14px;
     }}
-    dl {{
+    .hero-meta {{
       display: grid;
-      grid-template-columns: 150px 1fr;
-      gap: 8px 14px;
-      margin: 20px 0;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 18px;
     }}
-    dt {{
-      color: #aaa;
+    .mini {{
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      padding: 9px;
+      background: rgba(15, 23, 42, 0.58);
     }}
-    dd {{
+    .mini span,
+    .mini strong {{
+      display: block;
+      overflow-wrap: anywhere;
+    }}
+    .mini span {{ color: var(--muted); font-size: 11px; }}
+    .mini strong {{ margin-top: 3px; font-size: 13px; }}
+    .metrics {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }}
+    .metric {{
+      position: relative;
+      min-height: 118px;
+      padding: 14px;
+      overflow: hidden;
+    }}
+    .metric::after {{
+      content: "";
+      position: absolute;
+      inset: auto 12px 10px 12px;
+      height: 2px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--cyan), transparent);
+      opacity: .7;
+    }}
+    .metric:nth-child(2)::after {{ background: linear-gradient(90deg, var(--violet), transparent); }}
+    .metric:nth-child(3)::after {{ background: linear-gradient(90deg, var(--green), transparent); }}
+    .metric:nth-child(4)::after {{ background: linear-gradient(90deg, var(--amber), transparent); }}
+    .metric span {{
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }}
+    .metric strong {{
+      display: block;
+      margin-top: 8px;
+      font-size: 24px;
+      line-height: 1.05;
+      overflow-wrap: anywhere;
+    }}
+    .metric small {{
+      display: block;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .control-grid {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(260px, .85fr);
+      gap: 14px;
+      margin: 14px 0;
+    }}
+    .panel {{
+      padding: 14px;
+      overflow: hidden;
+    }}
+    .panel h2 {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 12px;
+      font-size: 15px;
+    }}
+    .panel h2::before {{
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--cyan);
+      box-shadow: 0 0 0 4px rgba(34, 211, 238, .12);
+    }}
+    .router-list,
+    .incident-list,
+    .flow-list {{
+      display: grid;
+      gap: 8px;
       margin: 0;
+      padding: 0;
+      list-style: none;
     }}
+    .router-row {{
+      display: grid;
+      grid-template-columns: auto minmax(0,1fr) auto;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      padding: 10px;
+      background: rgba(15, 23, 42, 0.62);
+    }}
+    .rank {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 34px;
+      height: 28px;
+      border: 1px solid rgba(34, 211, 238, .28);
+      border-radius: 999px;
+      color: var(--cyan);
+      font-size: 12px;
+      background: rgba(34, 211, 238, .08);
+    }}
+    .router-row strong,
+    .router-row small {{
+      display: block;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }}
+    .router-row small {{
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .router-row em {{
+      color: #bbf7d0;
+      font-style: normal;
+      font-weight: 800;
+    }}
+    .incident {{
+      border-left: 3px solid var(--cyan);
+      border-radius: 8px;
+      padding: 10px 10px 10px 12px;
+      background: rgba(15, 23, 42, .62);
+    }}
+    .incident.warn {{ border-left-color: var(--amber); }}
+    .incident.error {{ border-left-color: var(--red); }}
+    .incident.ok {{ border-left-color: var(--green); }}
+    .incident strong,
+    .incident span {{
+      display: block;
+    }}
+    .incident span {{
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .flow-list {{
+      grid-template-columns: repeat(2, minmax(0,1fr));
+    }}
+    .control-grid .panel:first-child .flow-list {{
+      grid-template-columns: repeat(4, minmax(0,1fr));
+    }}
+    .flow-list li {{
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      padding: 10px;
+      background: rgba(15, 23, 42, .60);
+    }}
+    .flow-list span,
+    .flow-list strong,
+    .flow-list small {{
+      display: block;
+      overflow-wrap: anywhere;
+    }}
+    .flow-list span {{ color: var(--muted); font-size: 11px; }}
+    .flow-list strong {{ margin-top: 4px; font-size: 21px; }}
+    .flow-list small {{ margin-top: 3px; color: var(--muted); font-size: 11px; }}
     table {{
       width: 100%;
       border-collapse: collapse;
-      margin: 18px 0;
+      overflow: hidden;
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      background: rgba(15, 23, 42, .68);
+    }}
+    .table-wrap {{
+      width: 100%;
+      overflow-x: auto;
+      border-radius: 8px;
     }}
     th, td {{
-      padding: 8px 6px;
-      border-bottom: 1px solid #303030;
+      padding: 10px 9px;
+      border-bottom: 1px solid var(--soft-line);
       text-align: left;
-      font-size: 14px;
-    }}
-    a {{
-      color: #8ab4ff;
-    }}
-    code {{
-      padding: 2px 5px;
-      border-radius: 4px;
-      background: #252525;
-    }}
-    .cards {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 10px;
-      margin: 18px 0;
-    }}
-    .card {{
-      border: 1px solid #303030;
-      border-radius: 8px;
-      padding: 12px;
-      background: #1d1d1d;
-    }}
-    .card strong {{
-      display: block;
-      font-size: 22px;
-    }}
-    .card span {{
-      color: #aaa;
       font-size: 13px;
+      vertical-align: top;
     }}
-    .nav-section {{
-      margin: 24px 0;
+    th {{
+      color: #cbd5e1;
+      background: rgba(30, 41, 59, .74);
+      font-weight: 700;
     }}
+    .nav-section {{ margin: 18px 0; }}
     .dashboard-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 12px;
+      gap: 10px;
     }}
     .nav-card {{
       display: block;
-      min-height: 72px;
-      border: 1px solid #303844;
-      border-radius: 10px;
-      padding: 14px;
-      background: #171d24;
+      min-height: 76px;
+      padding: 13px;
+      color: inherit;
       text-decoration: none;
+      box-shadow: none;
     }}
     .nav-card strong,
-    .nav-card span {{
-      display: block;
-    }}
-    .nav-card strong {{
-      color: #e8e8e8;
-      font-size: 15px;
-    }}
-    .nav-card span {{
-      color: #a8b3c2;
-      margin-top: 5px;
-      font-size: 13px;
-    }}
+    .nav-card span {{ display: block; }}
+    .nav-card strong {{ font-size: 14px; }}
+    .nav-card span {{ margin-top: 5px; color: var(--muted); font-size: 12px; }}
     .nav-card:hover {{
-      border-color: #8ab4ff;
-      background: #1b2633;
+      border-color: rgba(34, 211, 238, .42);
+      background: rgba(21, 29, 42, .98);
+    }}
+    .empty {{
+      border: 1px dashed var(--soft-line);
+      border-radius: 8px;
+      padding: 12px;
+      color: var(--muted);
+      background: rgba(15, 23, 42, .42);
     }}
     .json-links {{
-      margin-top: 28px;
-      color: #a8b3c2;
+      margin-top: 20px;
+      color: var(--muted);
       font-size: 13px;
+    }}
+    .json-links a {{
+      color: #93c5fd;
+      text-decoration: none;
+    }}
+    @media (max-width: 980px) {{
+      .app {{ grid-template-columns: 1fr; }}
+      .rail {{ position: relative; height: auto; }}
+      .hero,
+      .control-grid {{ grid-template-columns: 1fr; }}
+      .control-grid .panel:first-child .flow-list,
+      .flow-list {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    }}
+    @media (max-width: 560px) {{
+      main {{ padding: 14px; }}
+      h1 {{ font-size: 34px; }}
+      .metrics,
+      .hero-meta,
+      .control-grid .panel:first-child .flow-list,
+      .flow-list {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
 <body>
-  <main>
-    <div class="hero">
-      <div>
-        <h1>Agent Hub</h1>
-        <p>Local-first routing, provider health, workspace intelligence, cost tracking, and automation controls.</p>
+  <div class="app">
+    <aside class="rail">
+      <div class="brand">
+        <div class="mark">AH</div>
+        <div>
+          <strong>Agent Hub</strong>
+          <span>v{_html(BACKEND_VERSION)}</span>
+        </div>
       </div>
-      <div class="status">Running</div>
-    </div>
-    <dl>
-      <dt>Version</dt><dd>{BACKEND_VERSION}</dd>
-      <dt>Config hash</dt><dd><code>{config_runtime_hash(config)}</code></dd>
-      <dt>Workspace</dt><dd><code>{config.workspace_dir}</code></dd>
-      <dt>Shell tools</dt><dd>{str(config.allow_shell_tools).lower()}</dd>
-      <dt>Tool loop</dt><dd>{str(config.tool_loop_enabled).lower()} / max {config.max_tool_iterations}</dd>
-      <dt>Repo context</dt><dd>{str(config.repo_context_enabled).lower()} / {config.repo_context_max_files} files</dd>
-      <dt>Free only</dt><dd>{str(config.free_only).lower()}</dd>
-      <dt>Patch preference</dt><dd>{str(config.prefer_multi_file_patches).lower()}</dd>
-      <dt>Context bar</dt><dd>{config.context_change_bar_mode} / threshold {config.context_change_bar_threshold} / enabled {str(config.context_change_bar_enabled).lower()}</dd>
-      <dt>Agents</dt><dd>{agents}</dd>
-      <dt>Active</dt><dd>{active}</dd>
-    </dl>
-    <section>
-      <h2>Optimization</h2>
-      <div class="cards">
-        <div class="card"><strong>{_html(readiness_label)}</strong><span>readiness: {_html(readiness_state)}</span></div>
-        <div class="card"><strong>{_html(next_step_label)}</strong><span>next setup step</span></div>
-        <div class="card"><strong>{_html(workflow_label)}</strong><span>workflow success</span></div>
-        <div class="card"><strong>{_html(best_model_label)}</strong><span>best learned model</span></div>
-        <div class="card"><strong>{_html(avg_latency_label)}</strong><span>average latency</span></div>
-        <div class="card"><strong>{_html(avg_cost_label)}</strong><span>average known cost</span></div>
+      <nav>
+        <a href="/dashboard">Overview</a>
+        {rail_links}
+      </nav>
+    </aside>
+    <main>
+      <div class="topline">
+        <div class="crumb">Overview / Gateway Control Plane</div>
+        <div class="status">Running</div>
       </div>
-    </section>
-    <table>
-      <thead><tr><th>Provider</th><th>Model</th><th>Health</th><th>Score</th><th>Latency</th><th>Tools</th></tr></thead>
-      <tbody>
-        {''.join(_provider_row_html(row) for row in status["providers"][:12])}
-      </tbody>
-    </table>
-    {dashboard_sections}
-    <p class="json-links">
-      Raw APIs:
-      <a href="/v1/status">status</a> |
-      <a href="/health">health</a> |
-      <a href="/v1/models">models</a> |
-      <a href="/v1/optimization">optimization</a> |
-      <a href="/v1/events">events</a>
-    </p>
-  </main>
+      <section class="hero">
+        <div class="hero-card">
+          <div class="eyebrow">Gateway Control Plane</div>
+          <h1>Agent Hub</h1>
+          <p>Provider routing, model quality, cost posture, workflow activity, and security signals in one operator view.</p>
+          <div class="hero-meta">
+            <div class="mini"><span>Workspace</span><strong>{_html(config.workspace_dir)}</strong></div>
+            <div class="mini"><span>Config Hash</span><strong><code>{config_runtime_hash(config)}</code></strong></div>
+            <div class="mini"><span>Agents</span><strong>{_html(agents)}</strong></div>
+            <div class="mini"><span>Active</span><strong>{_html(active_model)}</strong></div>
+          </div>
+        </div>
+        <div class="metrics">
+          <div class="metric"><span>Readiness</span><strong>{_html(readiness_label)}</strong><small>{_html(readiness_state)}</small></div>
+          <div class="metric"><span>Model Samples</span><strong>{_html(measured_samples)}</strong><small>{_html(measured_agents)} measured agent(s)</small></div>
+          <div class="metric"><span>Benchmarks</span><strong>{_html(benchmark_reports)}</strong><small>{_html(coverage_summary.get('average_readiness_score') or '--')} avg readiness</small></div>
+          <div class="metric"><span>Cost Signal</span><strong>{_html(known_cost_label)}</strong><small>{pricing_coverage:.0f}% pricing coverage</small></div>
+        </div>
+      </section>
+      <section class="control-grid">
+        <div class="panel">
+          <h2>Session Router</h2>
+          <ul class="router-list">{router_rows}</ul>
+        </div>
+        <div class="panel">
+          <h2>Incident Stream</h2>
+          <ul class="incident-list">{incident_rows}</ul>
+        </div>
+      </section>
+      <section class="control-grid">
+        <div class="panel">
+          <h2>Task Flow</h2>
+          <ul class="flow-list">{task_flow_rows}</ul>
+        </div>
+        <div class="panel">
+          <h2>Security + Audit</h2>
+          <ul class="flow-list">{audit_rows_html}</ul>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Provider Health</h2>
+        <div class="table-wrap">
+        <table>
+          <thead><tr><th>Provider</th><th>Model</th><th>Health</th><th>Score</th><th>Latency</th><th>Tools</th></tr></thead>
+          <tbody>{''.join(_provider_row_html(row) for row in status["providers"][:12])}</tbody>
+        </table>
+        </div>
+      </section>
+      {dashboard_sections}
+      <p class="json-links">
+        Raw APIs:
+        <a href="/v1/status">status</a> |
+        <a href="/health">health</a> |
+        <a href="/v1/models">models</a> |
+        <a href="/v1/optimization">optimization</a> |
+        <a href="/v1/events">events</a>
+      </p>
+    </main>
+  </div>
 </body>
 </html>"""
 

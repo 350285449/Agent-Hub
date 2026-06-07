@@ -111,7 +111,9 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
 
         headings = [
-            "<h2>Ask anything</h2>",
+            "<h2>Command Center</h2>",
+            "<h2>Model Stats</h2>",
+            "<h2>Orchestration</h2>",
             "<h2>Health</h2>",
             "<h2>Setup</h2>",
             "<h2>Permissions</h2>",
@@ -263,6 +265,18 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("null", setting["type"])
         self.assertIn("applyOptionalMaxTokens", source)
         self.assertNotIn("max_tokens: config.maxTokens", source)
+
+    def test_automated_model_feedback_toggle_is_exposed(self) -> None:
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        setting = package["contributes"]["configuration"]["properties"]["agentHub.automatedModelFeedback"]
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertFalse(setting["default"])
+        self.assertIn('id="autoFeedbackToggle"', source)
+        self.assertIn('"toggleAutomatedFeedback"', source)
+        self.assertIn("autoSubmitModelFeedback", source)
+        self.assertIn("/v1/feedback", source)
+        self.assertIn("agent-hub-research", source)
 
     def test_chat_settings_include_max_token_save_button(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")

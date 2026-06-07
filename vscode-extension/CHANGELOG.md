@@ -1,5 +1,12 @@
 # Changelog
 
+## 9.2.0
+
+- Redesigns the Agent Hub sidebar and browser dashboard into a denser command-center UI with richer model, routing, health, audit, and workflow surfaces.
+- Adds automated model feedback controls that can ask a judge model to score successful chat responses.
+- Adds a model-stats board with gateway, selection, sample, benchmark, cost, and system health signals.
+- Refreshes release metadata and package artifacts for the `9.2.0` VSIX.
+
 ## 0.9.2
 
 - Upgrades the VS Code sidebar and chat webviews with a more polished agent-workspace visual system.
