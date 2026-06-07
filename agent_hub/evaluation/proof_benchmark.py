@@ -70,7 +70,7 @@ class BenchmarkProofRunner:
         )
         paths = write_benchmark_report(
             report,
-            output_dir=output_dir or _workspace_path(self.config, DEFAULT_REPORT_DIR),
+            output_dir=output_dir or _state_path(self.config, DEFAULT_REPORT_DIR),
         )
         report["report_paths"] = {"json": str(paths.json), "markdown": str(paths.markdown)}
         return report
@@ -338,6 +338,13 @@ def _workspace_path(config: HubConfig, name: str) -> Path:
     root = Path(config.workspace_dir)
     if not root.is_absolute():
         root = Path.cwd() / root
+    return root / name
+
+
+def _state_path(config: HubConfig, name: str) -> Path:
+    root = Path(config.state_dir)
+    if not root.is_absolute():
+        root = _workspace_path(config, str(root))
     return root / name
 
 

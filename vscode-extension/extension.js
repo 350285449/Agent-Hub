@@ -56,6 +56,10 @@ const OLLAMA_DOWNLOAD_URL = "https://ollama.com/download";
 const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
 const PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/";
 const NODE_DOWNLOAD_URL = "https://nodejs.org/en/download";
+const README_PROOF_URL = "https://github.com/350285449/Agent-Hub#proof-you-can-run-locally";
+const FIRST_RUN_PROOF_VERSION_KEY = "agentHub.firstRunProofPromptedVersion";
+const PERSONAL_BENCHMARK_LIMIT = 50;
+const PERSONAL_BENCHMARK_PROMPT = "Fix a failing pytest in a repository service layer, update the regression test, and explain why the route was selected.";
 const PYTHON_WINGET_ID = "Python.Python.3.12";
 const NODE_WINGET_ID = "OpenJS.NodeJS.LTS";
 const CODEX_CLI_AGENT_NAME = "codex-cli";
@@ -447,8 +451,12 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.openModelLeaderboard", () => openAgentHubDashboard("/dashboard/model-leaderboard")),
     vscode.commands.registerCommand("agentHub.openCostDashboard", () => openAgentHubDashboard("/dashboard/costs")),
     vscode.commands.registerCommand("agentHub.openBenchmarkResults", () => openAgentHubDashboard("/dashboard/benchmarks")),
+    vscode.commands.registerCommand("agentHub.runPersonalBenchmark", () => runPersonalBenchmark()),
+    vscode.commands.registerCommand("agentHub.explainRoute", () => explainRouteCommand()),
+    vscode.commands.registerCommand("agentHub.openReadmeProof", openReadmeProofSection),
     vscode.commands.registerCommand("agentHub.openOutput", () => output.show())
   );
+  scheduleFirstRunProofPrompt(context);
 }
 
 async function openAgentHubDashboard(pathname) {
@@ -552,6 +560,19 @@ class AgentHubSidebarProvider {
     }
     if (message.type === "openDashboard") {
       await openAgentHubDashboard("/dashboard");
+      return;
+    }
+    if (message.type === "runPersonalBenchmark") {
+      await runPersonalBenchmark();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "explainRoute") {
+      await explainRouteCommand();
+      return;
+    }
+    if (message.type === "openReadmeProof") {
+      await openReadmeProofSection();
       return;
     }
     if (message.type === "askAgent") {

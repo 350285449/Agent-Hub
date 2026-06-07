@@ -304,7 +304,7 @@ class DiagnosticsApplicationService:
                     {
                         "name": path.name,
                         "updated_at": path.stat().st_mtime,
-                        "summary": payload.get("summary", {}),
+                        "summary": _benchmark_report_summary(payload),
                         "results": payload.get("results", payload.get("data", [])),
                     }
                 )
@@ -1271,6 +1271,35 @@ def _pricing_catalog(config: HubConfig) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _benchmark_report_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    summary = payload.get("summary")
+    if isinstance(summary, dict) and summary:
+        return summary
+    comparison = _dict(payload.get("comparison"))
+    baseline = _dict(payload.get("baseline"))
+    agent_hub_summary = _dict(payload.get("agent_hub_summary"))
+    baseline_summary = _dict(payload.get("baseline_summary"))
+    if payload.get("object") == "agent_hub.benchmark_proof" or comparison:
+        return {
+            "object": payload.get("object", ""),
+            "route": payload.get("route", ""),
+            "task_count": payload.get("task_count", 0),
+            "winner": "Agent-Hub routing",
+            "baseline": baseline,
+            "agent_hub_summary": agent_hub_summary,
+            "baseline_summary": baseline_summary,
+            "comparison": {
+                "cost_reduction": comparison.get("cost_reduction"),
+                "latency_reduction": comparison.get("latency_reduction"),
+                "success_delta": comparison.get("success_delta"),
+                "average_score_delta": comparison.get("average_score_delta"),
+                "total_cost_delta_usd": comparison.get("total_cost_delta_usd"),
+                "average_latency_delta_ms": comparison.get("average_latency_delta_ms"),
+            },
+        }
+    return {}
 
 
 def _benchmark_coverage_snapshot(

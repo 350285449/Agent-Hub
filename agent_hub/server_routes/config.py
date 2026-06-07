@@ -1351,7 +1351,14 @@ def _benchmark_report_row_html(row: dict[str, Any]) -> str:
     winner = comparison.get("winner") or summary.get("winner") or "unknown"
     results = row.get("results") if isinstance(row.get("results"), list) else []
     detail = []
-    for key in ("success_rate_delta", "average_score_delta", "cost_savings_usd"):
+    for key in (
+        "cost_reduction",
+        "latency_reduction",
+        "success_delta",
+        "success_rate_delta",
+        "average_score_delta",
+        "cost_savings_usd",
+    ):
         if key in comparison:
             detail.append(f"{key}: {comparison[key]}")
     return (
