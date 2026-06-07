@@ -2,6 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+sh "$ROOT/scripts/check-requirements.sh" --include-extension
 if ! command -v node >/dev/null 2>&1; then
   echo "Node.js 20 or newer is required to package and install the VS Code extension." >&2
   exit 1

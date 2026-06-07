@@ -1,8 +1,10 @@
 # Changelog
 
-## 9.1.0
+## 0.9.2
 
 - Upgrades the VS Code sidebar and chat webviews with a more polished agent-workspace visual system.
+- Adds state-aware setup, provider, permission, model, and activity visuals for faster scanning.
+- Adds requirement checks and setup-row install buttons for missing Python, Node.js/npm, Codex CLI, and Ollama.
 - Syncs extension and backend release metadata for the next package.
 - Adds install verification, packaging checks, and command-runner hardening.
 

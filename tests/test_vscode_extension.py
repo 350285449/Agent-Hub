@@ -43,6 +43,9 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(commands["agentHub.installCodexCli"], "Agent Hub: Install Codex CLI")
         self.assertEqual(commands["agentHub.installOllamaDesktop"], "Agent Hub: Install Ollama Desktop")
         self.assertEqual(commands["agentHub.checkHealth"], "Agent Hub: Check Health")
+        self.assertEqual(commands["agentHub.checkRequirements"], "Agent Hub: Check Requirements")
+        self.assertEqual(commands["agentHub.installPython"], "Agent Hub: Install Python")
+        self.assertEqual(commands["agentHub.installNode"], "Agent Hub: Install Node.js")
         self.assertEqual(commands["agentHub.generateCommitMessage"], "Agent Hub: Generate Commit Message")
         self.assertEqual(commands["agentHub.copyClineConfig"], "Agent Hub: Copy Cline Config")
         self.assertEqual(commands["agentHub.testClineConnection"], "Agent Hub: Test Cline Connection")
@@ -128,6 +131,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('id="routingReasonList"', source)
         self.assertIn('id="heroReadiness"', source)
         self.assertIn('id="quickDashboard"', source)
+        self.assertIn('id="checkRequirements"', source)
         self.assertIn("function sidebarRoutingExplanation", source)
         self.assertIn("function renderRoutingIntelligence", source)
         self.assertIn("function readinessText", source)
@@ -302,6 +306,9 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("onCommand:agentHub.enableTokenSafeMode", package["activationEvents"])
         self.assertIn("onCommand:agentHub.enableCodexCliMode", package["activationEvents"])
         self.assertIn("onCommand:agentHub.installCodexCli", package["activationEvents"])
+        self.assertIn("onCommand:agentHub.checkRequirements", package["activationEvents"])
+        self.assertIn("onCommand:agentHub.installPython", package["activationEvents"])
+        self.assertIn("onCommand:agentHub.installNode", package["activationEvents"])
         self.assertIn("token-safe", json.dumps(package["contributes"]["chatParticipants"]))
         self.assertIn("codex-cli", json.dumps(package["contributes"]["chatParticipants"]))
         self.assertIn("MAX_TOKEN_SAVE_OUTPUT_TOKENS", source)
@@ -427,6 +434,22 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("/debug/request", source)
         self.assertIn("env.AGENT_HUB_API_TOKEN = config.apiToken", source)
         self.assertIn("config.approvalToken || runtimeApprovalToken", source)
+
+    def test_fresh_machine_requirement_helpers_are_exposed(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+
+        self.assertTrue((ROOT / "scripts" / "check-requirements.ps1").exists())
+        self.assertTrue((ROOT / "scripts" / "check-requirements.sh").exists())
+        self.assertIn("onCommand:agentHub.checkRequirements", package["activationEvents"])
+        self.assertIn("function checkRequirementsCommand", source)
+        self.assertIn("function installPythonCommand", source)
+        self.assertIn("function installNodeCommand", source)
+        self.assertIn("function setupRequirementRows", source)
+        self.assertIn('"installPython"', source)
+        self.assertIn('"installNode"', source)
+        self.assertIn("PYTHON_DOWNLOAD_URL", source)
+        self.assertIn("NODE_DOWNLOAD_URL", source)
 
 
 if __name__ == "__main__":

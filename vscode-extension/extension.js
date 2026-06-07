@@ -54,6 +54,10 @@ const CODEX_CLI_NPM_PACKAGE = "@openai/codex@latest";
 const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const OLLAMA_DOWNLOAD_URL = "https://ollama.com/download";
 const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
+const PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/";
+const NODE_DOWNLOAD_URL = "https://nodejs.org/en/download";
+const PYTHON_WINGET_ID = "Python.Python.3.12";
+const NODE_WINGET_ID = "OpenJS.NodeJS.LTS";
 const CODEX_CLI_AGENT_NAME = "codex-cli";
 const HOSTED_CLOUD_AGENT_NAMES = ["codex", "claude", "gemini", "chatgpt"];
 const FREE_CLOUD_AGENT_NAMES = [
@@ -419,6 +423,9 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.checkHealth", checkHealth),
     vscode.commands.registerCommand("agentHub.openDashboard", () => openAgentHubDashboard("/dashboard")),
     vscode.commands.registerCommand("agentHub.openSettings", openAgentHubSettings),
+    vscode.commands.registerCommand("agentHub.checkRequirements", checkRequirementsCommand),
+    vscode.commands.registerCommand("agentHub.installPython", installPythonCommand),
+    vscode.commands.registerCommand("agentHub.installNode", installNodeCommand),
     vscode.commands.registerCommand("agentHub.enableTokenSafeMode", enableTokenSafeModeCommand),
     vscode.commands.registerCommand("agentHub.enableCodexCliMode", enableCodexCliModeCommand),
     vscode.commands.registerCommand("agentHub.installCodexCli", installCodexCliCommand),
@@ -556,6 +563,21 @@ class AgentHubSidebarProvider {
     }
     if (message.type === "openSettings") {
       await openAgentHubSettings();
+      return;
+    }
+    if (message.type === "checkRequirements") {
+      await checkRequirementsCommand();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "installPython") {
+      await installPythonCommand();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "installNode") {
+      await installNodeCommand();
+      await this.refresh();
       return;
     }
     if (message.type === "copyClineConfig") {
@@ -1611,6 +1633,10 @@ async function sidebarOnboardingState(config, health) {
   const localStatus = await sidebarLocalServerStatus();
   const localModelsReady = localStatus.some((row) => row.ok);
   const python = await detectPythonForOnboarding(config, workspace);
+  const node = await nodeRuntimeStatus();
+  const npm = await npmRuntimeStatus();
+  const codex = await codexCliStatus();
+  const ollama = await ollamaDesktopStatus();
   const providers = health && Array.isArray(health.agents) ? health.agents.length : 0;
   const providerReady = providers > 0 || availableKeys > 0 || localModelsReady;
   const workspaceProfile = await sidebarWorkspaceProfile(config, health);
@@ -1631,6 +1657,8 @@ async function sidebarOnboardingState(config, health) {
       label: "Python",
       ok: python.ok,
       detail: python.detail,
+      actionType: python.ok ? "" : "installPython",
+      actionLabel: "Install",
       setupRequired: true
     },
     {
@@ -1647,7 +1675,38 @@ async function sidebarOnboardingState(config, health) {
         : availableKeys > 0
           ? `${savedKeys} saved key(s), ${envKeys} env key(s)`
           : "save a key or start a local model",
+      actionType: providerReady ? "" : "installOllamaDesktop",
+      actionLabel: "Install Ollama",
       setupRequired: true
+    },
+    {
+      label: "Node.js",
+      ok: node.ok,
+      detail: node.detail,
+      optional: true,
+      actionType: node.ok ? "" : "installNode",
+      actionLabel: "Install",
+      setupRequired: false
+    },
+    {
+      label: "npm",
+      ok: npm.ok,
+      detail: npm.detail,
+      optional: true,
+      actionType: npm.ok ? "" : "installNode",
+      actionLabel: "Install Node",
+      setupRequired: false
+    },
+    {
+      label: "Codex CLI",
+      ok: codex.installed,
+      detail: codex.installed
+        ? (codex.version || "installed")
+        : "optional no-key routing helper",
+      optional: true,
+      actionType: codex.installed ? "" : "installCodexCli",
+      actionLabel: "Install",
+      setupRequired: false
     },
     {
       label: "Provider keys",
@@ -1675,6 +1734,8 @@ async function sidebarOnboardingState(config, health) {
       ok: localModelsReady,
       detail: localStatus.map((row) => `${row.name}: ${row.ok ? "running" : "offline"}`).join(" / "),
       optional: true,
+      actionType: localModelsReady || ollama.installed ? "" : "installOllamaDesktop",
+      actionLabel: "Install Ollama",
       setupRequired: false
     },
     {
@@ -1682,6 +1743,8 @@ async function sidebarOnboardingState(config, health) {
       ok: health && health.running === true,
       detail: health && health.running ? `running at ${config.serverUrl}` : "click Start Agent Hub",
       action: true,
+      actionType: health && health.running ? "" : "startServer",
+      actionLabel: "Start",
       setupRequired: false
     }
   ];
@@ -1814,6 +1877,15 @@ function sidebarHtml(webview, logoPath) {
       box-shadow: var(--shadow);
     }
 
+    details.panel {
+      transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+    }
+
+    details.panel[open] {
+      border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+      background: color-mix(in srgb, var(--panel) 96%, var(--accent) 4%);
+    }
+
     header {
       display: flex;
       align-items: center;
@@ -1868,16 +1940,60 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .health-card {
+      position: relative;
       display: flex;
       align-items: baseline;
       justify-content: flex-end;
       gap: 5px;
       min-width: 0;
       color: var(--app-fg);
-      border: 1px solid color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+      border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--subtle-border));
       border-radius: 8px;
       padding: 6px 8px;
+      background: var(--accent-soft);
+    }
+
+    .health-card::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+
+    .health-card[data-state="Running"],
+    .health-card[data-state="Ready"] {
+      border-color: color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
       background: var(--ok-soft);
+    }
+
+    .health-card[data-state="Running"]::before,
+    .health-card[data-state="Ready"]::before {
+      background: var(--ok);
+      box-shadow: 0 0 0 3px var(--ok-soft);
+    }
+
+    .health-card[data-state="Starting"] {
+      border-color: color-mix(in srgb, var(--warn) 42%, var(--subtle-border));
+      background: var(--warn-soft);
+    }
+
+    .health-card[data-state="Starting"]::before {
+      background: var(--warn);
+      box-shadow: 0 0 0 3px var(--warn-soft);
+    }
+
+    .health-card[data-state="Error"],
+    .health-card[data-state="Stopped"] {
+      border-color: color-mix(in srgb, var(--error) 42%, var(--subtle-border));
+      background: var(--error-soft);
+    }
+
+    .health-card[data-state="Error"]::before,
+    .health-card[data-state="Stopped"]::before {
+      background: var(--error);
+      box-shadow: 0 0 0 3px var(--error-soft);
     }
 
     .health-label {
@@ -1902,6 +2018,7 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .state-pill {
+      position: relative;
       display: inline-flex;
       flex-direction: column;
       gap: 2px;
@@ -1911,6 +2028,17 @@ function sidebarHtml(webview, logoPath) {
       border-radius: 8px;
       padding: 7px;
       background: color-mix(in srgb, var(--card) 76%, transparent);
+    }
+
+    .state-pill::before {
+      content: "";
+      position: absolute;
+      inset: 7px 7px auto auto;
+      width: 5px;
+      height: 5px;
+      border-radius: 999px;
+      background: var(--accent);
+      opacity: 0.72;
     }
 
     .state-pill span {
@@ -2216,6 +2344,21 @@ function sidebarHtml(webview, logoPath) {
         linear-gradient(135deg, color-mix(in srgb, var(--accent) 17%, var(--card)), color-mix(in srgb, var(--ok) 12%, var(--card)));
     }
 
+    .stat-card[data-tone="ok"] {
+      border-color: color-mix(in srgb, var(--ok) 34%, var(--subtle-border));
+      background: color-mix(in srgb, var(--ok) 8%, var(--card));
+    }
+
+    .stat-card[data-tone="warn"] {
+      border-color: color-mix(in srgb, var(--warn) 34%, var(--subtle-border));
+      background: color-mix(in srgb, var(--warn) 8%, var(--card));
+    }
+
+    .stat-card[data-tone="error"] {
+      border-color: color-mix(in srgb, var(--error) 34%, var(--subtle-border));
+      background: color-mix(in srgb, var(--error) 8%, var(--card));
+    }
+
     .stat-value {
       font-size: 19px;
       font-weight: 700;
@@ -2320,6 +2463,10 @@ function sidebarHtml(webview, logoPath) {
       min-width: 18px;
       color: var(--muted);
       text-align: right;
+      border: 1px solid var(--subtle-border);
+      border-radius: 999px;
+      padding: 0 5px;
+      background: color-mix(in srgb, var(--card) 70%, transparent);
     }
 
     details.panel[open] > summary.section-head::after {
@@ -2327,16 +2474,27 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .status {
+      position: relative;
       display: inline-flex;
       align-items: center;
       min-width: auto;
       justify-content: center;
+      gap: 5px;
       border: 1px solid var(--subtle-border);
       border-radius: 999px;
       padding: 3px 8px;
       font-size: 11px;
       color: var(--muted);
       background: color-mix(in srgb, var(--card) 72%, transparent);
+    }
+
+    .status::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: currentColor;
+      opacity: 0.82;
     }
 
     .status[data-state="Running"] {
@@ -2401,6 +2559,12 @@ function sidebarHtml(webview, logoPath) {
       padding: 8px 9px;
       background: color-mix(in srgb, var(--secondary) 78%, var(--card));
       box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 8%, transparent);
+    }
+
+    .command-button:hover {
+      box-shadow:
+        inset 0 1px 0 color-mix(in srgb, var(--app-fg) 10%, transparent),
+        0 8px 18px color-mix(in srgb, var(--accent) 14%, transparent);
     }
 
     .command-button::after {
@@ -2472,8 +2636,15 @@ function sidebarHtml(webview, logoPath) {
         inset 0 1px 0 color-mix(in srgb, #ffffff 18%, transparent);
     }
 
+    .hero-server-action:hover {
+      box-shadow:
+        0 12px 26px color-mix(in srgb, var(--button) 30%, transparent),
+        inset 0 1px 0 color-mix(in srgb, #ffffff 20%, transparent);
+    }
+
     .hero-server-action[data-state="Running"] {
       color: #ffffff;
+      background: var(--ok);
       background: linear-gradient(135deg, var(--ok), color-mix(in srgb, var(--ok) 70%, var(--accent)));
       box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 40%, transparent);
     }
@@ -2587,6 +2758,7 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .row {
+      position: relative;
       display: grid;
       gap: 2px;
       padding: 8px 9px;
@@ -2594,6 +2766,94 @@ function sidebarHtml(webview, logoPath) {
       border-radius: 8px;
       background: color-mix(in srgb, var(--card) 86%, transparent);
       box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 7%, transparent);
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+    }
+
+    .row::before {
+      content: "";
+      position: absolute;
+      inset: 9px auto auto 0;
+      width: 3px;
+      height: calc(100% - 18px);
+      min-height: 14px;
+      border-radius: 0 999px 999px 0;
+      background: var(--accent);
+      opacity: 0.78;
+    }
+
+    .row:hover {
+      border-color: color-mix(in srgb, var(--accent) 34%, var(--subtle-border));
+      background: color-mix(in srgb, var(--card) 91%, var(--accent) 9%);
+      transform: translateY(-1px);
+    }
+
+    .row[data-tone="ok"] {
+      border-color: color-mix(in srgb, var(--ok) 34%, var(--subtle-border));
+      background: color-mix(in srgb, var(--ok) 9%, var(--card));
+    }
+
+    .row[data-tone="ok"]::before {
+      background: var(--ok);
+    }
+
+    .row[data-tone="warn"] {
+      border-color: color-mix(in srgb, var(--warn) 38%, var(--subtle-border));
+      background: color-mix(in srgb, var(--warn) 9%, var(--card));
+    }
+
+    .row[data-tone="warn"]::before {
+      background: var(--warn);
+    }
+
+    .row[data-tone="error"] {
+      border-color: color-mix(in srgb, var(--error) 38%, var(--subtle-border));
+      background: color-mix(in srgb, var(--error) 9%, var(--card));
+    }
+
+    .row[data-tone="error"]::before {
+      background: var(--error);
+    }
+
+    .row-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      padding-left: 4px;
+    }
+
+    .row-badge {
+      flex: 0 0 auto;
+      max-width: 82px;
+      border: 1px solid var(--subtle-border);
+      border-radius: 999px;
+      padding: 1px 6px;
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.45;
+      text-transform: uppercase;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      background: color-mix(in srgb, var(--card) 76%, transparent);
+    }
+
+    .row[data-tone="ok"] .row-badge {
+      color: var(--ok);
+      border-color: color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+      background: var(--ok-soft);
+    }
+
+    .row[data-tone="warn"] .row-badge {
+      color: var(--warn);
+      border-color: color-mix(in srgb, var(--warn) 42%, var(--subtle-border));
+      background: var(--warn-soft);
+    }
+
+    .row[data-tone="error"] .row-badge {
+      color: var(--error);
+      border-color: color-mix(in srgb, var(--error) 42%, var(--subtle-border));
+      background: var(--error-soft);
     }
 
     .main {
@@ -2601,9 +2861,27 @@ function sidebarHtml(webview, logoPath) {
       overflow-wrap: anywhere;
     }
 
+    .row .meta {
+      padding-left: 4px;
+    }
+
+    .row-action {
+      justify-self: start;
+      margin: 4px 0 0 4px;
+      padding: 4px 8px;
+      min-height: 24px;
+      border-radius: 6px;
+      font-size: 11px;
+      line-height: 1.2;
+    }
+
     .empty {
       color: var(--muted);
       font-size: 12px;
+      border: 1px dashed var(--subtle-border);
+      border-radius: 8px;
+      padding: 9px;
+      background: color-mix(in srgb, var(--card) 58%, transparent);
     }
 
     @media (max-width: 280px) {
@@ -2652,7 +2930,7 @@ function sidebarHtml(webview, logoPath) {
           <h2>Ask anything</h2>
           <div class="hero-copy" id="heroSummary">Checking status</div>
         </div>
-        <div class="health-card" title="Health score is a 0-100 summary of provider availability, success rate, fallbacks, permissions, context pressure, stream failures, and degraded providers. Open Statistics > Help for details.">
+        <div class="health-card" id="heroHealthCard" data-state="Stopped" title="Health score is a 0-100 summary of provider availability, success rate, fallbacks, permissions, context pressure, stream failures, and degraded providers. Open Statistics > Help for details.">
           <span class="health-label">Health</span>
           <strong class="health-value" id="heroHealthScore">--</strong>
         </div>
@@ -2729,7 +3007,7 @@ function sidebarHtml(webview, logoPath) {
       <div class="flow-strip" id="flowStrip"></div>
       <div class="detail" id="flowDetail">planner &gt; worker &gt; reviewer &gt; fixer &gt; final</div>
       <div class="template-grid" id="workflowTemplateList"></div>
-      <button class="primary killer-button" id="killerWorkflow" type="button">Take Issue &gt; PR</button>
+      <button class="primary killer-button" id="killerWorkflow" type="button">Issue to PR</button>
     </section>
     <details class="panel">
       <summary class="section-head">
@@ -2786,6 +3064,7 @@ function sidebarHtml(webview, logoPath) {
       <div class="actions">
         <button id="stopServer" type="button">Stop</button>
         <button id="restartServer" type="button">Restart</button>
+        <button id="checkRequirements" type="button">Check Requirements</button>
         <button id="checkHealth" type="button">Check Status</button>
       </div>
     </details>
@@ -2873,6 +3152,7 @@ function sidebarHtml(webview, logoPath) {
     const vscode = acquireVsCodeApi();
     const extensionVersion = document.getElementById("extensionVersion");
     const heroSummary = document.getElementById("heroSummary");
+    const heroHealthCard = document.getElementById("heroHealthCard");
     const heroHealthScore = document.getElementById("heroHealthScore");
     const heroMode = document.getElementById("heroMode");
     const heroApproval = document.getElementById("heroApproval");
@@ -3061,6 +3341,12 @@ function sidebarHtml(webview, logoPath) {
       if (label === "Model provider") {
         return "Save an API key, start Ollama or LM Studio, or choose a local model.";
       }
+      if (label === "Node.js" || label === "npm") {
+        return "Install Node.js 20 or newer to package the extension or install Codex CLI.";
+      }
+      if (label === "Codex CLI") {
+        return "Install Codex CLI to use no-key Codex routing.";
+      }
       if (label === "Backend") {
         return "Reinstall or rebuild the VSIX so the bundled backend is included.";
       }
@@ -3136,6 +3422,7 @@ function sidebarHtml(webview, logoPath) {
       heroHealthScore.textContent = status === "Running" ? String(score) : "--";
       statsHealth.textContent = status === "Running" ? healthLabel(stats) : "Offline";
       statsHealth.dataset.state = statisticsStatusState(stats, status);
+      heroHealthCard.dataset.state = statisticsStatusState(stats, status);
 
       const cards = [
         {
@@ -3312,6 +3599,9 @@ function sidebarHtml(webview, logoPath) {
       if (card.featured) {
         item.classList.add("featured");
       }
+      if (typeof card.percent === "number") {
+        item.dataset.tone = card.percent >= 80 ? "ok" : card.percent >= 50 ? "warn" : "error";
+      }
       const value = document.createElement("div");
       value.className = "stat-value";
       value.textContent = card.value;
@@ -3376,7 +3666,8 @@ function sidebarHtml(webview, logoPath) {
       for (const row of rows.slice(0, 4)) {
         routingChain.append(rowElement(
           [row.provider || row.agent || "provider", row.model || ""].filter(Boolean).join(" / "),
-          [row.available ? "active candidate" : "fallback candidate", row.reason || ""].filter(Boolean).join(" - ")
+          [row.available ? "active candidate" : "fallback candidate", row.reason || ""].filter(Boolean).join(" - "),
+          { tone: row.available ? "ok" : "warn", badge: row.available ? "active" : "fallback" }
         ));
       }
     }
@@ -3414,7 +3705,8 @@ function sidebarHtml(webview, logoPath) {
         for (const reason of reasons.slice(0, 6)) {
           routingReasonList.append(rowElement(
             reason.label || "signal",
-            [reason.detail || "", reason.source ? "source " + reason.source : ""].filter(Boolean).join(" - ")
+            [reason.detail || "", reason.source ? "source " + reason.source : ""].filter(Boolean).join(" - "),
+            { badge: "signal" }
           ));
         }
       } else {
@@ -3429,7 +3721,8 @@ function sidebarHtml(webview, logoPath) {
         for (const item of rejected.slice(0, 4)) {
           routingRejectedList.append(rowElement(
             [item.provider || item.agent || "fallback", item.model || ""].filter(Boolean).join(" / "),
-            item.reason || item.why || (item.available ? "fallback option" : "not selected")
+            item.reason || item.why || (item.available ? "fallback option" : "not selected"),
+            { tone: item.available ? "warn" : "error", badge: item.available ? "option" : "skipped" }
           ));
         }
       } else {
@@ -3532,24 +3825,32 @@ function sidebarHtml(webview, logoPath) {
         return;
       }
       for (const row of rows) {
+        const tone = row && row.ok ? "ok" : row && row.action ? "warn" : row && row.optional ? "info" : "error";
+        const action = row && !row.ok && row.actionType ? row.actionType : "";
         onboardingList.append(rowElement(
-          onboardingPrefix(row) + onboardingLabel(row),
-          row.detail || ""
+          onboardingLabel(row),
+          row.detail || "",
+          {
+            tone,
+            badge: setupBadge(row, tone),
+            action,
+            actionLabel: row && row.actionLabel ? row.actionLabel : "Fix"
+          }
         ));
       }
     }
 
-    function onboardingPrefix(row) {
+    function setupBadge(row, tone) {
       if (row && row.ok) {
-        return "[ok] ";
+        return "ready";
       }
       if (row && row.action) {
-        return "[>] ";
+        return "action";
       }
       if (row && row.optional) {
-        return "[-] ";
+        return "optional";
       }
-      return "[ ] ";
+      return tone === "error" ? "needed" : "setup";
     }
 
     function onboardingLabel(row) {
@@ -3570,7 +3871,11 @@ function sidebarHtml(webview, logoPath) {
             row.agent ? "agent " + row.agent : "",
             row.available ? "available" : "unavailable",
             row.degraded ? "degraded" : ""
-          ].filter(Boolean).join(" - ")
+          ].filter(Boolean).join(" - "),
+          {
+            tone: row.available ? (row.degraded ? "warn" : "ok") : "error",
+            badge: row.available ? (row.degraded ? "degraded" : "ready") : "offline"
+          }
         ));
       }
     }
@@ -3584,7 +3889,8 @@ function sidebarHtml(webview, logoPath) {
       for (const row of rows.slice(0, 6)) {
         limitList.append(rowElement(
           [row.provider || row.agent || "provider", row.model || ""].filter(Boolean).join(" / "),
-          limitText(row)
+          limitText(row),
+          { tone: limitTone(row), badge: limitBadge(row) }
         ));
       }
     }
@@ -3615,7 +3921,11 @@ function sidebarHtml(webview, logoPath) {
       for (const item of recent) {
         permissionList.append(rowElement(
           item.tool || item.provider || item.type || "permission",
-          [item.category || "", item.risk_level || "", item.allowed ? "allowed" : item.requires_approval ? "approval required" : item.denied ? "denied" : ""].filter(Boolean).join(" - ")
+          [item.category || "", item.risk_level || "", item.allowed ? "allowed" : item.requires_approval ? "approval required" : item.denied ? "denied" : ""].filter(Boolean).join(" - "),
+          {
+            tone: item.denied ? "error" : item.requires_approval ? "warn" : item.allowed ? "ok" : "info",
+            badge: item.denied ? "denied" : item.requires_approval ? "review" : item.allowed ? "allowed" : "event"
+          }
         ));
       }
     }
@@ -3703,8 +4013,57 @@ function sidebarHtml(webview, logoPath) {
         return;
       }
       for (const row of rows.slice(0, 6)) {
-        activityList.append(rowElement(row.main, row.meta));
+        activityList.append(rowElement(row.main, row.meta, { tone: row.tone || "info", badge: activityBadge(row) }));
       }
+    }
+
+    function activityBadge(row) {
+      const tone = row && row.tone ? row.tone : "info";
+      if (tone === "ok") {
+        return "done";
+      }
+      if (tone === "warn") {
+        return "watch";
+      }
+      if (tone === "error") {
+        return "issue";
+      }
+      return "event";
+    }
+
+    function limitTone(row) {
+      if (!row || row.unavailable_reason) {
+        return "error";
+      }
+      const numbers = [
+        row.requests_remaining,
+        row.tokens_remaining,
+        row.credits_remaining,
+        row.quota_remaining
+      ]
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value));
+      if (numbers.some((value) => value <= 0)) {
+        return "error";
+      }
+      if (numbers.some((value) => value > 0 && value <= 5)) {
+        return "warn";
+      }
+      return numbers.length ? "ok" : "info";
+    }
+
+    function limitBadge(row) {
+      const tone = limitTone(row);
+      if (tone === "ok") {
+        return "clear";
+      }
+      if (tone === "warn") {
+        return "low";
+      }
+      if (tone === "error") {
+        return "limit";
+      }
+      return "unknown";
     }
 
     function limitText(row) {
@@ -3755,16 +4114,40 @@ function sidebarHtml(webview, logoPath) {
       return "in " + Math.round(seconds / 3600) + "h";
     }
 
-    function rowElement(mainText, metaText) {
+    function rowElement(mainText, metaText, options = {}) {
       const item = document.createElement("li");
       item.className = "row";
+      if (options.tone) {
+        item.dataset.tone = options.tone;
+      }
+      const head = document.createElement("div");
+      head.className = "row-head";
+      if (options.badge) {
+        const badge = document.createElement("span");
+        badge.className = "row-badge";
+        badge.textContent = options.badge;
+        head.append(badge);
+      }
       const main = document.createElement("div");
       main.className = "main";
       main.textContent = mainText || "Unknown";
+      head.append(main);
       const meta = document.createElement("div");
       meta.className = "meta";
       meta.textContent = metaText || "";
-      item.append(main, meta);
+      item.append(head, meta);
+      if (options.action) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "row-action";
+        button.textContent = options.actionLabel || "Fix";
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          post(options.action);
+        });
+        item.append(button);
+      }
       return item;
     }
 
@@ -3807,6 +4190,7 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("killerWorkflow").addEventListener("click", () => runWorkflowPrompt("Run the issue-to-PR workflow. Take the current issue or selected prompt through the full Agent Hub loop: plan the work, edit the needed files, run the most relevant tests, fix failures once, and summarize a pull request with files changed, validation, and risks. If no issue is selected, inspect the workspace first and choose the highest-impact actionable issue."));
     document.getElementById("stopServer").addEventListener("click", () => post("stopServer"));
     document.getElementById("restartServer").addEventListener("click", () => post("restartServer"));
+    document.getElementById("checkRequirements").addEventListener("click", () => post("checkRequirements"));
     document.getElementById("checkHealth").addEventListener("click", () => post("checkHealth"));
     document.getElementById("tokenSafeMode").addEventListener("click", () => post("enableTokenSafeMode"));
     document.getElementById("openOutput").addEventListener("click", () => post("openOutput"));
@@ -4516,6 +4900,204 @@ async function enableCodexCliModeCommand(options = {}) {
   return result;
 }
 
+async function checkRequirementsCommand() {
+  const rows = await setupRequirementRows(settings(), workspaceRoot());
+  const requiredMissing = rows.filter((row) => row.required && !row.ok);
+  const actionableMissing = rows.filter((row) => !row.ok && row.actionType);
+  const primary = requiredMissing.find((row) => row.actionType) || actionableMissing[0];
+
+  output.appendLine("Agent Hub requirement check:");
+  for (const row of rows) {
+    output.appendLine(`- ${row.ok ? "OK" : row.required ? "MISSING" : "OPTIONAL"} ${row.label}: ${row.detail}`);
+  }
+
+  if (!primary) {
+    const optional = rows.filter((row) => row.optional && !row.ok);
+    const suffix = optional.length
+      ? ` Optional missing: ${optional.map((row) => row.label).join(", ")}.`
+      : "";
+    vscode.window.showInformationMessage(`Agent Hub core requirements are ready.${suffix}`);
+    return { ok: true, rows };
+  }
+
+  const actionLabel = primary.actionLabel || "Fix";
+  const message = requiredMissing.length
+    ? `${primary.label} is required before Agent Hub can run. ${primary.detail}`
+    : `${primary.label} is optional, but unlocks more Agent Hub features. ${primary.detail}`;
+  const choice = await vscode.window.showWarningMessage(
+    message,
+    actionLabel,
+    "Open Logs",
+    "Close"
+  );
+  if (choice === actionLabel) {
+    await runRequirementAction(primary.actionType);
+  } else if (choice === "Open Logs") {
+    output.show(true);
+  }
+  return { ok: requiredMissing.length === 0, rows };
+}
+
+async function setupRequirementRows(config, workspace) {
+  const backendRoot = backendSourceRoot(workspace);
+  const python = await detectPythonForOnboarding(config, workspace);
+  const node = await nodeRuntimeStatus();
+  const npm = await npmRuntimeStatus();
+  const codex = await codexCliStatus();
+  const ollama = await ollamaDesktopStatus();
+  return [
+    {
+      label: "Workspace",
+      ok: !!workspace,
+      required: true,
+      detail: workspace ? workspace : "open a workspace folder"
+    },
+    {
+      label: "Backend",
+      ok: !!backendRoot,
+      required: true,
+      detail: backendRoot ? `found at ${backendRoot}` : "backend package not found"
+    },
+    {
+      label: "Python",
+      ok: python.ok,
+      required: true,
+      detail: python.detail,
+      actionType: python.ok ? "" : "installPython",
+      actionLabel: "Install Python"
+    },
+    {
+      label: "Node.js",
+      ok: node.ok,
+      optional: true,
+      detail: node.detail,
+      actionType: node.ok ? "" : "installNode",
+      actionLabel: "Install Node"
+    },
+    {
+      label: "npm",
+      ok: npm.ok,
+      optional: true,
+      detail: npm.detail,
+      actionType: npm.ok ? "" : "installNode",
+      actionLabel: "Install Node"
+    },
+    {
+      label: "Codex CLI",
+      ok: codex.installed,
+      optional: true,
+      detail: codex.installed ? (codex.version || "installed") : "optional no-key routing helper",
+      actionType: codex.installed ? "" : "installCodexCli",
+      actionLabel: "Install Codex CLI"
+    },
+    {
+      label: "Ollama",
+      ok: ollama.installed,
+      optional: true,
+      detail: ollama.installed ? (ollama.version || "installed") : "optional local-model runtime",
+      actionType: ollama.installed ? "" : "installOllamaDesktop",
+      actionLabel: "Install Ollama"
+    }
+  ];
+}
+
+async function runRequirementAction(actionType) {
+  if (actionType === "installPython") {
+    return installPythonCommand();
+  }
+  if (actionType === "installNode") {
+    return installNodeCommand();
+  }
+  if (actionType === "installCodexCli") {
+    return installCodexCliCommand({ showAlreadyInstalled: false });
+  }
+  if (actionType === "installOllamaDesktop") {
+    return installOllamaDesktopCommand({ showAlreadyInstalled: false });
+  }
+  if (actionType === "startServer") {
+    return startServer();
+  }
+  if (actionType === "openSettings") {
+    return openAgentHubSettings();
+  }
+  return undefined;
+}
+
+async function installPythonCommand(options = {}) {
+  const status = await detectPythonForOnboarding(settings(), workspaceRoot());
+  if (status.ok && options.force !== true) {
+    const message = `Python is already ready. ${status.detail}`;
+    vscode.window.showInformationMessage(message);
+    return { ok: true, message };
+  }
+
+  const winget = await wingetStatus();
+  const choices = process.platform === "win32" && winget.installed
+    ? ["Install with winget", "Open Download", "Cancel"]
+    : ["Open Download", "Cancel"];
+  const choice = await vscode.window.showWarningMessage(
+    "Agent Hub needs Python 3.11 or newer. Install Python, then restart VS Code if PATH changes.",
+    ...choices
+  );
+  if (choice === "Install with winget") {
+    const command = `winget install -e --id ${PYTHON_WINGET_ID}`;
+    if (!(await requestPermission({
+      category: "shell_command",
+      description: "Agent Hub wants to install Python with winget.",
+      resource: command,
+      risk: "high",
+      detail: "This opens a visible VS Code terminal. Review the installer prompts before accepting them."
+    }))) {
+      return { ok: false, cancelled: true, message: "Python install was cancelled." };
+    }
+    openSetupTerminal("Agent Hub Python Setup", command);
+    return { ok: true, message: "Opened a terminal to install Python. Restart VS Code after installation if PATH changes." };
+  }
+  if (choice === "Open Download") {
+    await vscode.env.openExternal(vscode.Uri.parse(PYTHON_DOWNLOAD_URL));
+    return { ok: true, message: "Opened the official Python download page." };
+  }
+  return { ok: false, cancelled: true, message: "Python install was cancelled." };
+}
+
+async function installNodeCommand(options = {}) {
+  const status = await nodeRuntimeStatus();
+  const npm = await npmRuntimeStatus();
+  if (status.ok && npm.ok && options.force !== true) {
+    const message = `Node.js is already ready. ${status.detail}`;
+    vscode.window.showInformationMessage(message);
+    return { ok: true, message };
+  }
+
+  const winget = await wingetStatus();
+  const choices = process.platform === "win32" && winget.installed
+    ? ["Install with winget", "Open Download", "Cancel"]
+    : ["Open Download", "Cancel"];
+  const choice = await vscode.window.showWarningMessage(
+    "Agent Hub needs Node.js 20 or newer for extension packaging and Codex CLI installation.",
+    ...choices
+  );
+  if (choice === "Install with winget") {
+    const command = `winget install -e --id ${NODE_WINGET_ID}`;
+    if (!(await requestPermission({
+      category: "shell_command",
+      description: "Agent Hub wants to install Node.js with winget.",
+      resource: command,
+      risk: "high",
+      detail: "This opens a visible VS Code terminal. Review the installer prompts before accepting them."
+    }))) {
+      return { ok: false, cancelled: true, message: "Node.js install was cancelled." };
+    }
+    openSetupTerminal("Agent Hub Node Setup", command);
+    return { ok: true, message: "Opened a terminal to install Node.js. Restart VS Code after installation if PATH changes." };
+  }
+  if (choice === "Open Download") {
+    await vscode.env.openExternal(vscode.Uri.parse(NODE_DOWNLOAD_URL));
+    return { ok: true, message: "Opened the official Node.js download page." };
+  }
+  return { ok: false, cancelled: true, message: "Node.js install was cancelled." };
+}
+
 async function installCodexCliCommand(options = {}) {
   const status = await codexCliStatus();
   if (status.installed && options.force !== true && options.showAlreadyInstalled !== false) {
@@ -4541,6 +5123,23 @@ async function installCodexCliCommand(options = {}) {
         message: "Codex CLI is already installed."
       };
     }
+  }
+
+  const npm = await npmRuntimeStatus();
+  if (!npm.ok) {
+    const choice = await vscode.window.showWarningMessage(
+      "Codex CLI installs through npm, but npm was not found. Install Node.js first.",
+      "Install Node.js",
+      "Cancel"
+    );
+    if (choice === "Install Node.js") {
+      return installNodeCommand({ force: true });
+    }
+    return {
+      ok: false,
+      cancelled: true,
+      message: "Codex CLI install was cancelled because npm is missing."
+    };
   }
 
   const command = codexCliInstallTerminalCommand();
@@ -5768,16 +6367,54 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     }
 
     .model-row {
+      position: relative;
       display: grid;
       gap: 2px;
-      padding: 9px;
+      padding: 9px 9px 9px 13px;
       border: 1px solid var(--subtle-border);
       border-radius: 8px;
       background: color-mix(in srgb, var(--surface) 86%, transparent);
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
     }
 
     .model-row:first-child {
       border-top: 1px solid var(--subtle-border);
+    }
+
+    .model-row::before {
+      content: "";
+      position: absolute;
+      inset: 9px auto 9px 0;
+      width: 3px;
+      border-radius: 0 999px 999px 0;
+      background: var(--accent);
+    }
+
+    .model-row[data-status="active"],
+    .model-row[data-status="routing"] {
+      border-color: color-mix(in srgb, var(--ok) 34%, var(--subtle-border));
+      background: color-mix(in srgb, var(--ok) 9%, var(--surface));
+    }
+
+    .model-row[data-status="active"]::before,
+    .model-row[data-status="routing"]::before {
+      background: var(--ok);
+    }
+
+    .model-row[data-status="failover"],
+    .model-row[data-status="stopped"] {
+      border-color: color-mix(in srgb, var(--warn) 36%, var(--subtle-border));
+      background: color-mix(in srgb, var(--warn) 9%, var(--surface));
+    }
+
+    .model-row[data-status="failover"]::before,
+    .model-row[data-status="stopped"]::before {
+      background: var(--warn);
+    }
+
+    .model-row:hover {
+      border-color: color-mix(in srgb, var(--accent) 38%, var(--subtle-border));
+      transform: translateY(-1px);
     }
 
     .model-main {
@@ -5938,17 +6575,41 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       gap: 6px;
       max-width: 920px;
       margin: 0;
+      animation: messageIn 160ms ease-out;
     }
 
     .message.user {
       margin-left: auto;
+      justify-items: end;
     }
 
     .role {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
       color: var(--muted);
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0;
+    }
+
+    .role::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+
+    .assistant .role::before {
+      background: var(--ok);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent);
+    }
+
+    .error .role::before {
+      background: var(--error);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--error) 16%, transparent);
     }
 
     .bubble {
@@ -5961,6 +6622,14 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       color: var(--app-fg);
       background: color-mix(in srgb, var(--surface) 88%, transparent);
       box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 7%, transparent);
+    }
+
+    .message.user .bubble {
+      max-width: min(780px, 86vw);
+    }
+
+    .message.assistant .bubble {
+      max-width: min(880px, 92vw);
     }
 
     .user .bubble {
@@ -5995,6 +6664,10 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
 
     .activity li {
       margin: 2px 0;
+    }
+
+    .activity li::marker {
+      color: var(--accent);
     }
 
     .feedback {
@@ -6111,6 +6784,14 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       transform: none;
     }
 
+    textarea:focus-visible,
+    select:focus-visible,
+    input:focus-visible,
+    button:focus-visible {
+      outline: 1px solid var(--accent);
+      outline-offset: 2px;
+    }
+
     label {
       display: inline-flex;
       align-items: center;
@@ -6160,6 +6841,17 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       gap: 8px;
       flex-wrap: wrap;
       margin-top: 10px;
+    }
+
+    @keyframes messageIn {
+      from {
+        opacity: 0;
+        transform: translateY(6px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
     }
 
     @media (max-width: 720px) {
@@ -7004,6 +7696,7 @@ ${apiKeyFieldsHtml()}
       if (!rows.length) {
         const item = document.createElement("li");
         item.className = "model-row";
+        item.dataset.status = "empty";
         const main = document.createElement("div");
         main.className = "model-main";
         main.textContent = "No models yet";
@@ -7017,6 +7710,7 @@ ${apiKeyFieldsHtml()}
       for (const row of rows.slice().reverse()) {
         const item = document.createElement("li");
         item.className = "model-row";
+        item.dataset.status = row.status || "used";
         const main = document.createElement("div");
         main.className = "model-main";
         main.textContent = providerModelText(row);
@@ -9128,6 +9822,72 @@ function requestExternalJson(urlString, timeoutMs) {
   });
 }
 
+async function nodeRuntimeStatus() {
+  try {
+    const { stdout, stderr } = await execFile("node", ["-p", "process.versions.node"], {
+      shell: process.platform === "win32",
+      timeout: 5000
+    });
+    const version = String(stdout || stderr || "").trim().split(/\r?\n/).find(Boolean) || "";
+    const major = Number.parseInt(version.split(".")[0], 10);
+    const ok = Number.isFinite(major) && major >= 20;
+    return {
+      ok,
+      version,
+      detail: ok
+        ? `Node.js ${version}`
+        : version
+          ? `Node.js ${version} is older than 20`
+          : "Node.js 20+ not detected"
+    };
+  } catch (_error) {
+    return {
+      ok: false,
+      version: "",
+      detail: "Node.js 20+ not detected"
+    };
+  }
+}
+
+async function npmRuntimeStatus() {
+  try {
+    const { stdout, stderr } = await execFile("npm", ["--version"], {
+      shell: process.platform === "win32",
+      timeout: 5000
+    });
+    const version = String(stdout || stderr || "").trim().split(/\r?\n/).find(Boolean) || "";
+    return {
+      ok: !!version,
+      version,
+      detail: version ? `npm ${version}` : "npm not detected"
+    };
+  } catch (_error) {
+    return {
+      ok: false,
+      version: "",
+      detail: "npm not detected"
+    };
+  }
+}
+
+async function wingetStatus() {
+  if (process.platform !== "win32") {
+    return { installed: false, version: "" };
+  }
+  try {
+    const { stdout, stderr } = await execFile("winget", ["--version"], {
+      shell: true,
+      timeout: 5000
+    });
+    return {
+      installed: true,
+      version: String(stdout || stderr || "").trim().split(/\r?\n/).find(Boolean) || ""
+    };
+  } catch (_error) {
+    return { installed: false, version: "" };
+  }
+}
+
 async function codexCliStatus() {
   try {
     const { stdout, stderr } = await execFile("codex", ["--version"], {
@@ -9167,8 +9927,12 @@ async function ollamaDesktopStatus() {
 }
 
 function openCodexCliTerminal(command) {
+  openSetupTerminal("Agent Hub Codex CLI", command);
+}
+
+function openSetupTerminal(name, command) {
   const options = {
-    name: "Agent Hub Codex CLI"
+    name
   };
   const workspace = workspaceRoot();
   if (workspace) {

@@ -6,6 +6,15 @@ Run:
 agent-hub doctor
 ```
 
+For a machine-level setup check before the backend can start, run:
+
+```powershell
+.\scripts\check-requirements.ps1 -IncludeExtension
+```
+
+The VS Code extension exposes the same flow as `Agent Hub: Check Requirements`
+and as buttons in the sidebar Setup list.
+
 The doctor report includes config path, backend version, Python runtime,
 install checks, dependency checks, backend reachability, generated backend
 snapshot status, enabled providers, missing API keys, local model servers,
@@ -27,6 +36,8 @@ Useful endpoints:
 
 Common fixes:
 
+- Missing Python/Node/npm/VS Code CLI: run the requirement checker above and use
+  its install/open button, then restart the terminal or VS Code if PATH changed.
 - No usable model: enable a provider, set the missing API key, or start Ollama
   or LM Studio.
 - Ollama offline: run `ollama serve`, then `agent-hub local-models`, and confirm

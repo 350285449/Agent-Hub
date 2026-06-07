@@ -425,6 +425,20 @@ diagnostics.
 
 ## Quick Start
 
+Empty-machine preflight:
+
+```powershell
+.\scripts\check-requirements.ps1 -IncludeExtension
+```
+
+The Windows checker verifies Python 3.11+, Node.js 20+, npm, and a VS
+Code-compatible CLI, then offers install/open buttons for missing items. On
+macOS or Linux, run:
+
+```sh
+sh ./scripts/check-requirements.sh --include-extension
+```
+
 Fresh clone on Windows:
 
 ```powershell
@@ -457,9 +471,11 @@ One-command backend + extension setup on macOS or Linux:
 sh ./install.sh --with-extension
 ```
 
-The extension installer needs Node.js 20 or newer and a VS Code-compatible CLI.
-If `agent-hub.config.json` is missing, the backend now creates a default config
-and `.agent-hub` state folders automatically on first start. It also enables
+The install scripts run the same prerequisite check before setup. The VS Code
+sidebar also exposes `Agent Hub: Check Requirements` plus setup-row buttons for
+missing Python, Node.js/npm, Codex CLI, and Ollama. If
+`agent-hub.config.json` is missing, the backend now creates a default config and
+`.agent-hub` state folders automatically on first start. It also enables
 disabled provider entries when their API key environment variables are already
 set, and it probes reachable local OpenAI-compatible servers for model IDs.
 
@@ -671,6 +687,11 @@ VSIX can therefore start on a fresh Python 3.11+ installation without downloadin
 Python packages. Release and development tools use optional dependencies such as
 `packaging`, `build`, and `pytest`.
 
+For machine setup checks, use `.\scripts\check-requirements.ps1` on Windows or
+`sh ./scripts/check-requirements.sh` on macOS/Linux. Add `-IncludeExtension` or
+`--include-extension` when you plan to build or install the VS Code extension
+from this checkout.
+
 ## Operations
 
 Run:
@@ -790,6 +811,7 @@ Test proof:
 
 ```powershell
 python -m pip install -e ".[test,dev,release]"
+.\scripts\check-requirements.ps1 -IncludeExtension -NoPrompt
 python -m compileall -q agent_hub scripts
 python scripts/generate_backend_snapshot.py
 python scripts/validate_backend_drift.py

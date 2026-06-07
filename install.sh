@@ -45,6 +45,13 @@ find_python() {
 }
 
 if [ "$SKIP_BACKEND" -eq 0 ]; then
+  REQUIRE_ARGS=""
+  if [ "$WITH_EXTENSION" -eq 1 ]; then
+    REQUIRE_ARGS="--include-extension"
+  fi
+  # shellcheck disable=SC2086
+  sh "$ROOT/scripts/check-requirements.sh" $REQUIRE_ARGS
+
   PYTHON=$(find_python || true)
   if [ -z "${PYTHON:-}" ]; then
     echo "Python 3.11 or newer is required. Install Python, then rerun this script." >&2
@@ -70,6 +77,9 @@ if [ "$SKIP_BACKEND" -eq 0 ]; then
 fi
 
 if [ "$WITH_EXTENSION" -eq 1 ]; then
+  if [ "$SKIP_BACKEND" -eq 1 ]; then
+    sh "$ROOT/scripts/check-requirements.sh" --include-extension
+  fi
   if ! command -v node >/dev/null 2>&1; then
     echo "Node.js 20 or newer is required to build/install the VS Code extension." >&2
     exit 1

@@ -1,5 +1,18 @@
 # Install From VSIX
 
+Check host requirements first:
+
+```sh
+sh ./scripts/check-requirements.sh --include-extension
+```
+
+On Windows, use the PowerShell checker instead; it offers install/open buttons
+for missing prerequisites:
+
+```powershell
+.\scripts\check-requirements.ps1 -IncludeExtension
+```
+
 Build or install the packaged VS Code extension:
 
 ```sh

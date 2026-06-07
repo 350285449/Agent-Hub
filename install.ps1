@@ -2,7 +2,9 @@ param(
     [switch]$WithExtension,
     [switch]$SkipBackend,
     [switch]$SkipDeps,
-    [switch]$PackageOnly
+    [switch]$PackageOnly,
+    [switch]$CheckOnly,
+    [switch]$NoPrompt
 )
 
 $ErrorActionPreference = "Stop"
@@ -63,8 +65,34 @@ function Test-Node20 {
     return $major -ge 20
 }
 
+function Invoke-RequirementCheck {
+    param([switch]$IncludeExtension)
+    $script = Join-Path $Root "scripts\check-requirements.ps1"
+    if (-not (Test-Path $script)) {
+        return
+    }
+    $arguments = @()
+    if ($IncludeExtension) {
+        $arguments += "-IncludeExtension"
+    }
+    if ($NoPrompt) {
+        $arguments += "-NoPrompt"
+    }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Agent Hub requirement check failed. Install the missing required item(s), reopen your terminal if PATH changed, then rerun this installer."
+    }
+}
+
 Push-Location $Root
 try {
+    if (-not $SkipBackend -or $WithExtension) {
+        Invoke-RequirementCheck -IncludeExtension:$WithExtension
+    }
+    if ($CheckOnly) {
+        return
+    }
+
     if (-not $SkipBackend) {
         $PythonSpec = Find-Python311
         if (-not (Test-Path $Python)) {

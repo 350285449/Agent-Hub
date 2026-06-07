@@ -1112,6 +1112,9 @@ def _compat_config(path: Path) -> HubConfig:
     return HubConfig(
         workspace_dir=path,
         state_dir=path / "state",
+        inbox_dir=path / "inbox",
+        outbox_dir=path / "outbox",
+        archive_dir=path / "archive",
         default_route=["tooly"],
         routes=[
             RouteRule(name="coding", agents=["tooly"]),

@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub - Local-First AI Model Router",
   "description": "Cline, Codex and Claude Code compatible AI model router with free-model routing, workspace agents, and cost-saving local-first orchestration.",
-  "version": "9.1.0",
+  "version": "0.9.2",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
@@ -63,6 +63,9 @@
     "onCommand:agentHub.checkHealth",
     "onCommand:agentHub.openDashboard",
     "onCommand:agentHub.openSettings",
+    "onCommand:agentHub.checkRequirements",
+    "onCommand:agentHub.installPython",
+    "onCommand:agentHub.installNode",
     "onCommand:agentHub.enableTokenSafeMode",
     "onCommand:agentHub.enableCodexCliMode",
     "onCommand:agentHub.installCodexCli",
@@ -169,6 +172,21 @@
       {
         "command": "agentHub.openSettings",
         "title": "Agent Hub: Open Settings"
+      },
+      {
+        "command": "agentHub.checkRequirements",
+        "title": "Agent Hub: Check Requirements",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "agentHub.installPython",
+        "title": "Agent Hub: Install Python",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "agentHub.installNode",
+        "title": "Agent Hub: Install Node.js",
+        "icon": "$(cloud-download)"
       },
       {
         "command": "agentHub.enableTokenSafeMode",
