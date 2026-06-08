@@ -452,14 +452,17 @@ def provider_permission_request(agent: AgentConfig, request: HubRequest) -> Perm
         transparency["has_secret_findings"]
         or prepared_security.get("has_secret_findings")
         or prepared_security.get("has_unredacted_secrets")
-        or sensitive_files
     )
+    sensitive_path_reference_only = bool(sensitive_files and not explicit_approval_required)
+    effective_risk_level = "high" if sensitive_path_reference_only and risk_level == "medium" else risk_level
     security = {
         "category": category,
-        "risk_level": "critical" if explicit_approval_required else risk_level,
+        "risk_level": "critical" if explicit_approval_required else effective_risk_level,
         "reason": (
             "Request content appears to include secrets."
             if explicit_approval_required
+            else "Request references sensitive file paths, but no secret values were detected."
+            if sensitive_path_reference_only
             else "External provider call can transmit prompt or workspace context."
         ),
         "blocked": False,
@@ -468,6 +471,7 @@ def provider_permission_request(agent: AgentConfig, request: HubRequest) -> Perm
         "metadata": {
             "token_estimate": token_estimate,
             "sensitive_files": sensitive_files[:20],
+            "sensitive_path_reference_only": sensitive_path_reference_only,
             "prompt_injection_findings": injection_findings[:20],
             "repo_files_untrusted": bool(prepared_security.get("repo_files_untrusted")),
         },

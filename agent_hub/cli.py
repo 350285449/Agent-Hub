@@ -23,6 +23,7 @@ from .commands_config import (
 )
 from .commands_doctor import (
     _backend_reachability,
+    _doctor_fix_safe,
     _print_doctor,
 )
 from .commands_provider import (
@@ -47,6 +48,7 @@ from .commands_provider import (
     _recommend,
     _benchmark_card,
     _benchmark_evolution,
+    _calibrate_models,
     _generate_case_study,
     _replay_route,
     _route_test,
@@ -93,6 +95,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     doctor_parser = subparsers.add_parser("doctor", help="Explain config and provider readiness.")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     doctor_parser.add_argument("--providers", action="store_true", help="Include known provider metadata.")
+    doctor_parser.add_argument(
+        "--fix-safe",
+        action="store_true",
+        help="Apply conservative config repairs such as removing unknown route agents.",
+    )
 
     inspect_parser = subparsers.add_parser(
         "inspect-request",
@@ -320,6 +327,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     eval_parser.add_argument("--json", action="store_true")
     eval_parser.add_argument("--limit", type=int, default=6, help="Maximum benchmark tasks to run.")
 
+    calibrate_parser = subparsers.add_parser(
+        "calibrate-models",
+        help="Run bounded calibration prompts against routed agents and store model score evidence.",
+    )
+    calibrate_parser.add_argument("--route", default="cloud-agent")
+    calibrate_parser.add_argument("--limit", type=int, default=4, help="Tasks per agent.")
+    calibrate_parser.add_argument("--max-agents", type=int, default=5, help="Maximum agents to calibrate.")
+    calibrate_parser.add_argument("--agents", default="", help="Comma-separated agent names. Defaults to route agents.")
+    calibrate_parser.add_argument("--json", action="store_true")
+
     route_test_parser = subparsers.add_parser("route-test", help="Route a prompt and show selected provider.")
     route_test_parser.add_argument("prompt", nargs="*", default=["hello"])
     route_test_parser.add_argument("--route", default="cloud-agent")
@@ -506,7 +523,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_table(rows, ["name", "provider", "model", "enabled", "free", "allowed", "tokens", "status"])
         return 0
     if command == "doctor":
+        fix_report = None
+        if args.fix_safe:
+            fix_report = _doctor_fix_safe(args.config)
+            config = load_config(args.config)
+            config.ensure_dirs()
         report = _doctor_report(config, args.config)
+        if fix_report is not None:
+            report["fix_safe"] = fix_report
         if args.providers:
             report["provider_types"] = provider_metadata_rows()
         if args.json:
@@ -702,6 +726,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if command == "eval":
         return _eval_providers(config, route=args.route, limit=args.limit, as_json=args.json)
+    if command == "calibrate-models":
+        return _calibrate_models(
+            config,
+            route=args.route,
+            limit=args.limit,
+            max_agents=args.max_agents,
+            agents=args.agents,
+            as_json=args.json,
+        )
     if command == "route-test":
         return _route_test(config, route=args.route, prompt=" ".join(args.prompt), as_json=args.json)
     if command == "route-diagnose":

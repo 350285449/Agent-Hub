@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import threading
 import time
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +41,7 @@ from .context import request_context_diagnostics
 from .models import HubRequest, HubResponse
 from .observability import permission_snapshot, recent_events, record_event, usage_snapshot
 from .permissions import UNTRUSTED_EXTERNAL, mark_trusted_approval
+from .runtime_kernel import AgentHubRuntimeKernel
 from .security.secrets import redact_secrets
 from .streaming import safe_stream_failure_chunk
 from .core.router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
@@ -124,6 +127,13 @@ from .server_routes.diagnostics import (
 )
 
 
+CLINE_PERMISSION_GUIDANCE_TTL_SECONDS = 90.0
+CLINE_PERMISSION_GUIDANCE_MAX_ENTRIES = 128
+_CLINE_PERMISSION_GUIDANCE_CACHE: dict[str, float] = {}
+DIAGNOSTICS_CACHE_TTL_SECONDS = 1.5
+DIAGNOSTICS_CACHE_MAX_ENTRIES = 128
+
+
 DIAGNOSTIC_ENDPOINTS = {
     "/v1/provider-health",
     "/v1/provider-scores",
@@ -140,6 +150,7 @@ DIAGNOSTIC_ENDPOINTS = {
     "/v1/usage",
     "/v1/client-sources",
     "/v1/events",
+    "/v1/kernel",
     "/v1/optimization",
     "/v1/tools",
     "/v1/workflows/status",
@@ -186,65 +197,192 @@ class AgentHubHTTPServer(ThreadingHTTPServer):
             workflow_engine=self.workflow_engine,
         )
         self.debug_requests: list[dict[str, Any]] = []
+        self.runtime_kernel = AgentHubRuntimeKernel()
+        self._diagnostics_cache: dict[str, dict[str, Any]] = {}
+        self._diagnostics_cache_lock = threading.RLock()
+        self._diagnostics_cache_hits = 0
+        self._diagnostics_cache_misses = 0
+        self._diagnostics_cache_invalidations = 0
+
+    def diagnostics_cache_get(
+        self,
+        key: str,
+        ttl_seconds: float,
+        builder: Any,
+    ) -> tuple[Any, bool]:
+        now = time.monotonic()
+        ttl = max(0.05, float(ttl_seconds or DIAGNOSTICS_CACHE_TTL_SECONDS))
+        with self._diagnostics_cache_lock:
+            entry = self._diagnostics_cache.get(key)
+            if entry and float(entry.get("expires_at") or 0.0) > now:
+                entry["last_access"] = now
+                self._diagnostics_cache_hits += 1
+                return entry.get("value"), True
+            self._diagnostics_cache_misses += 1
+        value = builder()
+        with self._diagnostics_cache_lock:
+            self._diagnostics_cache[key] = {
+                "value": value,
+                "expires_at": now + ttl,
+                "last_access": now,
+            }
+            self._prune_diagnostics_cache_locked(now)
+        return value, False
+
+    def invalidate_diagnostics_cache(self, reason: str = "") -> None:
+        with self._diagnostics_cache_lock:
+            if self._diagnostics_cache:
+                self._diagnostics_cache.clear()
+            self._diagnostics_cache_invalidations += 1
+
+    def diagnostics_cache_stats(self) -> dict[str, Any]:
+        with self._diagnostics_cache_lock:
+            hits = self._diagnostics_cache_hits
+            misses = self._diagnostics_cache_misses
+            total = hits + misses
+            return {
+                "object": "agent_hub.diagnostics_cache",
+                "enabled": True,
+                "ttl_seconds": DIAGNOSTICS_CACHE_TTL_SECONDS,
+                "max_entries": DIAGNOSTICS_CACHE_MAX_ENTRIES,
+                "entries": len(self._diagnostics_cache),
+                "hits": hits,
+                "misses": misses,
+                "hit_rate": round(hits / total, 4) if total else 0.0,
+                "invalidations": self._diagnostics_cache_invalidations,
+            }
+
+    def _prune_diagnostics_cache_locked(self, now: float) -> None:
+        expired = [
+            key
+            for key, entry in self._diagnostics_cache.items()
+            if float(entry.get("expires_at") or 0.0) <= now
+        ]
+        for key in expired:
+            self._diagnostics_cache.pop(key, None)
+        overflow = len(self._diagnostics_cache) - DIAGNOSTICS_CACHE_MAX_ENTRIES
+        if overflow <= 0:
+            return
+        oldest = sorted(
+            self._diagnostics_cache.items(),
+            key=lambda item: float(item[1].get("last_access") or 0.0),
+        )
+        for key, _entry in oldest[:overflow]:
+            self._diagnostics_cache.pop(key, None)
 
 
 class AgentHubHandler(BaseHTTPRequestHandler):
     server: AgentHubHTTPServer
 
     def do_GET(self) -> None:
-        if self._reject_unauthenticated_public_request():
-            return
-        path = _request_path(self.path)
-        if handle_route_get(self, path):
-            return
-        self._send_json({"error": "not found"}, status=404)
+        self._begin_kernel_request()
+        try:
+            if self._reject_unauthenticated_public_request():
+                return
+            path = _request_path(self.path)
+            if handle_route_get(self, path):
+                return
+            self._send_json({"error": "not found"}, status=404)
+        except Exception:
+            self._kernel_response_status = 500
+            raise
+        finally:
+            self._finish_kernel_request()
 
     def do_OPTIONS(self) -> None:
-        self.send_response(204)
-        self._send_common_headers()
-        self.send_header(
-            "Access-Control-Allow-Methods",
-            "GET, POST, DELETE, OPTIONS",
-        )
-        self.send_header(
-            "Access-Control-Allow-Headers",
-            (
-                "Authorization, Content-Type, X-API-Key, API-Key, "
-                "Anthropic-Version, Anthropic-Beta, X-Agent-Hub-Session-ID, "
-                "X-Session-ID, X-Conversation-ID, X-Thread-ID, "
-                "X-Agent-Hub-API-Token, X-Agent-Hub-Diagnostics-Token, "
-                "X-Agent-Hub-Approval-Token, X-Agent-Hub-Client"
-            ),
-        )
-        self.end_headers()
+        self._begin_kernel_request()
+        try:
+            self.send_response(204)
+            self._send_common_headers()
+            self.send_header(
+                "Access-Control-Allow-Methods",
+                "GET, POST, DELETE, OPTIONS",
+            )
+            self.send_header(
+                "Access-Control-Allow-Headers",
+                (
+                    "Authorization, Content-Type, X-API-Key, API-Key, "
+                    "Anthropic-Version, Anthropic-Beta, X-Agent-Hub-Session-ID, "
+                    "X-Session-ID, X-Conversation-ID, X-Thread-ID, "
+                    "X-Agent-Hub-API-Token, X-Agent-Hub-Diagnostics-Token, "
+                    "X-Agent-Hub-Approval-Token, X-Agent-Hub-Client"
+                ),
+            )
+            self.end_headers()
+        except Exception:
+            self._kernel_response_status = 500
+            raise
+        finally:
+            self._finish_kernel_request()
 
     def do_POST(self) -> None:
-        if self._reject_unauthenticated_public_request(drain_body=True):
-            return
+        self._begin_kernel_request()
         try:
-            payload = self._read_json()
-        except ValueError as exc:
-            self._send_json({"error": str(exc)}, status=400)
-            return
+            if self._reject_unauthenticated_public_request(drain_body=True):
+                return
+            try:
+                payload = self._read_json()
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
 
-        path = _request_path(self.path)
-        if handle_route_post(self, path, payload):
-            return
-        self._send_json({"error": "not found"}, status=404)
+            path = _request_path(self.path)
+            if handle_route_post(self, path, payload):
+                self.server.invalidate_diagnostics_cache(f"POST {path}")
+                return
+            self._send_json({"error": "not found"}, status=404)
+        except Exception:
+            self._kernel_response_status = 500
+            raise
+        finally:
+            self._finish_kernel_request()
 
     def do_DELETE(self) -> None:
-        if self._reject_unauthenticated_public_request():
-            return
-        path = _request_path(self.path)
-        if path == "/v1/routing-memory":
-            auth_error = _diagnostics_auth_error(self.server.config, self.headers)
-            if auth_error is not None:
-                body, status = auth_error
-                self._send_json(body, status=status)
+        self._begin_kernel_request()
+        try:
+            if self._reject_unauthenticated_public_request():
                 return
-            self._send_json(self.server.router.routing_memory.reset())
+            path = _request_path(self.path)
+            if path == "/v1/routing-memory":
+                auth_error = _diagnostics_auth_error(self.server.config, self.headers)
+                if auth_error is not None:
+                    body, status = auth_error
+                    self._send_json(body, status=status)
+                    return
+                body = self.server.router.routing_memory.reset()
+                self.server.invalidate_diagnostics_cache("DELETE /v1/routing-memory")
+                self._send_json(body)
+                return
+            self._send_json({"error": "not found"}, status=404)
+        except Exception:
+            self._kernel_response_status = 500
+            raise
+        finally:
+            self._finish_kernel_request()
+
+    def send_response(self, code: int, message: str | None = None) -> None:
+        self._kernel_response_status = int(code)
+        super().send_response(code, message)
+
+    def _begin_kernel_request(self) -> None:
+        self._kernel_request_started_at = time.perf_counter()
+        self._kernel_response_status = 200
+        self._kernel_cache_state = ""
+        self.server.runtime_kernel.begin_request()
+
+    def _finish_kernel_request(self) -> None:
+        started_at = getattr(self, "_kernel_request_started_at", None)
+        if started_at is None:
             return
-        self._send_json({"error": "not found"}, status=404)
+        duration_ms = (time.perf_counter() - float(started_at)) * 1000
+        self.server.runtime_kernel.record_request(
+            method=getattr(self, "command", ""),
+            path=_request_path(getattr(self, "path", "/")),
+            status=int(getattr(self, "_kernel_response_status", 200) or 200),
+            duration_ms=duration_ms,
+            cache_state=str(getattr(self, "_kernel_cache_state", "") or ""),
+        )
+        self._kernel_request_started_at = None
 
     def _reject_unauthenticated_public_request(self, *, drain_body: bool = False) -> bool:
         auth_error = _api_auth_error(self.server.config, self.headers)
@@ -518,6 +656,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             )
             permission_event = None
             trust_level = None
+            security_blocked = False
             explicit_security_approval = False
             unknown_external = False
             route_error_type = getattr(exc, "error_type", None)
@@ -570,15 +709,25 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                         if isinstance(permission_event.metadata, dict)
                         else None
                     )
+                    security_blocked = bool(security.get("blocked"))
                     explicit_security_approval = bool(
-                        security.get("blocked") or security.get("explicit_approval_required")
+                        security.get("explicit_approval_required") and not security_blocked
                     )
                     unknown_external = (
                         trust_level == UNTRUSTED_EXTERNAL
                         or "unknown external" in permission_event.reason.lower()
                     )
                     error_body["error"]["provider"] = permission_event.agent
-                    if explicit_security_approval:
+                    if security_blocked:
+                        error_body["error"]["message"] = (
+                            str(security.get("reason") or "").strip()
+                            or "Provider privacy policy blocked this request before workspace context was sent."
+                        )
+                        error_body["error"]["suggested_fix"] = {
+                            "remove_sensitive_content": True,
+                            "use_local_provider": True,
+                        }
+                    elif explicit_security_approval:
                         error_body["error"]["message"] = (
                             "Provider request requires explicit approval because "
                             "the request content triggered a security rule."
@@ -644,6 +793,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     permission_event=permission_event,
                     failover=exc.failover,
                     trust_level=trust_level,
+                    security_blocked=security_blocked,
                     explicit_security_approval=explicit_security_approval,
                     unknown_external=unknown_external,
                 )
@@ -785,6 +935,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         headers: dict[str, str] | None = None,
     ) -> None:
         body = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+        cache_state = (headers or {}).get("X-Agent-Hub-Cache")
+        if cache_state:
+            self._kernel_cache_state = cache_state
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -802,6 +955,48 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._send_json(body, status=status)
             return
         self._send_json(redact_secrets(data))
+
+    def _send_cached_json(
+        self,
+        cache_key: str,
+        builder: Any,
+        *,
+        ttl_seconds: float = DIAGNOSTICS_CACHE_TTL_SECONDS,
+        redact: bool = False,
+    ) -> None:
+        data, hit = self.server.diagnostics_cache_get(cache_key, ttl_seconds, builder)
+        data = self._with_live_cache_stats(data)
+        self._send_json(
+            redact_secrets(data) if redact else data,
+            headers={"X-Agent-Hub-Cache": "hit" if hit else "miss"},
+        )
+
+    def _send_cached_diagnostics_json(
+        self,
+        cache_key: str,
+        builder: Any,
+        *,
+        ttl_seconds: float = DIAGNOSTICS_CACHE_TTL_SECONDS,
+    ) -> None:
+        auth_error = _diagnostics_auth_error(self.server.config, self.headers)
+        if auth_error is not None:
+            body, status = auth_error
+            self._send_json(body, status=status)
+            return
+        data, hit = self.server.diagnostics_cache_get(cache_key, ttl_seconds, builder)
+        data = self._with_live_cache_stats(data)
+        self._send_json(
+            redact_secrets(data),
+            headers={"X-Agent-Hub-Cache": "hit" if hit else "miss"},
+        )
+
+    def _with_live_cache_stats(self, data: Any) -> Any:
+        if not isinstance(data, dict) or not isinstance(data.get("backend_efficiency"), dict):
+            return data
+        efficiency = dict(data["backend_efficiency"])
+        efficiency["diagnostics_cache"] = self.server.diagnostics_cache_stats()
+        efficiency["runtime_kernel"] = self.server.runtime_kernel.efficiency_summary()
+        return {**data, "backend_efficiency": efficiency}
 
     def _send_html(self, html: str, status: int = 200) -> None:
         body = html.encode("utf-8")
@@ -828,7 +1023,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 "X-Agent-Hub-Tokens-Remaining, X-Agent-Hub-Credits-Remaining, "
                 "X-Agent-Hub-Quota-Remaining, X-Agent-Hub-Reset-At, "
                 "X-Agent-Hub-Cooldown-Until, X-Agent-Hub-Fallback-Models, "
-                "X-Agent-Hub-Stream-Mode, X-Agent-Hub-Provider-Score"
+                "X-Agent-Hub-Stream-Mode, X-Agent-Hub-Provider-Score, "
+                "X-Agent-Hub-Cache"
             ),
         )
 
@@ -946,6 +1142,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             (
                 "Operate",
                 [
+                    ("Runtime Kernel", "/dashboard/kernel", "Subsystem health, request telemetry, cache flow"),
                     ("Status", "/dashboard/status", "Backend, providers, and next dashboard links"),
                     ("Readiness", "/dashboard/readiness", "Setup scorecard and next action"),
                     ("Provider Health", "/dashboard/provider-health", "Availability, reliability, cooldowns"),
@@ -1539,6 +1736,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       <p class="json-links">
         Raw APIs:
         <a href="/v1/status">status</a> |
+        <a href="/v1/kernel">kernel</a> |
         <a href="/health">health</a> |
         <a href="/v1/models">models</a> |
         <a href="/v1/optimization">optimization</a> |
@@ -1764,6 +1962,7 @@ def _cline_permission_guidance_response(
     permission_event: Any,
     failover: list[Any],
     trust_level: str | None,
+    security_blocked: bool,
     explicit_security_approval: bool,
     unknown_external: bool,
 ) -> HubResponse:
@@ -1773,6 +1972,12 @@ def _cline_permission_guidance_response(
     provider = str(getattr(permission_event, "agent", "") or error.get("provider") or "selected-provider")
     provider_name = str(getattr(permission_event, "provider", "") or provider)
     model = str(getattr(permission_event, "model", "") or public_model)
+    repeated = _cline_permission_guidance_repeated(
+        request=request,
+        provider=provider,
+        model=model,
+        error=error,
+    )
     text = _cline_permission_guidance_text(
         config=config,
         error=error,
@@ -1780,8 +1985,10 @@ def _cline_permission_guidance_response(
         provider_name=provider_name,
         model=model,
         trust_level=trust_level,
+        security_blocked=security_blocked,
         explicit_security_approval=explicit_security_approval,
         unknown_external=unknown_external,
+        repeated=repeated,
     )
     completion_tokens = max(1, len(text) // 4)
     return HubResponse(
@@ -1805,6 +2012,8 @@ def _cline_permission_guidance_response(
                 "diagnostic_response": True,
                 "permission_error": error,
                 "trust_level": trust_level,
+                "security_blocked": security_blocked,
+                "deduplicated": repeated,
                 "approval_mode": config.approval_mode,
             }
         },
@@ -1819,10 +2028,22 @@ def _cline_permission_guidance_text(
     provider_name: str,
     model: str,
     trust_level: str | None,
+    security_blocked: bool,
     explicit_security_approval: bool,
     unknown_external: bool,
+    repeated: bool = False,
 ) -> str:
     message = str(error.get("message") or "Provider approval is required.")
+    if repeated:
+        return "\n".join(
+            [
+                "Agent Hub already reported this Cline provider approval block for this session.",
+                "",
+                f"Provider: {provider} ({provider_name}, model {model})",
+                f"Reason: {message}",
+                "Open the Agent Hub output or permissions dashboard for the full repair steps.",
+            ]
+        )
     lines = [
         "Agent Hub blocked this Cline request before sending workspace context to the selected provider.",
         "",
@@ -1832,15 +2053,26 @@ def _cline_permission_guidance_text(
         f"Current approval_mode: {config.approval_mode}",
         "",
     ]
-    if explicit_security_approval:
+    if security_blocked:
         lines.extend(
             [
-                "This is a security approval, not just a Cline compatibility issue.",
+                "This request was blocked by the provider privacy policy.",
                 "",
                 "What to do:",
-                "1. Remove secrets or sensitive workspace content from the prompt/context, then retry.",
-                "2. If sending that content is intentional, approve it from the Agent Hub VS Code UI or a trusted session.",
-                "3. Do not rely on approval_mode=auto for content that Agent Hub says needs explicit security approval.",
+                "1. Remove the sensitive content from the prompt/context, or route the task to a local provider.",
+                "2. If this provider is intentionally allowed to receive this content, update its privacy flags in the Agent Hub config.",
+                "3. Restart Agent Hub after changing provider configuration, then retry from Cline.",
+            ]
+        )
+    elif explicit_security_approval:
+        lines.extend(
+            [
+                "This request needs explicit approval because secret-like content was detected.",
+                "",
+                "What to do:",
+                "1. Remove the secret value from the prompt/context, then retry.",
+                "2. If sending it is intentional, approve the provider from the Agent Hub VS Code UI or a trusted session.",
+                "3. For ordinary Cline workspace context, approval_mode=auto still works when no secret value is detected.",
             ]
         )
     elif unknown_external:
@@ -1877,6 +2109,67 @@ def _cline_permission_guidance_text(
             ]
         )
     return "\n".join(lines)
+
+
+def _cline_permission_guidance_repeated(
+    *,
+    request: HubRequest,
+    provider: str,
+    model: str,
+    error: dict[str, Any],
+) -> bool:
+    now = time.time()
+    stale = [
+        key
+        for key, timestamp in _CLINE_PERMISSION_GUIDANCE_CACHE.items()
+        if now - timestamp > CLINE_PERMISSION_GUIDANCE_TTL_SECONDS
+    ]
+    for key in stale:
+        _CLINE_PERMISSION_GUIDANCE_CACHE.pop(key, None)
+    if len(_CLINE_PERMISSION_GUIDANCE_CACHE) > CLINE_PERMISSION_GUIDANCE_MAX_ENTRIES:
+        oldest = sorted(_CLINE_PERMISSION_GUIDANCE_CACHE.items(), key=lambda item: item[1])
+        for key, _timestamp in oldest[: max(1, len(oldest) // 4)]:
+            _CLINE_PERMISSION_GUIDANCE_CACHE.pop(key, None)
+    fingerprint = _cline_permission_guidance_fingerprint(
+        request=request,
+        provider=provider,
+        model=model,
+        message=str(error.get("message") or ""),
+    )
+    repeated = fingerprint in _CLINE_PERMISSION_GUIDANCE_CACHE
+    _CLINE_PERMISSION_GUIDANCE_CACHE[fingerprint] = now
+    return repeated
+
+
+def _cline_permission_guidance_fingerprint(
+    *,
+    request: HubRequest,
+    provider: str,
+    model: str,
+    message: str,
+) -> str:
+    text = "\n".join(
+        str(message_item.get("content") or "")[:800]
+        for message_item in (request.messages or [])[:6]
+        if isinstance(message_item, dict)
+    )
+    raw_model = ""
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    if isinstance(raw.get("model"), str):
+        raw_model = raw["model"]
+    payload = json.dumps(
+        {
+            "session_id": request.session_id,
+            "provider": provider,
+            "model": model,
+            "public_model": raw_model,
+            "message": message,
+            "text": text,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def serve(config: HubConfig) -> None:

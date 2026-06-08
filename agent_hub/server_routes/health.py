@@ -9,69 +9,65 @@ def handle_get(handler: object, path: str) -> bool:
     from .. import server as server_module
 
     if path == "/v1/readiness":
-        handler._send_diagnostics_json(
-            handler.server.diagnostics_service.readiness_body(handler.server.router)
+        handler._send_cached_diagnostics_json(
+            "GET /v1/readiness",
+            lambda: handler.server.diagnostics_service.readiness_body(handler.server.router),
         )
         return True
     if path == "/v1/production-check":
-        handler._send_diagnostics_json(
-            handler.server.diagnostics_service.production_check_body(handler.server.router)
+        handler._send_cached_diagnostics_json(
+            "GET /v1/production-check",
+            lambda: handler.server.diagnostics_service.production_check_body(handler.server.router),
         )
         return True
     if path == "/v1/limits":
-        handler._send_diagnostics_json(handler.server.diagnostics_service.limits_body(handler.server.router))
+        handler._send_cached_diagnostics_json(
+            "GET /v1/limits",
+            lambda: handler.server.diagnostics_service.limits_body(handler.server.router),
+        )
         return True
     if path == "/v1/usage":
-        body = usage_snapshot(
-            handler.server.config.state_dir,
-            handler.server.router.health_snapshot(include_history=True),
-        )
-        body["usage_ledger"] = usage_ledger_summary(handler.server.config)
-        handler._send_diagnostics_json(
-            body
+        handler._send_cached_diagnostics_json(
+            "GET /v1/usage",
+            lambda: _usage_body(handler),
         )
         return True
     if path == "/health":
-        handler._send_json(
-            handler.server.diagnostics_service.backend_health_body(
-                handler.server.router,
-                context_diagnostics=server_module._debug_context_summary(handler.server),
-            )
+        handler._send_cached_json(
+            "GET /health",
+            lambda: _health_body(handler, server_module),
         )
         return True
     if path == "/limits":
-        handler._send_json(handler.server.diagnostics_service.limits_body(handler.server.router))
+        handler._send_cached_json(
+            "GET /limits",
+            lambda: handler.server.diagnostics_service.limits_body(handler.server.router),
+        )
         return True
     if path == "/usage":
-        body = usage_snapshot(
-            handler.server.config.state_dir,
-            handler.server.router.health_snapshot(include_history=True),
-        )
-        body["usage_ledger"] = usage_ledger_summary(handler.server.config)
-        handler._send_json(
-            redact_secrets(
-                body
-            )
+        handler._send_cached_json(
+            "GET /usage",
+            lambda: _usage_body(handler),
+            redact=True,
         )
         return True
     if path == "/permissions":
-        handler._send_json(
-            redact_secrets(
-                permission_snapshot(
-                    handler.server.config.state_dir,
-                    approval_mode=handler.server.config.approval_mode,
-                    safe_mode=handler.server.config.approval_mode == "safe",
-                )
-            )
+        handler._send_cached_json(
+            "GET /permissions",
+            lambda: permission_snapshot(
+                handler.server.config.state_dir,
+                approval_mode=handler.server.config.approval_mode,
+                safe_mode=handler.server.config.approval_mode == "safe",
+            ),
+            redact=True,
         )
         return True
     if path == "/metrics":
-        metrics = metrics_snapshot(
-            handler.server.config.state_dir,
-            handler.server.router.health_snapshot(include_history=True),
+        handler._send_cached_json(
+            "GET /metrics",
+            lambda: _metrics_body(handler),
+            redact=True,
         )
-        metrics["optimization"] = handler.server.adaptive_service.optimization_summary()
-        handler._send_json(redact_secrets(metrics))
         return True
     if path == "/debug/request":
         handler._send_json(
@@ -95,3 +91,33 @@ def handle_get(handler: object, path: str) -> bool:
         )
         return True
     return False
+
+
+def _usage_body(handler: object) -> dict:
+    body = usage_snapshot(
+        handler.server.config.state_dir,
+        handler.server.router.health_snapshot(include_history=True),
+    )
+    body["usage_ledger"] = usage_ledger_summary(handler.server.config)
+    return body
+
+
+def _metrics_body(handler: object) -> dict:
+    metrics = metrics_snapshot(
+        handler.server.config.state_dir,
+        handler.server.router.health_snapshot(include_history=True),
+    )
+    metrics["optimization"] = handler.server.adaptive_service.optimization_summary()
+    return metrics
+
+
+def _health_body(handler: object, server_module: object) -> dict:
+    body = handler.server.diagnostics_service.backend_health_body(
+        handler.server.router,
+        context_diagnostics=server_module._debug_context_summary(handler.server),
+    )
+    body["backend_efficiency"] = {
+        "diagnostics_cache": handler.server.diagnostics_cache_stats(),
+        "runtime_kernel": handler.server.runtime_kernel.efficiency_summary(),
+    }
+    return body

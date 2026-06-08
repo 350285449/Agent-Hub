@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 
 from agent_hub.config import AgentConfig, HubConfig, config_from_dict
 from agent_hub.core.router import AgentRouter
-from agent_hub.models import HubRequest
+from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.permissions import (
     approval_granted_from_request,
     mark_trusted_approval,
@@ -135,6 +135,16 @@ class SecurityGuardrailTests(unittest.TestCase):
         self.assertTrue(scan.secret_findings)
         self.assertTrue(scan.injection_findings)
 
+    def test_secret_scanner_separates_sensitive_paths_from_secret_values(self) -> None:
+        template = scan_and_redact_context_text("Current file: .env.example\nOPENAI_API_KEY=placeholder")
+        path_only = scan_and_redact_context_text("Current file: .env\nNo values shown.")
+
+        self.assertFalse(template.sensitive_files)
+        self.assertFalse(template.has_secret_findings)
+        self.assertTrue(path_only.sensitive_files)
+        self.assertFalse(path_only.has_secret_findings)
+        self.assertTrue(path_only.has_sensitive_file_references)
+
     def test_provider_privacy_blocks_unredacted_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             agent = AgentConfig(
@@ -159,6 +169,44 @@ class SecurityGuardrailTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertTrue(decision.denied)
         self.assertIn("blocks secrets", decision.reason)
+
+    def test_auto_mode_allows_sensitive_path_reference_without_secret_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                approval_mode="auto",
+                free_only=False,
+                default_route=["cloud"],
+                agents={
+                    "cloud": AgentConfig(
+                        name="cloud",
+                        provider="openai",
+                        model="trusted-cloud",
+                        api_key="provider-key",
+                    )
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    return ProviderResult(text="ok", model=self.agent.model, finish_reason="stop")
+
+            response = AgentRouter(config, provider_factory=Provider).route(
+                HubRequest(
+                    session_id="s",
+                    messages=[{"role": "user", "content": "Current file: .env\nNo values shown."}],
+                )
+            )
+
+        self.assertEqual(response.text, "ok")
+        self.assertEqual(calls, ["cloud"])
 
     def test_routing_decision_exposes_tournament_and_escalation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -38,6 +38,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(commands["agentHub.restartServer"], "Agent Hub: Restart Server")
         self.assertEqual(commands["agentHub.openSettings"], "Agent Hub: Open Settings")
         self.assertEqual(commands["agentHub.openDashboard"], "Agent Hub: Open Dashboard")
+        self.assertEqual(commands["agentHub.runCheckup"], "Agent Hub: Run Checkup")
         self.assertEqual(commands["agentHub.enableFreeOnlyMode"], "Agent Hub: Disable Non-Free Models")
         self.assertEqual(commands["agentHub.enableTokenSafeMode"], "Agent Hub: Enable Token Safe Mode")
         self.assertEqual(commands["agentHub.enableCodexCliMode"], "Agent Hub: Use Codex CLI Without API Key")
@@ -45,6 +46,8 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(commands["agentHub.installOllamaDesktop"], "Agent Hub: Install Ollama Desktop")
         self.assertEqual(commands["agentHub.checkHealth"], "Agent Hub: Check Health")
         self.assertEqual(commands["agentHub.checkRequirements"], "Agent Hub: Check Requirements")
+        self.assertEqual(commands["agentHub.fixSafeConfig"], "Agent Hub: Repair Config")
+        self.assertEqual(commands["agentHub.openRuntimeKernel"], "Agent Hub: Open Runtime Kernel")
         self.assertEqual(commands["agentHub.installPython"], "Agent Hub: Install Python")
         self.assertEqual(commands["agentHub.installNode"], "Agent Hub: Install Node.js")
         self.assertEqual(commands["agentHub.generateCommitMessage"], "Agent Hub: Generate Commit Message")
@@ -52,6 +55,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(commands["agentHub.testClineConnection"], "Agent Hub: Test Cline Connection")
         self.assertEqual(commands["agentHub.copyClaudeCodeConfig"], "Agent Hub: Copy Claude Code Config")
         self.assertEqual(commands["agentHub.testAnthropicEndpoint"], "Agent Hub: Test Anthropic Endpoint")
+        self.assertEqual(commands["agentHub.openRouteLab"], "Agent Hub: Open Route Lab")
 
     def test_commit_message_generator_is_contributed_to_scm(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
@@ -114,6 +118,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         headings = [
             "<h2>Command Center</h2>",
             "<h2>Model Stats</h2>",
+            "<h2>Runtime Kernel</h2>",
             "<h2>Orchestration</h2>",
             "<h2>Health</h2>",
             "<h2>Setup</h2>",
@@ -146,6 +151,74 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("averageTokensPerCall", source)
         self.assertIn("health score", source)
         self.assertIn("readiness score", source)
+
+    def test_runtime_kernel_is_visible_from_sidebar_and_command_palette(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        sidebar_start = source.index("function sidebarHtml")
+        sidebar_end = source.index("function registerChatParticipant", sidebar_start)
+        sidebar = source[sidebar_start:sidebar_end]
+
+        self.assertIn("onCommand:agentHub.openRuntimeKernel", package["activationEvents"])
+        self.assertIn('registerCommand("agentHub.openRuntimeKernel"', source)
+        self.assertIn("/dashboard/kernel", source)
+        self.assertIn("/v1/kernel", source)
+        self.assertIn("function sidebarRuntimeKernel", source)
+        self.assertIn("function renderRuntimeKernel", source)
+        self.assertIn('id="quickKernel"', sidebar)
+        self.assertIn('id="openRuntimeKernel"', sidebar)
+        self.assertIn('id="kernelSignalGrid"', sidebar)
+        self.assertIn('id="kernelActionList"', sidebar)
+        self.assertIn('post("openRuntimeKernel")', sidebar)
+
+    def test_route_lab_is_visible_from_sidebar_and_command_palette(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        sidebar_start = source.index("function sidebarHtml")
+        sidebar_end = source.index("function registerChatParticipant", sidebar_start)
+        sidebar = source[sidebar_start:sidebar_end]
+
+        self.assertIn("onCommand:agentHub.openRouteLab", package["activationEvents"])
+        self.assertIn('registerCommand("agentHub.openRouteLab"', source)
+        self.assertIn("function openRouteLabCommand", source)
+        self.assertIn("function routeLabHtml", source)
+        self.assertIn("named_baselines", source)
+        self.assertIn("function formatRouteLabSavings", source)
+        self.assertIn('"route-diagnose"', source)
+        self.assertIn('id="quickRouteLab"', sidebar)
+        self.assertIn('id="openRouteLab"', sidebar)
+        self.assertIn('post("openRouteLab")', sidebar)
+        self.assertIn("/dashboard/routing-intelligence", source)
+
+    def test_checkup_is_visible_from_sidebar_and_command_palette(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        sidebar_start = source.index("function sidebarHtml")
+        sidebar_end = source.index("function registerChatParticipant", sidebar_start)
+        sidebar = source[sidebar_start:sidebar_end]
+
+        self.assertIn("onCommand:agentHub.runCheckup", package["activationEvents"])
+        self.assertIn('registerCommand("agentHub.runCheckup"', source)
+        self.assertIn("function runCheckupCommand", source)
+        self.assertIn("promptForFixes: false", source)
+        self.assertIn("fixSafeConfigCommand({ quietNoChange: true", source)
+        self.assertIn('id="quickCheckup"', sidebar)
+        self.assertIn('id="runCheckup"', sidebar)
+        self.assertIn('post("runCheckup")', sidebar)
+
+    def test_safe_config_repair_is_visible_from_sidebar_and_command_palette(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        sidebar_start = source.index("function sidebarHtml")
+        sidebar_end = source.index("function registerChatParticipant", sidebar_start)
+        sidebar = source[sidebar_start:sidebar_end]
+
+        self.assertIn("onCommand:agentHub.fixSafeConfig", package["activationEvents"])
+        self.assertIn('registerCommand("agentHub.fixSafeConfig"', source)
+        self.assertIn("function fixSafeConfigCommand", source)
+        self.assertIn('"--fix-safe"', source)
+        self.assertIn('id="fixSafeConfig"', sidebar)
+        self.assertIn('post("fixSafeConfig")', sidebar)
 
     def test_webview_theme_tokens_have_dark_mode_fallbacks(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
@@ -188,6 +261,8 @@ class VscodeExtensionContributionTests(unittest.TestCase):
             "readiness_scorecard",
             "feature_maturity_status",
             "production_acceptance_check",
+            "runtime_kernel_control_plane",
+            "runtime_kernel_dashboard",
         ]:
             self.assertIn(feature, required)
             self.assertTrue(BACKEND_FEATURES[feature])

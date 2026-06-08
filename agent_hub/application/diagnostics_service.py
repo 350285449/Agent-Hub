@@ -146,6 +146,8 @@ BACKEND_FEATURES = {
     "feature_maturity_status": True,
     "production_acceptance_check": True,
     "vscode_readiness_surface": True,
+    "runtime_kernel_control_plane": True,
+    "runtime_kernel_dashboard": True,
 }
 
 

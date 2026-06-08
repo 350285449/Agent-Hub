@@ -26,6 +26,7 @@ LOCAL_URL_PREFIXES = (
     "http://[::1]",
     "https://[::1]",
 )
+BACKEND_HEALTH_TIMEOUT_SECONDS = 5.0
 
 
 def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
@@ -141,6 +142,99 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
         "exact_fixes": fixes,
         "warnings": warnings,
     }
+
+
+def _doctor_fix_safe(config_path: str) -> dict[str, Any]:
+    path = Path(config_path)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {
+            "object": "agent_hub.doctor_fix_safe",
+            "ok": False,
+            "path": str(path),
+            "changes": [],
+            "errors": ["Config file does not exist."],
+        }
+    except json.JSONDecodeError as exc:
+        return {
+            "object": "agent_hub.doctor_fix_safe",
+            "ok": False,
+            "path": str(path),
+            "changes": [],
+            "errors": [f"Config is not valid JSON: {exc}"],
+        }
+    if not isinstance(data, dict):
+        return {
+            "object": "agent_hub.doctor_fix_safe",
+            "ok": False,
+            "path": str(path),
+            "changes": [],
+            "errors": ["Config root must be a JSON object."],
+        }
+
+    changes: list[str] = []
+    errors: list[str] = []
+    agents = data.get("agents")
+    agent_names: set[str] = set()
+    if isinstance(agents, list):
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            name = str(agent.get("name") or "").strip()
+            if name:
+                agent_names.add(name)
+    if not agent_names:
+        errors.append("No named agents are available for safe route cleanup.")
+
+    default_route = data.get("default_route")
+    if isinstance(default_route, list) and agent_names:
+        cleaned = _known_route_agents(default_route, agent_names)
+        if cleaned != default_route:
+            data["default_route"] = cleaned
+            changes.append("Removed unknown agents from default_route.")
+
+    fallback_route = data.get("default_route") if isinstance(data.get("default_route"), list) else []
+    routes = data.get("routes")
+    if isinstance(routes, list) and agent_names:
+        for route in routes:
+            if not isinstance(route, dict):
+                continue
+            names = route.get("agents")
+            if not isinstance(names, list):
+                continue
+            cleaned = _known_route_agents(names, agent_names)
+            if not cleaned and fallback_route:
+                cleaned = _known_route_agents(fallback_route, agent_names)
+            if cleaned != names:
+                route["agents"] = cleaned
+                changes.append(f"Cleaned unknown agents from route {route.get('name') or '?'}.")
+
+    if data.get("allow_shell_tools") is True and str(data.get("shell_command_policy") or "deny").lower() == "deny":
+        data["allow_shell_tools"] = False
+        changes.append("Set allow_shell_tools=false because shell_command_policy=deny.")
+
+    if changes and not errors:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return {
+        "object": "agent_hub.doctor_fix_safe",
+        "ok": not errors,
+        "path": str(path),
+        "changed": bool(changes and not errors),
+        "changes": changes,
+        "errors": errors,
+    }
+
+
+def _known_route_agents(names: list[Any], agent_names: set[str]) -> list[str]:
+    cleaned: list[str] = []
+    for name in names:
+        text = str(name or "")
+        if text and text in agent_names and text not in cleaned:
+            cleaned.append(text)
+    return cleaned
 
 
 def _missing_api_key_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -568,7 +662,7 @@ def _is_local_url(value: str) -> bool:
 def _backend_reachability(config: Any) -> dict[str, Any]:
     url = f"http://{config.host}:{config.port}/health"
     try:
-        with urllib.request.urlopen(url, timeout=0.8) as response:
+        with urllib.request.urlopen(url, timeout=BACKEND_HEALTH_TIMEOUT_SECONDS) as response:
             return {"ok": 200 <= int(response.status) < 300, "url": url, "detail": f"HTTP {response.status}"}
     except Exception as exc:
         return {"ok": False, "url": url, "detail": str(exc)}

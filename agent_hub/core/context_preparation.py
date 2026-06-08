@@ -118,7 +118,8 @@ class ContextPreparationService:
             "secret_findings": secret_findings[:20],
             "injection_findings": injection_findings[:20],
             "sensitive_files": sensitive_files[:20],
-            "has_secret_findings": bool(secret_findings or sensitive_files),
+            "has_secret_findings": bool(secret_findings),
+            "has_sensitive_file_references": bool(sensitive_files),
             "has_unredacted_secrets": False,
             "has_injection_findings": bool(injection_findings),
             "repo_files_untrusted": any(
@@ -137,6 +138,12 @@ class ContextPreparationService:
             security_context["injection_findings"] = (
                 security_context["injection_findings"] + scan.injection_findings
             )[:20]
+            for path in scan.sensitive_files:
+                if path not in security_context["sensitive_files"]:
+                    security_context["sensitive_files"].append(path)
+            security_context["has_secret_findings"] = bool(security_context["secret_findings"])
+            security_context["has_sensitive_file_references"] = bool(security_context["sensitive_files"])
+            security_context["has_injection_findings"] = bool(security_context["injection_findings"])
         if isinstance(request.context, str) and request.context:
             scan = scan_and_redact_context_text(request.context, source="context")
             next_context = scan.text
@@ -148,9 +155,8 @@ class ContextPreparationService:
             for path in scan.sensitive_files:
                 if path not in security_context["sensitive_files"]:
                     security_context["sensitive_files"].append(path)
-            security_context["has_secret_findings"] = bool(
-                security_context["secret_findings"] or security_context["sensitive_files"]
-            )
+            security_context["has_secret_findings"] = bool(security_context["secret_findings"])
+            security_context["has_sensitive_file_references"] = bool(security_context["sensitive_files"])
             security_context["has_injection_findings"] = bool(security_context["injection_findings"])
             security_context["redacted"] = changed
         if not any(security_context.values()):

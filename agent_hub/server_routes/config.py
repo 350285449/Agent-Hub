@@ -20,6 +20,14 @@ def handle_get(handler: object, path: str) -> bool:
     if path == "/dashboard":
         handler._send_html(handler._root_html())
         return True
+    if path == "/dashboard/kernel":
+        body = handler.server.runtime_kernel.snapshot(
+            config=handler.server.config,
+            router=handler.server.router,
+            diagnostics_cache=handler.server.diagnostics_cache_stats(),
+        )
+        handler._send_html(_kernel_dashboard_html(body))
+        return True
     if path == "/dashboard/optimization":
         handler._send_html(server_module._optimization_dashboard_html(handler.server.adaptive_service.optimization_summary()))
         return True
@@ -138,93 +146,155 @@ def handle_get(handler: object, path: str) -> bool:
         body = handler.server.diagnostics_service.inbox_status_body()
         handler._send_html(_inbox_dashboard_html(body))
         return True
+    if path == "/v1/kernel":
+        handler._send_diagnostics_json(
+            handler.server.runtime_kernel.snapshot(
+                config=handler.server.config,
+                router=handler.server.router,
+                diagnostics_cache=handler.server.diagnostics_cache_stats(),
+            )
+        )
+        return True
     if path == "/v1/events":
-        handler._send_diagnostics_json(server_module._events_body(handler.server.config))
+        handler._send_cached_diagnostics_json(
+            "GET /v1/events",
+            lambda: server_module._events_body(handler.server.config),
+        )
         return True
     if path == "/v1/optimization":
-        handler._send_diagnostics_json(handler.server.adaptive_service.optimization_summary())
+        handler._send_cached_diagnostics_json(
+            "GET /v1/optimization",
+            lambda: handler.server.adaptive_service.optimization_summary(),
+        )
         return True
     if path == "/v1/learning":
-        handler._send_diagnostics_json(learning_dashboard_body(handler.server.config, handler.server.router))
+        handler._send_cached_diagnostics_json(
+            "GET /v1/learning",
+            lambda: learning_dashboard_body(handler.server.config, handler.server.router),
+        )
         return True
     if path == "/v1/route-history":
         from ..learning_proof import route_history_body
 
-        handler._send_diagnostics_json(route_history_body(handler.server.config))
+        handler._send_cached_diagnostics_json(
+            "GET /v1/route-history",
+            lambda: route_history_body(handler.server.config),
+        )
         return True
     if path == "/v1/cost-dashboard":
-        handler._send_diagnostics_json(
-            handler.server.diagnostics_service.cost_dashboard_body(
+        handler._send_cached_diagnostics_json(
+            "GET /v1/cost-dashboard",
+            lambda: handler.server.diagnostics_service.cost_dashboard_body(
                 handler.server.adaptive_service.optimization_summary()
-            )
+            ),
         )
         return True
     if path == "/v1/model-leaderboard":
-        handler._send_diagnostics_json(
-            handler.server.diagnostics_service.model_leaderboard_body(handler.server.router)
+        handler._send_cached_diagnostics_json(
+            "GET /v1/model-leaderboard",
+            lambda: handler.server.diagnostics_service.model_leaderboard_body(handler.server.router),
         )
         return True
     if path == "/v1/benchmarks":
-        handler._send_diagnostics_json(handler.server.diagnostics_service.benchmark_results_body())
+        handler._send_cached_diagnostics_json(
+            "GET /v1/benchmarks",
+            lambda: handler.server.diagnostics_service.benchmark_results_body(),
+        )
         return True
     if path == "/v1/workspace/checkpoints":
-        handler._send_diagnostics_json(handler.server.diagnostics_service.workspace_checkpoints_body())
+        handler._send_cached_diagnostics_json(
+            "GET /v1/workspace/checkpoints",
+            lambda: handler.server.diagnostics_service.workspace_checkpoints_body(),
+        )
         return True
     if path == "/v1/workflow-presets":
         from ..workflows.selector import WORKFLOW_PRESETS
 
-        handler._send_diagnostics_json(
-            {"object": "agent_hub.workflow_presets", "data": WORKFLOW_PRESETS}
+        handler._send_cached_diagnostics_json(
+            "GET /v1/workflow-presets",
+            lambda: {"object": "agent_hub.workflow_presets", "data": WORKFLOW_PRESETS},
         )
         return True
     if path == "/v1/routing-intelligence":
-        optimization = handler.server.adaptive_service.optimization_summary()
-        handler._send_diagnostics_json(
-            server_module._routing_intelligence_body(
+        handler._send_cached_diagnostics_json(
+            "GET /v1/routing-intelligence",
+            lambda: server_module._routing_intelligence_body(
                 handler.server.config,
                 handler.server.router,
-                optimization=optimization,
-            )
+                optimization=handler.server.adaptive_service.optimization_summary(),
+            ),
         )
         return True
     if path == "/v1/repository-dna":
-        dna = handler.server.router.repository_intelligence.repository_dna()
-        handler._send_diagnostics_json(dna.to_dict())
+        handler._send_cached_diagnostics_json(
+            "GET /v1/repository-dna",
+            lambda: handler.server.router.repository_intelligence.repository_dna().to_dict(),
+        )
         return True
     if path == "/v1/workspace-memory":
-        handler._send_diagnostics_json(handler.server.router.repository_intelligence.workspace_memory())
+        handler._send_cached_diagnostics_json(
+            "GET /v1/workspace-memory",
+            lambda: handler.server.router.repository_intelligence.workspace_memory(),
+        )
         return True
     if path == "/v1/night-mode":
         from ..repository_intelligence import build_autonomous_night_mode_plan
 
-        dna = handler.server.router.repository_intelligence.repository_dna()
-        handler._send_diagnostics_json(
-            build_autonomous_night_mode_plan(dna=dna, config=handler.server.config)
+        handler._send_cached_diagnostics_json(
+            "GET /v1/night-mode",
+            lambda: build_autonomous_night_mode_plan(
+                dna=handler.server.router.repository_intelligence.repository_dna(),
+                config=handler.server.config,
+            ),
         )
         return True
     if path == "/v1/inbox/status":
-        handler._send_diagnostics_json(handler.server.diagnostics_service.inbox_status_body())
+        handler._send_cached_diagnostics_json(
+            "GET /v1/inbox/status",
+            lambda: handler.server.diagnostics_service.inbox_status_body(),
+        )
         return True
     if path == "/v1/tools":
-        handler._send_diagnostics_json(server_module._tools_body(handler.server.router))
+        handler._send_cached_diagnostics_json(
+            "GET /v1/tools",
+            lambda: server_module._tools_body(handler.server.router),
+        )
         return True
     if path == "/v1/workflows/status":
-        handler._send_diagnostics_json(server_module._workflow_status_body(handler.server.config))
+        handler._send_cached_diagnostics_json(
+            "GET /v1/workflows/status",
+            lambda: server_module._workflow_status_body(handler.server.config),
+        )
         return True
     if path == "/v1/plugins":
-        handler._send_diagnostics_json(handler.server.diagnostics_service.plugins_body())
+        handler._send_cached_diagnostics_json(
+            "GET /v1/plugins",
+            lambda: handler.server.diagnostics_service.plugins_body(),
+        )
         return True
     if path == "/v1/mcp/status":
-        handler._send_diagnostics_json(handler.server.diagnostics_service.mcp_status_body())
+        handler._send_cached_diagnostics_json(
+            "GET /v1/mcp/status",
+            lambda: handler.server.diagnostics_service.mcp_status_body(),
+        )
         return True
     if path == "/v1/extension-contract":
-        handler._send_diagnostics_json(handler.server.diagnostics_service.extension_contract_body())
+        handler._send_cached_diagnostics_json(
+            "GET /v1/extension-contract",
+            lambda: handler.server.diagnostics_service.extension_contract_body(),
+        )
         return True
     if path == "/v1/enterprise/audit":
-        handler._send_diagnostics_json(handler.server.diagnostics_service.enterprise_audit_body(request_query(handler.path)))
+        handler._send_cached_diagnostics_json(
+            f"GET {handler.path}",
+            lambda: handler.server.diagnostics_service.enterprise_audit_body(request_query(handler.path)),
+        )
         return True
     if path == "/v1/enterprise/status":
-        handler._send_diagnostics_json(handler.server.diagnostics_service.enterprise_status_body())
+        handler._send_cached_diagnostics_json(
+            "GET /v1/enterprise/status",
+            lambda: handler.server.diagnostics_service.enterprise_status_body(),
+        )
         return True
     return False
 
@@ -307,6 +377,110 @@ main{{padding:24px;max-width:1280px;margin:auto}} pre{{white-space:pre-wrap;word
 a{{color:#67e8f9}}
 </style></head><body><header><strong>{html.escape(title)}</strong></header>
 <main><p><a href="/dashboard">Back to Agent Hub</a></p><pre>{payload}</pre></main></body></html>"""
+
+
+def _kernel_dashboard_html(body: dict[str, Any]) -> str:
+    telemetry = _dict(body.get("request_telemetry"))
+    latency = _dict(telemetry.get("latency_ms"))
+    cache = _dict(body.get("diagnostics_cache"))
+    actions = body.get("next_actions") if isinstance(body.get("next_actions"), list) else []
+    subsystems = body.get("subsystems") if isinstance(body.get("subsystems"), list) else []
+    routes = telemetry.get("routes") if isinstance(telemetry.get("routes"), list) else []
+    slow_requests = (
+        telemetry.get("recent_slow_requests")
+        if isinstance(telemetry.get("recent_slow_requests"), list)
+        else []
+    )
+    subsystem_rows = "".join(
+        _kernel_subsystem_row_html(row)
+        for row in subsystems
+        if isinstance(row, dict)
+    )
+    if not subsystem_rows:
+        subsystem_rows = "<tr><td colspan=\"4\" class=\"muted\">No subsystem data yet.</td></tr>"
+    route_rows = "".join(
+        _kernel_route_row_html(row)
+        for row in routes[:20]
+        if isinstance(row, dict)
+    )
+    if not route_rows:
+        route_rows = "<tr><td colspan=\"8\" class=\"muted\">No completed HTTP requests yet.</td></tr>"
+    slow_rows = "".join(
+        _kernel_slow_request_row_html(row)
+        for row in slow_requests[:20]
+        if isinstance(row, dict)
+    )
+    if not slow_rows:
+        slow_rows = "<tr><td colspan=\"6\" class=\"muted\">No slow requests crossed the kernel threshold.</td></tr>"
+    cache_rows = "".join(
+        f"<tr><td>{_html(key)}</td><td>{_html(value)}</td></tr>"
+        for key, value in sorted(cache.items(), key=lambda item: str(item[0]))
+    ) or "<tr><td colspan=\"2\" class=\"muted\">No diagnostics cache stats available.</td></tr>"
+    action_rows = "".join(
+        _kernel_action_row_html(row)
+        for row in actions
+        if isinstance(row, dict)
+    ) or "<tr><td colspan=\"5\" class=\"muted\">No recommended actions.</td></tr>"
+    quick_links = _quick_link_grid_html(
+        [
+            ("Status", "/dashboard/status", "Provider state and routing summary"),
+            ("Provider Health", "/dashboard/provider-health", "Availability, latency, cooldowns"),
+            ("Routing Intelligence", "/dashboard/routing-intelligence", "Selection reasons and candidates"),
+            ("Events", "/dashboard/events", "Recent backend events"),
+        ]
+    )
+    content = f"""
+{quick_links}
+<section class="panel">
+  <h2>Recommended Actions</h2>
+  <table>
+    <thead><tr><th>Severity</th><th>Action</th><th>Detail</th><th>Open</th><th>Command</th></tr></thead>
+    <tbody>{action_rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Subsystems</h2>
+  <table>
+    <thead><tr><th>Subsystem</th><th>State</th><th>Detail</th><th>Metrics</th></tr></thead>
+    <tbody>{subsystem_rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Request Routes</h2>
+  <table>
+    <thead><tr><th>Route</th><th>Count</th><th>Errors</th><th>Error Rate</th><th>Cache Hit Rate</th><th>Avg Latency</th><th>EWMA</th><th>Last</th></tr></thead>
+    <tbody>{route_rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Diagnostics Cache</h2>
+  <table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>{cache_rows}</tbody></table>
+</section>
+<section class="panel">
+  <h2>Slow Requests</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Method</th><th>Route</th><th>Status</th><th>Latency</th><th>Cache</th></tr></thead>
+    <tbody>{slow_rows}</tbody>
+  </table>
+</section>"""
+    cards = [
+        ("Kernel state", body.get("state", "unknown")),
+        ("Operational score", f"{_int(body.get('operational_score'))}/100"),
+        ("Uptime", _duration(body.get("uptime_seconds"))),
+        ("Requests", telemetry.get("total_requests", 0)),
+        ("In flight", telemetry.get("in_flight", 0)),
+        ("EWMA latency", _latency(latency.get("ewma"))),
+        ("Cache hit rate", _percent(telemetry.get("cache_hit_rate"))),
+        ("Boot ID", str(body.get("boot_id") or "")[:12]),
+    ]
+    return _dashboard_page(
+        "Agent Hub Runtime Kernel",
+        "Control-plane telemetry for request flow, subsystem readiness, cache behavior, and slow-path detection.",
+        cards,
+        content,
+        body,
+        json_path="/v1/kernel",
+    )
 
 
 def _cost_dashboard_html(body: dict[str, Any]) -> str:
@@ -1412,6 +1586,62 @@ def _quick_link_grid_html(links: list[tuple[str, str, str]]) -> str:
     return f"<section class=\"link-grid\">{items}</section>"
 
 
+def _kernel_subsystem_row_html(row: dict[str, Any]) -> str:
+    metrics = _dict(row.get("metrics"))
+    metric_text = json.dumps(metrics, sort_keys=True, ensure_ascii=False) if metrics else ""
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('id'))}</td>"
+        f"<td>{_html(row.get('state'))}</td>"
+        f"<td>{_html(row.get('detail'))}</td>"
+        f"<td><code>{_html(metric_text)}</code></td>"
+        "</tr>"
+    )
+
+
+def _kernel_action_row_html(row: dict[str, Any]) -> str:
+    path = str(row.get("path") or "")
+    link = f"<a href=\"{_html(path)}\">{_html(path)}</a>" if path else ""
+    command = str(row.get("command") or "")
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('severity'))}</td>"
+        f"<td>{_html(row.get('title'))}</td>"
+        f"<td>{_html(row.get('detail'))}</td>"
+        f"<td>{link}</td>"
+        f"<td><code>{_html(command)}</code></td>"
+        "</tr>"
+    )
+
+
+def _kernel_route_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('path'))}</td>"
+        f"<td>{_html(row.get('count', 0))}</td>"
+        f"<td>{_html(row.get('error_count', 0))}</td>"
+        f"<td>{_html(_percent(row.get('error_rate')))}</td>"
+        f"<td>{_html(_percent(row.get('cache_hit_rate')))}</td>"
+        f"<td>{_html(_latency(row.get('average_latency_ms')))}</td>"
+        f"<td>{_html(_latency(row.get('ewma_latency_ms')))}</td>"
+        f"<td>{_html(row.get('last_status'))} at {_html(row.get('last_seen'))}</td>"
+        "</tr>"
+    )
+
+
+def _kernel_slow_request_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('timestamp'))}</td>"
+        f"<td>{_html(row.get('method'))}</td>"
+        f"<td>{_html(row.get('path'))}</td>"
+        f"<td>{_html(row.get('status'))}</td>"
+        f"<td>{_html(_latency(row.get('duration_ms')))}</td>"
+        f"<td>{_html(row.get('cache_state'))}</td>"
+        "</tr>"
+    )
+
+
 def _status_provider_row_html(row: dict[str, Any]) -> str:
     return (
         "<tr>"
@@ -1819,6 +2049,21 @@ def _percent(value: Any) -> str:
 def _latency(value: Any) -> str:
     number = _float(value)
     return "unknown" if number is None or number <= 0 else f"{number:.1f} ms"
+
+
+def _duration(value: Any) -> str:
+    seconds = _float(value)
+    if seconds is None or seconds < 0:
+        return "unknown"
+    if seconds < 60:
+        return f"{seconds:.1f} s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:.1f} min"
+    hours = minutes / 60
+    if hours < 48:
+        return f"{hours:.1f} h"
+    return f"{hours / 24:.1f} d"
 
 
 def _timestamp(value: Any) -> str:

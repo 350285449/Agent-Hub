@@ -19,6 +19,7 @@ let extensionContext = null;
 let sidebarProvider = null;
 let statusBarItem = null;
 let benchmarkSharePanel = null;
+let routeLabPanel = null;
 let lastActiveTextEditor = null;
 let serverLifecycleState = "Stopped";
 let lastServerMessage = "";
@@ -326,7 +327,9 @@ const REQUIRED_BACKEND_FEATURES = [
   "tool_execution_loop",
   "readiness_scorecard",
   "feature_maturity_status",
-  "production_acceptance_check"
+  "production_acceptance_check",
+  "runtime_kernel_control_plane",
+  "runtime_kernel_dashboard"
 ];
 const APPROVAL_MODES = new Set(["ask", "auto", "safe", "readonly", "shell-ask", "deny"]);
 const SENSITIVE_PERMISSION_CATEGORIES = new Set([
@@ -445,8 +448,11 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.restartServer", restartServer),
     vscode.commands.registerCommand("agentHub.checkHealth", checkHealth),
     vscode.commands.registerCommand("agentHub.openDashboard", () => openAgentHubDashboard("/dashboard")),
+    vscode.commands.registerCommand("agentHub.openRuntimeKernel", () => openAgentHubDashboard("/dashboard/kernel")),
     vscode.commands.registerCommand("agentHub.openSettings", openAgentHubSettings),
+    vscode.commands.registerCommand("agentHub.runCheckup", () => runCheckupCommand()),
     vscode.commands.registerCommand("agentHub.checkRequirements", checkRequirementsCommand),
+    vscode.commands.registerCommand("agentHub.fixSafeConfig", fixSafeConfigCommand),
     vscode.commands.registerCommand("agentHub.installPython", installPythonCommand),
     vscode.commands.registerCommand("agentHub.installNode", installNodeCommand),
     vscode.commands.registerCommand("agentHub.enableFreeOnlyMode", enableFreeOnlyModeCommand),
@@ -473,6 +479,7 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.openBenchmarkResults", () => openAgentHubDashboard("/dashboard/benchmarks")),
     vscode.commands.registerCommand("agentHub.runPersonalBenchmark", () => runPersonalBenchmark()),
     vscode.commands.registerCommand("agentHub.explainRoute", () => explainRouteCommand()),
+    vscode.commands.registerCommand("agentHub.openRouteLab", () => openRouteLabCommand()),
     vscode.commands.registerCommand("agentHub.openBenchmarkShareCard", () => openLatestBenchmarkShareCard()),
     vscode.commands.registerCommand("agentHub.openReadmeProof", openReadmeProofSection),
     vscode.commands.registerCommand("agentHub.openOutput", () => output.show())
@@ -505,20 +512,24 @@ async function showFirstRunProofPrompt(context, options = {}) {
     return;
   }
   await context.globalState.update(FIRST_RUN_PROOF_VERSION_KEY, EXTENSION_VERSION);
+  const checkup = "Run Checkup";
   const run = "Run Benchmark";
-  const explain = "Explain Routing";
+  const routeLab = "Open Route Lab";
   const proof = "Open Proof";
   const choice = await vscode.window.showInformationMessage(
-    "Agent-Hub ships a 50-task benchmark corpus so you can verify routing, cost, latency, and success locally.",
+    "Agent-Hub can check setup, repair safe config issues, start the backend, and show route reasoning in one pass.",
+    checkup,
     run,
-    explain,
+    routeLab,
     proof,
     "Later"
   );
-  if (choice === run) {
+  if (choice === checkup) {
+    await runCheckupCommand({ source: "first-run" });
+  } else if (choice === run) {
     await runPersonalBenchmark({ source: "first-run" });
-  } else if (choice === explain) {
-    await explainRouteCommand();
+  } else if (choice === routeLab) {
+    await openRouteLabCommand({ prompt: PERSONAL_BENCHMARK_PROMPT });
   } else if (choice === proof) {
     await openReadmeProofSection();
   }
@@ -631,6 +642,19 @@ class AgentHubSidebarProvider {
       await openAgentHubDashboard("/dashboard");
       return;
     }
+    if (message.type === "openRuntimeKernel") {
+      await openAgentHubDashboard("/dashboard/kernel");
+      return;
+    }
+    if (message.type === "runCheckup") {
+      await runCheckupCommand({ source: "sidebar" });
+      await this.refresh();
+      return;
+    }
+    if (message.type === "openRoutingDashboard") {
+      await openAgentHubDashboard("/dashboard/routing-intelligence");
+      return;
+    }
     if (message.type === "runPersonalBenchmark") {
       await runPersonalBenchmark();
       await this.refresh();
@@ -642,6 +666,10 @@ class AgentHubSidebarProvider {
     }
     if (message.type === "explainRoute") {
       await explainRouteCommand();
+      return;
+    }
+    if (message.type === "openRouteLab") {
+      await openRouteLabCommand();
       return;
     }
     if (message.type === "openReadmeProof") {
@@ -666,6 +694,11 @@ class AgentHubSidebarProvider {
     }
     if (message.type === "checkRequirements") {
       await checkRequirementsCommand();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "fixSafeConfig") {
+      await fixSafeConfigCommand();
       await this.refresh();
       return;
     }
@@ -842,6 +875,7 @@ async function sidebarDashboardState() {
     optimization: null,
     routingIntelligence: null,
     routingExplanation: null,
+    runtimeKernel: sidebarRuntimeKernel(null),
     modelStats: sidebarModelStats(null, null, null, null),
     orchestrationFlow: sidebarOrchestrationFlow(null, null),
     workflowTemplates: sidebarWorkflowTemplates(),
@@ -862,6 +896,7 @@ async function sidebarDashboardState() {
     let metrics = null;
     let optimization = null;
     let routingIntelligence = null;
+    let runtimeKernel = null;
     let debugContext = null;
     let tools = null;
     let modelLeaderboard = null;
@@ -896,6 +931,11 @@ async function sidebarDashboardState() {
       routingIntelligence = await requestJson("GET", "/v1/routing-intelligence");
     } catch (_error) {
       routingIntelligence = null;
+    }
+    try {
+      runtimeKernel = await requestJson("GET", "/v1/kernel");
+    } catch (_error) {
+      runtimeKernel = null;
     }
     try {
       debugContext = await requestJson("GET", "/debug/context");
@@ -937,6 +977,7 @@ async function sidebarDashboardState() {
     dashboard.optimization = optimization || (metrics && metrics.optimization) || null;
     dashboard.routingIntelligence = routingIntelligence;
     dashboard.routingExplanation = sidebarRoutingExplanation(routingIntelligence, health, limits);
+    dashboard.runtimeKernel = sidebarRuntimeKernel(runtimeKernel);
     if (metrics && dashboard.optimization) {
       metrics.optimization = dashboard.optimization;
     }
@@ -1414,6 +1455,136 @@ function sidebarModelStats(dashboard, leaderboard, benchmarks, costDashboard) {
     },
     active: activeRow || active || null
   };
+}
+
+function sidebarRuntimeKernel(kernel) {
+  const body = objectValue(kernel);
+  const telemetry = objectValue(body.request_telemetry);
+  const latency = objectValue(telemetry.latency_ms);
+  const pressure = objectValue(body.pressure);
+  const cache = objectValue(body.diagnostics_cache);
+  const subsystems = Array.isArray(body.subsystems) ? body.subsystems : [];
+  const timeline = Array.isArray(body.timeline) ? body.timeline : [];
+  const score = numberValueOrNull(body.operational_score);
+  const state = body.state ? String(body.state).replace(/_/g, " ") : "offline";
+  const isOnline = body.object === "agent_hub.runtime_kernel";
+  const pressureSignals = Array.isArray(pressure.signals) ? pressure.signals : [];
+  const nextActions = Array.isArray(body.next_actions) ? body.next_actions : [];
+  const cacheHitRate = numberValueOrNull(cache.hit_rate, telemetry.cache_hit_rate);
+  const ewmaLatency = numberValueOrNull(latency.ewma);
+  const totalRequests = numberOrZero(telemetry.total_requests);
+  const slowCount = Array.isArray(telemetry.recent_slow_requests)
+    ? telemetry.recent_slow_requests.length
+    : numberOrZero(body.slow_request_count);
+
+  return {
+    online: isOnline,
+    title: isOnline ? `Kernel ${score === null ? "--" : Math.round(score)}/100` : "Kernel offline",
+    detail: isOnline
+      ? `${state} / uptime ${durationText(body.uptime_seconds)} / ${compactStatValue(totalRequests)} request(s)`
+      : "Start Agent Hub to inspect runtime pressure and subsystem state.",
+    state: isOnline ? state : "offline",
+    score: score === null ? null : Math.round(score),
+    status: isOnline ? state : "Offline",
+    statusTone: runtimeTone(pressure.state || state, score),
+    tiles: [
+      {
+        label: "State",
+        value: isOnline ? state : "Offline",
+        detail: isOnline ? `boot ${String(body.boot_id || "").slice(0, 8) || "unknown"}` : "waiting for backend",
+        tone: runtimeTone(pressure.state || state, score)
+      },
+      {
+        label: "Requests",
+        value: compactStatValue(totalRequests),
+        detail: `${numberOrZero(telemetry.in_flight)} in flight`,
+        tone: numberOrZero(telemetry.in_flight) > 4 ? "warn" : "ok"
+      },
+      {
+        label: "Latency",
+        value: latencyText(ewmaLatency),
+        detail: `max ${latencyText(latency.max)}`,
+        tone: ewmaLatency !== null && ewmaLatency >= 750 ? "warn" : "ok"
+      },
+      {
+        label: "Cache",
+        value: cacheHitRate === null ? "--" : `${Math.round(cacheHitRate * 100)}%`,
+        detail: `${numberOrZero(cache.entries)} live entries`,
+        tone: cacheHitRate !== null && cacheHitRate < 0.2 && numberOrZero(cache.misses) > 8 ? "warn" : "ok"
+      },
+      {
+        label: "Slow Path",
+        value: compactStatValue(slowCount),
+        detail: "retained slow request(s)",
+        tone: slowCount ? "warn" : "ok"
+      }
+    ],
+    pressureRows: pressureSignals.map((signal) => ({
+      label: signal.id || "pressure",
+      value: signal.value === null || signal.value === undefined ? "" : String(signal.value),
+      detail: signal.detail || "",
+      tone: signal.state === "hot" ? "error" : signal.state === "elevated" ? "warn" : "ok"
+    })),
+    actionRows: nextActions.map((row) => ({
+      label: row.title || "Recommended action",
+      value: row.severity || "",
+      detail: [row.detail, row.command ? `Command: ${row.command}` : "", row.path ? `Open: ${row.path}` : ""].filter(Boolean).join(" / "),
+      tone: row.severity === "critical" ? "error" : row.severity === "warn" ? "warn" : row.severity === "ok" ? "ok" : "info"
+    })),
+    subsystemRows: subsystems.map((row) => ({
+      label: row.id || "subsystem",
+      value: row.state || "unknown",
+      detail: row.detail || "",
+      tone: row.state === "critical" || row.state === "degraded" ? "error" : row.state === "watching" || row.state === "needs_setup" ? "warn" : "ok"
+    })),
+    timelineRows: timeline.slice(0, 6).map((row) => ({
+      label: row.title || row.type || "kernel event",
+      value: row.tone === "error" ? "issue" : row.tone === "warn" ? "watch" : "ok",
+      detail: [row.timestamp, row.detail].filter(Boolean).join(" - "),
+      tone: row.tone || "info"
+    }))
+  };
+}
+
+function runtimeTone(state, score) {
+  const text = String(state || "").toLowerCase();
+  if (text.includes("critical") || text.includes("hot") || (score !== null && score < 55)) {
+    return "error";
+  }
+  if (text.includes("degraded") || text.includes("elevated") || text.includes("attention") || (score !== null && score < 80)) {
+    return "warn";
+  }
+  return "ok";
+}
+
+function latencyText(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "--";
+  }
+  if (number >= 1000) {
+    return `${(number / 1000).toFixed(1)}s`;
+  }
+  return `${Math.round(number)}ms`;
+}
+
+function durationText(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "--";
+  }
+  if (seconds < 60) {
+    return `${Math.round(seconds)}s`;
+  }
+  const minutes = seconds / 60;
+  if (minutes < 60) {
+    return `${Math.round(minutes)}m`;
+  }
+  const hours = minutes / 60;
+  if (hours < 48) {
+    return `${hours.toFixed(1)}h`;
+  }
+  return `${(hours / 24).toFixed(1)}d`;
 }
 
 function objectValue(value) {
@@ -3878,6 +4049,18 @@ function sidebarHtml(webview, logoPath) {
           <span class="button-main">Dashboard</span>
           <span class="button-meta">Browser</span>
         </button>
+        <button class="command-button" id="quickKernel" type="button" title="Open the runtime kernel control plane" data-icon="K">
+          <span class="button-main">Kernel</span>
+          <span class="button-meta">Runtime</span>
+        </button>
+        <button class="command-button" id="quickCheckup" type="button" title="Repair config, check requirements, start Agent Hub, and open Route Lab" data-icon="V">
+          <span class="button-main">Checkup</span>
+          <span class="button-meta">One click</span>
+        </button>
+        <button class="command-button" id="quickRouteLab" type="button" title="Score current route candidates without calling a provider" data-icon="R">
+          <span class="button-main">Route Lab</span>
+          <span class="button-meta">Why model?</span>
+        </button>
         <button class="command-button" id="quickSettings" type="button" title="Open Agent Hub settings" data-icon="S">
           <span class="button-main">Settings</span>
           <span class="button-meta">Models</span>
@@ -3946,6 +4129,40 @@ function sidebarHtml(webview, logoPath) {
         <ul class="mini-flow-list" id="modelIncidentList"></ul>
       </div>
     </section>
+    <section class="model-control-plane runtime-kernel-panel">
+      <div class="section-head">
+        <h2>Runtime Kernel</h2>
+        <span class="status" id="kernelStatus" data-state="Stopped">Offline</span>
+      </div>
+      <div class="control-plane-status">
+        <div>
+          <strong id="kernelTitle">Kernel offline</strong>
+          <span id="kernelDetail">Start Agent Hub to inspect runtime pressure and subsystem state.</span>
+        </div>
+        <button id="openRuntimeKernel" type="button">Open Kernel</button>
+      </div>
+      <div class="signal-tile-grid" id="kernelSignalGrid"></div>
+      <div class="model-board-grid compact">
+        <div class="model-panel">
+          <h3>Recommended Actions</h3>
+          <ul class="mini-flow-list" id="kernelActionList"></ul>
+        </div>
+        <div class="model-panel">
+          <h3>Pressure Signals</h3>
+          <ul class="mini-flow-list" id="kernelPressureList"></ul>
+        </div>
+      </div>
+      <div class="model-board-grid compact">
+        <div class="model-panel">
+          <h3>Subsystems</h3>
+          <ul class="mini-flow-list" id="kernelSubsystemList"></ul>
+        </div>
+        <div class="model-panel incident-stream">
+          <h3>Kernel Timeline</h3>
+          <ul class="mini-flow-list" id="kernelTimelineList"></ul>
+        </div>
+      </div>
+    </section>
     <section>
       <div class="section-head">
         <h2>Orchestration</h2>
@@ -4011,7 +4228,9 @@ function sidebarHtml(webview, logoPath) {
       <div class="actions">
         <button id="stopServer" type="button">Stop</button>
         <button id="restartServer" type="button">Restart</button>
+        <button id="runCheckup" type="button">Run Checkup</button>
         <button id="checkRequirements" type="button">Check Requirements</button>
+        <button id="fixSafeConfig" type="button">Repair Config</button>
         <button id="checkHealth" type="button">Check Status</button>
       </div>
     </details>
@@ -4046,6 +4265,11 @@ function sidebarHtml(webview, logoPath) {
       <div class="detail" id="routingExplanation">No routing decision yet</div>
       <ul class="list" id="routingReasonList"></ul>
       <ul class="list" id="routingRejectedList"></ul>
+      <div class="actions">
+        <button id="openRouteLab" type="button">Open Route Lab</button>
+        <button id="explainRoute" type="button">Plain Text Explain</button>
+        <button id="openRoutingDashboard" type="button">Dashboard</button>
+      </div>
     </details>
     <details class="panel">
       <summary class="section-head">
@@ -4179,6 +4403,7 @@ function sidebarHtml(webview, logoPath) {
       renderServerControls(status, dashboard);
       renderSetupSummary(dashboard);
       renderModelStats(dashboard.modelStats || {}, dashboard.automatedModelFeedback);
+      renderRuntimeKernel(dashboard.runtimeKernel || {});
       renderOrchestration(dashboard.orchestrationFlow || {});
       renderWorkflowTemplates(dashboard.workflowTemplates || []);
       renderStatistics(dashboard.statistics || {}, dashboard.insights || [], status);
@@ -4362,6 +4587,42 @@ function sidebarHtml(webview, logoPath) {
 
     function gatewayStatusState(gateway) {
       const tone = gateway && gateway.tone ? gateway.tone : "";
+      if (tone === "ok") {
+        return "Running";
+      }
+      if (tone === "error") {
+        return "Error";
+      }
+      return "Starting";
+    }
+
+    function renderRuntimeKernel(kernel) {
+      const state = kernel || {};
+      kernelTitle.textContent = state.title || "Kernel offline";
+      kernelDetail.textContent = state.detail || "Start Agent Hub to inspect runtime pressure and subsystem state.";
+      kernelStatus.textContent = state.status || "Offline";
+      kernelStatus.dataset.state = kernelStatusState(state.statusTone);
+      kernelSignalGrid.textContent = "";
+      const tiles = Array.isArray(state.tiles) ? state.tiles : [];
+      if (!tiles.length) {
+        kernelSignalGrid.append(signalTile({
+          label: "Kernel",
+          value: "Offline",
+          detail: "waiting for /v1/kernel",
+          tone: "warn"
+        }));
+      } else {
+        for (const tile of tiles) {
+          kernelSignalGrid.append(signalTile(tile));
+        }
+      }
+      renderMiniFlowRows(kernelActionList, state.actionRows || [], "No recommended actions yet");
+      renderMiniFlowRows(kernelPressureList, state.pressureRows || [], "No pressure signals yet");
+      renderMiniFlowRows(kernelSubsystemList, state.subsystemRows || [], "No subsystem state yet");
+      renderMiniFlowRows(kernelTimelineList, state.timelineRows || [], "No kernel events yet");
+    }
+
+    function kernelStatusState(tone) {
       if (tone === "ok") {
         return "Running";
       }
@@ -5292,6 +5553,10 @@ function sidebarHtml(webview, logoPath) {
     });
     document.getElementById("openChat").addEventListener("click", () => post("openChat"));
     document.getElementById("quickDashboard").addEventListener("click", () => post("openDashboard"));
+    document.getElementById("quickKernel").addEventListener("click", () => post("openRuntimeKernel"));
+    document.getElementById("openRuntimeKernel").addEventListener("click", () => post("openRuntimeKernel"));
+    document.getElementById("quickCheckup").addEventListener("click", () => post("runCheckup"));
+    document.getElementById("quickRouteLab").addEventListener("click", () => post("openRouteLab"));
     document.getElementById("quickSettings").addEventListener("click", () => post("openSettings"));
     document.getElementById("quickTokenSafeMode").addEventListener("click", () => post("enableTokenSafeMode"));
     document.getElementById("quickFreeOnlyMode").addEventListener("click", () => post("enableFreeOnlyMode"));
@@ -5303,8 +5568,13 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("killerWorkflow").addEventListener("click", () => runWorkflowPrompt("Run the issue-to-PR workflow. Take the current issue or selected prompt through the full Agent Hub loop: plan the work, edit the needed files, run the most relevant tests, fix failures once, and summarize a pull request with files changed, validation, and risks. If no issue is selected, inspect the workspace first and choose the highest-impact actionable issue."));
     document.getElementById("stopServer").addEventListener("click", () => post("stopServer"));
     document.getElementById("restartServer").addEventListener("click", () => post("restartServer"));
+    document.getElementById("runCheckup").addEventListener("click", () => post("runCheckup"));
     document.getElementById("checkRequirements").addEventListener("click", () => post("checkRequirements"));
+    document.getElementById("fixSafeConfig").addEventListener("click", () => post("fixSafeConfig"));
     document.getElementById("checkHealth").addEventListener("click", () => post("checkHealth"));
+    document.getElementById("openRouteLab").addEventListener("click", () => post("openRouteLab"));
+    document.getElementById("explainRoute").addEventListener("click", () => post("explainRoute"));
+    document.getElementById("openRoutingDashboard").addEventListener("click", () => post("openRoutingDashboard"));
     document.getElementById("tokenSafeMode").addEventListener("click", () => post("enableTokenSafeMode"));
     document.getElementById("freeOnlyMode").addEventListener("click", () => post("enableFreeOnlyMode"));
     document.getElementById("openOutput").addEventListener("click", () => post("openOutput"));
@@ -6231,7 +6501,7 @@ async function enableCodexCliModeCommand(options = {}) {
   return result;
 }
 
-async function checkRequirementsCommand() {
+async function checkRequirementsCommand(options = {}) {
   const rows = await setupRequirementRows(settings(), workspaceRoot());
   const requiredMissing = rows.filter((row) => row.required && !row.ok);
   const actionableMissing = rows.filter((row) => !row.ok && row.actionType);
@@ -6247,8 +6517,17 @@ async function checkRequirementsCommand() {
     const suffix = optional.length
       ? ` Optional missing: ${optional.map((row) => row.label).join(", ")}.`
       : "";
-    vscode.window.showInformationMessage(`Agent Hub core requirements are ready.${suffix}`);
+    if (options.showReadyMessage !== false) {
+      vscode.window.showInformationMessage(`Agent Hub core requirements are ready.${suffix}`);
+    }
     return { ok: true, rows };
+  }
+
+  if (options.promptForFixes === false) {
+    if (requiredMissing.length && options.showFailureMessage !== false) {
+      vscode.window.showWarningMessage(`${primary.label} is required before Agent Hub can run. ${primary.detail}`);
+    }
+    return { ok: requiredMissing.length === 0, rows, primary };
   }
 
   const actionLabel = primary.actionLabel || "Fix";
@@ -6267,6 +6546,156 @@ async function checkRequirementsCommand() {
     output.show(true);
   }
   return { ok: requiredMissing.length === 0, rows };
+}
+
+async function runCheckupCommand(options = {}) {
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    vscode.window.showWarningMessage("Open a workspace folder before running Agent Hub Checkup.");
+    return { ok: false, cancelled: true };
+  }
+  output.appendLine("");
+  output.appendLine("Agent Hub checkup");
+  const requirements = await checkRequirementsCommand({
+    promptForFixes: false,
+    showReadyMessage: false,
+    showFailureMessage: false
+  });
+  const requiredMissing = Array.isArray(requirements.rows)
+    ? requirements.rows.filter((row) => row.required && !row.ok)
+    : [];
+  if (requiredMissing.length) {
+    const first = requiredMissing[0];
+    const choice = await vscode.window.showWarningMessage(
+      `${first.label} is required before Agent Hub can run. ${first.detail}`,
+      "Fix Requirements",
+      "Open Logs",
+      "Close"
+    );
+    if (choice === "Fix Requirements") {
+      await checkRequirementsCommand();
+    } else if (choice === "Open Logs") {
+      output.show(true);
+    }
+    return { ok: false, requirements };
+  }
+
+  const repair = await fixSafeConfigCommand({ quietNoChange: true, source: options.source || "checkup" });
+  if (repair && repair.ok === false && repair.cancelled !== true) {
+    return { ok: false, requirements, repair };
+  }
+
+  if (!(await isServerOnline())) {
+    setServerLifecycleState("Starting", "Checkup is starting Agent Hub...");
+    await startServer();
+  }
+  const online = (await isServerOnline()) || (await waitForServer(7000));
+  if (!online) {
+    const message = "Checkup could not confirm the Agent Hub backend is running. Open logs for the startup details.";
+    output.appendLine(message);
+    const choice = await vscode.window.showWarningMessage(message, "Open Logs", "Route Lab Anyway");
+    if (choice === "Open Logs") {
+      output.show(true);
+      return { ok: false, requirements, repair, backendOnline: false };
+    }
+    if (choice !== "Route Lab Anyway") {
+      return { ok: false, requirements, repair, backendOnline: false };
+    }
+  }
+
+  const routeLab = await openRouteLabCommand({ prompt: PERSONAL_BENCHMARK_PROMPT });
+  if (routeLab.ok) {
+    vscode.window.showInformationMessage("Agent Hub Checkup complete. Route Lab is open with the current model decision.");
+  }
+  return {
+    ok: !!routeLab.ok,
+    requirements,
+    repair,
+    backendOnline: online,
+    routeLab
+  };
+}
+
+async function fixSafeConfigCommand(options = {}) {
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    vscode.window.showWarningMessage("Open a workspace folder before repairing Agent Hub config.");
+    return { ok: false, cancelled: true };
+  }
+  const config = settings();
+  const configPath = resolveConfigPath(config.configPath, workspace);
+  if (!(await requestPermission({
+    category: "config_edit",
+    description: "Agent Hub wants to apply conservative repairs to the workspace config.",
+    resource: configPath,
+    risk: "medium",
+    detail: "This removes unknown route agent references and aligns shell-tool toggles with the effective shell policy."
+  }))) {
+    return { ok: false, cancelled: true };
+  }
+  const launch = await serverLaunchEnvironment(workspace);
+  if (!(await ensurePythonBackend(config, workspace, launch))) {
+    return { ok: false, cancelled: false };
+  }
+  const args = [
+    ...launch.pythonArgs,
+    "-m",
+    "agent_hub",
+    "--config",
+    configPath,
+    "doctor",
+    "--fix-safe",
+    "--json"
+  ];
+  output.appendLine("");
+  output.appendLine("Agent Hub safe config repair");
+  output.appendLine(formatCliCommandForLog(launch.pythonCommand, args));
+  try {
+    const { stdout, stderr } = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Agent Hub: Repairing config",
+        cancellable: false
+      },
+      () => execFile(launch.pythonCommand, args, {
+        cwd: workspace,
+        env: launch.env,
+        timeout: 120000,
+        maxBuffer: 6 * 1024 * 1024
+      })
+    );
+    if (stderr && String(stderr).trim()) {
+      output.appendLine(String(stderr).trim());
+    }
+    const report = parseJsonObjectFromText(stdout);
+    const fix = report && report.fix_safe && typeof report.fix_safe === "object"
+      ? report.fix_safe
+      : {};
+    const errors = Array.isArray(fix.errors) ? fix.errors.filter(Boolean) : [];
+    const changes = Array.isArray(fix.changes) ? fix.changes.filter(Boolean) : [];
+    if (errors.length) {
+      const message = `Agent Hub config repair could not finish: ${errors[0]}`;
+      output.appendLine(message);
+      vscode.window.showErrorMessage(message);
+      return { ok: false, errors };
+    }
+    const message = changes.length
+      ? `Agent Hub config repaired: ${changes.join(" ")}`
+      : "Agent Hub config already looks clean.";
+    output.appendLine(message);
+    if (changes.length || options.quietNoChange !== true) {
+      vscode.window.showInformationMessage(message);
+    }
+    return { ok: true, changed: !!fix.changed, changes };
+  } catch (error) {
+    output.appendLine(`Config repair failed: ${error.message}`);
+    if (error.stderr) {
+      output.appendLine(String(error.stderr));
+    }
+    output.show(true);
+    vscode.window.showErrorMessage(`Config repair failed: ${error.message}`);
+    return { ok: false, cancelled: false };
+  }
 }
 
 async function setupRequirementRows(config, workspace) {
@@ -6348,6 +6777,9 @@ async function runRequirementAction(actionType) {
   if (actionType === "startServer") {
     return startServer();
   }
+  if (actionType === "runCheckup") {
+    return runCheckupCommand({ source: "onboarding" });
+  }
   if (actionType === "openSettings") {
     return openAgentHubSettings();
   }
@@ -6356,6 +6788,9 @@ async function runRequirementAction(actionType) {
   }
   if (actionType === "explainRoute") {
     return explainRouteCommand();
+  }
+  if (actionType === "openRouteLab") {
+    return openRouteLabCommand();
   }
   if (actionType === "openReadmeProof") {
     return openReadmeProofSection();
@@ -12379,6 +12814,519 @@ async function explainRouteCommand(options = {}) {
     vscode.window.showErrorMessage(`Route explanation failed: ${error.message}`);
     return { ok: false, cancelled: false };
   }
+}
+
+async function openRouteLabCommand(options = {}) {
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    vscode.window.showWarningMessage("Open a workspace folder before opening Agent Hub Route Lab.");
+    return { ok: false, cancelled: true };
+  }
+  const prompt = options.prompt || await vscode.window.showInputBox({
+    title: "Agent Hub Route Lab",
+    prompt: "Task to diagnose. Route Lab scores candidates without calling a provider.",
+    value: PERSONAL_BENCHMARK_PROMPT,
+    ignoreFocusOut: true
+  });
+  if (!prompt) {
+    return { ok: false, cancelled: true };
+  }
+  const config = settings();
+  const launch = await serverLaunchEnvironment(workspace);
+  if (!(await ensurePythonBackend(config, workspace, launch))) {
+    return { ok: false, cancelled: false };
+  }
+  const route = options.route || config.route || "coding";
+  const outputTokens = Number.isFinite(Number(options.outputTokens))
+    ? Math.max(1, Number.parseInt(options.outputTokens, 10))
+    : (config.maxTokens || 1024);
+  const args = [
+    ...launch.pythonArgs,
+    "-m",
+    "agent_hub",
+    "--config",
+    resolveConfigPath(config.configPath, workspace),
+    "route-diagnose",
+    "--route",
+    route,
+    "--prefer",
+    options.prefer || "coding",
+    "--needs-tools",
+    "--output-tokens",
+    String(outputTokens),
+    "--json",
+    prompt
+  ];
+  output.appendLine("");
+  output.appendLine("Agent Hub Route Lab");
+  output.appendLine(formatCliCommandForLog(launch.pythonCommand, args));
+  try {
+    const { stdout, stderr } = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Agent Hub: Opening Route Lab",
+        cancellable: false
+      },
+      () => execFile(launch.pythonCommand, args, {
+        cwd: workspace,
+        env: launch.env,
+        timeout: 120000,
+        maxBuffer: 6 * 1024 * 1024
+      })
+    );
+    if (stderr && String(stderr).trim()) {
+      output.appendLine(String(stderr).trim());
+    }
+    const report = parseJsonObjectFromText(stdout);
+    if (!report || report.object !== "agent_hub.route_diagnosis") {
+      throw new Error("Route diagnosis did not return valid JSON.");
+    }
+    routeLabPanel = routeLabPanel || vscode.window.createWebviewPanel(
+      "agentHub.routeLab",
+      "Agent Hub Route Lab",
+      vscode.ViewColumn.Beside,
+      {
+        enableScripts: false,
+        retainContextWhenHidden: true
+      }
+    );
+    routeLabPanel.onDidDispose(() => {
+      routeLabPanel = null;
+    });
+    routeLabPanel.webview.html = routeLabHtml(routeLabPanel.webview, report, prompt);
+    routeLabPanel.reveal(vscode.ViewColumn.Beside);
+    vscode.window.showInformationMessage("Route Lab scored the current candidate stack.");
+    return { ok: true, report };
+  } catch (error) {
+    output.appendLine(`Route Lab failed: ${error.message}`);
+    if (error.stderr) {
+      output.appendLine(String(error.stderr));
+    }
+    output.show(true);
+    vscode.window.showErrorMessage(`Route Lab failed: ${error.message}`);
+    return { ok: false, cancelled: false };
+  }
+}
+
+function routeLabHtml(webview, report, prompt) {
+  const nonce = getNonce();
+  const selected = {
+    agent: report.selected_agent || "none",
+    provider: report.selected_provider || "none",
+    model: report.selected_model || "none",
+    latency: formatRouteLabLatency(report.latency_ms),
+    cost: formatRouteLabCost(report.estimated_cost_usd)
+  };
+  const candidates = Array.isArray(report.candidates) ? report.candidates : [];
+  const skipped = Array.isArray(report.skipped_providers) ? report.skipped_providers : [];
+  const warnings = Array.isArray(report.selection_warnings) ? report.selection_warnings : [];
+  const tokenSaver = report.token_saver && typeof report.token_saver === "object" ? report.token_saver : null;
+  const baselineComparisons = report.baseline_comparisons && typeof report.baseline_comparisons === "object"
+    ? report.baseline_comparisons
+    : {};
+  const baselines = Array.isArray(report.baseline_comparisons)
+    ? report.baseline_comparisons
+    : Array.isArray(baselineComparisons.named_baselines)
+      ? baselineComparisons.named_baselines
+      : [];
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}';">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Hub Route Lab</title>
+  <style nonce="${nonce}">
+    :root {
+      color-scheme: light dark;
+      --bg: var(--vscode-editor-background, #1f2328);
+      --fg: var(--vscode-foreground, #d4d4d4);
+      --muted: var(--vscode-descriptionForeground, #8b949e);
+      --border: var(--vscode-panel-border, #3b3f46);
+      --panel: var(--vscode-sideBar-background, #252a31);
+      --accent: var(--vscode-button-background, #2563eb);
+      --accent-fg: var(--vscode-button-foreground, #ffffff);
+      --warn: var(--vscode-editorWarning-foreground, #d29922);
+      --ok: var(--vscode-testing-iconPassed, #3fb950);
+      --bad: var(--vscode-testing-iconFailed, #f85149);
+      --code: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.12));
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      color: var(--fg);
+      background: var(--bg);
+      font-family: var(--vscode-font-family, system-ui, sans-serif);
+      font-size: var(--vscode-font-size, 13px);
+    }
+    main {
+      width: min(1180px, 100%);
+      margin: 0 auto;
+      padding: 24px;
+    }
+    header {
+      display: grid;
+      gap: 14px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--border);
+    }
+    h1, h2, h3, p {
+      margin: 0;
+    }
+    h1 {
+      font-size: 26px;
+      font-weight: 700;
+    }
+    h2 {
+      font-size: 16px;
+      margin-bottom: 10px;
+    }
+    h3 {
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    .prompt {
+      max-width: 960px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 10px;
+      margin: 18px 0;
+    }
+    .metric {
+      min-height: 82px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      background: var(--panel);
+    }
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .metric strong {
+      display: block;
+      overflow-wrap: anywhere;
+      font-size: 17px;
+      line-height: 1.25;
+    }
+    section {
+      margin-top: 22px;
+    }
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+      gap: 16px;
+    }
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px;
+      background: color-mix(in srgb, var(--panel) 88%, transparent);
+    }
+    .why {
+      line-height: 1.45;
+    }
+    .honesty {
+      border-left: 3px solid ${warnings.length ? "var(--warn)" : "var(--ok)"};
+      padding-left: 12px;
+      line-height: 1.45;
+    }
+    .warning-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .warning {
+      border: 1px solid color-mix(in srgb, var(--warn) 52%, var(--border));
+      border-radius: 6px;
+      padding: 9px 10px;
+      color: var(--fg);
+      background: color-mix(in srgb, var(--warn) 12%, transparent);
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 140px minmax(0, 1fr);
+      gap: 8px;
+      color: var(--muted);
+    }
+    .kv strong {
+      color: var(--fg);
+      overflow-wrap: anywhere;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    th, td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--panel);
+    }
+    tr:last-child td {
+      border-bottom: 0;
+    }
+    .status {
+      display: inline-block;
+      min-width: 70px;
+      border-radius: 999px;
+      padding: 2px 8px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--accent-fg);
+      background: var(--accent);
+    }
+    .status.off {
+      color: var(--fg);
+      background: var(--code);
+    }
+    .mono {
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 12px;
+    }
+    .col-rank {
+      width: 54px;
+    }
+    .col-state {
+      width: 96px;
+    }
+    .col-score {
+      width: 90px;
+    }
+    .col-latency {
+      width: 112px;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    .empty {
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      padding: 14px;
+      color: var(--muted);
+    }
+    @media (max-width: 760px) {
+      main {
+        padding: 16px;
+      }
+      .split {
+        grid-template-columns: 1fr;
+      }
+      .kv {
+        grid-template-columns: 1fr;
+      }
+      th:nth-child(6), td:nth-child(6) {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Agent Hub Route Lab</h1>
+      <p class="prompt">${escapeHtml(prompt)}</p>
+    </header>
+
+    <section class="summary" aria-label="Selected route summary">
+      <div class="metric"><span>Route</span><strong>${escapeHtml(report.route || "unknown")}</strong></div>
+      <div class="metric"><span>Selected Agent</span><strong>${escapeHtml(selected.agent)}</strong></div>
+      <div class="metric"><span>Model</span><strong>${escapeHtml(selected.model)}</strong></div>
+      <div class="metric"><span>Latency</span><strong>${escapeHtml(selected.latency)}</strong></div>
+      <div class="metric"><span>Cost Estimate</span><strong>${escapeHtml(selected.cost)}</strong></div>
+    </section>
+
+    <section class="split">
+      <div class="panel">
+        <h2>Why This Route</h2>
+        <p class="why">${escapeHtml(report.why_provider_chosen || report.fallback_reason || "No route reason was returned.")}</p>
+      </div>
+      <div class="panel">
+        <h2>Selection Honesty</h2>
+        <p class="honesty">${escapeHtml(report.selection_honesty || "No health summary was returned.")}</p>
+        ${warnings.length ? `<div class="warning-list">${warnings.map((warning) => `<div class="warning">${escapeHtml(warning)}</div>`).join("")}</div>` : ""}
+      </div>
+    </section>
+
+    <section class="split">
+      <div class="panel">
+        <h2>Routing Signals</h2>
+        <div class="kv">
+          <span>Mode</span><strong>${escapeHtml(report.routing_mode || "unknown")}</strong>
+          <span>Task Type</span><strong>${escapeHtml(report.task_type || "unknown")}</strong>
+          <span>Input Tokens</span><strong>${escapeHtml(formatRouteLabNumber(report.estimated_input_tokens))}</strong>
+          <span>Output Tokens</span><strong>${escapeHtml(formatRouteLabNumber(report.estimated_output_tokens))}</strong>
+          <span>Fallback Reason</span><strong>${escapeHtml(report.fallback_reason || "none")}</strong>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Token Saver</h2>
+        ${tokenSaver ? routeLabTokenSaverHtml(tokenSaver) : `<div class="empty">No token saver scorecard was attached.</div>`}
+      </div>
+    </section>
+
+    <section>
+      <h2>Candidate Stack</h2>
+      ${candidates.length ? routeLabCandidatesTable(candidates) : `<div class="empty">No candidates were returned.</div>`}
+    </section>
+
+    <section class="split">
+      <div>
+        <h2>Skipped Providers</h2>
+        ${skipped.length ? routeLabSkippedTable(skipped) : `<div class="empty">No providers were skipped.</div>`}
+      </div>
+      <div>
+        <h2>Baseline Comparison</h2>
+        ${baselines.length ? routeLabBaselineTable(baselines) : `<div class="empty">No baseline comparison was returned.</div>`}
+      </div>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function routeLabTokenSaverHtml(tokenSaver) {
+  const active = tokenSaver.active ? "active" : "inactive";
+  const confidence = tokenSaver.confidence === null || tokenSaver.confidence === undefined
+    ? "unknown"
+    : Number(tokenSaver.confidence).toFixed(2);
+  return `<div class="kv">
+    <span>State</span><strong>${escapeHtml(active)}</strong>
+    <span>Confidence</span><strong>${escapeHtml(confidence)}</strong>
+    <span>Summary</span><strong>${escapeHtml(tokenSaver.summary || "none")}</strong>
+  </div>`;
+}
+
+function routeLabCandidatesTable(candidates) {
+  return `<table>
+    <thead>
+      <tr>
+        <th class="col-rank">Rank</th>
+        <th>Agent</th>
+        <th>Provider</th>
+        <th>Model</th>
+        <th class="col-state">State</th>
+        <th class="col-score">Score</th>
+        <th class="col-latency">Latency</th>
+        <th>Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${candidates.map((row) => `<tr>
+        <td class="mono">${escapeHtml(formatRouteLabNumber(row.rank))}</td>
+        <td>${escapeHtml(row.agent || "")}</td>
+        <td>${escapeHtml(row.provider || "")}</td>
+        <td>${escapeHtml(row.model || "")}</td>
+        <td><span class="status ${row.available ? "" : "off"}">${escapeHtml(row.available ? "ready" : "skipped")}</span></td>
+        <td class="mono">${escapeHtml(formatRouteLabScore(row.routing_score ?? row.score))}</td>
+        <td class="mono">${escapeHtml(formatRouteLabLatency(row.latency_ms))}</td>
+        <td>${escapeHtml(row.reason || row.why || "")}</td>
+      </tr>`).join("")}
+    </tbody>
+  </table>`;
+}
+
+function routeLabSkippedTable(skipped) {
+  return `<table>
+    <thead>
+      <tr>
+        <th>Agent</th>
+        <th>Model</th>
+        <th>Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${skipped.map((row) => `<tr>
+        <td>${escapeHtml(row.agent || "")}</td>
+        <td>${escapeHtml(row.model || "")}</td>
+        <td>${escapeHtml(row.reason || row.fallback_reason || "")}</td>
+      </tr>`).join("")}
+    </tbody>
+  </table>`;
+}
+
+function routeLabBaselineTable(baselines) {
+  return `<table>
+    <thead>
+      <tr>
+        <th>Baseline</th>
+        <th>Model</th>
+        <th>Cost</th>
+        <th>Savings</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${baselines.map((row) => `<tr>
+        <td>${escapeHtml(row.baseline_name || row.agent || row.name || row.provider || "baseline")}</td>
+        <td>${escapeHtml(row.baseline_model || row.model || row.baseline_agent || "")}</td>
+        <td class="mono">${escapeHtml(formatRouteLabCost(row.estimated_cost_usd ?? row.cost_usd ?? row.cost))}</td>
+        <td>${escapeHtml(formatRouteLabSavings(row))}</td>
+      </tr>`).join("")}
+    </tbody>
+  </table>`;
+}
+
+function formatRouteLabSavings(row) {
+  const savingsUsd = Number(row.savings_usd);
+  const savingsPct = Number(row.savings_pct);
+  if (Number.isFinite(savingsUsd) && Number.isFinite(savingsPct)) {
+    return `${formatRouteLabCost(savingsUsd)} (${savingsPct.toFixed(1)}%)`;
+  }
+  return row.comparison || row.summary || row.delta || row.reason || "";
+}
+
+function formatRouteLabLatency(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "unknown";
+  }
+  return number >= 1000 ? `${(number / 1000).toFixed(1)} s` : `${number.toFixed(0)} ms`;
+}
+
+function formatRouteLabCost(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) {
+    return "unpriced";
+  }
+  if (number === 0) {
+    return "$0.000000";
+  }
+  return `$${number.toFixed(number < 0.001 ? 6 : 4)}`;
+}
+
+function formatRouteLabScore(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "";
+  }
+  return number.toFixed(3);
+}
+
+function formatRouteLabNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "";
+  }
+  return new Intl.NumberFormat("en-US").format(number);
 }
 
 async function openBenchmarkReport(report, fallbackStatus) {

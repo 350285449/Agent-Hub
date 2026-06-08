@@ -143,6 +143,55 @@ class CliTests(unittest.TestCase):
             self.assertTrue(data["backend_reachable"]["ok"])
             self.assertTrue(any("Cline:" in fix for fix in data["exact_fixes"]))
 
+    def test_doctor_fix_safe_repairs_route_refs_and_shell_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "state_dir": str(Path(tmp) / "state"),
+                        "auto_detect_local_models": False,
+                        "allow_shell_tools": True,
+                        "default_route": ["ghost", "echo"],
+                        "routes": [{"name": "cloud-agent", "agents": ["missing"]}],
+                        "agents": [
+                            {
+                                "name": "echo",
+                                "provider": "echo",
+                                "model": "local-echo",
+                                "free": True,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+            release_check = {
+                "id": "release_validation",
+                "category": "release",
+                "ok": True,
+                "detail": "passed",
+                "failures": [],
+            }
+
+            with (
+                patch("agent_hub.cli._backend_reachability") as backend,
+                patch("agent_hub.commands_doctor._validate_backend_snapshot", return_value=[]),
+                patch("agent_hub.commands_doctor._release_validation_check", return_value=release_check),
+                redirect_stdout(buffer),
+            ):
+                backend.return_value = {"ok": True, "url": "http://127.0.0.1:8787/health", "detail": "HTTP 200"}
+                code = main(["--config", str(path), "doctor", "--fix-safe", "--json"])
+
+            self.assertEqual(code, 0)
+            report = json.loads(buffer.getvalue())
+            fixed = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(report["fix_safe"]["changed"])
+            self.assertEqual(fixed["default_route"], ["echo"])
+            self.assertEqual(fixed["routes"][0]["agents"], ["echo"])
+            self.assertFalse(fixed["allow_shell_tools"])
+
     def test_doctor_does_not_warn_for_cline_cloud_auto_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"

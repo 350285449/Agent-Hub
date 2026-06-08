@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub - Local-First AI Model Router",
   "description": "Cline, Codex and Claude Code compatible AI model router with free-model routing, workspace agents, and cost-saving local-first orchestration.",
-  "version": "9.5.0",
+  "version": "9.6.0",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",
@@ -63,8 +63,11 @@
     "onCommand:agentHub.restartServer",
     "onCommand:agentHub.checkHealth",
     "onCommand:agentHub.openDashboard",
+    "onCommand:agentHub.openRuntimeKernel",
     "onCommand:agentHub.openSettings",
+    "onCommand:agentHub.runCheckup",
     "onCommand:agentHub.checkRequirements",
+    "onCommand:agentHub.fixSafeConfig",
     "onCommand:agentHub.installPython",
     "onCommand:agentHub.installNode",
     "onCommand:agentHub.enableFreeOnlyMode",
@@ -91,6 +94,7 @@
     "onCommand:agentHub.openBenchmarkResults",
     "onCommand:agentHub.runPersonalBenchmark",
     "onCommand:agentHub.explainRoute",
+    "onCommand:agentHub.openRouteLab",
     "onCommand:agentHub.openBenchmarkShareCard",
     "onCommand:agentHub.openReadmeProof",
     "onCommand:agentHub.openOutput"
@@ -176,13 +180,28 @@
         "title": "Agent Hub: Open Dashboard"
       },
       {
+        "command": "agentHub.openRuntimeKernel",
+        "title": "Agent Hub: Open Runtime Kernel",
+        "icon": "$(pulse)"
+      },
+      {
         "command": "agentHub.openSettings",
         "title": "Agent Hub: Open Settings"
+      },
+      {
+        "command": "agentHub.runCheckup",
+        "title": "Agent Hub: Run Checkup",
+        "icon": "$(verified)"
       },
       {
         "command": "agentHub.checkRequirements",
         "title": "Agent Hub: Check Requirements",
         "icon": "$(checklist)"
+      },
+      {
+        "command": "agentHub.fixSafeConfig",
+        "title": "Agent Hub: Repair Config",
+        "icon": "$(tools)"
       },
       {
         "command": "agentHub.installPython",
@@ -301,6 +320,11 @@
         "command": "agentHub.explainRoute",
         "title": "Agent Hub: Explain Route",
         "icon": "$(symbol-method)"
+      },
+      {
+        "command": "agentHub.openRouteLab",
+        "title": "Agent Hub: Open Route Lab",
+        "icon": "$(graph)"
       },
       {
         "command": "agentHub.openBenchmarkShareCard",

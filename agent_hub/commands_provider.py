@@ -22,13 +22,14 @@ from .config import (
 )
 from .core.router import AgentRouter, RouterError
 from .discovery import fetch_openai_models
-from .evaluation import BenchmarkRunner, ProviderScoreStore, default_benchmark_tasks
+from .evaluation import BenchmarkResult, BenchmarkRunner, ProviderScoreStore, _score_text, default_benchmark_tasks
 from .evaluation.benchmark_suite import BenchmarkSuiteRunner
 from .evaluation.proof_benchmark import BenchmarkProofRunner
 from .explainability import explain_route_body, format_route_explanation
 from .learning_proof import format_route_history, route_history_body
 from .measurement import estimate_named_baselines
 from .payloads import request_from_payload
+from .permissions import mark_trusted_approval
 from .proof_artifacts import (
     benchmark_evolution_body,
     benchmark_share_card_body,
@@ -1041,6 +1042,7 @@ def _route_diagnose(
         if isinstance(scorecard, dict):
             row["token_saver"] = scorecard.get("token_saver")
             row["routing_score"] = scorecard.get("final_routing_score", scorecard.get("routing_score"))
+    selection_warnings = _selected_diagnostic_warnings(selected)
     report = {
         "object": "agent_hub.route_diagnosis",
         "route": route,
@@ -1056,6 +1058,8 @@ def _route_diagnose(
         "estimated_input_tokens": input_tokens,
         "estimated_output_tokens": output_estimate,
         "why_provider_chosen": selected.get("why") if selected else decision.reason,
+        "selection_warnings": selection_warnings,
+        "selection_honesty": _selection_honesty_summary(selected, selection_warnings),
         "token_saver": (decision_scorecards.get(selected.get("agent")) or {}).get("token_saver") if selected else None,
         "fallback_chain": list(decision.fallback_chain),
         "candidates": candidates,
@@ -1104,6 +1108,9 @@ def _diagnostic_candidate(
         "why": row.get("why") or "",
         "quota_state": row.get("quota_state"),
         "remaining": row.get("remaining"),
+        "reliability_score": row.get("reliability_score"),
+        "degraded": bool(row.get("degraded")),
+        "cooldown_until": row.get("cooldown_until"),
         "token_saver": row.get("token_saver"),
     }
 
@@ -1116,6 +1123,32 @@ def _diagnostic_fallback_reason(skipped: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _selected_diagnostic_warnings(selected: dict[str, Any] | None) -> list[str]:
+    if not selected:
+        return []
+    warnings: list[str] = []
+    if selected.get("degraded"):
+        warnings.append("Selected provider is currently marked degraded by health history.")
+    reliability = _safe_float(selected.get("reliability_score"))
+    if reliability and reliability < 0.5:
+        warnings.append(f"Selected provider reliability is low ({reliability:.2f}).")
+    latency = _safe_float(selected.get("latency_ms"))
+    if latency and latency >= 15_000:
+        warnings.append(f"Selected provider average latency is high ({latency:.0f} ms).")
+    cooldown = _safe_float(selected.get("cooldown_until"))
+    if cooldown and cooldown > time.time():
+        warnings.append("Selected provider has a recent cooldown marker; fallback may occur at execution time.")
+    return warnings
+
+
+def _selection_honesty_summary(selected: dict[str, Any] | None, warnings: list[str]) -> str:
+    if not selected:
+        return "No available provider was selected."
+    if not warnings:
+        return "Selected provider has no active health warnings in the diagnostic snapshot."
+    return "Selected despite warnings because its route priority, capability, context window, or fallback role still ranked highest."
+
+
 def _print_route_diagnosis(report: dict[str, Any]) -> None:
     print(f"Route diagnosis: {report['route']}")
     print(f"Selected provider: {report.get('selected_provider') or 'none'}")
@@ -1126,6 +1159,13 @@ def _print_route_diagnosis(report: dict[str, Any]) -> None:
     print(f"Estimated cost: {_display_cost(report.get('estimated_cost_usd'))}")
     if report.get("why_provider_chosen"):
         print(f"Why: {report['why_provider_chosen']}")
+    if report.get("selection_honesty"):
+        print(f"Selection honesty: {report['selection_honesty']}")
+    warnings = report.get("selection_warnings")
+    if isinstance(warnings, list) and warnings:
+        print("Warnings:")
+        for warning in warnings:
+            print(f"- {warning}")
     token_saver = report.get("token_saver")
     if isinstance(token_saver, dict):
         state = "active" if token_saver.get("active") else "inactive"
@@ -1447,6 +1487,107 @@ def _eval_providers(config: HubConfig, *, route: str, limit: int, as_json: bool)
         )
         print(f"Stored scores: {config.state_dir / 'provider_scores.json'}")
     return 0 if any(result.ok for result in results) else 1
+
+
+def _calibrate_models(
+    config: HubConfig,
+    *,
+    route: str,
+    limit: int,
+    max_agents: int,
+    agents: str,
+    as_json: bool,
+) -> int:
+    router = AgentRouter(config)
+    route_names = _route_agent_names(config, route)
+    requested = [name.strip() for name in agents.split(",") if name.strip()]
+    names = requested or route_names
+    selected_agents = [
+        config.agents[name]
+        for name in names
+        if name in config.agents
+        and config.agents[name].enabled
+        and agent_allowed_by_cost_policy(config, config.agents[name])
+    ][: max(1, int(max_agents or 1))]
+    tasks = default_benchmark_tasks(route=route)[: max(1, min(int(limit or 1), 20))]
+    results: list[BenchmarkResult] = []
+    errors: list[dict[str, Any]] = []
+    for agent in selected_agents:
+        for task in tasks:
+            request = request_from_payload(
+                {
+                    "session_id": f"calibrate-{uuid.uuid4().hex}",
+                    "route": route,
+                    "agent": agent.name,
+                    "task": task.prompt,
+                    "max_tokens": 192,
+                    "use_session_history": False,
+                    "record_session": False,
+                    "agent_hub": {
+                        "benchmark_task_type": task.type,
+                        "model_calibration": True,
+                        "provider_approval_granted": True,
+                    },
+                }
+            )
+            request = mark_trusted_approval(request, source="cli-calibrate-models")
+            started = time.perf_counter()
+            try:
+                response = router.route(request)
+                latency_ms = (time.perf_counter() - started) * 1000
+                results.append(
+                    BenchmarkResult(
+                        agent=response.agent,
+                        provider=response.provider,
+                        model=response.model,
+                        task_type=task.type,
+                        score=_score_text(response.text, task),
+                        latency_ms=round(latency_ms, 2),
+                        ok=bool(response.text.strip()),
+                    )
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "agent": agent.name,
+                        "provider": agent.provider,
+                        "model": agent.model,
+                        "task_type": task.type,
+                        "error": str(exc),
+                    }
+                )
+    scores = ProviderScoreStore(config.state_dir).save_results(results) if results else ProviderScoreStore(config.state_dir).load()
+    report = {
+        "object": "agent_hub.model_calibration",
+        "route": route,
+        "agent_count": len(selected_agents),
+        "task_count": len(tasks),
+        "result_count": len(results),
+        "error_count": len(errors),
+        "results": [result.to_dict() for result in results],
+        "errors": errors,
+        "provider_scores_path": str(config.state_dir / "provider_scores.json"),
+        "provider_scores": scores,
+    }
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(f"Model calibration for route {route}")
+        print(f"Agents: {len(selected_agents)}; tasks per agent: {len(tasks)}; results: {len(results)}")
+        _print_table(report["results"], ["agent", "provider", "model", "task_type", "score", "latency_ms", "ok"])
+        if errors:
+            print()
+            print("Calibration errors:")
+            _print_table(errors, ["agent", "provider", "model", "task_type", "error"])
+        print(f"Stored scores: {report['provider_scores_path']}")
+    return 0 if results else 1
+
+
+def _route_agent_names(config: HubConfig, route_name: str) -> list[str]:
+    for route in config.routes:
+        if route.name == route_name:
+            return list(route.agents)
+    return list(config.default_route)
 
 
 def _route_test(config: HubConfig, *, route: str, prompt: str, as_json: bool) -> int:

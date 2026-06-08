@@ -1,5 +1,10 @@
 # Changelog
 
+## 9.6.0
+
+- Syncs extension and backend release metadata for the next package.
+- Adds install verification, packaging checks, and command-runner hardening.
+
 ## 9.5.0
 
 - Keeps API-key-backed cloud providers disabled until their matching key is saved or present in the environment.

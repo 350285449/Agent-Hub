@@ -51,9 +51,9 @@ PROMPT_INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("tool_rule_override", re.compile(r"(?i)\b(?:use|call|run).{0,80}\b(?:shell|terminal|powershell|bash).{0,80}\bwithout (?:approval|permission)\b")),
 )
 SENSITIVE_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?i)(?:^|[\\/])\\.env(?:\\.|$)"),
-    re.compile(r"(?i)(?:^|[\\/])\\.npmrc$"),
-    re.compile(r"(?i)(?:^|[\\/])\\.pypirc$"),
+    re.compile(r"(?i)(?:^|[\\/])\.env(?:\.|$)"),
+    re.compile(r"(?i)(?:^|[\\/])\.npmrc$"),
+    re.compile(r"(?i)(?:^|[\\/])\.pypirc$"),
     re.compile(r"(?i)(?:^|[\\/])id_rsa$"),
     re.compile(r"(?i)(?:^|[\\/])id_ed25519$"),
     re.compile(r"(?i)(?:^|[\\/]).*private.*key"),
@@ -75,7 +75,11 @@ class ContextSecurityScan:
 
     @property
     def has_secret_findings(self) -> bool:
-        return bool(self.secret_findings or self.sensitive_files)
+        return bool(self.secret_findings)
+
+    @property
+    def has_sensitive_file_references(self) -> bool:
+        return bool(self.sensitive_files)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +88,7 @@ class ContextSecurityScan:
             "sensitive_files": self.sensitive_files,
             "has_findings": self.has_findings,
             "has_secret_findings": self.has_secret_findings,
+            "has_sensitive_file_references": self.has_sensitive_file_references,
         }
 
 
@@ -252,12 +257,25 @@ def _sensitive_paths(text: str) -> list[str]:
         candidate = line.strip().strip("`'\"")
         if ":" in candidate:
             candidate = candidate.split(":", 1)[1].strip()
+        if _safe_sensitive_template_path(candidate):
+            continue
         if any(pattern.search(candidate) for pattern in SENSITIVE_PATH_PATTERNS):
             if candidate not in paths:
                 paths.append(candidate[:240])
         if len(paths) >= 20:
             break
     return paths
+
+
+def _safe_sensitive_template_path(path: str) -> bool:
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name in {
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        ".env.dist",
+        ".env.defaults",
+    }
 
 
 def _secret_kind(index: int, value: str) -> str:

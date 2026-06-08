@@ -37,6 +37,8 @@ class ServerCompatibilityTests(unittest.TestCase):
         self.assertTrue(BACKEND_FEATURES["local_dummy_auth_compatibility"])
         self.assertTrue(BACKEND_FEATURES["readiness_scorecard"])
         self.assertTrue(BACKEND_FEATURES["feature_maturity_status"])
+        self.assertTrue(BACKEND_FEATURES["runtime_kernel_control_plane"])
+        self.assertTrue(BACKEND_FEATURES["runtime_kernel_dashboard"])
 
     def test_health_includes_context_enforcement_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +102,154 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(readiness["state"], "needs_setup")
             self.assertEqual(readiness["next_step"]["id"], "providers_configured")
             self.assertEqual(data["feature_status"]["provider_routing"]["state"], "needs_setup")
+
+    def test_health_uses_short_lived_diagnostics_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["echo"],
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            calls = 0
+
+            def fake_health_body(router, *, context_diagnostics):
+                nonlocal calls
+                calls += 1
+                return {
+                    "status": "ok",
+                    "running": True,
+                    "calls": calls,
+                    "context_diagnostics": context_diagnostics,
+                }
+
+            server.diagnostics_service.backend_health_body = fake_health_body
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                first, first_headers = _get_json_with_headers(f"{base}/health")
+                second, second_headers = _get_json_with_headers(f"{base}/health")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(first["calls"], 1)
+            self.assertEqual(second["calls"], 1)
+            self.assertEqual(calls, 1)
+            self.assertEqual(first_headers.get("X-Agent-Hub-Cache"), "miss")
+            self.assertEqual(second_headers.get("X-Agent-Hub-Cache"), "hit")
+            self.assertIn("backend_efficiency", second)
+            self.assertGreaterEqual(second["backend_efficiency"]["diagnostics_cache"]["hits"], 1)
+            self.assertEqual(
+                second["backend_efficiency"]["runtime_kernel"]["object"],
+                "agent_hub.runtime_kernel.efficiency",
+            )
+            self.assertGreaterEqual(second["backend_efficiency"]["runtime_kernel"]["total_requests"], 1)
+
+    def test_diagnostics_cache_invalidates_after_post(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["echo"],
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            calls = 0
+
+            def fake_health_body(router, *, context_diagnostics):
+                nonlocal calls
+                calls += 1
+                return {"status": "ok", "running": True, "calls": calls}
+
+            server.diagnostics_service.backend_health_body = fake_health_body
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                first, first_headers = _get_json_with_headers(f"{base}/health")
+                cached, cached_headers = _get_json_with_headers(f"{base}/health")
+                _post_json(
+                    f"{base}/debug/request",
+                    {
+                        "session_id": "debug",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+                refreshed, refreshed_headers = _get_json_with_headers(f"{base}/health")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(first["calls"], 1)
+            self.assertEqual(cached["calls"], 1)
+            self.assertEqual(refreshed["calls"], 2)
+            self.assertEqual(first_headers.get("X-Agent-Hub-Cache"), "miss")
+            self.assertEqual(cached_headers.get("X-Agent-Hub-Cache"), "hit")
+            self.assertEqual(refreshed_headers.get("X-Agent-Hub-Cache"), "miss")
+
+    def test_runtime_kernel_endpoint_and_dashboard_report_live_server_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["echo"],
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+                debug_echo_enabled=True,
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                _get_json(f"{base}/health")
+                kernel = _get_json(f"{base}/v1/kernel")
+                dashboard = _get_text(f"{base}/dashboard/kernel")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(kernel["object"], "agent_hub.runtime_kernel")
+            self.assertGreaterEqual(kernel["request_telemetry"]["total_requests"], 1)
+            self.assertGreaterEqual(kernel["uptime_seconds"], 0)
+            self.assertEqual(kernel["pressure"]["object"], "agent_hub.runtime_kernel.pressure")
+            self.assertEqual(kernel["service_map"]["object"], "agent_hub.runtime_kernel.service_map")
+            self.assertTrue(kernel["timeline"])
+            self.assertTrue(kernel["next_actions"])
+            self.assertEqual(kernel["primary_next_action"], kernel["next_actions"][0])
+            self.assertIn(
+                kernel["state"],
+                {"production_ready", "ready", "degraded", "needs_attention", "critical"},
+            )
+            subsystem_ids = {row["id"] for row in kernel["subsystems"]}
+            self.assertTrue({"http_server", "router", "provider_pool", "diagnostics_cache"}.issubset(subsystem_ids))
+            route_paths = {row["path"] for row in kernel["request_telemetry"]["routes"]}
+            self.assertIn("/health", route_paths)
+            self.assertIn("Agent Hub Runtime Kernel", dashboard)
+            self.assertIn("Subsystems", dashboard)
+            self.assertIn("Recommended Actions", dashboard)
+
+    def test_runtime_kernel_tracks_error_status_codes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["echo"],
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with self.assertRaises(HTTPError):
+                    _get_json(f"{base}/missing-route")
+                kernel = _get_json(f"{base}/v1/kernel")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(kernel["request_telemetry"]["status_codes"]["404"], 1)
+            route_paths = {row["path"] for row in kernel["request_telemetry"]["routes"]}
+            self.assertIn("/missing-route", route_paths)
 
     def test_model_rows_include_router_aliases_and_agent_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1191,6 +1341,11 @@ def _post_text(url: str, payload: dict, headers: dict[str, str] | None = None) -
 def _get_json(url: str) -> dict:
     with urlopen(url, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _get_json_with_headers(url: str) -> tuple[dict, object]:
+    with urlopen(url, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8")), response.headers
 
 
 def _get_text(url: str) -> str:
