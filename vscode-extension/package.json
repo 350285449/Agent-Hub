@@ -67,6 +67,7 @@
     "onCommand:agentHub.checkRequirements",
     "onCommand:agentHub.installPython",
     "onCommand:agentHub.installNode",
+    "onCommand:agentHub.enableFreeOnlyMode",
     "onCommand:agentHub.enableTokenSafeMode",
     "onCommand:agentHub.enableCodexCliMode",
     "onCommand:agentHub.installCodexCli",
@@ -192,6 +193,11 @@
         "command": "agentHub.installNode",
         "title": "Agent Hub: Install Node.js",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "agentHub.enableFreeOnlyMode",
+        "title": "Agent Hub: Disable Non-Free Models",
+        "icon": "$(circle-slash)"
       },
       {
         "command": "agentHub.enableTokenSafeMode",

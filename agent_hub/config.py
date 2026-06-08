@@ -52,6 +52,10 @@ DEFAULT_ROUTING_CONFIG = {
     "auto_failover": True,
     "auto_retry": True,
     "free_first": True,
+    "token_saver_enabled": True,
+    "token_saver_confidence_threshold": 0.74,
+    "token_saver_max_productivity_loss": 0.08,
+    "token_saver_free_candidate_bonus": 22.0,
     "prefer_available_quota": True,
     "failover_on_slow_stream": True,
     "failover_on_quota_exhaustion": True,
@@ -201,6 +205,7 @@ class HubConfig:
     mcp_execution_enabled: bool = False
     mcp_timeout_seconds: float = 20.0
     free_only: bool = True
+    disable_non_free_models: bool = False
     enable_load_balancing: bool = True
     adaptive_learning_enabled: bool = True
     adaptive_routing_enabled: bool = True
@@ -610,6 +615,7 @@ def free_local_config() -> HubConfig:
         max_context_tokens=None,
         compatibility_mode=dict(DEFAULT_COMPATIBILITY_MODE),
         free_only=True,
+        disable_non_free_models=False,
         adaptive_learning_enabled=True,
         adaptive_routing_enabled=True,
         adaptive_workflow_upgrades_enabled=True,
@@ -889,6 +895,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         mcp_execution_enabled=_bool_with_default(raw.get("mcp_execution_enabled"), False),
         mcp_timeout_seconds=max(1.0, min(120.0, _float_with_default(raw.get("mcp_timeout_seconds"), 20.0))),
         free_only=_bool_with_default(raw.get("free_only"), True),
+        disable_non_free_models=_bool_with_default(raw.get("disable_non_free_models"), False),
         enable_load_balancing=_bool_with_default(raw.get("enable_load_balancing"), True),
         adaptive_learning_enabled=_bool_with_default(raw.get("adaptive_learning_enabled"), True),
         adaptive_routing_enabled=_bool_with_default(raw.get("adaptive_routing_enabled"), True),
@@ -1033,6 +1040,38 @@ def is_free_agent(agent: AgentConfig) -> bool:
     return _is_local_or_private_url(agent.base_url)
 
 
+def is_strict_free_agent(agent: AgentConfig) -> bool:
+    """Return True for agents allowed when paid/subscription fallbacks are disabled."""
+
+    provider = normalize_provider(agent.provider)
+    provider_type = (agent.provider_type or agent.provider).lower()
+    if provider == "echo":
+        return True
+    if provider == "local-research":
+        return True
+    if provider_type in {"ollama-cloud", "ollama", "ollama-local", "lm-studio", "localai", "llama-cpp", "vllm"}:
+        return True
+    if provider == "openai-compatible" and _is_local_or_private_url(agent.base_url):
+        return True
+    if (
+        agent.name.lower() in {"codex", "codex-cli", "chatgpt", "claude", "gemini"}
+        or provider in {"openai", "anthropic", "gemini", "codex-cli"}
+        or provider_type in {"openai", "anthropic", "gemini", "codex-cli"}
+    ):
+        return False
+    return bool(agent.free)
+
+
+def agent_allowed_by_cost_policy(config: HubConfig, agent: AgentConfig) -> bool:
+    """Check the configured free-only policy, including strict no paid/subscription mode."""
+
+    if getattr(config, "disable_non_free_models", False):
+        return is_strict_free_agent(agent)
+    if not config.free_only:
+        return True
+    return is_free_agent(agent)
+
+
 def normalize_provider(provider: str) -> str:
     """Map common provider aliases to the internal provider names."""
 
@@ -1107,6 +1146,7 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "mcp_execution_enabled": config.mcp_execution_enabled,
         "mcp_timeout_seconds": config.mcp_timeout_seconds,
         "free_only": config.free_only,
+        "disable_non_free_models": config.disable_non_free_models,
         "enable_load_balancing": config.enable_load_balancing,
         "adaptive_learning_enabled": config.adaptive_learning_enabled,
         "adaptive_routing_enabled": config.adaptive_routing_enabled,
@@ -1523,6 +1563,28 @@ def _normalize_routing_config(value: Any) -> dict[str, Any]:
         "free_first": _bool_with_default(
             source.get("free_first"),
             bool(defaults["free_first"]),
+        ),
+        "token_saver_enabled": _bool_with_default(
+            source.get("token_saver_enabled"),
+            bool(defaults["token_saver_enabled"]),
+        ),
+        "token_saver_confidence_threshold": _normalize_positive_float(
+            source.get("token_saver_confidence_threshold"),
+            float(defaults["token_saver_confidence_threshold"]),
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        "token_saver_max_productivity_loss": _normalize_positive_float(
+            source.get("token_saver_max_productivity_loss"),
+            float(defaults["token_saver_max_productivity_loss"]),
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        "token_saver_free_candidate_bonus": _normalize_positive_float(
+            source.get("token_saver_free_candidate_bonus"),
+            float(defaults["token_saver_free_candidate_bonus"]),
+            minimum=0.0,
+            maximum=200.0,
         ),
         "prefer_available_quota": _bool_with_default(
             source.get("prefer_available_quota"),

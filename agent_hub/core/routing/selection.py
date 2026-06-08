@@ -12,7 +12,7 @@ from typing import Any
 
 from ...adaptive import AdaptiveLearningStore, estimate_known_cost_usd
 from ...capabilities import agent_capabilities
-from ...config import AgentConfig, HubConfig, is_free_agent, normalize_provider
+from ...config import AgentConfig, HubConfig, agent_allowed_by_cost_policy, is_free_agent, normalize_provider
 from ...context import estimate_message_tokens, is_protected_context_message
 from ...debug import debug_dir_for_state, provider_debug_context
 from ...events import (
@@ -1149,7 +1149,9 @@ class AgentRouter:
         return any(
             agent_can_emulate_tools(self.config, agent) or _agent_supports_tools(agent)
             for name in names
-            if (agent := self.config.agents.get(name)) is not None and agent.enabled
+            if (agent := self.config.agents.get(name)) is not None
+            and agent.enabled
+            and (not _strict_free_policy_enabled(self.config) or agent_allowed_by_cost_policy(self.config, agent))
         )
 
     def _tool_loop_chat(self, agent: AgentConfig, request: HubRequest) -> ProviderResult:
@@ -1202,11 +1204,16 @@ class AgentRouter:
         memory_reason = _routing_memory_route_reason(candidate_scores)
         if memory_reason and mode != "manual":
             reason = f"{reason} {memory_reason}"
+        token_saver_reason = _token_saver_route_reason(candidate_scores)
+        if token_saver_reason and mode != "manual":
+            reason = f"{reason} {token_saver_reason}"
         if reviewer_signal.get("reason"):
             reason = f"{reason} {reviewer_signal['reason']}"
         routing_reasons = [reason, *classification.reasons[:8]]
         if memory_reason:
             routing_reasons.append(memory_reason)
+        if token_saver_reason:
+            routing_reasons.append(token_saver_reason)
         if reviewer_signal.get("reason"):
             routing_reasons.append(str(reviewer_signal["reason"]))
         dna = self._repository_dna()
@@ -1294,9 +1301,12 @@ class AgentRouter:
             agent = self.config.agents.get(name)
             if agent and agent.enabled:
                 agents.append(agent)
+        if _strict_free_policy_enabled(self.config):
+            agents = [agent for agent in agents if agent_allowed_by_cost_policy(self.config, agent)]
         if request.preferred_agent and agents and agents[0].name == request.preferred_agent:
             return [agents[0], *self._rank_agents_for_mode(agents[1:], request, mode)]
-        return self._rank_agents_for_mode(agents, request, mode)
+        ranked = self._rank_agents_for_mode(agents, request, mode)
+        return self._apply_token_saver_ranking(ranked, request, mode)
 
     def _route_names(self, request: HubRequest) -> list[str]:
         if request.route:
@@ -1550,6 +1560,252 @@ class AgentRouter:
 
         return _dedupe_agents([*ordered, *agents])
 
+    def _apply_token_saver_ranking(
+        self,
+        agents: list[AgentConfig],
+        request: HubRequest,
+        mode: str,
+    ) -> list[AgentConfig]:
+        if not agents or not self._token_saver_enabled(request, mode):
+            return agents
+        classification = self._classify_request(request)
+        codex_reference = _codex_efficiency_reference_agent(agents)
+        eligible: list[tuple[AgentConfig, dict[str, Any], float]] = []
+        for agent in agents:
+            if not _token_saver_offload_candidate(agent):
+                continue
+            signal = self._token_saver_signal(
+                agent,
+                request,
+                classification=classification,
+                codex_reference=codex_reference,
+            )
+            if not signal.get("active"):
+                continue
+            eligible.append(
+                (
+                    agent,
+                    signal,
+                    self._routing_score(
+                        agent,
+                        request,
+                        include_routing_memory=False,
+                        include_token_saver=False,
+                    ),
+                )
+            )
+        if not eligible:
+            return agents
+        eligible.sort(
+            key=lambda item: (
+                -float(item[1].get("confidence", 0.0) or 0.0),
+                -float(item[1].get("adjustment", 0.0) or 0.0),
+                -float(item[2]),
+            )
+        )
+        return _dedupe_agents([*[agent for agent, _signal, _score in eligible], *agents])
+
+    def _token_saver_enabled(self, request: HubRequest | None, mode: str | None = None) -> bool:
+        if not getattr(self.config, "cost_optimizer_enabled", True):
+            return False
+        if _strict_free_policy_enabled(self.config):
+            return False
+        if not _routing_bool(self.config, "token_saver_enabled", True):
+            return False
+        if request is None:
+            return False
+        if mode == "manual" or request.preferred_agent or self._manual_model_or_provider_agent_names(request):
+            return False
+        if _privacy_requested(request):
+            return False
+        return True
+
+    def _token_saver_signal(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        *,
+        classification: Any | None = None,
+        codex_reference: AgentConfig | None = None,
+    ) -> dict[str, Any]:
+        classification = classification or self._classify_request(request)
+        threshold = _bounded_float(
+            _routing_float(
+                self.config,
+                "token_saver_confidence_threshold",
+                float(getattr(self.config, "confidence_threshold", 0.72) or 0.72),
+            ),
+            0.0,
+            1.0,
+        )
+        max_loss = _bounded_float(
+            _routing_float(self.config, "token_saver_max_productivity_loss", 0.08),
+            0.0,
+            1.0,
+        )
+        enabled = self._token_saver_enabled(request, self._routing_mode(request))
+        offload_candidate = _token_saver_offload_candidate(agent)
+        confidence, confidence_reasons = self._token_saver_confidence(agent, request, classification)
+        reference_confidence = None
+        productivity_loss = 0.0
+        if codex_reference is not None:
+            reference_confidence = self._token_saver_confidence(
+                codex_reference,
+                request,
+                classification,
+            )[0]
+            productivity_loss = max(0.0, float(reference_confidence) - float(confidence))
+        protection_reasons = self._token_saver_protection_reasons(agent, request, classification)
+        has_reference = codex_reference is not None
+        active = bool(
+            enabled
+            and has_reference
+            and offload_candidate
+            and not protection_reasons
+            and confidence >= threshold
+            and productivity_loss <= max_loss
+        )
+        if active:
+            adjustment = _routing_float(self.config, "token_saver_free_candidate_bonus", 22.0) * confidence
+            summary = (
+                "Token saver active: free candidate is confident enough and within "
+                f"{max_loss:.0%} productivity-loss tolerance."
+            )
+        elif not enabled:
+            adjustment = 0.0
+            summary = "Token saver is disabled for this request or routing mode."
+        elif not offload_candidate:
+            adjustment = 0.0
+            summary = "Not a token-saver offload candidate."
+        elif not has_reference:
+            adjustment = 0.0
+            summary = "Token saver inactive: no Codex fallback reference is in this route."
+        elif protection_reasons:
+            adjustment = 0.0
+            summary = "Codex fallback protected: " + "; ".join(protection_reasons[:3]) + "."
+        elif confidence < threshold:
+            adjustment = 0.0
+            summary = f"Confidence {confidence:.2f} is below token-saver threshold {threshold:.2f}."
+        else:
+            adjustment = 0.0
+            summary = (
+                f"Estimated productivity loss {productivity_loss:.2f} exceeds "
+                f"token-saver tolerance {max_loss:.2f}."
+            )
+        return {
+            "enabled": enabled,
+            "active": active,
+            "agent": agent.name,
+            "provider": agent.provider,
+            "model": agent.model,
+            "free_candidate": offload_candidate,
+            "codex_reference": codex_reference.name if codex_reference is not None else None,
+            "confidence": round(confidence, 4),
+            "confidence_threshold": round(threshold, 4),
+            "reference_confidence": round(reference_confidence, 4) if reference_confidence is not None else None,
+            "max_productivity_loss": round(max_loss, 4),
+            "estimated_productivity_loss": round(productivity_loss, 4),
+            "adjustment": round(adjustment, 3),
+            "protection_reasons": protection_reasons,
+            "confidence_reasons": confidence_reasons,
+            "summary": summary,
+        }
+
+    def _token_saver_confidence(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        classification: Any,
+    ) -> tuple[float, list[str]]:
+        capability = _token_saver_task_capability(agent, classification)
+        health = self._health.get(agent.name)
+        reliability = _bounded_float(health.reliability_score if health else 0.7, 0.0, 1.0)
+        outcome_score, outcome_samples = self._model_efficiency_score(agent, request, classification)
+        evidence = capability if outcome_score is None else outcome_score
+        context_fit = self._token_saver_context_fit(agent, request, classification, health)
+        speed = _bounded_float(float(agent.speed_score or 0.5), 0.0, 1.0)
+        penalty = _token_saver_task_penalty(classification)
+        if health is not None:
+            if health.is_degraded():
+                penalty += 0.18
+            attempts = health.success_count + health.failure_count
+            if attempts >= 3 and health.failure_count:
+                penalty += min(0.12, health.failure_count / max(1, attempts) * 0.2)
+            if health.timeout_count:
+                penalty += min(0.10, health.timeout_count * 0.03)
+        if _request_has_tools(request) and tool_compatibility_mode(self.config, agent) == "unavailable":
+            penalty += 0.22
+        confidence = (
+            capability * 0.42
+            + reliability * 0.24
+            + context_fit * 0.14
+            + evidence * 0.16
+            + speed * 0.04
+            - penalty
+        )
+        reasons = [
+            f"capability={capability:.2f}",
+            f"reliability={reliability:.2f}",
+            f"context_fit={context_fit:.2f}",
+        ]
+        if outcome_score is not None:
+            reasons.append(f"outcomes={outcome_score:.2f}/{outcome_samples} samples")
+        if penalty:
+            reasons.append(f"risk_penalty={penalty:.2f}")
+        return round(_bounded_float(confidence, 0.0, 1.0), 4), reasons
+
+    def _token_saver_context_fit(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        classification: Any,
+        health: ProviderHealth | None,
+    ) -> float:
+        output_budget = output_token_budget(
+            self.config,
+            request,
+            agent,
+            input_tokens=max(1, int(getattr(classification, "estimated_input_tokens", 0) or 0)),
+            health=health,
+        )
+        required = max(1, int(getattr(classification, "estimated_input_tokens", 0) or 0)) + int(output_budget.effective)
+        window = int(agent.context_window or getattr(health, "context_window", 0) or 0)
+        if window <= 0:
+            return 0.72
+        if window >= required * 2:
+            return 1.0
+        if window >= required:
+            return 0.86
+        if window >= max(1, required // 2):
+            return 0.42
+        return 0.15
+
+    def _token_saver_protection_reasons(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        classification: Any,
+    ) -> list[str]:
+        reasons: list[str] = []
+        risk = str(getattr(classification, "risk_level", "low") or "low")
+        task_type = str(getattr(classification, "task_type", "") or "")
+        complexity = str(getattr(classification, "complexity", "low") or "low")
+        context_estimate = str(getattr(classification, "context_estimate", "small") or "small")
+        if risk in {"high", "critical"} or task_type == "security_sensitive_change":
+            reasons.append(f"{risk} risk task")
+        if bool(getattr(classification, "reviewer_required", False)):
+            reasons.append("reviewer workflow recommended")
+        if task_type == "long_context" or context_estimate == "large":
+            reasons.append("large-context task")
+        if complexity == "high" and task_type not in {"simple_explanation", "documentation"}:
+            reasons.append("high-complexity task")
+        if _request_has_tools(request) and tool_compatibility_mode(self.config, agent) == "unavailable":
+            reasons.append("required tools unavailable")
+        health = self._health.get(agent.name)
+        if health is not None and health.is_degraded():
+            reasons.append("provider health is degraded")
+        return reasons
+
     def _model_efficiency_score(
         self,
         agent: AgentConfig,
@@ -1751,6 +2007,7 @@ class AgentRouter:
         estimated_input = classification.estimated_input_tokens
         rows: list[dict[str, Any]] = []
         repository_dna = self._repository_dna()
+        codex_reference = _codex_efficiency_reference_agent(agents)
         for rank, agent in enumerate(agents[:8], start=1):
             health = self._health.get(agent.name)
             output_budget = output_token_budget(
@@ -1779,6 +2036,13 @@ class AgentRouter:
                 agent,
                 request,
                 include_routing_memory=False,
+                include_token_saver=False,
+            )
+            token_saver = self._token_saver_signal(
+                agent,
+                request,
+                classification=classification,
+                codex_reference=codex_reference,
             )
             routing_memory = self._routing_memory_signal(
                 agent,
@@ -1792,7 +2056,8 @@ class AgentRouter:
             )
             outcome_signal = self._outcome_based_routing_signal(agent, request, classification)
             memory_adjustment = float(routing_memory.get("adjustment", 0.0) or 0.0)
-            final_routing_score = original_routing_score + memory_adjustment
+            token_saver_adjustment = float(token_saver.get("adjustment", 0.0) or 0.0)
+            final_routing_score = original_routing_score + memory_adjustment + token_saver_adjustment
             rows.append(
                 {
                     "rank": rank,
@@ -1802,6 +2067,7 @@ class AgentRouter:
                     "model": agent.model,
                     "original_routing_score": round(original_routing_score, 3),
                     "memory_adjustment": round(memory_adjustment, 3),
+                    "token_saver_adjustment": round(token_saver_adjustment, 3),
                     "repository_dna_adjustment": round(
                         float(repository_signal.get("adjustment", 0.0) or 0.0),
                         3,
@@ -1818,6 +2084,7 @@ class AgentRouter:
                         output_tokens=int(output_budget.effective),
                     ),
                     "adaptive": adaptive,
+                    "token_saver": token_saver,
                     "routing_memory": routing_memory,
                     "repository_dna": repository_signal,
                     "outcome_based_routing": outcome_signal,
@@ -1848,6 +2115,22 @@ class AgentRouter:
         if selected is None:
             return "No enabled provider matched the requested route and routing mode."
         if mode == "manual":
+            if _strict_free_policy_enabled(self.config):
+                manual_names = [
+                    *([request.preferred_agent] if request.preferred_agent else []),
+                    *self._manual_model_or_provider_agent_names(request),
+                ]
+                blocked = [
+                    name
+                    for name in manual_names
+                    if (agent := self.config.agents.get(name)) is not None
+                    and not agent_allowed_by_cost_policy(self.config, agent)
+                ]
+                if blocked and selected.name not in blocked:
+                    return (
+                        "Strict free-model policy blocked the manual non-free preference "
+                        "and selected the next eligible fallback candidate."
+                    )
             return "Manual model/provider preference was applied before fallback candidates."
         if mode == "fastest":
             return "Selected the highest-ranked low-latency candidate using speed score and observed latency."
@@ -2064,7 +2347,7 @@ class AgentRouter:
             capabilities = agent_capabilities(agent) if agent else None
             cooldown_until = max(cooldown_rows.get(name, 0.0), health.cooldown_deadline())
             available = bool(agent.enabled) if agent else False
-            if agent and self.config.free_only and not is_free_agent(agent):
+            if agent and not agent_allowed_by_cost_policy(self.config, agent):
                 available = False
             if agent and _requires_missing_api_key(agent):
                 available = False
@@ -2215,7 +2498,7 @@ class AgentRouter:
                 unavailable_reason = "disabled"
             elif require_free is True and not free:
                 unavailable_reason = "not free"
-            elif self.config.free_only and not free:
+            elif not agent_allowed_by_cost_policy(self.config, agent):
                 unavailable_reason = "skipped by free_only"
             elif (
                 needs_tools is True
@@ -2233,8 +2516,10 @@ class AgentRouter:
             available = not unavailable_reason
             if unavailable_reason and not include_unavailable:
                 continue
+            token_saver = self._token_saver_signal(agent, request, classification=self._classify_request(request))
             score = self._recommendation_score(
                 agent,
+                request=request,
                 text=text,
                 needs_tools=needs_tools,
                 prefer=prefer,
@@ -2273,6 +2558,7 @@ class AgentRouter:
                     "tokens_remaining": health.tokens_remaining if health else None,
                     "credits_remaining": health.credits_remaining if health else None,
                     "rate_limit_reset_at": health.rate_limit_reset_at if health else None,
+                    "token_saver": token_saver,
                     "why": _recommendation_reason(agent, text=text, prefer=prefer, index=index),
                 }
             )
@@ -2309,6 +2595,7 @@ class AgentRouter:
         request: HubRequest | None = None,
         *,
         include_routing_memory: bool = True,
+        include_token_saver: bool = True,
     ) -> float:
         score = float(agent.priority or 0.0)
         capabilities = agent_capabilities(agent)
@@ -2402,6 +2689,13 @@ class AgentRouter:
             if include_routing_memory:
                 signal = self._routing_memory_signal(agent, request)
                 score += float(signal.get("adjustment", 0.0) or 0.0)
+            if include_token_saver:
+                token_saver = self._token_saver_signal(
+                    agent,
+                    request,
+                    classification=self._classify_request(request),
+                )
+                score += float(token_saver.get("adjustment", 0.0) or 0.0)
         evaluation = self.provider_scores.get(agent.name) if isinstance(self.provider_scores, dict) else None
         if isinstance(evaluation, dict):
             try:
@@ -2944,6 +3238,7 @@ class AgentRouter:
         self,
         agent: AgentConfig,
         *,
+        request: HubRequest | None = None,
         text: str,
         needs_tools: bool | None,
         prefer: str | None,
@@ -2986,6 +3281,9 @@ class AgentRouter:
                 score -= min(10.0, health.tool_call_failure_count * 2.0)
             if agent.supports_streaming and health.streaming_tokens_per_second:
                 score += min(4.0, health.streaming_tokens_per_second / 25.0)
+        if request is not None:
+            token_saver = self._token_saver_signal(agent, request, classification=self._classify_request(request))
+            score += float(token_saver.get("adjustment", 0.0) or 0.0)
         return score
 
 
@@ -3039,12 +3337,89 @@ def _free_remote_cloud_agent(agent: AgentConfig) -> bool:
     return not _is_local_or_private_agent(agent)
 
 
+def _strict_free_policy_enabled(config: HubConfig) -> bool:
+    return bool(getattr(config, "disable_non_free_models", False))
+
+
+def _token_saver_offload_candidate(agent: AgentConfig) -> bool:
+    if not is_free_agent(agent):
+        return False
+    if _codex_like_agent(agent):
+        return False
+    provider = normalize_provider(agent.provider)
+    if provider == "echo":
+        return False
+    return True
+
+
+def _codex_like_agent(agent: AgentConfig) -> bool:
+    name = agent.name.lower()
+    provider = normalize_provider(agent.provider)
+    provider_type = (agent.provider_type or agent.provider).lower()
+    model = agent.model.lower()
+    return (
+        name in {"codex", "codex-cli", "chatgpt", "codex-fallback", "chatgpt-fallback"}
+        or provider in {"openai", "codex-cli"}
+        or provider_type in {"openai", "codex-cli"}
+        or "codex" in model
+    )
+
+
+def _token_saver_task_capability(agent: AgentConfig, classification: Any) -> float:
+    task_type = str(getattr(classification, "task_type", "") or "general")
+    task_category = str(getattr(classification, "task_category", "") or task_type)
+    provider = normalize_provider(agent.provider)
+    coding = _optional_float(agent.coding_score)
+    reasoning = _optional_float(agent.reasoning_score)
+    speed = _optional_float(agent.speed_score)
+    if task_type in {"coding", "debug", "test_generation", "tool_use"} or task_category in {"refactor", "debugging"}:
+        return _bounded_float(coding if coding is not None else 0.52, 0.0, 1.0)
+    if task_type in {"review", "security_sensitive_change"}:
+        fallback = coding if coding is not None else 0.0
+        return _bounded_float(reasoning if reasoning is not None else fallback * 0.8 or 0.55, 0.0, 1.0)
+    if task_type == "research":
+        if provider == "local-research":
+            return 0.82
+        fallback = reasoning if reasoning is not None else coding if coding is not None else 0.58
+        return _bounded_float(fallback, 0.0, 1.0)
+    if task_type in {"simple_explanation", "documentation", "general"}:
+        values = [
+            value
+            for value in (
+                reasoning,
+                (coding * 0.75 if coding is not None else None),
+                (speed * 0.85 if speed is not None else None),
+                0.68,
+            )
+            if value is not None
+        ]
+        return _bounded_float(max(values), 0.0, 1.0)
+    return _bounded_float(max(value for value in (coding or 0.0, reasoning or 0.0, 0.58)), 0.0, 1.0)
+
+
+def _token_saver_task_penalty(classification: Any) -> float:
+    risk = str(getattr(classification, "risk_level", "low") or "low")
+    complexity = str(getattr(classification, "complexity", "low") or "low")
+    context_estimate = str(getattr(classification, "context_estimate", "small") or "small")
+    penalty = {
+        "low": 0.0,
+        "medium": 0.08,
+        "high": 0.26,
+        "critical": 0.42,
+    }.get(risk, 0.0)
+    penalty += {"low": 0.0, "medium": 0.06, "high": 0.18}.get(complexity, 0.0)
+    if context_estimate == "medium":
+        penalty += 0.04
+    elif context_estimate == "large":
+        penalty += 0.16
+    return penalty
+
+
 def _codex_efficiency_reference_agent(agents: list[AgentConfig]) -> AgentConfig | None:
     explicit = [
         agent
         for agent in agents
-        if agent.name.lower() in {"codex", "chatgpt", "codex-fallback", "chatgpt-fallback"}
-        or (normalize_provider(agent.provider) == "openai" and not is_free_agent(agent))
+        if _codex_like_agent(agent)
     ]
     if explicit:
         return sorted(
@@ -3801,6 +4176,25 @@ def _routing_memory_route_reason(candidate_scores: list[dict[str, Any]]) -> str:
     return f"Routing memory {direction} {selected.get('agent')} by {adjustment:+.2f}."
 
 
+def _token_saver_route_reason(candidate_scores: list[dict[str, Any]]) -> str:
+    if not candidate_scores:
+        return ""
+    selected = candidate_scores[0]
+    token_saver = selected.get("token_saver")
+    if not isinstance(token_saver, dict) or not token_saver.get("active"):
+        return ""
+    confidence = _optional_float(token_saver.get("confidence"))
+    reference = token_saver.get("codex_reference")
+    loss = _optional_float(token_saver.get("estimated_productivity_loss")) or 0.0
+    if confidence is None:
+        return f"Token saver selected free candidate {selected.get('agent')} ahead of {reference or 'Codex fallback'}."
+    return (
+        f"Token saver selected free candidate {selected.get('agent')} ahead of "
+        f"{reference or 'Codex fallback'} with confidence {confidence:.2f} "
+        f"and estimated productivity loss {loss:.2f}."
+    )
+
+
 def _routing_decision_explanation(decision: RoutingDecision) -> RoutingDecisionExplanation:
     selected = _selected_scorecard(decision)
     selected_agent = selected.get("agent") or decision.selected_agent or ""
@@ -3812,6 +4206,7 @@ def _routing_decision_explanation(decision: RoutingDecision) -> RoutingDecisionE
     capabilities = selected.get("capabilities") if isinstance(selected.get("capabilities"), dict) else {}
     health = selected.get("health") if isinstance(selected.get("health"), dict) else {}
     adaptive = selected.get("adaptive") if isinstance(selected.get("adaptive"), dict) else {}
+    token_saver = selected.get("token_saver") if isinstance(selected.get("token_saver"), dict) else {}
     memory = selected.get("routing_memory") if isinstance(selected.get("routing_memory"), dict) else {}
     repository_dna = selected.get("repository_dna") if isinstance(selected.get("repository_dna"), dict) else {}
     summary = (
@@ -3828,6 +4223,7 @@ def _routing_decision_explanation(decision: RoutingDecision) -> RoutingDecisionE
         capabilities=capabilities,
         health=health,
         adaptive=adaptive,
+        token_saver=token_saver,
         memory=memory,
         repository_dna=repository_dna,
     )
@@ -3846,6 +4242,7 @@ def _routing_decision_explanation(decision: RoutingDecision) -> RoutingDecisionE
             "risk_level": decision.risk,
             "complexity": decision.complexity,
             "final_routing_score": round(selected_score, 3) if selected_score is not None else None,
+            "token_saver": token_saver,
         },
         reasons=reasons,
         rejected=_fallback_rejections(decision.candidate_scores),
@@ -3889,6 +4286,7 @@ def _routing_explanation_reasons(
     capabilities: dict[str, Any],
     health: dict[str, Any],
     adaptive: dict[str, Any],
+    token_saver: dict[str, Any],
     memory: dict[str, Any],
     repository_dna: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -3961,6 +4359,14 @@ def _routing_explanation_reasons(
         summary = str(adaptive.get("summary") or "").strip()
         if summary:
             _append_reason(reasons, "Adaptive learning", summary, "adaptive_learning.json")
+    if token_saver:
+        summary = str(token_saver.get("summary") or "").strip()
+        if summary:
+            confidence = token_saver.get("confidence")
+            detail = summary
+            if confidence is not None:
+                detail = f"{summary} Confidence {confidence}."
+            _append_reason(reasons, "Token saver", detail, "candidate scorecard")
     if memory:
         summary = str(memory.get("summary") or "").strip()
         if summary:
@@ -4018,6 +4424,7 @@ def _routing_explanation_rankings(
         health = row.get("health") if isinstance(row.get("health"), dict) else {}
         capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
         repository_signal = row.get("repository_dna") if isinstance(row.get("repository_dna"), dict) else {}
+        token_saver = row.get("token_saver") if isinstance(row.get("token_saver"), dict) else {}
         ranking = {
             "rank": row.get("rank"),
             "agent": row.get("agent"),
@@ -4035,6 +4442,9 @@ def _routing_explanation_rankings(
             "supports_tools": capabilities.get("supports_tools"),
             "context_window": capabilities.get("context_window"),
             "repository_dna_summary": repository_signal.get("summary"),
+            "token_saver_active": token_saver.get("active"),
+            "token_saver_confidence": token_saver.get("confidence"),
+            "token_saver_adjustment": row.get("token_saver_adjustment"),
             "why": row.get("why"),
         }
         if by == "provider":
@@ -4385,6 +4795,14 @@ def _fallback_rejections(candidate_scores: list[dict[str, Any]]) -> list[dict[st
         repository_adjustment = _optional_float(row.get("repository_dna_adjustment")) or 0.0
         if repository_adjustment > 0.05:
             reasons.append(f"Repository DNA boost {repository_adjustment:+.2f} was not enough to win.")
+        token_saver = row.get("token_saver") if isinstance(row.get("token_saver"), dict) else {}
+        if token_saver:
+            if token_saver.get("active"):
+                reasons.append("Token saver marked this as a safe free candidate, but another candidate ranked higher.")
+            elif token_saver.get("free_candidate"):
+                summary = str(token_saver.get("summary") or "").strip()
+                if summary:
+                    reasons.append(summary)
         if health.get("degraded"):
             reasons.append("Provider health is degraded.")
         if not reasons:

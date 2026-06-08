@@ -555,10 +555,15 @@ Cloud control starts with Ollama cloud model IDs in fresh VS Code configs. Those
 models run through Ollama Cloud, not on your local CPU/GPU. To put hosted API-key
 models first, open the chat `Settings` menu, set `Cloud route` to `API-key
 models first`, save provider keys, and restart Agent Hub.
-Use `Token Safe Mode` in the same chat `Settings` menu when you want free cloud
-models to try first while Codex CLI and API-key models stay available as
-full-strength fallback. Token Safe caps the free-provider attempts, not the
-Codex fallback.
+Use `Token Safe Mode` in the same chat `Settings` menu when you want confident
+free models to handle safe work first while Codex CLI and API-key models stay
+available as full-strength fallback. The router protects Codex for high-risk,
+large-context, security-sensitive, low-confidence, or tool-incompatible tasks.
+Use `Free Only Mode` when you want to disable Codex CLI, OpenAI, Claude, Gemini,
+ChatGPT, and other non-free/API-key fallbacks entirely. This keeps local,
+Ollama Cloud, local research, and configured free-tier models eligible, and it
+adds `disable_non_free_models=true` to the config so saved API keys cannot
+quietly re-enable paid routes.
 Use `Codex CLI Mode` when you want Codex through your existing `codex login`
 session instead of an `OPENAI_API_KEY`; it enables the `codex-cli` route,
 disables API-key fallbacks, and applies a smaller Codex prompt/output budget.
@@ -607,6 +612,8 @@ Useful commands:
 ```powershell
 python -m agent_hub providers
 python -m agent_hub presets
+python -m agent_hub presets apply free-only
+python -m agent_hub presets apply token-saver
 python -m agent_hub presets apply private
 python -m agent_hub presets apply fast
 python -m agent_hub presets apply cheap
@@ -635,6 +642,31 @@ When an API key environment variable is already available, Agent-Hub also adds
 matching free provider presets at runtime and inserts them into the cloud/coding
 routes. For example, setting `GROQ_API_KEY` is enough for the Groq free presets
 to become eligible on the next start; no config edit is required.
+
+## Token Saver And Free Only Modes
+
+These two modes solve different cost problems:
+
+- `Token Safe Mode` / `python -m agent_hub presets apply token-saver`: save
+  Codex tokens without losing fallback quality. Free models are promoted only
+  when the task classifier, provider health, context fit, tool support, and
+  recent outcomes say they are likely to handle the task within the configured
+  productivity-loss tolerance.
+- `Free Only Mode` / `python -m agent_hub presets apply free-only`: block
+  Codex CLI and non-free/API-key fallbacks. Use this when spending tokens or
+  subscription-backed model calls is not acceptable for the current workspace.
+
+Useful checks:
+
+```powershell
+python -m agent_hub route-diagnose --route cloud-agent --json "Explain this selected function"
+python -m agent_hub explain-route "Fix a typo in README.md"
+python -m agent_hub agents
+```
+
+In `route-diagnose`, the `token_saver` object shows whether the free candidate
+was active, its confidence, the Codex reference model, and why Codex was
+protected when it was not safe to offload.
 
 ## Codex CLI Without an API Key
 
@@ -1150,11 +1182,12 @@ Get-Content .agent-hub/outbox/task.response.json
 ```
 
 The same request context is sent to each candidate agent in order. While
-`free_only` is enabled, Agent-Hub only uses agents marked `free`, `echo`, and
-local/private `openai-compatible` agents. The default Claude, Gemini, and
-ChatGPT entries are local `openai-compatible` aliases. If a local endpoint is
-offline, a model is missing, or the request does not fit that model's configured
-token window, Agent-Hub records that event and retries the next agent.
+`free_only` is enabled, Agent-Hub skips agents outside the configured free-model
+policy. With `disable_non_free_models=true`, Codex CLI, OpenAI, Claude, Gemini,
+ChatGPT, and other non-free/API-key fallbacks are blocked even if they are
+marked `free` in an older config. If a local endpoint is offline, a model is
+missing, or the request does not fit that model's configured token window,
+Agent-Hub records that event and retries the next agent.
 Quota, rate-limit, exhausted free-tier, and token-limit errors are marked as
 temporary provider/model unavailability and cooled down before the next retry.
 The client keeps the same public model alias and session history unless routing

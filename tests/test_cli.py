@@ -336,6 +336,64 @@ class CliTests(unittest.TestCase):
             self.assertTrue(data["free_only"])
             self.assertFalse(data["auto_enable_available_providers"])
 
+    def test_free_only_routing_preset_disables_codex_cli_and_paid_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "default_route": ["codex-cli", "paid", "free"],
+                        "routes": [
+                            {"name": "cloud-agent", "agents": ["codex-cli", "paid", "free"]},
+                            {"name": "codex-cli", "agents": ["codex-cli", "free"]},
+                        ],
+                        "agents": [
+                            {
+                                "name": "codex-cli",
+                                "provider": "codex-cli",
+                                "provider_type": "codex-cli",
+                                "model": "gpt-5.5",
+                                "enabled": True,
+                                "free": True,
+                            },
+                            {
+                                "name": "paid",
+                                "provider": "openai",
+                                "model": "gpt-paid",
+                                "enabled": True,
+                                "free": True,
+                            },
+                            {
+                                "name": "free",
+                                "provider": "openai-compatible",
+                                "provider_type": "groq",
+                                "model": "qwen-free",
+                                "base_url": "https://api.groq.com/openai/v1",
+                                "enabled": True,
+                                "free": True,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                code = main(["--config", str(path), "presets", "apply", "Free Only Mode"])
+
+            self.assertEqual(code, 0)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(data["free_only"])
+            self.assertTrue(data["disable_non_free_models"])
+            self.assertEqual(data["default_route"], ["free"])
+            agents = {agent["name"]: agent for agent in data["agents"]}
+            self.assertFalse(agents["codex-cli"]["enabled"])
+            self.assertFalse(agents["codex-cli"]["free"])
+            self.assertFalse(agents["paid"]["enabled"])
+            self.assertFalse(agents["paid"]["free"])
+            codex_route = next(route for route in data["routes"] if route["name"] == "codex-cli")
+            self.assertEqual(codex_route["agents"], ["free"])
+
     def test_recommend_command_prints_model_suggestions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"

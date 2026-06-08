@@ -10,7 +10,7 @@ from typing import Any
 
 from .agent_runner import AgentEventSink, AgentRunner
 from .agent_tools import AgentToolbox, ShellPermissionCallback
-from .config import AgentConfig, HubConfig, is_free_agent
+from .config import AgentConfig, HubConfig, agent_allowed_by_cost_policy, is_free_agent
 from .models import FailoverEvent, HubRequest, HubResponse
 from .payloads import content_to_text, request_text
 from .reasoning import WorkspaceReasoningState
@@ -621,7 +621,7 @@ class TeamAgentRunner:
             if name in self.config.agents and self.config.agents[name].enabled
         ]
         if self.config.free_only:
-            candidates = [agent for agent in candidates if is_free_agent(agent)]
+            candidates = [agent for agent in candidates if agent_allowed_by_cost_policy(self.config, agent)]
         return sorted(
             candidates,
             key=lambda agent: (-_role_score(agent, role), route_names.index(agent.name)),

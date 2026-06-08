@@ -449,6 +449,7 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.checkRequirements", checkRequirementsCommand),
     vscode.commands.registerCommand("agentHub.installPython", installPythonCommand),
     vscode.commands.registerCommand("agentHub.installNode", installNodeCommand),
+    vscode.commands.registerCommand("agentHub.enableFreeOnlyMode", enableFreeOnlyModeCommand),
     vscode.commands.registerCommand("agentHub.enableTokenSafeMode", enableTokenSafeModeCommand),
     vscode.commands.registerCommand("agentHub.enableCodexCliMode", enableCodexCliModeCommand),
     vscode.commands.registerCommand("agentHub.installCodexCli", installCodexCliCommand),
@@ -598,6 +599,11 @@ class AgentHubSidebarProvider {
     }
     if (message.type === "enableTokenSafeMode") {
       await enableTokenSafeModeCommand({ refreshSidebar: false });
+      await this.refresh();
+      return;
+    }
+    if (message.type === "enableFreeOnlyMode") {
+      await enableFreeOnlyModeCommand({ refreshSidebar: false });
       await this.refresh();
       return;
     }
@@ -809,6 +815,7 @@ async function sidebarDashboardState() {
     agentMode: config.agentMode,
     approvalMode: config.approvalMode,
     tokenSafeMode: isFreeCloudSavingsMode(config),
+    freeOnlyStrictMode: cloudSettings.freeOnly !== false && cloudSettings.disableNonFreeModels === true,
     codexCliMode: isMaxTokenSaveMode(config) && cloudSettings.cloudRouteMode === "codex-cli",
     autoStart: config.autoStart,
     automatedModelFeedback: config.automatedModelFeedback,
@@ -3879,6 +3886,10 @@ function sidebarHtml(webview, logoPath) {
           <span class="button-main">Token Safe</span>
           <span class="button-meta">Save context</span>
         </button>
+        <button class="command-button" id="quickFreeOnlyMode" type="button" title="Disable Codex CLI and non-free models" data-icon="F">
+          <span class="button-main">Free Only</span>
+          <span class="button-meta">No paid models</span>
+        </button>
         <button class="command-button" id="quickCodexCliMode" type="button" title="Use Codex CLI without an API key" data-icon="X">
           <span class="button-main">Codex CLI</span>
           <span class="button-meta">No API key</span>
@@ -4049,6 +4060,7 @@ function sidebarHtml(webview, logoPath) {
       <div class="detail" id="tokenUsage">No token usage yet</div>
       <div class="detail" id="contextDiagnostics"></div>
       <div class="actions">
+        <button id="freeOnlyMode" type="button">Free Only Mode</button>
         <button id="tokenSafeMode" type="button">Token Safe Mode</button>
       </div>
       <div class="detail" id="tokenSafeModeDetail">Token Safe Mode: Off</div>
@@ -5094,6 +5106,9 @@ function sidebarHtml(webview, logoPath) {
     }
 
     function tokenSafeModeText(dashboard) {
+      if (dashboard.freeOnlyStrictMode) {
+        return "Free Only Mode: On. Codex CLI and non-free/API-key fallbacks are disabled.";
+      }
       if (dashboard.codexCliMode) {
         return "Codex CLI Mode: On. No OpenAI API key fallback, compacted workspace, 500-token output cap.";
       }
@@ -5279,6 +5294,7 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("quickDashboard").addEventListener("click", () => post("openDashboard"));
     document.getElementById("quickSettings").addEventListener("click", () => post("openSettings"));
     document.getElementById("quickTokenSafeMode").addEventListener("click", () => post("enableTokenSafeMode"));
+    document.getElementById("quickFreeOnlyMode").addEventListener("click", () => post("enableFreeOnlyMode"));
     document.getElementById("quickCodexCliMode").addEventListener("click", () => post("enableCodexCliMode"));
     document.getElementById("quickInstallCodexCli").addEventListener("click", () => post("installCodexCli"));
     autoFeedbackToggle.addEventListener("click", () => post("toggleAutomatedFeedback"));
@@ -5290,6 +5306,7 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("checkRequirements").addEventListener("click", () => post("checkRequirements"));
     document.getElementById("checkHealth").addEventListener("click", () => post("checkHealth"));
     document.getElementById("tokenSafeMode").addEventListener("click", () => post("enableTokenSafeMode"));
+    document.getElementById("freeOnlyMode").addEventListener("click", () => post("enableFreeOnlyMode"));
     document.getElementById("openOutput").addEventListener("click", () => post("openOutput"));
     document.getElementById("openSettings").addEventListener("click", () => post("openSettings"));
     document.getElementById("copyClineConfig").addEventListener("click", () => post("copyClineConfig"));
@@ -5708,6 +5725,11 @@ async function handleChatMessage(panel, message) {
 
   if (message.type === "enableMaxTokenSave") {
     await enableMaxTokenSaveModeFromWebview(panel, message.settings);
+    return;
+  }
+
+  if (message.type === "enableFreeOnlyMode") {
+    await enableFreeOnlyModeFromWebview(panel, message.settings);
     return;
   }
 
@@ -6149,6 +6171,22 @@ async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
   return result;
 }
 
+async function enableFreeOnlyModeCommand(options = {}) {
+  const result = await applyFreeOnlyModeSettings(options.rawSettings);
+  if (result.ok) {
+    vscode.window.showInformationMessage(result.message);
+    postChatSettings(chatPanel, result.message);
+    if (sidebarProvider && options.refreshSidebar !== false) {
+      await sidebarProvider.refresh();
+    }
+  } else if (result.cancelled) {
+    vscode.window.showInformationMessage(result.message);
+  } else {
+    vscode.window.showErrorMessage(result.message);
+  }
+  return result;
+}
+
 async function enableCodexCliModeCommand(options = {}) {
   if (options.skipCodexCliCheck !== true) {
     const status = await codexCliStatus();
@@ -6522,6 +6560,15 @@ async function enableCodexCliModeFromWebview(panel, rawSettings) {
   return result;
 }
 
+async function enableFreeOnlyModeFromWebview(panel, rawSettings) {
+  const result = await applyFreeOnlyModeSettings(rawSettings);
+  postChatSettings(panel, result.message);
+  if (result.ok && sidebarProvider) {
+    await sidebarProvider.refresh();
+  }
+  return result;
+}
+
 async function applyCodexCliModeSettings(rawSettings) {
   try {
     const baseSettings = chatSettingsPayload(settings());
@@ -6534,6 +6581,7 @@ async function applyCodexCliModeSettings(rawSettings) {
       apiKeyModelsEnabled: false,
       freeCloudPresetsEnabled: false,
       freeOnly: true,
+      disableNonFreeModels: false,
       enableLoadBalancing: false,
       maxTokens: CODEX_CLI_OUTPUT_TOKENS,
       agentMaxSteps: CODEX_CLI_AGENT_STEPS,
@@ -6587,6 +6635,7 @@ async function applyCodexCliModeSettings(rawSettings) {
         apiKeyModelsEnabled: false,
         freeCloudPresetsEnabled: false,
         freeOnly: true,
+        disableNonFreeModels: false,
         enableLoadBalancing: false,
         freeCloudSavingsMode: false,
         codexCliMode: true,
@@ -6616,6 +6665,103 @@ async function applyCodexCliModeSettings(rawSettings) {
   }
 }
 
+async function applyFreeOnlyModeSettings(rawSettings) {
+  try {
+    const baseSettings = chatSettingsPayload(settings());
+    const profileInput = {
+      ...baseSettings,
+      ...(rawSettings && typeof rawSettings === "object" ? rawSettings : {}),
+      agentProviderMode: "cloud",
+      cloudRouteMode: "ollama-cloud",
+      codexCliEnabled: false,
+      apiKeyModelsEnabled: false,
+      freeCloudPresetsEnabled: true,
+      freeOnly: true,
+      disableNonFreeModels: true,
+      enableLoadBalancing: true,
+      maxTokens: null,
+      agentMaxSteps: DEFAULT_AGENT_MAX_STEPS,
+      groupPlanCandidates: 1
+    };
+    const next = normalizeChatSettingsInput(profileInput);
+    const workspace = workspaceRoot();
+    const resource = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
+      : "VS Code user settings";
+    if (!(await requestPermission({
+      category: "config_edit",
+      description: "Agent Hub wants to disable Codex CLI and non-free model fallbacks.",
+      resource,
+      risk: "medium",
+      detail: "This keeps only free/local/free-tier models eligible and prevents Codex CLI, OpenAI, Claude, Gemini, and other non-free fallbacks from being selected."
+    }))) {
+      return {
+        ok: false,
+        cancelled: true,
+        message: "Free Only Mode was cancelled."
+      };
+    }
+
+    const target = vscode.ConfigurationTarget.Global;
+    const config = vscode.workspace.getConfiguration("agentHub");
+    for (const [key, value] of Object.entries(next.workspaceSettings)) {
+      await config.update(key, value, target);
+    }
+    await config.update("agentContextBudgetTokens", DEFAULT_AGENT_CONTEXT_BUDGET, target);
+    await config.update("agentContextCompactionEnabled", true, target);
+    await config.update("contextMode", "balanced", target);
+
+    const clearKeys = [
+      ...Object.keys(next.workspaceSettings),
+      "agentContextBudgetTokens",
+      "agentContextCompactionEnabled",
+      "contextMode"
+    ];
+    const clearedWorkspaceSettings = workspace
+      ? await clearWorkspaceAgentHubSettings(config, clearKeys)
+      : false;
+    const configPath = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
+      : "";
+    const configChanged = configPath
+      ? await saveCloudModelSettingsToConfig(configPath, {
+        ...next.cloudSettings,
+        cloudRouteMode: "ollama-cloud",
+        codexCliEnabled: false,
+        apiKeyModelsEnabled: false,
+        freeCloudPresetsEnabled: true,
+        freeOnly: true,
+        disableNonFreeModels: true,
+        enableLoadBalancing: true,
+        maxTokenSaveMode: false,
+        freeCloudSavingsMode: false,
+        codexCliMode: false,
+        codexCliTokenOptimized: false,
+        agentContextBudgetTokens: DEFAULT_AGENT_CONTEXT_BUDGET
+      }, {
+        workspaceDir: generatedConfigWorkspaceDir(next.workspaceSettings.configPath, workspace),
+        storageDir: generatedConfigStorageDir(next.workspaceSettings.configPath, workspace)
+      })
+      : false;
+    const restartNote = serverProcess || (await isServerOnline())
+      ? " Restart Agent Hub to apply strict free routing."
+      : "";
+    const configNote = configChanged ? " Updated Agent Hub routing and disabled non-free agents." : "";
+    const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
+    return {
+      ok: true,
+      cancelled: false,
+      message: `Free Only Mode is on: Codex CLI and non-free/API-key fallbacks are disabled.${migrationNote}${configNote}${restartNote}`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      cancelled: false,
+      message: `Could not enable Free Only Mode: ${error.message}`
+    };
+  }
+}
+
 async function applyTokenSafeModeSettings(rawSettings) {
   try {
     const baseSettings = chatSettingsPayload(settings());
@@ -6628,6 +6774,7 @@ async function applyTokenSafeModeSettings(rawSettings) {
       apiKeyModelsEnabled: true,
       freeCloudPresetsEnabled: true,
       freeOnly: false,
+      disableNonFreeModels: false,
       enableLoadBalancing: true,
       maxTokens: null,
       agentMaxSteps: DEFAULT_AGENT_MAX_STEPS,
@@ -6681,6 +6828,7 @@ async function applyTokenSafeModeSettings(rawSettings) {
         apiKeyModelsEnabled: true,
         freeCloudPresetsEnabled: true,
         freeOnly: false,
+        disableNonFreeModels: false,
         enableLoadBalancing: true,
         maxTokenSaveMode: true,
         freeCloudSavingsMode: true,
@@ -6749,6 +6897,7 @@ function normalizeChatSettingsInput(value) {
       apiKeyModelsEnabled: !!input.apiKeyModelsEnabled,
       freeCloudPresetsEnabled: !!input.freeCloudPresetsEnabled,
       freeOnly: !!input.freeOnly,
+      disableNonFreeModels: !!input.disableNonFreeModels,
       enableLoadBalancing: !!input.enableLoadBalancing,
       exposeRoutingDetails: !!input.exposeRoutingDetails,
       codexModel: cleanSettingString(input.codexModel, DEFAULT_CODEX_MODEL),
@@ -6860,6 +7009,12 @@ function readResolvedAgentHubConfig(config) {
 
 function agentHubRequestOptions(config, extra = {}) {
   const options = { ...(extra && typeof extra === "object" ? extra : {}) };
+  const cloudSettings = cloudModelSettingsPayload(config);
+  if (cloudSettings.freeOnly !== false && cloudSettings.disableNonFreeModels === true) {
+    options.free_only = true;
+    options.disable_non_free_models = true;
+    options.routing_mode = "cheapest";
+  }
   if (isFreeCloudSavingsMode(config)) {
     options.free_cloud_offload = true;
     options.prefer_free_cloud = true;
@@ -6907,6 +7062,7 @@ function cloudModelSettingsPayload(config) {
     apiKeyModelsEnabled: false,
     freeCloudPresetsEnabled: false,
     freeOnly: true,
+    disableNonFreeModels: false,
     enableLoadBalancing: true,
     exposeRoutingDetails: false,
     codexModel: DEFAULT_CODEX_MODEL,
@@ -6943,6 +7099,7 @@ function cloudModelSettingsPayload(config) {
       apiKeyModelsEnabled: apiKeyModelsEnabledFromConfig(raw),
       freeCloudPresetsEnabled: freeCloudPresetsEnabledFromConfig(raw),
       freeOnly: raw.free_only !== false,
+      disableNonFreeModels: raw.disable_non_free_models === true,
       enableLoadBalancing: raw.enable_load_balancing !== false,
       exposeRoutingDetails: raw.expose_routing_details === true,
       codexModel: modelForAgent(raw, "codex", DEFAULT_CODEX_MODEL),
@@ -7084,7 +7241,16 @@ async function syncApiKeyProviderAvailabilityToConfig(configPath) {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     return false;
   }
-  const changed = await applySavedApiKeyProviderAvailability(data);
+  let changed = await applySavedApiKeyProviderAvailability(data);
+  if (data.disable_non_free_models === true || (
+    data.cloud_control_selection &&
+    typeof data.cloud_control_selection === "object" &&
+    data.cloud_control_selection.disable_non_free_models === true
+  )) {
+    const beforeStrictFree = stableConfigText(JSON.stringify(data));
+    applyStrictFreeOnlyModeToConfig(data);
+    changed = changed || beforeStrictFree !== stableConfigText(JSON.stringify(data));
+  }
   if (!changed) {
     return false;
   }
@@ -8490,11 +8656,13 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
               <label class="settings-check"><input id="settingApiKeyModelsEnabled" type="checkbox"> Enable API-key models</label>
               <label class="settings-check"><input id="settingFreeCloudPresetsEnabled" type="checkbox"> Enable free cloud presets</label>
               <label class="settings-check"><input id="settingFreeOnly" type="checkbox"> Free-only routing</label>
+              <label class="settings-check"><input id="settingDisableNonFreeModels" type="checkbox"> Disable non-free models</label>
               <label class="settings-check"><input id="settingLoadBalancing" type="checkbox"> Load balancing</label>
               <label class="settings-check"><input id="settingRoutingDetails" type="checkbox"> Routing details</label>
             </div>
             <div class="settings-actions">
               <button class="secondary" id="codexCliMode" type="button">Codex CLI Mode</button>
+              <button class="secondary" id="freeOnlyModeSettings" type="button">Free Only Mode</button>
               <button class="secondary" id="maxTokenSave" type="button">Token Safe Mode</button>
               <button id="saveSettings" type="button">Save Settings</button>
               <button class="secondary" id="openSettings" type="button">Open VS Code Settings</button>
@@ -8607,6 +8775,7 @@ ${apiKeyFieldsHtml()}
       apiKeyModelsEnabled: document.getElementById("settingApiKeyModelsEnabled"),
       freeCloudPresetsEnabled: document.getElementById("settingFreeCloudPresetsEnabled"),
       freeOnly: document.getElementById("settingFreeOnly"),
+      disableNonFreeModels: document.getElementById("settingDisableNonFreeModels"),
       enableLoadBalancing: document.getElementById("settingLoadBalancing"),
       exposeRoutingDetails: document.getElementById("settingRoutingDetails"),
       allowShellTools: document.getElementById("settingAllowShellTools"),
@@ -8689,6 +8858,7 @@ ${apiKeyFieldsHtml()}
       settingInputs.apiKeyModelsEnabled.checked = !!next.apiKeyModelsEnabled;
       settingInputs.freeCloudPresetsEnabled.checked = !!next.freeCloudPresetsEnabled;
       settingInputs.freeOnly.checked = next.freeOnly !== false;
+      settingInputs.disableNonFreeModels.checked = !!next.disableNonFreeModels;
       settingInputs.enableLoadBalancing.checked = next.enableLoadBalancing !== false;
       settingInputs.exposeRoutingDetails.checked = !!next.exposeRoutingDetails;
       settingInputs.allowShellTools.checked = !!next.allowShellTools;
@@ -8730,6 +8900,7 @@ ${apiKeyFieldsHtml()}
         apiKeyModelsEnabled: settingInputs.apiKeyModelsEnabled.checked,
         freeCloudPresetsEnabled: settingInputs.freeCloudPresetsEnabled.checked,
         freeOnly: settingInputs.freeOnly.checked,
+        disableNonFreeModels: settingInputs.disableNonFreeModels.checked,
         enableLoadBalancing: settingInputs.enableLoadBalancing.checked,
         exposeRoutingDetails: settingInputs.exposeRoutingDetails.checked,
         allowShellTools: settingInputs.allowShellTools.checked,
@@ -9283,6 +9454,7 @@ ${apiKeyFieldsHtml()}
       settingInputs.apiKeyModelsEnabled.checked = false;
       settingInputs.freeCloudPresetsEnabled.checked = false;
       settingInputs.freeOnly.checked = true;
+      settingInputs.disableNonFreeModels.checked = false;
       settingInputs.enableLoadBalancing.checked = false;
       settingInputs.maxTokens.value = String(${CODEX_CLI_OUTPUT_TOKENS});
       settingInputs.agentMaxSteps.value = String(${CODEX_CLI_AGENT_STEPS});
@@ -9294,12 +9466,31 @@ ${apiKeyFieldsHtml()}
       });
     });
 
+    document.getElementById("freeOnlyModeSettings").addEventListener("click", () => {
+      controlMode.value = "cloud";
+      settingInputs.cloudRouteMode.value = "ollama-cloud";
+      settingInputs.apiKeyModelsEnabled.checked = false;
+      settingInputs.freeCloudPresetsEnabled.checked = true;
+      settingInputs.freeOnly.checked = true;
+      settingInputs.disableNonFreeModels.checked = true;
+      settingInputs.enableLoadBalancing.checked = true;
+      settingInputs.maxTokens.value = "";
+      settingInputs.agentMaxSteps.value = String(${DEFAULT_AGENT_MAX_STEPS});
+      settingInputs.groupPlanCandidates.value = "1";
+      settingsMessage.textContent = "Turning on Free Only Mode...";
+      vscode.postMessage({
+        type: "enableFreeOnlyMode",
+        settings: collectChatSettings()
+      });
+    });
+
     document.getElementById("maxTokenSave").addEventListener("click", () => {
       controlMode.value = "cloud";
       settingInputs.cloudRouteMode.value = "ollama-cloud";
       settingInputs.apiKeyModelsEnabled.checked = true;
       settingInputs.freeCloudPresetsEnabled.checked = true;
       settingInputs.freeOnly.checked = false;
+      settingInputs.disableNonFreeModels.checked = false;
       settingInputs.enableLoadBalancing.checked = true;
       settingInputs.maxTokens.value = "";
       settingInputs.agentMaxSteps.value = String(${DEFAULT_AGENT_MAX_STEPS});
@@ -10136,6 +10327,7 @@ function cloudModelSettingsFromConfig(raw) {
     apiKeyModelsEnabled: apiKeyModelsEnabledFromConfig(raw),
     freeCloudPresetsEnabled: freeCloudPresetsEnabledFromConfig(raw),
     freeOnly: raw.free_only !== false,
+    disableNonFreeModels: raw.disable_non_free_models === true,
     enableLoadBalancing: raw.enable_load_balancing !== false,
     exposeRoutingDetails: raw.expose_routing_details === true,
     codexModel: modelForAgent(raw, "codex", DEFAULT_CODEX_MODEL),
@@ -10241,12 +10433,14 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
   data.agents = Array.isArray(data.agents) ? data.agents : [];
   data.routes = Array.isArray(data.routes) ? data.routes : [];
   data.free_only = effectiveCloudSettings.freeOnly !== false;
+  data.disable_non_free_models = effectiveCloudSettings.disableNonFreeModels === true;
   data.enable_load_balancing = effectiveCloudSettings.enableLoadBalancing !== false;
   data.expose_routing_details = !!effectiveCloudSettings.exposeRoutingDetails;
   data.cloud_control_selection = {
     route_mode: normalizeCloudRouteMode(effectiveCloudSettings.cloudRouteMode),
     api_key_models_enabled: !!effectiveCloudSettings.apiKeyModelsEnabled,
-    free_cloud_presets_enabled: !!effectiveCloudSettings.freeCloudPresetsEnabled
+    free_cloud_presets_enabled: !!effectiveCloudSettings.freeCloudPresetsEnabled,
+    disable_non_free_models: effectiveCloudSettings.disableNonFreeModels === true
   };
   if (effectiveCloudSettings.maxTokenSaveMode) {
     applyMaxTokenSaveModeToConfig(data, effectiveCloudSettings);
@@ -10263,6 +10457,9 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
   }
   ensureDefaultOllamaCloudAgents(data);
   applyApiKeyProviderAvailability(data, keyEnvs);
+  if (effectiveCloudSettings.disableNonFreeModels === true) {
+    applyStrictFreeOnlyModeToConfig(data);
+  }
   applyCloudRouteMode(data, data.cloud_control_selection.route_mode);
 
   const nextText = `${JSON.stringify(data, null, 2)}\n`;
@@ -10355,6 +10552,39 @@ function applyCodexCliModeToConfig(data, settings = {}) {
   };
 }
 
+function applyStrictFreeOnlyModeToConfig(data) {
+  data.free_only = true;
+  data.disable_non_free_models = true;
+  data.enable_load_balancing = true;
+  data.cloud_control_selection = {
+    ...(data.cloud_control_selection && typeof data.cloud_control_selection === "object" && !Array.isArray(data.cloud_control_selection)
+      ? data.cloud_control_selection
+      : {}),
+    route_mode: "ollama-cloud",
+    api_key_models_enabled: false,
+    free_cloud_presets_enabled: true,
+    disable_non_free_models: true
+  };
+  data.routing = {
+    ...(data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)
+      ? data.routing
+      : {}),
+    free_first: true,
+    token_saver_enabled: false,
+    prefer_available_quota: true
+  };
+  if (!Array.isArray(data.agents)) {
+    return;
+  }
+  for (const agent of data.agents) {
+    if (!agent || typeof agent !== "object" || strictFreeAgentConfigAllowed(agent)) {
+      continue;
+    }
+    agent.enabled = false;
+    agent.free = false;
+  }
+}
+
 async function applySavedApiKeyProviderAvailability(data) {
   return applyApiKeyProviderAvailability(data, await availableApiKeyEnvs());
 }
@@ -10363,18 +10593,73 @@ function applyApiKeyProviderAvailability(data, keyEnvs) {
   if (!data || typeof data !== "object" || !Array.isArray(data.agents)) {
     return false;
   }
+  const strictFree = data.disable_non_free_models === true || (
+    data.cloud_control_selection &&
+    typeof data.cloud_control_selection === "object" &&
+    data.cloud_control_selection.disable_non_free_models === true
+  );
   let changed = false;
   for (const agent of data.agents) {
     if (!agent || typeof agent !== "object" || !isManagedApiKeyProviderAgent(agent)) {
       continue;
     }
-    const desired = agentHasAvailableApiKey(agent, keyEnvs);
+    const desired = strictFree && !strictFreeAgentConfigAllowed(agent)
+      ? false
+      : agentHasAvailableApiKey(agent, keyEnvs);
     if (agent.enabled !== desired) {
       agent.enabled = desired;
       changed = true;
     }
   }
   return changed;
+}
+
+function strictFreeAgentConfigAllowed(agent) {
+  if (!agent || typeof agent !== "object") {
+    return false;
+  }
+  const name = String(agent.name || "").toLowerCase();
+  const provider = normalizeProviderName(String(agent.provider || ""));
+  const providerType = String(agent.provider_type || agent.provider || "").toLowerCase();
+  if (["codex", "codex-cli", "chatgpt", "claude", "gemini"].includes(name)) {
+    return false;
+  }
+  if (["openai", "anthropic", "gemini", "codex-cli"].includes(provider)) {
+    return false;
+  }
+  if (["openai", "anthropic", "gemini", "codex-cli"].includes(providerType)) {
+    return false;
+  }
+  if (["echo", "local-research"].includes(provider)) {
+    return true;
+  }
+  if (providerType === "ollama-cloud" || OLLAMA_CLOUD_AGENT_NAMES.includes(name)) {
+    return true;
+  }
+  if (LOCAL_API_KEY_OPTIONAL_PROVIDER_TYPES.has(providerType) || LOCAL_API_KEY_OPTIONAL_PROVIDER_TYPES.has(provider)) {
+    return true;
+  }
+  if (provider === "openai-compatible" && isLocalOrPrivateUrl(agent.base_url)) {
+    return true;
+  }
+  return agent.free === true;
+}
+
+function normalizeProviderName(value) {
+  const provider = String(value || "").toLowerCase();
+  if (["codex", "chatgpt", "openai-chat", "gpt"].includes(provider)) {
+    return "openai";
+  }
+  if (["claude", "anthropic-messages"].includes(provider)) {
+    return "anthropic";
+  }
+  if (["google", "google-gemini", "generative-language"].includes(provider)) {
+    return "gemini";
+  }
+  if (["codex_cli", "codex-login"].includes(provider)) {
+    return "codex-cli";
+  }
+  return provider;
 }
 
 function isManagedApiKeyProviderAgent(agent) {
@@ -10682,6 +10967,7 @@ function localConfigForLocalModels(sources, options = {}) {
     allow_shell_tools: true,
     approval_mode: generatedConfigApprovalMode(options.approvalMode),
     free_only: options.cloudSettings?.freeOnly !== false,
+    disable_non_free_models: options.cloudSettings?.disableNonFreeModels === true,
     enable_load_balancing: options.cloudSettings?.enableLoadBalancing !== false,
     include_raw_responses: false,
     expose_routing_details: options.cloudSettings?.exposeRoutingDetails === true,
@@ -10689,7 +10975,8 @@ function localConfigForLocalModels(sources, options = {}) {
     cloud_control_selection: {
       route_mode: cloudRouteMode,
       api_key_models_enabled: !!options.cloudSettings?.apiKeyModelsEnabled,
-      free_cloud_presets_enabled: !!options.cloudSettings?.freeCloudPresetsEnabled
+      free_cloud_presets_enabled: !!options.cloudSettings?.freeCloudPresetsEnabled,
+      disable_non_free_models: options.cloudSettings?.disableNonFreeModels === true
     },
     default_route: hybridAgents,
     routes: [
@@ -10743,8 +11030,8 @@ function cloudModelSources(settings = {}) {
     label: "Codex CLI",
     provider: "codex-cli",
     providerType: "codex-cli",
-    enabled: routeMode === "codex-cli" || !!settings.codexCliEnabled,
-    free: routeMode === "codex-cli",
+    enabled: settings.disableNonFreeModels === true ? false : routeMode === "codex-cli" || !!settings.codexCliEnabled,
+    free: settings.disableNonFreeModels === true ? false : routeMode === "codex-cli",
     model: cleanSettingString(settings.codexCliModel, process.env.AGENT_HUB_CODEX_CLI_MODEL || DEFAULT_CODEX_CLI_MODEL),
     contextWindow: 400000,
     timeoutSeconds: 300,
@@ -10766,7 +11053,7 @@ function cloudModelSources(settings = {}) {
       label: "Codex",
       provider: "openai",
       enabled: false,
-      free: settings.maxTokenSaveMode ? false : true,
+      free: settings.disableNonFreeModels || settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.codexModel, process.env.AGENT_HUB_CODEX_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CODEX_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CODEX_API_KEY_ENV || "OPENAI_API_KEY",
       baseUrl: process.env.AGENT_HUB_CODEX_BASE_URL || process.env.OPENAI_BASE_URL || "",
@@ -10777,7 +11064,7 @@ function cloudModelSources(settings = {}) {
       label: "Claude",
       provider: "anthropic",
       enabled: false,
-      free: settings.maxTokenSaveMode ? false : true,
+      free: settings.disableNonFreeModels || settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.claudeModel, process.env.AGENT_HUB_CLAUDE_MODEL || DEFAULT_CLAUDE_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CLAUDE_API_KEY_ENV || "ANTHROPIC_API_KEY",
       baseUrl: process.env.AGENT_HUB_CLAUDE_BASE_URL || "",
@@ -10788,7 +11075,7 @@ function cloudModelSources(settings = {}) {
       label: "Gemini",
       provider: "gemini",
       enabled: false,
-      free: settings.maxTokenSaveMode ? false : true,
+      free: settings.disableNonFreeModels || settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.geminiModel, process.env.AGENT_HUB_GEMINI_MODEL || DEFAULT_GEMINI_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_GEMINI_API_KEY_ENV || "GEMINI_API_KEY",
       baseUrl: process.env.AGENT_HUB_GEMINI_BASE_URL || "",
@@ -10799,7 +11086,7 @@ function cloudModelSources(settings = {}) {
       label: "ChatGPT",
       provider: "openai",
       enabled: false,
-      free: settings.maxTokenSaveMode ? false : true,
+      free: settings.disableNonFreeModels || settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.chatgptModel, process.env.AGENT_HUB_CHATGPT_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CHATGPT_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CHATGPT_API_KEY_ENV || "OPENAI_API_KEY",
       baseUrl: process.env.AGENT_HUB_CHATGPT_BASE_URL || process.env.OPENAI_BASE_URL || "",
@@ -10959,10 +11246,26 @@ function freeCloudPresetSources(settings = {}) {
 }
 
 function apiKeySourceEnabled(source, familyEnabled, settings = {}) {
+  if (settings.disableNonFreeModels === true && !strictFreeSourceAllowed(source)) {
+    return false;
+  }
   if (!source || !source.apiKeyEnv) {
     return !!familyEnabled;
   }
-  return sourceHasAvailableApiKey(source, settings);
+  return !!familyEnabled && sourceHasAvailableApiKey(source, settings);
+}
+
+function strictFreeSourceAllowed(source) {
+  if (!source || typeof source !== "object") {
+    return false;
+  }
+  return strictFreeAgentConfigAllowed({
+    name: source.name,
+    provider: source.provider,
+    provider_type: source.providerType,
+    base_url: source.baseUrl,
+    free: source.free !== false
+  });
 }
 
 function ollamaCloudModelSources(settings = {}) {

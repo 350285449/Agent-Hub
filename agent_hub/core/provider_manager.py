@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..capabilities import agent_capabilities
-from ..config import AgentConfig, HubConfig, is_free_agent, normalize_provider
+from ..config import AgentConfig, HubConfig, agent_allowed_by_cost_policy, is_free_agent, normalize_provider
 from ..models import HubRequest, ProviderResult
 from ..providers import Provider, ProviderError, create_provider
 from ..providers.base import ChatResponse, ProviderAdapter, StreamChunk
@@ -147,7 +147,7 @@ class ProviderManager:
     def _agent_available(self, agent: AgentConfig, health: dict[str, Any]) -> bool:
         if not agent.enabled:
             return False
-        if self.config.free_only and not is_free_agent(agent):
+        if not agent_allowed_by_cost_policy(self.config, agent):
             return False
         if health and health.get("available") is False:
             return False

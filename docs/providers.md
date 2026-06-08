@@ -56,3 +56,8 @@ fallbacks, caps output, and uses compact Codex prompts. Set
 Token Safe Mode is separate from Codex CLI Mode: it routes free cloud models
 first to avoid spending Codex calls, but keeps Codex CLI and API-key fallback
 requests at the normal context and output budget.
+
+Free Only Mode is stricter. It sets `free_only=true` and
+`disable_non_free_models=true`, disables `codex-cli` and hosted API-key agents,
+and rewrites cloud routes to eligible free/local/free-tier models only. Use it
+when Codex CLI or paid/API-key fallback calls should not run at all.

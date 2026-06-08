@@ -5,7 +5,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..capabilities import agent_supports_tools
-from ..config import AgentConfig, HubConfig, _is_local_or_private_url, is_free_agent, normalize_provider
+from ..config import (
+    AgentConfig,
+    HubConfig,
+    _is_local_or_private_url,
+    agent_allowed_by_cost_policy,
+    is_free_agent,
+    normalize_provider,
+)
 from ..models import HubRequest
 from ..provider_presets import provider_defaults_for_agent
 from ..tool_compatibility import agent_can_emulate_tools, tool_emulation_can_handle
@@ -70,10 +77,10 @@ class RouterPreflightPolicy:
                 "Configure a real provider or set debug_echo_enabled=true for diagnostics."
             )
 
-        if self.config.free_only and not is_free_agent(agent):
+        if not agent_allowed_by_cost_policy(self.config, agent):
             return (
                 "Agent provider is disabled because free_only is enabled; "
-                "only agents marked free, echo, and local/private openai-compatible agents are allowed"
+                "only agents allowed by the configured free-model policy are allowed"
             )
 
         if _requires_missing_api_key(agent):

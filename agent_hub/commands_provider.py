@@ -15,6 +15,7 @@ from .config import (
     config_to_dict,
     default_agent_names,
     free_local_config,
+    agent_allowed_by_cost_policy,
     is_free_agent,
     load_config,
     normalize_provider,
@@ -77,6 +78,33 @@ ROUTING_PRESETS: dict[str, dict[str, Any]] = {
         "selector": "cheap-local",
         "free_only": True,
         "approval_mode": "ask",
+        "free_first": True,
+    },
+    "free-only": {
+        "name": "free-only",
+        "label": "Free only mode",
+        "description": "Disable Codex CLI, paid API-key models, and other non-free fallbacks.",
+        "selector": "free-only",
+        "free_only": True,
+        "approval_mode": "safe",
+        "free_first": True,
+    },
+    "token-saver": {
+        "name": "token-saver",
+        "label": "Token saver mode",
+        "description": "Let confident free models handle safe work while keeping Codex as fallback.",
+        "selector": "fallback-safe",
+        "free_only": False,
+        "approval_mode": "safe",
+        "free_first": True,
+    },
+    "token-safe": {
+        "name": "token-safe",
+        "label": "Token safe mode",
+        "description": "Let confident free models handle safe work while keeping Codex as fallback.",
+        "selector": "fallback-safe",
+        "free_only": False,
+        "approval_mode": "safe",
         "free_first": True,
     },
     "best-coding": {
@@ -329,12 +357,29 @@ def _apply_routing_preset(path: str, preset_name: str | None, *, as_json: bool) 
     if isinstance(routing, dict):
         routing["auto_failover"] = True
         routing["free_first"] = bool(preset["free_first"])
-        if preset["name"] == "fallback-safe":
+        if preset["name"] == "free-only":
+            data["disable_non_free_models"] = True
+            routing["token_saver_enabled"] = False
+        if preset["name"] in {"token-saver", "token-safe"}:
+            routing["token_saver_enabled"] = True
+            routing["token_saver_confidence_threshold"] = 0.74
+            routing["token_saver_max_productivity_loss"] = 0.08
+            routing["max_provider_attempts"] = max(4, int(routing.get("max_provider_attempts") or 4))
+        if preset["name"] in {"fallback-safe", "token-saver", "token-safe"}:
             routing["max_provider_attempts"] = max(3, int(routing.get("max_provider_attempts") or 3))
     if preset["name"] in {"private", "local-only"}:
         data["auto_enable_available_providers"] = False
+    if preset["name"] == "free-only":
+        selection = data.setdefault("cloud_control_selection", {})
+        if isinstance(selection, dict):
+            selection["api_key_models_enabled"] = False
+            selection["disable_non_free_models"] = True
+        _disable_non_free_config_agents(data)
 
-    for route_name in ("cloud-agent", "coding", "hybrid-agent"):
+    route_names = ["cloud-agent", "coding", "hybrid-agent"]
+    if preset["name"] == "free-only":
+        route_names.extend(["codex-cli", "research"])
+    for route_name in route_names:
         _replace_route_agents(data, route_name, agent_names)
     if preset["name"] in {"cheap-local", "private", "local-only"}:
         _replace_route_agents(data, "local-agent", agent_names)
@@ -372,13 +417,15 @@ def _select_routing_preset_agents(data: dict[str, Any], preset: dict[str, Any]) 
         return []
     agents = [agent for agent in raw_agents if isinstance(agent, dict) and isinstance(agent.get("name"), str)]
     enabled = [agent for agent in agents if _agent_enabled(agent)]
-    candidates = enabled or agents
     selector = str(preset["selector"])
+    candidates = agents if selector == "free-only" else enabled or agents
 
     if selector == "private":
         selected = [agent for agent in candidates if _agent_is_private(agent)]
     elif selector == "cheap-local":
         selected = [agent for agent in candidates if _agent_is_free(agent) and _agent_is_private(agent)]
+    elif selector == "free-only":
+        selected = [agent for agent in candidates if _agent_is_strict_free(agent)]
     elif selector == "best-coding":
         selected = sorted(candidates, key=_coding_agent_rank, reverse=True)
     elif selector == "fastest":
@@ -388,7 +435,7 @@ def _select_routing_preset_agents(data: dict[str, Any], preset: dict[str, Any]) 
     else:
         selected = candidates
 
-    if not selected:
+    if not selected and selector != "free-only":
         selected = sorted(candidates, key=_fallback_safe_agent_rank, reverse=True)
     names: list[str] = []
     for agent in selected:
@@ -426,6 +473,38 @@ def _agent_enabled(agent: dict[str, Any]) -> bool:
 
 def _agent_is_free(agent: dict[str, Any]) -> bool:
     return agent.get("free", True) is not False
+
+
+def _agent_is_strict_free(agent: dict[str, Any]) -> bool:
+    name = str(agent.get("name") or "").lower()
+    provider = normalize_provider(str(agent.get("provider") or ""))
+    provider_type = str(agent.get("provider_type") or agent.get("provider") or "").lower()
+    if name in {"codex", "codex-cli", "chatgpt", "claude", "gemini"}:
+        return False
+    if provider in {"openai", "anthropic", "gemini", "codex-cli"}:
+        return False
+    if provider_type in {"openai", "anthropic", "gemini", "codex-cli"}:
+        return False
+    if provider in {"echo", "local-research"}:
+        return True
+    if provider_type in LOCAL_PROVIDER_TYPES or provider in LOCAL_PROVIDER_TYPES:
+        return True
+    if provider_type == "ollama-cloud" or name.endswith("-cloud"):
+        return True
+    base_url = str(agent.get("base_url") or "").lower()
+    if base_url.startswith(LOCAL_URL_PREFIXES):
+        return True
+    return agent.get("free") is True
+
+
+def _disable_non_free_config_agents(data: dict[str, Any]) -> None:
+    agents = data.get("agents")
+    if not isinstance(agents, list):
+        return
+    for agent in agents:
+        if isinstance(agent, dict) and not _agent_is_strict_free(agent):
+            agent["enabled"] = False
+            agent["free"] = False
 
 
 def _agent_is_private(agent: dict[str, Any]) -> bool:
@@ -481,7 +560,7 @@ def _agent_rows(config: Any) -> list[dict[str, Any]]:
     for agent in config.agents.values():
         normalized = normalize_provider(agent.provider)
         free = is_free_agent(agent)
-        allowed = agent.enabled and (free or not config.free_only)
+        allowed = agent.enabled and agent_allowed_by_cost_policy(config, agent)
         status = _agent_status(agent, free=free, allowed=allowed, normalized=normalized)
         rows.append(
             {
@@ -952,6 +1031,16 @@ def _route_diagnose(
     selected = next((row for row in candidates if row.get("available")), None)
     skipped = [row for row in candidates if not row.get("available")]
     fallback_reason = _diagnostic_fallback_reason(skipped)
+    decision_scorecards = {
+        row.get("agent"): row
+        for row in decision.candidate_scores
+        if isinstance(row, dict) and row.get("agent")
+    }
+    for row in candidates:
+        scorecard = decision_scorecards.get(row.get("agent"))
+        if isinstance(scorecard, dict):
+            row["token_saver"] = scorecard.get("token_saver")
+            row["routing_score"] = scorecard.get("final_routing_score", scorecard.get("routing_score"))
     report = {
         "object": "agent_hub.route_diagnosis",
         "route": route,
@@ -967,6 +1056,7 @@ def _route_diagnose(
         "estimated_input_tokens": input_tokens,
         "estimated_output_tokens": output_estimate,
         "why_provider_chosen": selected.get("why") if selected else decision.reason,
+        "token_saver": (decision_scorecards.get(selected.get("agent")) or {}).get("token_saver") if selected else None,
         "fallback_chain": list(decision.fallback_chain),
         "candidates": candidates,
         "baseline_comparisons": _baseline_estimate(
@@ -1014,6 +1104,7 @@ def _diagnostic_candidate(
         "why": row.get("why") or "",
         "quota_state": row.get("quota_state"),
         "remaining": row.get("remaining"),
+        "token_saver": row.get("token_saver"),
     }
 
 
@@ -1035,6 +1126,12 @@ def _print_route_diagnosis(report: dict[str, Any]) -> None:
     print(f"Estimated cost: {_display_cost(report.get('estimated_cost_usd'))}")
     if report.get("why_provider_chosen"):
         print(f"Why: {report['why_provider_chosen']}")
+    token_saver = report.get("token_saver")
+    if isinstance(token_saver, dict):
+        state = "active" if token_saver.get("active") else "inactive"
+        confidence = token_saver.get("confidence")
+        summary = token_saver.get("summary") or ""
+        print(f"Token saver: {state} (confidence {confidence}) {summary}")
     skipped = report.get("skipped_providers")
     if isinstance(skipped, list) and skipped:
         print()

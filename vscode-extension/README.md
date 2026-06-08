@@ -104,10 +104,11 @@ Good first tasks:
 - `Fix the failing test`
 - `Add a small feature`
 
-Use `Token Safe Mode` when you want free cloud models to try first while Codex
-CLI and API-key models stay available as full-strength fallback. Use `Codex CLI
-Mode` when you want Agent Hub to route directly through your existing
-`codex login` session without an `OPENAI_API_KEY`.
+Use `Token Safe Mode` when you want confident free models to try safe work first
+while Codex CLI and API-key models stay available as full-strength fallback.
+Use `Free Only Mode` when you want to disable Codex CLI and non-free/API-key
+fallbacks entirely. Use `Codex CLI Mode` when you want Agent Hub to route
+directly through your existing `codex login` session without an `OPENAI_API_KEY`.
 
 ## Models
 
@@ -117,6 +118,7 @@ Pick one path:
 - Start Ollama or LM Studio locally and let Agent Hub route to the local endpoint.
 - Run `Agent Hub: Install Ollama Desktop` if the `ollama` command is not present, then choose a local model.
 - Run `Agent Hub: Install Codex CLI`, sign in, then use `Agent Hub: Use Codex CLI Without API Key`.
+- Run `Agent Hub: Disable Non-Free Models` to keep only free/local/free-tier routes eligible.
 - Connect Cline, Roo Code, Continue, Claude Code, or another OpenAI-compatible tool.
 
 ## Comparison

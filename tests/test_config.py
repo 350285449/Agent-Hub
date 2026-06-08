@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from agent_hub.config import (
     AgentConfig,
+    agent_allowed_by_cost_policy,
     cloud_agent_names,
     config_from_dict,
     config_to_dict,
@@ -13,6 +14,7 @@ from agent_hub.config import (
     free_local_agent_names,
     free_local_config,
     is_free_agent,
+    is_strict_free_agent,
     load_config,
     normalize_provider,
     ollama_cloud_agent_names,
@@ -47,6 +49,7 @@ class ConfigTests(unittest.TestCase):
             },
         )
         self.assertTrue(config.free_only)
+        self.assertFalse(config.disable_non_free_models)
         self.assertFalse(config.allow_shell_tools)
         self.assertEqual(config.shell_command_policy, "deny")
         self.assertFalse(config.fast_write_finalize)
@@ -63,6 +66,7 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(is_free_agent(config.agents["local-research"]))
         self.assertTrue(is_free_agent(config.agents["codex"]))
         self.assertTrue(is_free_agent(config.agents["codex-cli"]))
+        self.assertFalse(is_strict_free_agent(config.agents["codex-cli"]))
         self.assertTrue(is_free_agent(config.agents["claude"]))
         self.assertTrue(is_free_agent(config.agents["gemini"]))
         self.assertTrue(is_free_agent(config.agents["chatgpt"]))
@@ -106,6 +110,73 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.routing["max_provider_attempts"], 5)
         self.assertTrue(is_free_agent(config.agents["custom-local"]))
         self.assertTrue(is_free_agent(config.agents["ollama-qwen-coder"]))
+
+    def test_disable_non_free_models_blocks_codex_cli_even_when_marked_free(self) -> None:
+        config = config_from_dict(
+            {
+                "free_only": True,
+                "disable_non_free_models": True,
+                "agents": [
+                    {
+                        "name": "codex-cli",
+                        "provider": "codex-cli",
+                        "provider_type": "codex-cli",
+                        "model": "gpt-5.5",
+                        "free": True,
+                    },
+                    {
+                        "name": "free-cloud",
+                        "provider": "openai-compatible",
+                        "provider_type": "groq",
+                        "model": "qwen-free",
+                        "base_url": "https://api.groq.com/openai/v1",
+                        "free": True,
+                    },
+                    {
+                        "name": "local",
+                        "provider": "openai-compatible",
+                        "provider_type": "lm-studio",
+                        "model": "local",
+                        "base_url": "http://127.0.0.1:1234",
+                        "free": True,
+                    },
+                ],
+            }
+        )
+
+        self.assertTrue(is_free_agent(config.agents["codex-cli"]))
+        self.assertFalse(agent_allowed_by_cost_policy(config, config.agents["codex-cli"]))
+        self.assertTrue(agent_allowed_by_cost_policy(config, config.agents["free-cloud"]))
+        self.assertTrue(agent_allowed_by_cost_policy(config, config.agents["local"]))
+        self.assertTrue(config_to_dict(config)["disable_non_free_models"])
+
+    def test_disable_non_free_models_overrides_free_only_false(self) -> None:
+        config = config_from_dict(
+            {
+                "free_only": False,
+                "disable_non_free_models": True,
+                "agents": [
+                    {
+                        "name": "codex-cli",
+                        "provider": "codex-cli",
+                        "provider_type": "codex-cli",
+                        "model": "gpt-5.5",
+                        "free": True,
+                    },
+                    {
+                        "name": "free-cloud",
+                        "provider": "openai-compatible",
+                        "provider_type": "ollama-cloud",
+                        "model": "qwen-free",
+                        "base_url": "http://127.0.0.1:11434",
+                        "free": True,
+                    },
+                ],
+            }
+        )
+
+        self.assertFalse(agent_allowed_by_cost_policy(config, config.agents["codex-cli"]))
+        self.assertTrue(agent_allowed_by_cost_policy(config, config.agents["free-cloud"]))
 
     def test_context_change_bar_settings_round_trip(self) -> None:
         config = config_from_dict(

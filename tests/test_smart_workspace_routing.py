@@ -136,8 +136,117 @@ class SmartWorkspaceRoutingTests(unittest.TestCase):
 
         self.assertEqual(simple.routing_mode, "cheapest")
         self.assertEqual(simple.selected_agent, "free-cloud")
+        self.assertTrue(simple.candidate_scores[0]["token_saver"]["active"])
+        self.assertIn("Token saver", simple.reason)
         self.assertEqual(coding.routing_mode, "coding")
         self.assertEqual(coding.selected_agent, "codex-fallback")
+        free_scorecard = next(row for row in coding.candidate_scores if row["agent"] == "free-cloud")
+        self.assertFalse(free_scorecard["token_saver"]["active"])
+
+    def test_disable_non_free_models_excludes_codex_cli_from_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / ".agent-hub" / "state",
+                free_only=True,
+                disable_non_free_models=True,
+                default_route=["codex-cli", "free-cloud"],
+                routes=[RouteRule(name="cloud-agent", agents=["codex-cli", "free-cloud"])],
+                agents={
+                    "codex-cli": AgentConfig(
+                        name="codex-cli",
+                        provider="codex-cli",
+                        provider_type="codex-cli",
+                        model="gpt-5.5",
+                        free=True,
+                        enabled=True,
+                        coding_score=1.0,
+                        reasoning_score=1.0,
+                    ),
+                    "free-cloud": AgentConfig(
+                        name="free-cloud",
+                        provider="openai-compatible",
+                        provider_type="groq",
+                        model="free-qwen",
+                        base_url="https://example.invalid/v1",
+                        free=True,
+                        enabled=True,
+                        coding_score=0.7,
+                        reasoning_score=0.7,
+                    ),
+                },
+            )
+
+            decision = AgentRouter(config, provider_factory=_OkProvider).decide(
+                HubRequest(
+                    session_id="s",
+                    route="cloud-agent",
+                    messages=[{"role": "user", "content": "Explain this selected code."}],
+                )
+            )
+
+        self.assertEqual(decision.selected_agent, "free-cloud")
+        self.assertEqual(decision.fallback_chain, ["free-cloud"])
+
+    def test_disable_non_free_models_blocks_manual_codex_cli_preferences(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / ".agent-hub" / "state",
+                free_only=True,
+                disable_non_free_models=True,
+                default_route=["codex-cli", "free-cloud"],
+                routes=[RouteRule(name="cloud-agent", agents=["codex-cli", "free-cloud"])],
+                agents={
+                    "codex-cli": AgentConfig(
+                        name="codex-cli",
+                        provider="codex-cli",
+                        provider_type="codex-cli",
+                        model="gpt-5.5",
+                        free=True,
+                        enabled=True,
+                        coding_score=1.0,
+                        reasoning_score=1.0,
+                    ),
+                    "free-cloud": AgentConfig(
+                        name="free-cloud",
+                        provider="openai-compatible",
+                        provider_type="ollama-cloud",
+                        model="free-qwen",
+                        base_url="http://127.0.0.1:11434",
+                        free=True,
+                        enabled=True,
+                        coding_score=0.7,
+                        reasoning_score=0.7,
+                    ),
+                },
+            )
+            router = AgentRouter(config, provider_factory=_OkProvider)
+
+            preferred = router.decide(
+                HubRequest(
+                    session_id="s",
+                    route="cloud-agent",
+                    preferred_agent="codex-cli",
+                    messages=[{"role": "user", "content": "Explain this selected code."}],
+                )
+            )
+            model_alias = router.decide(
+                HubRequest(
+                    session_id="s",
+                    route="cloud-agent",
+                    messages=[{"role": "user", "content": "Explain this selected code."}],
+                    raw={"model": "gpt-5.5"},
+                )
+            )
+
+        self.assertEqual(preferred.selected_agent, "free-cloud")
+        self.assertEqual(preferred.fallback_chain, ["free-cloud"])
+        self.assertIn("Strict free-model policy blocked", preferred.reason)
+        self.assertEqual(model_alias.selected_agent, "free-cloud")
+        self.assertEqual(model_alias.fallback_chain, ["free-cloud"])
 
     def test_cloud_exploration_uses_codex_when_cloud_score_is_not_close(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
