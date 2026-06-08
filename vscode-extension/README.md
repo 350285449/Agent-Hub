@@ -1,8 +1,23 @@
 # Agent Hub - Adaptive AI Orchestration
 
+Stop manually switching AI models.
+
+Agent-Hub automatically routes coding tasks to the model most likely to
+succeed.
+
+- Built-in benchmark corpus
+- Route explanations
+- Learning history
+- Reproducible proof reports
+
+Run `Agent Hub: Run Personal Benchmark` to generate your local savings report.
+
 Use OpenAI, Claude, Gemini, Ollama, OpenRouter, local models, Cline, Roo Code,
 Continue, and coding agents through one local API with routing intelligence,
 workflow selection, failover, and local workspace safety.
+
+Agent-Hub does not ask you to trust benchmark claims. It ships the benchmark
+corpus so you can verify routing, cost, latency, and success locally.
 
 ## Why Use Agent Hub?
 
@@ -34,6 +49,12 @@ from the repository media folder or use the screenshots below.
 
 ## Screenshots
 
+![Personal benchmark proof](media/benchmark-proof.png)
+
+![Route replay](media/route-replay.png)
+
+![Learning dashboard](media/learning-dashboard.png)
+
 ![Agent Hub dashboard](media/dashboard.png)
 
 ![Provider routing](media/provider-routing.png)
@@ -47,6 +68,21 @@ from the repository media folder or use the screenshots below.
 3. Open a project folder.
 
 The Agent Hub backend is bundled with the VSIX.
+
+## Personal Proof
+
+On first run, Agent Hub offers to run the shipped 50-task benchmark corpus
+against your configured baseline and routed models. The flow is:
+
+1. Run `Agent Hub: Run Personal Benchmark`.
+2. Review the generated `benchmark-report.md` savings report and share card.
+3. Copy Markdown, Reddit, X, or GitHub Discussion text from the share card.
+4. Run `Agent Hub: Explain Route` to see selected and rejected candidates.
+5. Replay a specific decision with `agent-hub replay-route <request-id>`.
+6. Open the README proof section for the reproducible CLI command.
+
+Benchmark execution may call configured providers and consume provider quota or
+credits, so the extension asks before running it.
 
 ## Use
 

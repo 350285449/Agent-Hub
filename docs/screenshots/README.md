@@ -1,6 +1,12 @@
 # Screenshots
 
-Marketplace screenshot placeholders:
+Marketplace proof screenshots:
+
+- `vscode-extension/media/benchmark-proof.png`
+- `vscode-extension/media/route-replay.png`
+- `vscode-extension/media/learning-dashboard.png`
+
+Operational screenshot placeholders:
 
 - `sidebar-server-permissions.png`
 - `sidebar-providers-limits.png`
@@ -8,4 +14,7 @@ Marketplace screenshot placeholders:
 - `cline-setup-helper.png`
 - `claude-code-setup-helper.png`
 
-Capture these from a clean VS Code window after installing the `9.3.0` VSIX.
+Capture operational screenshots from a clean VS Code window after installing
+the `9.4.0` VSIX. Keep proof screenshots focused on benchmark savings, route
+replay, and learning history so the Marketplace page shows the value before the
+configuration details.

@@ -70,6 +70,7 @@ def request_event_context(request: Any) -> dict[str, Any]:
         "preferred_agent": getattr(request, "preferred_agent", None),
         "api_shape": getattr(request, "api_shape", ""),
         "source": request_source(request),
+        "request_preview": request_preview(request),
     }
 
 
@@ -91,6 +92,45 @@ def request_source(request: Any) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()[:120]
     return "unknown"
+
+
+def request_preview(request: Any) -> str:
+    task = getattr(request, "task", "")
+    if isinstance(task, str) and task.strip():
+        return _one_line(task)
+    messages = getattr(request, "messages", [])
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").lower() not in {"user", "system"}:
+            continue
+        text = _content_text(message.get("content"))
+        if text:
+            return _one_line(text)
+    return ""
+
+
+def _content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(item, str):
+                parts.append(item)
+        return " ".join(parts)
+    return ""
+
+
+def _one_line(value: str) -> str:
+    text = " ".join(str(value or "").split())
+    return text[:240] + ("..." if len(text) > 240 else "")
 
 
 def record_internal_event(state_dir: str | Path, name: str, **data: Any) -> None:
@@ -146,5 +186,6 @@ __all__ = [
     "TOOL_EXECUTED",
     "record_internal_event",
     "request_event_context",
+    "request_preview",
     "request_source",
 ]

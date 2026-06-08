@@ -12,6 +12,13 @@ from agent_hub.learning_proof import learning_dashboard_body, route_history_body
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.core.router import AgentRouter
 from agent_hub.observability import record_event
+from agent_hub.proof_artifacts import (
+    benchmark_evolution_body,
+    benchmark_share_card_body,
+    case_study_body,
+    format_route_replay,
+    replay_route_body,
+)
 
 
 class ProofInfrastructureTests(unittest.TestCase):
@@ -120,6 +127,97 @@ class ProofInfrastructureTests(unittest.TestCase):
             self.assertGreaterEqual(learning["summary"]["routes"], 1)
             self.assertEqual(history["object"], "agent_hub.route_history")
             self.assertGreaterEqual(history["total_routes"], 1)
+
+    def test_route_replay_shows_selected_alternatives_and_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _proof_config(Path(tmp))
+            record_event(
+                config.state_dir,
+                "routing",
+                {
+                    "type": "routing_decision",
+                    "request_id": "replay-1",
+                    "request_preview": "Fix failing pytest",
+                    "agent": "routed",
+                    "provider": "openai-compatible",
+                    "model": "routed-model",
+                    "routing_decision": {
+                        "selected_agent": "routed",
+                        "selected_provider": "openai-compatible",
+                        "selected_model": "routed-model",
+                        "reason": "best cost/performance score",
+                        "candidate_scores": [
+                            {
+                                "agent": "routed",
+                                "provider": "openai-compatible",
+                                "model": "routed-model",
+                                "final_routing_score": 82,
+                                "estimated_cost_usd": 0.01,
+                            },
+                            {
+                                "agent": "baseline",
+                                "provider": "anthropic",
+                                "model": "claude-sonnet-baseline",
+                                "final_routing_score": 83,
+                                "estimated_cost_usd": 0.0314,
+                            },
+                        ],
+                    },
+                },
+            )
+
+            replay = replay_route_body(config, "replay-1")
+            text = format_route_replay(replay)
+
+            self.assertTrue(replay["found"])
+            self.assertEqual(replay["request"]["text"], "Fix failing pytest")
+            self.assertEqual(replay["selected"]["agent"], "routed")
+            self.assertEqual(replay["alternatives"][0]["agent"], "baseline")
+            self.assertIn("Selected:", text)
+            self.assertIn("Expected Quality:", text)
+
+    def test_share_cards_case_study_and_evolution_use_local_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _proof_config(Path(tmp))
+            reports_dir = config.state_dir / "benchmark_reports"
+            reports_dir.mkdir(parents=True)
+            (reports_dir / "benchmark-report.json").write_text(
+                json.dumps(
+                    {
+                        "object": "agent_hub.benchmark_proof",
+                        "task_count": 50,
+                        "baseline": {"agent": "baseline", "provider": "anthropic", "model": "claude-sonnet"},
+                        "comparison": {
+                            "cost_reduction": 34.0,
+                            "latency_reduction": 18.0,
+                            "success_delta": 3.0,
+                        },
+                        "results": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            now = time.time()
+            record_event(
+                config.state_dir,
+                "routing",
+                {"type": "routing_decision", "request_id": "m1", "time": now - 61 * 24 * 3600, "agent": "baseline"},
+            )
+            record_event(
+                config.state_dir,
+                "routing",
+                {"type": "routing_decision", "request_id": "m3", "time": now, "agent": "routed"},
+            )
+
+            card = benchmark_share_card_body(config)
+            case_study = case_study_body(config)
+            evolution = benchmark_evolution_body(config, months=3)
+
+            self.assertIn("My Agent-Hub Benchmark", card["variants"]["markdown"])
+            self.assertEqual(card["metrics"]["cost_reduction"], 34.0)
+            self.assertEqual(case_study["benchmark"]["success_delta"], 3.0)
+            self.assertEqual(evolution["object"], "agent_hub.benchmark_evolution")
+            self.assertGreaterEqual(evolution["total_routes"], 2)
 
 
 def _proof_config(root: Path) -> HubConfig:

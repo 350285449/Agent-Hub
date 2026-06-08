@@ -28,6 +28,16 @@ from .explainability import explain_route_body, format_route_explanation
 from .learning_proof import format_route_history, route_history_body
 from .measurement import estimate_named_baselines
 from .payloads import request_from_payload
+from .proof_artifacts import (
+    benchmark_evolution_body,
+    benchmark_share_card_body,
+    case_study_body,
+    format_benchmark_card,
+    format_benchmark_evolution,
+    format_case_study_markdown,
+    format_route_replay,
+    replay_route_body,
+)
 from .provider_presets import (
     FREE_PROVIDER_PRESETS,
     agent_dict_from_preset,
@@ -1263,6 +1273,58 @@ def _route_history(config: HubConfig, *, weeks: int, as_json: bool) -> int:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:
         print(format_route_history(report), end="")
+    return 0
+
+
+def _replay_route(config: HubConfig, *, request_id: str, as_json: bool) -> int:
+    report = replay_route_body(config, request_id)
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(format_route_replay(report), end="")
+    return 0 if report.get("found") else 1
+
+
+def _benchmark_card(
+    config: HubConfig,
+    *,
+    report_path: str,
+    variant: str,
+    as_json: bool,
+) -> int:
+    report = benchmark_share_card_body(config, report_path or None)
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(format_benchmark_card(report, variant=variant), end="")
+    return 0 if report.get("report_path") else 1
+
+
+def _generate_case_study(
+    config: HubConfig,
+    *,
+    output: str,
+    as_json: bool,
+) -> int:
+    report = case_study_body(config)
+    if as_json:
+        text = json.dumps(report, indent=2, ensure_ascii=False)
+    else:
+        text = format_case_study_markdown(report)
+    if output:
+        target = Path(output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    print(text, end="" if text.endswith("\n") else "\n")
+    return 0
+
+
+def _benchmark_evolution(config: HubConfig, *, months: int, as_json: bool) -> int:
+    report = benchmark_evolution_body(config, months=months)
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(format_benchmark_evolution(report), end="")
     return 0
 
 

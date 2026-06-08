@@ -18,6 +18,7 @@ let pendingChatRequests = [];
 let extensionContext = null;
 let sidebarProvider = null;
 let statusBarItem = null;
+let benchmarkSharePanel = null;
 let lastActiveTextEditor = null;
 let serverLifecycleState = "Stopped";
 let lastServerMessage = "";
@@ -410,6 +411,13 @@ function activate(context) {
       }
     })
   );
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      showFirstRunProofPrompt(context).catch((error) => {
+        output.appendLine(`Could not show first-run proof prompt after workspace change: ${error.message}`);
+      });
+    })
+  );
 
   registerChatParticipant(context);
   sidebarProvider = new AgentHubSidebarProvider(context);
@@ -453,6 +461,7 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.openBenchmarkResults", () => openAgentHubDashboard("/dashboard/benchmarks")),
     vscode.commands.registerCommand("agentHub.runPersonalBenchmark", () => runPersonalBenchmark()),
     vscode.commands.registerCommand("agentHub.explainRoute", () => explainRouteCommand()),
+    vscode.commands.registerCommand("agentHub.openBenchmarkShareCard", () => openLatestBenchmarkShareCard()),
     vscode.commands.registerCommand("agentHub.openReadmeProof", openReadmeProofSection),
     vscode.commands.registerCommand("agentHub.openOutput", () => output.show())
   );
@@ -462,6 +471,49 @@ function activate(context) {
 async function openAgentHubDashboard(pathname) {
   const url = new URL(pathname, settings().serverUrl);
   await vscode.env.openExternal(vscode.Uri.parse(url.toString()));
+}
+
+function scheduleFirstRunProofPrompt(context) {
+  setTimeout(() => {
+    showFirstRunProofPrompt(context).catch((error) => {
+      output.appendLine(`Could not show first-run proof prompt: ${error.message}`);
+    });
+  }, 1800);
+}
+
+async function showFirstRunProofPrompt(context, options = {}) {
+  if (!context || !context.globalState) {
+    return;
+  }
+  const storedVersion = context.globalState.get(FIRST_RUN_PROOF_VERSION_KEY, "");
+  if (options.force !== true && !runtimePolicy.shouldShowFirstRunProofPrompt(storedVersion, EXTENSION_VERSION)) {
+    return;
+  }
+  if (!workspaceRoot()) {
+    return;
+  }
+  await context.globalState.update(FIRST_RUN_PROOF_VERSION_KEY, EXTENSION_VERSION);
+  const run = "Run Benchmark";
+  const explain = "Explain Routing";
+  const proof = "Open Proof";
+  const choice = await vscode.window.showInformationMessage(
+    "Agent-Hub ships a 50-task benchmark corpus so you can verify routing, cost, latency, and success locally.",
+    run,
+    explain,
+    proof,
+    "Later"
+  );
+  if (choice === run) {
+    await runPersonalBenchmark({ source: "first-run" });
+  } else if (choice === explain) {
+    await explainRouteCommand();
+  } else if (choice === proof) {
+    await openReadmeProofSection();
+  }
+}
+
+async function openReadmeProofSection() {
+  await vscode.env.openExternal(vscode.Uri.parse(README_PROOF_URL));
 }
 
 class AgentHubSidebarProvider {
@@ -565,6 +617,10 @@ class AgentHubSidebarProvider {
     if (message.type === "runPersonalBenchmark") {
       await runPersonalBenchmark();
       await this.refresh();
+      return;
+    }
+    if (message.type === "openBenchmarkShareCard") {
+      await openLatestBenchmarkShareCard();
       return;
     }
     if (message.type === "explainRoute") {
@@ -1953,6 +2009,7 @@ async function sidebarOnboardingState(config, health) {
   const providers = health && Array.isArray(health.agents) ? health.agents.length : 0;
   const providerReady = providers > 0 || availableKeys > 0 || localModelsReady;
   const workspaceProfile = await sidebarWorkspaceProfile(config, health);
+  const proof = personalBenchmarkReportStatus(config, workspace);
   return [
     {
       label: "Workspace",
@@ -2043,6 +2100,17 @@ async function sidebarOnboardingState(config, health) {
       setupRequired: false
     },
     {
+      label: "Personal proof",
+      ok: proof.exists,
+      detail: proof.exists
+        ? `benchmark report ready: ${proof.updatedText}`
+        : "run the shipped 50-task corpus locally",
+      optional: true,
+      actionType: proof.exists ? "" : "runPersonalBenchmark",
+      actionLabel: "Run",
+      setupRequired: false
+    },
+    {
       label: "Local models",
       ok: localModelsReady,
       detail: localStatus.map((row) => `${row.name}: ${row.ok ? "running" : "offline"}`).join(" / "),
@@ -2078,6 +2146,43 @@ async function sidebarLocalServerStatus() {
     }
   }
   return result;
+}
+
+function personalBenchmarkReportStatus(config, workspace) {
+  const reportDir = personalBenchmarkReportDir(config, workspace);
+  const jsonPath = reportDir ? path.join(reportDir, "benchmark-report.json") : "";
+  const markdownPath = reportDir ? path.join(reportDir, "benchmark-report.md") : "";
+  const exists = !!(jsonPath && fs.existsSync(jsonPath));
+  let updatedText = "";
+  if (exists) {
+    try {
+      updatedText = new Date(fs.statSync(jsonPath).mtimeMs).toLocaleString();
+    } catch (_error) {
+      updatedText = "latest report";
+    }
+  }
+  return {
+    exists,
+    reportDir,
+    jsonPath,
+    markdownPath,
+    updatedText: updatedText || "not run yet"
+  };
+}
+
+function personalBenchmarkReportDir(config, workspace) {
+  if (!workspace) {
+    return "";
+  }
+  const raw = readResolvedAgentHubConfig(config);
+  const workspaceDir = raw && typeof raw.workspace_dir === "string" && raw.workspace_dir.trim()
+    ? raw.workspace_dir.trim()
+    : workspace;
+  const stateDir = raw && typeof raw.state_dir === "string" && raw.state_dir.trim()
+    ? raw.state_dir.trim()
+    : path.join(defaultExtensionWorkspaceStorageDir(workspace), "runtime", "state");
+  const resolvedState = resolveRuntimeStatePath(stateDir, workspaceDir || workspace);
+  return resolvedState ? path.join(resolvedState, "benchmark_reports") : "";
 }
 
 async function detectPythonForOnboarding(config, workspace) {
@@ -6188,6 +6293,15 @@ async function runRequirementAction(actionType) {
   }
   if (actionType === "openSettings") {
     return openAgentHubSettings();
+  }
+  if (actionType === "runPersonalBenchmark") {
+    return runPersonalBenchmark({ source: "sidebar" });
+  }
+  if (actionType === "explainRoute") {
+    return explainRouteCommand();
+  }
+  if (actionType === "openReadmeProof") {
+    return openReadmeProofSection();
   }
   return undefined;
 }
@@ -11315,6 +11429,508 @@ async function showStatus() {
     setServerLifecycleState(serverProcess ? "Error" : "Stopped", `Agent Hub is offline or unhealthy: ${error.message}`);
     vscode.window.showWarningMessage(`Agent Hub is offline or unhealthy: ${error.message}`);
   }
+}
+
+async function runPersonalBenchmark(options = {}) {
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    vscode.window.showWarningMessage("Open a workspace folder before running a personal Agent-Hub benchmark.");
+    return { ok: false, cancelled: true };
+  }
+  const config = settings();
+  const route = config.route || "coding";
+  const reportStatus = personalBenchmarkReportStatus(config, workspace);
+  const reportDir = reportStatus.reportDir;
+  if (!(await requestPermission({
+    category: "cloud_provider",
+    description: "Agent Hub wants to run the shipped benchmark corpus against your configured baseline and routed models.",
+    resource: reportDir || workspace,
+    risk: "medium",
+    detail: [
+      `Route: ${route}.`,
+      `Tasks: ${PERSONAL_BENCHMARK_LIMIT}.`,
+      "This may call configured local or cloud providers and may consume quota or credits.",
+      "Reports are written locally as benchmark-report.json and benchmark-report.md."
+    ].join(" ")
+  }))) {
+    vscode.window.showWarningMessage("Personal benchmark cancelled.");
+    return { ok: false, cancelled: true };
+  }
+
+  if (!(await ensureServerReady())) {
+    vscode.window.showErrorMessage("Agent Hub is not ready. Start the backend or open the Agent Hub output.");
+    return { ok: false, cancelled: false };
+  }
+
+  const launch = await serverLaunchEnvironment(workspace);
+  if (!(await ensurePythonBackend(config, workspace, launch))) {
+    return { ok: false, cancelled: false };
+  }
+  if (reportDir) {
+    fs.mkdirSync(reportDir, { recursive: true });
+  }
+  const configPath = resolveConfigPath(config.configPath, workspace);
+  const args = [
+    ...launch.pythonArgs,
+    "-m",
+    "agent_hub",
+    "--config",
+    configPath,
+    "benchmark",
+    "run",
+    "--route",
+    route,
+    "--limit",
+    String(PERSONAL_BENCHMARK_LIMIT),
+    "--json"
+  ];
+  if (reportDir) {
+    args.push("--output-dir", reportDir);
+  }
+  output.appendLine("");
+  output.appendLine("Agent Hub personal benchmark");
+  output.appendLine(formatCliCommandForLog(launch.pythonCommand, args));
+  const started = Date.now();
+  try {
+    const { stdout, stderr } = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Agent Hub: Running personal benchmark",
+        cancellable: false
+      },
+      () => execFile(launch.pythonCommand, args, {
+        cwd: workspace,
+        env: launch.env,
+        timeout: 60 * 60 * 1000,
+        maxBuffer: 32 * 1024 * 1024
+      })
+    );
+    if (stderr && String(stderr).trim()) {
+      output.appendLine(String(stderr).trim());
+    }
+    output.appendLine(String(stdout || "").trim());
+    const report = parseJsonObjectFromText(stdout);
+    const elapsedSeconds = ((Date.now() - started) / 1000).toFixed(1);
+    await openBenchmarkReport(report, reportStatus);
+    openBenchmarkShareCard(report);
+    const message = `${formatBenchmarkCompletionMessage(report)} Finished in ${elapsedSeconds}s.`;
+    const next = await vscode.window.showInformationMessage(
+      message,
+      "Explain Routing",
+      "README Proof",
+      "Benchmark Dashboard"
+    );
+    if (next === "Explain Routing") {
+      await explainRouteCommand({ prompt: PERSONAL_BENCHMARK_PROMPT });
+    } else if (next === "README Proof") {
+      await openReadmeProofSection();
+    } else if (next === "Benchmark Dashboard") {
+      await openAgentHubDashboard("/dashboard/benchmarks");
+    }
+    refreshSidebar();
+    return { ok: true, report };
+  } catch (error) {
+    output.appendLine(`Personal benchmark failed: ${error.message}`);
+    if (error.stderr) {
+      output.appendLine(String(error.stderr));
+    }
+    output.show(true);
+    vscode.window.showErrorMessage(`Personal benchmark failed: ${error.message}`);
+    return { ok: false, cancelled: false };
+  }
+}
+
+async function openLatestBenchmarkShareCard() {
+  const status = personalBenchmarkReportStatus(settings(), workspaceRoot());
+  if (!status.jsonPath || !fs.existsSync(status.jsonPath)) {
+    vscode.window.showWarningMessage("No personal benchmark report found yet. Run Agent Hub: Run Personal Benchmark first.");
+    return;
+  }
+  try {
+    const report = JSON.parse(fs.readFileSync(status.jsonPath, "utf8"));
+    openBenchmarkShareCard(report);
+  } catch (error) {
+    vscode.window.showErrorMessage(`Could not open benchmark share card: ${error.message}`);
+  }
+}
+
+function openBenchmarkShareCard(report) {
+  const card = benchmarkShareCard(report);
+  if (!benchmarkSharePanel) {
+    benchmarkSharePanel = vscode.window.createWebviewPanel(
+      "agentHubBenchmarkShare",
+      "Agent Hub Benchmark Card",
+      vscode.ViewColumn.Beside,
+      { enableScripts: true }
+    );
+    benchmarkSharePanel.onDidDispose(() => {
+      benchmarkSharePanel = null;
+    });
+    benchmarkSharePanel.webview.onDidReceiveMessage((message) => {
+      if (!message || message.type !== "copyShareVariant") {
+        return;
+      }
+      const key = String(message.variant || "");
+      const text = benchmarkSharePanel && benchmarkSharePanel.shareVariants
+        ? benchmarkSharePanel.shareVariants[key]
+        : "";
+      if (text) {
+        vscode.env.clipboard.writeText(text);
+        vscode.window.showInformationMessage(`Copied ${shareVariantLabel(key)} benchmark card.`);
+      }
+    });
+  }
+  benchmarkSharePanel.shareVariants = card.variants;
+  benchmarkSharePanel.webview.html = benchmarkShareCardHtml(card);
+  benchmarkSharePanel.reveal(vscode.ViewColumn.Beside);
+}
+
+function benchmarkShareCard(report) {
+  const comparison = report && report.comparison && typeof report.comparison === "object"
+    ? report.comparison
+    : {};
+  const baseline = report && report.baseline && typeof report.baseline === "object"
+    ? report.baseline
+    : {};
+  const baselineLabel = baseline.model || baseline.agent || baseline.provider || "User default";
+  const tasks = Number(report && report.task_count) || (Array.isArray(report && report.results) ? report.results.length : 0);
+  const metrics = {
+    cost: formatPercentMetric(comparison.cost_reduction),
+    latency: formatPercentMetric(comparison.latency_reduction),
+    success: formatSignedPointMetric(comparison.success_delta)
+  };
+  const markdown = [
+    "# My Agent-Hub Benchmark",
+    "",
+    `Baseline: ${baselineLabel}`,
+    `Tasks: ${tasks}`,
+    "",
+    `Cost Reduction: ${metrics.cost}`,
+    `Latency Reduction: ${metrics.latency}`,
+    `Success Rate: ${metrics.success}`,
+    "",
+    "Agent-Hub ships the benchmark corpus so I can verify routing, cost, latency, and success locally."
+  ].join("\n");
+  const reddit = [
+    "I ran Agent-Hub's local benchmark corpus.",
+    "",
+    `Baseline: ${baselineLabel}`,
+    `Tasks: ${tasks}`,
+    `Cost Reduction: ${metrics.cost}`,
+    `Latency Reduction: ${metrics.latency}`,
+    `Success Rate: ${metrics.success}`,
+    "",
+    "The useful part: the benchmark corpus and reports are local/reproducible, not just vendor claims."
+  ].join("\n");
+  const x = (
+    `I ran Agent-Hub's local benchmark corpus vs ${baselineLabel}: ` +
+    `${metrics.cost} cost, ${metrics.latency} latency, ${metrics.success} success across ${tasks} tasks. ` +
+    "Reproducible proof reports ship with the tool."
+  ).slice(0, 280);
+  const github = [
+    "## Agent-Hub Benchmark Result",
+    "",
+    `- Baseline: ${baselineLabel}`,
+    `- Tasks: ${tasks}`,
+    `- Cost Reduction: ${metrics.cost}`,
+    `- Latency Reduction: ${metrics.latency}`,
+    `- Success Rate: ${metrics.success}`,
+    "",
+    "The report was generated locally from the bundled benchmark corpus."
+  ].join("\n");
+  return {
+    baseline: baselineLabel,
+    tasks,
+    metrics,
+    variants: {
+      markdown,
+      reddit,
+      x,
+      github
+    }
+  };
+}
+
+function benchmarkShareCardHtml(card) {
+  const nonce = getNonce();
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Hub Benchmark Card</title>
+  <style nonce="${nonce}">
+    body {
+      margin: 0;
+      padding: 20px;
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+      font-family: var(--vscode-font-family);
+    }
+    .card {
+      max-width: 680px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 8px;
+      padding: 18px;
+      background: var(--vscode-sideBar-background);
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 22px;
+      line-height: 1.2;
+    }
+    .meta {
+      color: var(--vscode-descriptionForeground);
+      margin-bottom: 18px;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .metric {
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--vscode-editor-inactiveSelectionBackground);
+    }
+    .metric span {
+      display: block;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .metric strong {
+      font-size: 22px;
+      line-height: 1.1;
+    }
+    .buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    button {
+      border: 0;
+      border-radius: 4px;
+      padding: 8px 10px;
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+      cursor: pointer;
+    }
+    button:hover {
+      background: var(--vscode-button-hoverBackground);
+    }
+    pre {
+      white-space: pre-wrap;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 8px;
+      padding: 12px;
+      color: var(--vscode-editor-foreground);
+      background: var(--vscode-textCodeBlock-background);
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>My Agent-Hub Benchmark</h1>
+    <div class="meta">Baseline: ${escapeHtml(card.baseline)} · Tasks: ${escapeHtml(card.tasks)}</div>
+    <section class="metrics">
+      <div class="metric"><span>Cost Reduction</span><strong>${escapeHtml(card.metrics.cost)}</strong></div>
+      <div class="metric"><span>Latency Reduction</span><strong>${escapeHtml(card.metrics.latency)}</strong></div>
+      <div class="metric"><span>Success Rate</span><strong>${escapeHtml(card.metrics.success)}</strong></div>
+    </section>
+    <div class="buttons">
+      <button data-copy="markdown">Copy Markdown</button>
+      <button data-copy="reddit">Copy Reddit Version</button>
+      <button data-copy="x">Copy X Version</button>
+      <button data-copy="github">Copy GitHub Discussion Version</button>
+    </div>
+    <pre>${escapeHtml(card.variants.markdown)}</pre>
+  </main>
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    document.querySelectorAll("button[data-copy]").forEach((button) => {
+      button.addEventListener("click", () => {
+        vscode.postMessage({ type: "copyShareVariant", variant: button.dataset.copy });
+      });
+    });
+  </script>
+</body>
+</html>`;
+}
+
+function shareVariantLabel(key) {
+  if (key === "x") {
+    return "X";
+  }
+  if (key === "github") {
+    return "GitHub Discussion";
+  }
+  return key ? key.charAt(0).toUpperCase() + key.slice(1) : "benchmark";
+}
+
+async function explainRouteCommand(options = {}) {
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    vscode.window.showWarningMessage("Open a workspace folder before explaining an Agent-Hub route.");
+    return { ok: false, cancelled: true };
+  }
+  const prompt = options.prompt || await vscode.window.showInputBox({
+    title: "Explain Agent-Hub Route",
+    prompt: "Task to score. This explains routing without calling a provider.",
+    value: PERSONAL_BENCHMARK_PROMPT,
+    ignoreFocusOut: true
+  });
+  if (!prompt) {
+    return { ok: false, cancelled: true };
+  }
+  if (!(await ensureServerReady())) {
+    vscode.window.showErrorMessage("Agent Hub is not ready. Start the backend or open the Agent Hub output.");
+    return { ok: false, cancelled: false };
+  }
+  const config = settings();
+  const launch = await serverLaunchEnvironment(workspace);
+  if (!(await ensurePythonBackend(config, workspace, launch))) {
+    return { ok: false, cancelled: false };
+  }
+  const route = config.route || "coding";
+  const args = [
+    ...launch.pythonArgs,
+    "-m",
+    "agent_hub",
+    "--config",
+    resolveConfigPath(config.configPath, workspace),
+    "explain-route",
+    "--route",
+    route,
+    "--prefer",
+    "coding",
+    "--needs-tools",
+    prompt
+  ];
+  output.appendLine("");
+  output.appendLine("Agent Hub route explanation");
+  output.appendLine(formatCliCommandForLog(launch.pythonCommand, args));
+  try {
+    const { stdout, stderr } = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Agent Hub: Explaining route",
+        cancellable: false
+      },
+      () => execFile(launch.pythonCommand, args, {
+        cwd: workspace,
+        env: launch.env,
+        timeout: 120000,
+        maxBuffer: 4 * 1024 * 1024
+      })
+    );
+    if (stderr && String(stderr).trim()) {
+      output.appendLine(String(stderr).trim());
+    }
+    const text = String(stdout || "").trim() || "No route explanation was returned.";
+    output.appendLine(text);
+    const document = await vscode.workspace.openTextDocument({
+      content: text,
+      language: "plaintext"
+    });
+    await vscode.window.showTextDocument(document, { preview: true });
+    const next = await vscode.window.showInformationMessage(
+      "Route explanation generated from the current candidate scorecards.",
+      "README Proof",
+      "Benchmark Dashboard"
+    );
+    if (next === "README Proof") {
+      await openReadmeProofSection();
+    } else if (next === "Benchmark Dashboard") {
+      await openAgentHubDashboard("/dashboard/benchmarks");
+    }
+    return { ok: true, text };
+  } catch (error) {
+    output.appendLine(`Route explanation failed: ${error.message}`);
+    if (error.stderr) {
+      output.appendLine(String(error.stderr));
+    }
+    output.show(true);
+    vscode.window.showErrorMessage(`Route explanation failed: ${error.message}`);
+    return { ok: false, cancelled: false };
+  }
+}
+
+async function openBenchmarkReport(report, fallbackStatus) {
+  const paths = report && report.report_paths && typeof report.report_paths === "object"
+    ? report.report_paths
+    : {};
+  const markdownPath = typeof paths.markdown === "string" && paths.markdown
+    ? paths.markdown
+    : fallbackStatus.markdownPath;
+  if (markdownPath && fs.existsSync(markdownPath)) {
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(markdownPath));
+    await vscode.window.showTextDocument(document, { preview: false });
+    return;
+  }
+  output.show(true);
+}
+
+function formatBenchmarkCompletionMessage(report) {
+  const comparison = report && report.comparison && typeof report.comparison === "object"
+    ? report.comparison
+    : {};
+  const tasks = report && report.task_count ? report.task_count : PERSONAL_BENCHMARK_LIMIT;
+  return [
+    `Personal benchmark complete: ${tasks} tasks.`,
+    `Cost ${formatPercentMetric(comparison.cost_reduction)}.`,
+    `Latency ${formatPercentMetric(comparison.latency_reduction)}.`,
+    `Success ${formatSignedPointMetric(comparison.success_delta)}.`
+  ].join(" ");
+}
+
+function formatPercentMetric(value) {
+  if (value === null || value === undefined || value === "") {
+    return "unpriced";
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "unpriced";
+  }
+  return `${number.toFixed(1)}%`;
+}
+
+function formatSignedPointMetric(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "0.0 pp";
+  }
+  return `${number >= 0 ? "+" : ""}${number.toFixed(1)} pp`;
+}
+
+function parseJsonObjectFromText(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return {};
+  }
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start !== -1 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch (_nestedError) {
+        return {};
+      }
+    }
+  }
+  return {};
+}
+
+function formatCliCommandForLog(command, args) {
+  return [command, ...args]
+    .map((part) => /\s/.test(String(part)) ? `"${String(part).replace(/"/g, '\\"')}"` : String(part))
+    .join(" ");
 }
 
 async function copyClineConfig() {

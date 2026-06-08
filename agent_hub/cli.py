@@ -45,6 +45,10 @@ from .commands_provider import (
     _print_production_check,
     _production_check_report,
     _recommend,
+    _benchmark_card,
+    _benchmark_evolution,
+    _generate_case_study,
+    _replay_route,
     _route_test,
     _route_diagnose,
     _route_history,
@@ -369,6 +373,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     route_history_parser.add_argument("--weeks", type=int, default=4)
     route_history_parser.add_argument("--json", action="store_true")
 
+    replay_route_parser = subparsers.add_parser(
+        "replay-route",
+        help="Replay a recorded routing decision and show selected plus rejected alternatives.",
+    )
+    replay_route_parser.add_argument("request_id", help="Agent-Hub request id to replay.")
+    replay_route_parser.add_argument("--json", action="store_true")
+
+    benchmark_card_parser = subparsers.add_parser(
+        "benchmark-card",
+        help="Generate shareable benchmark card text from the latest proof report.",
+    )
+    benchmark_card_parser.add_argument("--report", default="", help="Optional benchmark-report.json path.")
+    benchmark_card_parser.add_argument(
+        "--variant",
+        choices=["markdown", "reddit", "x", "github_discussion"],
+        default="markdown",
+    )
+    benchmark_card_parser.add_argument("--json", action="store_true")
+
+    case_study_parser = subparsers.add_parser(
+        "generate-case-study",
+        help="Generate a local Markdown case study from benchmark and routing history.",
+    )
+    case_study_parser.add_argument("--output", default="", help="Optional Markdown output path.")
+    case_study_parser.add_argument("--json", action="store_true")
+
+    benchmark_evolution_parser = subparsers.add_parser(
+        "benchmark-evolution",
+        help="Show month-by-month routing distribution changes.",
+    )
+    benchmark_evolution_parser.add_argument("--months", type=int, default=3)
+    benchmark_evolution_parser.add_argument("--json", action="store_true")
+
     export_logs_parser = subparsers.add_parser("export-logs", help="Export recent diagnostic logs.")
     export_logs_parser.add_argument("--format", choices=["json", "markdown", "zip"], default="json")
     export_logs_parser.add_argument("--output", help="Output path. Defaults to stdout for json/markdown.")
@@ -689,6 +726,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if command == "route-history":
         return _route_history(config, weeks=args.weeks, as_json=args.json)
+    if command == "replay-route":
+        return _replay_route(config, request_id=args.request_id, as_json=args.json)
+    if command == "benchmark-card":
+        return _benchmark_card(
+            config,
+            report_path=args.report,
+            variant=args.variant,
+            as_json=args.json,
+        )
+    if command == "generate-case-study":
+        return _generate_case_study(config, output=args.output, as_json=args.json)
+    if command == "benchmark-evolution":
+        return _benchmark_evolution(config, months=args.months, as_json=args.json)
     if command == "chat":
         if not args.allow_cloud:
             config.free_only = True

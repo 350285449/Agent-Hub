@@ -11,6 +11,11 @@ Agent-Hub automatically routes coding tasks to the model most likely to succeed,
 then records the evidence: cost, latency, success/failure, rejected candidates,
 and why the winning model was selected.
 
+Agent-Hub does not ask you to trust benchmark claims. It ships the benchmark
+corpus so you can verify routing, cost, latency, and success locally.
+
+## Proof You Can Run Locally
+
 Measured results are generated locally from your configured providers:
 
 ```sh
@@ -18,13 +23,35 @@ agent-hub benchmark run --baseline claude-sonnet --route coding
 ```
 
 The command writes reproducible proof to
-`benchmark_reports/benchmark-report.json` and
-`benchmark_reports/benchmark-report.md`, including:
+`.agent-hub/state/benchmark_reports/benchmark-report.json` and
+`.agent-hub/state/benchmark_reports/benchmark-report.md` by default, including:
 
 - cost reduction versus your baseline model
 - latency reduction versus your baseline model
 - success-rate delta across the same task corpus
 - per-task selected model, cost, latency, and outcome
+
+In VS Code, the first-run proof flow is:
+
+1. Install the extension.
+2. Run `Agent Hub: Run Personal Benchmark`.
+3. Review the generated personal savings report and share card.
+4. Run `Agent Hub: Explain Route`.
+5. Replay a specific decision with `agent-hub replay-route <request-id>`.
+6. Open this README proof section from `Agent Hub: Open README Proof Section`.
+
+Additional local proof commands:
+
+- `agent-hub replay-route <request-id>` shows the request, selected model,
+  alternatives, expected quality deltas, cost deltas, and the routing reason.
+- `agent-hub benchmark-card --variant markdown` prints a shareable personal
+  benchmark card.
+- `agent-hub benchmark-card --variant reddit`, `--variant x`, or
+  `--variant github_discussion` formats the same benchmark for community posts.
+- `agent-hub generate-case-study --output docs/proofs/my-proof.md` turns local
+  benchmark and routing history into a paste-ready case study.
+- `agent-hub benchmark-evolution --months 3` shows how route distribution
+  changed over time.
 
 | Feature | Agent-Hub | Claude Code | OpenRouter |
 | --- | --- | --- | --- |
@@ -32,6 +59,10 @@ The command writes reproducible proof to
 | Learning | Yes | No | No |
 | Cost optimization | Yes | No | Manual |
 | Explainability | Yes | No | No |
+
+Community proof lives in `docs/proofs/`. Submit benchmark cards or case studies
+by PR, or use the `Share Your Benchmark` GitHub Discussion template with your
+baseline, savings, repository size, and workflow.
 
 Agent-Hub is an Adaptive AI Orchestration Platform for developer workspaces. It
 accepts local OpenAI, Anthropic, Responses, OpenRouter-style, VS Code, Cline,
@@ -803,8 +834,8 @@ providers, fallback reason, latency, and estimated cost when configured.
 selected model, scorecard, reasons, and rejected-candidate reasons.
 `benchmark run` compares Agent-Hub routing against a baseline model on the
 reproducible 50-task corpus and writes `benchmark-report.json` plus
-`benchmark-report.md`. `route-history` shows how routing distribution changed
-over recent weeks.
+`benchmark-report.md` under `.agent-hub/state/benchmark_reports` by default.
+`route-history` shows how routing distribution changed over recent weeks.
 `production-check` is a strict local acceptance gate: it requires route-ready
 provider health, production-safe security guardrails, honest feature maturity
 states, dashboard contracts, and VS Code/backend feature alignment. It exits

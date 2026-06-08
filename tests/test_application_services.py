@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
@@ -115,6 +116,38 @@ class ApplicationServiceTests(unittest.TestCase):
                 "configured_baseline",
             )
             self.assertIsNone(benchmarks["empty_state"])
+
+    def test_benchmark_dashboard_reads_personal_proof_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            reports_dir = config.state_dir / "benchmark_reports"
+            reports_dir.mkdir(parents=True)
+            (reports_dir / "benchmark-report.json").write_text(
+                json.dumps(
+                    {
+                        "object": "agent_hub.benchmark_proof",
+                        "route": "coding",
+                        "task_count": 50,
+                        "baseline": {"agent": "claude", "provider": "anthropic", "model": "sonnet"},
+                        "baseline_summary": {"success_rate": 0.82},
+                        "agent_hub_summary": {"success_rate": 0.84},
+                        "comparison": {
+                            "cost_reduction": 38.2,
+                            "latency_reduction": 17.4,
+                            "success_delta": 2.0,
+                        },
+                        "results": [{"task_type": "debugging"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            benchmarks = DiagnosticsApplicationService(config).benchmark_results_body()
+
+            self.assertEqual(benchmarks["summary"]["data_state"], "measured_ready")
+            self.assertEqual(benchmarks["summary"]["report_count"], 1)
+            self.assertEqual(benchmarks["reports"][0]["summary"]["winner"], "Agent-Hub routing")
+            self.assertEqual(benchmarks["reports"][0]["summary"]["comparison"]["cost_reduction"], 38.2)
 
     def test_readiness_score_rewards_real_route_ready_health(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

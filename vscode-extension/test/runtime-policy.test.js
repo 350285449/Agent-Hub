@@ -38,3 +38,10 @@ test("command parsing preserves quoted Python paths", () => {
     ["C:\\Program Files\\Python\\python.exe", "-S"]
   );
 });
+
+test("first-run proof prompt is version gated", () => {
+  assert.equal(policy.shouldShowFirstRunProofPrompt("", "9.3.0"), true);
+  assert.equal(policy.shouldShowFirstRunProofPrompt("9.2.0", "9.3.0"), true);
+  assert.equal(policy.shouldShowFirstRunProofPrompt("9.3.0", "9.3.0"), false);
+  assert.equal(policy.shouldShowFirstRunProofPrompt("", ""), false);
+});
