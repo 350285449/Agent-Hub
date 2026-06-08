@@ -478,6 +478,94 @@ class RouterTests(unittest.TestCase):
             self.assertIn("OPENAI_API_KEY", str(error.exception))
             self.assertIn("OPENAI_API_KEY", error.exception.suggested_fix or "")
 
+    def test_remote_provider_alias_missing_key_is_configuration_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            key_name = "CLOUDFLARE_API_TOKEN"
+            config = HubConfig(
+                state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
+                default_route=["cloudflare"],
+                agents={
+                    "cloudflare": AgentConfig(
+                        name="cloudflare",
+                        provider="cloudflare-workers-ai",
+                        provider_type="cloudflare-workers-ai",
+                        model="@cf/meta/llama-3.1-8b-instruct",
+                        api_key_env=key_name,
+                        free=True,
+                    )
+                },
+            )
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+
+            with patch.dict("os.environ", {key_name: ""}, clear=False):
+                with self.assertRaises(RouterError) as error:
+                    router.route(
+                        HubRequest(
+                            session_id="cline",
+                            api_shape="openai-chat",
+                            messages=[{"role": "user", "content": "hello"}],
+                            raw={"model": "agent-hub-coding"},
+                        )
+                    )
+
+            self.assertEqual(calls, [])
+            self.assertEqual(error.exception.error_type, "configuration_error")
+            self.assertEqual(error.exception.status_code, 400)
+            self.assertIn(key_name, str(error.exception))
+            self.assertIn(key_name, error.exception.suggested_fix or "")
+
+    def test_non_retryable_provider_configuration_error_gets_400_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            key_name = "AGENT_HUB_RUNTIME_TEST_KEY"
+            config = HubConfig(
+                state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
+                default_route=["runtime"],
+                agents={
+                    "runtime": AgentConfig(
+                        name="runtime",
+                        provider="openai-compatible",
+                        model="runtime-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+
+            class RuntimeConfigurationProvider(_FakeProvider):
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    self.calls.append(self.agent.name)
+                    raise ProviderError(
+                        f"{self.agent.name} is missing API key env {key_name}",
+                        retryable=False,
+                        error_type="configuration",
+                    )
+
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: RuntimeConfigurationProvider(agent, calls),
+            )
+
+            with self.assertRaises(RouterError) as error:
+                router.route(
+                    HubRequest(
+                        session_id="cline",
+                        api_shape="openai-chat",
+                        messages=[{"role": "user", "content": "hello"}],
+                        raw={"model": "agent-hub-coding"},
+                    )
+                )
+
+            self.assertEqual(calls, ["runtime"])
+            self.assertEqual(error.exception.error_type, "configuration_error")
+            self.assertEqual(error.exception.status_code, 400)
+            self.assertIn(key_name, error.exception.suggested_fix or "")
+
     def test_debug_echo_non_tool_request_works_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(

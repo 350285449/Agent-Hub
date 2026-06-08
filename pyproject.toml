@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-hub"
-version = "9.4.0"
+version = "9.5.0"
 description = "Local-first AI model router for Cline, Codex, Claude Code, free-model routing, and cost-saving workspace agents."
 readme = "README.md"
 requires-python = ">=3.11"

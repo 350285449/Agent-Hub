@@ -301,6 +301,26 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(headers["X-Title"], "Custom Hub")
         self.assertIn("HTTP-Referer", headers)
 
+    def test_openai_compatible_remote_provider_alias_requires_configured_key(self) -> None:
+        agent = AgentConfig(
+            name="cloudflare",
+            provider="cloudflare-workers-ai",
+            provider_type="cloudflare-workers-ai",
+            model="@cf/meta/llama-3.1-8b-instruct",
+            api_key_env="CLOUDFLARE_API_TOKEN",
+        )
+        request = HubRequest(
+            session_id="s",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+        with patch.dict("os.environ", {"CLOUDFLARE_API_TOKEN": ""}, clear=False):
+            with self.assertRaises(ProviderError) as error:
+                OpenAIChatProvider(agent).complete(request)
+
+        self.assertEqual(error.exception.error_type, "configuration")
+        self.assertIn("CLOUDFLARE_API_TOKEN", str(error.exception))
+
     def test_github_models_uses_provider_specific_chat_path(self) -> None:
         agent = AgentConfig(
             name="github-model",

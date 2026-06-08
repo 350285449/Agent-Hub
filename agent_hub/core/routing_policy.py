@@ -7,6 +7,7 @@ from typing import Any
 from ..capabilities import agent_supports_tools
 from ..config import AgentConfig, HubConfig, _is_local_or_private_url, is_free_agent, normalize_provider
 from ..models import HubRequest
+from ..provider_presets import provider_defaults_for_agent
 from ..tool_compatibility import agent_can_emulate_tools, tool_emulation_can_handle
 from .context import estimate_context_tokens
 from .health import ProviderHealth
@@ -16,6 +17,18 @@ TRANSPARENT_API_SHAPES = {"openai-chat", "openai-responses", "anthropic-messages
 NO_TOOL_CAPABLE_MODEL = "no_tool_capable_model"
 ECHO_DISABLED = "echo_disabled"
 CONFIGURATION_ERROR = "configuration_error"
+LOCAL_API_KEY_OPTIONAL_PROVIDER_TYPES = {
+    "codex-cli",
+    "echo",
+    "llama-cpp",
+    "lm-studio",
+    "local-research",
+    "localai",
+    "ollama",
+    "ollama-local",
+    "openai-compatible",
+    "vllm",
+}
 
 
 @dataclass(slots=True)
@@ -236,6 +249,12 @@ def _requires_missing_api_key(agent: AgentConfig) -> bool:
         return True
     if provider == "openai-compatible" and agent.base_url:
         return not _is_local_or_private_agent(agent)
+    metadata = provider_defaults_for_agent(agent)
+    if metadata and metadata.api_key_env == agent.api_key_env:
+        if metadata.base_url:
+            return not _is_local_or_private_url(metadata.base_url)
+        provider_type = (agent.provider_type or agent.provider).lower()
+        return provider_type not in LOCAL_API_KEY_OPTIONAL_PROVIDER_TYPES
     return False
 
 

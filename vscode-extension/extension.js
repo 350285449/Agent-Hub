@@ -285,6 +285,17 @@ const API_KEY_SECRETS = [
     secret: "agentHub.anyscaleApiKey"
   }
 ];
+const LOCAL_API_KEY_OPTIONAL_PROVIDER_TYPES = new Set([
+  "codex-cli",
+  "echo",
+  "llama-cpp",
+  "lm-studio",
+  "local-research",
+  "localai",
+  "ollama",
+  "ollama-local",
+  "vllm"
+]);
 const REQUIRED_BACKEND_FEATURES = [
   "native_agent_streaming",
   "native_agent_tool_schemas",
@@ -5972,6 +5983,7 @@ async function saveApiKeysFromWebview(panel, keys) {
 
   const values = keys && typeof keys === "object" ? keys : {};
   const saved = [];
+  const savedEnvs = [];
   for (const spec of API_KEY_SECRETS) {
     const value = typeof values[spec.id] === "string" ? values[spec.id].trim() : "";
     if (!value) {
@@ -5979,6 +5991,7 @@ async function saveApiKeysFromWebview(panel, keys) {
     }
     await extensionContext.secrets.store(spec.secret, value);
     saved.push(spec.label);
+    savedEnvs.push(spec.env);
   }
 
   if (!saved.length) {
@@ -5986,13 +5999,17 @@ async function saveApiKeysFromWebview(panel, keys) {
     return;
   }
 
+  const configSynced = await syncApiKeyProviderAvailabilityForCurrentWorkspace();
   const online = await isServerOnline();
   const suffix = serverProcess
     ? " Restart Agent Hub to use the updated keys."
     : (online
       ? " Restart the running server to use the saved keys."
       : " Start Agent Hub to use the saved keys.");
-  await postApiKeyStatus(panel, `Saved ${saved.join(", ")}.${suffix}`, { clearInputs: true });
+  const configNote = configSynced
+    ? " Enabled matching provider route entries."
+    : (savedEnvs.length ? " Matching providers will be enabled when the config is created or repaired." : "");
+  await postApiKeyStatus(panel, `Saved ${saved.join(", ")}.${configNote}${suffix}`, { clearInputs: true });
 }
 
 async function clearApiKeysFromWebview(panel) {
@@ -6013,7 +6030,9 @@ async function clearApiKeysFromWebview(panel) {
   for (const spec of API_KEY_SECRETS) {
     await extensionContext.secrets.delete(spec.secret);
   }
-  await postApiKeyStatus(panel, "Saved API keys cleared.", { clearInputs: true });
+  const configSynced = await syncApiKeyProviderAvailabilityForCurrentWorkspace();
+  const configNote = configSynced ? " Disabled providers without remaining environment keys." : "";
+  await postApiKeyStatus(panel, `Saved API keys cleared.${configNote}`, { clearInputs: true });
 }
 
 async function postApiKeyStatus(panel, text = "", options = {}) {
@@ -6956,8 +6975,8 @@ function modelForAgent(data, name, fallback) {
 
 function apiKeyModelsEnabledFromConfig(data) {
   const selection = data && data.cloud_control_selection;
-  if (selection && typeof selection === "object" && typeof selection.api_key_models_enabled === "boolean") {
-    return selection.api_key_models_enabled;
+  if (selection && typeof selection === "object" && selection.api_key_models_enabled === true) {
+    return true;
   }
   return Array.isArray(data && data.agents)
     ? data.agents.some((item) => (
@@ -6970,6 +6989,10 @@ function apiKeyModelsEnabledFromConfig(data) {
 }
 
 function freeCloudPresetsEnabledFromConfig(data) {
+  const selection = data && data.cloud_control_selection;
+  if (selection && typeof selection === "object" && selection.free_cloud_presets_enabled === true) {
+    return true;
+  }
   return Array.isArray(data && data.agents)
     ? data.agents.some((item) => (
       item &&
@@ -6995,6 +7018,88 @@ async function apiKeyStatusRows() {
     });
   }
   return rows;
+}
+
+async function availableApiKeyEnvs() {
+  const envs = new Set();
+  for (const spec of API_KEY_SECRETS) {
+    if (process.env[spec.env]) {
+      envs.add(spec.env);
+      continue;
+    }
+    if (!extensionContext || !extensionContext.secrets) {
+      continue;
+    }
+    const value = await extensionContext.secrets.get(spec.secret);
+    if (value && value.trim()) {
+      envs.add(spec.env);
+    }
+  }
+  return envs;
+}
+
+function cloudSettingsWithAvailableApiKeys(cloudSettings, envs) {
+  return {
+    ...(cloudSettings && typeof cloudSettings === "object" ? cloudSettings : {}),
+    availableApiKeyEnvs: Array.from(envs || [])
+  };
+}
+
+function availableApiKeyEnvSet(settings = {}) {
+  return new Set(Array.isArray(settings.availableApiKeyEnvs) ? settings.availableApiKeyEnvs : []);
+}
+
+function sourceHasAvailableApiKey(source, settings = {}) {
+  const envName = source && source.apiKeyEnv;
+  if (!envName) {
+    return false;
+  }
+  return availableApiKeyEnvSet(settings).has(envName) || !!process.env[envName];
+}
+
+async function syncApiKeyProviderAvailabilityForCurrentWorkspace() {
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    return false;
+  }
+  const config = settings();
+  const configPath = resolveConfigPath(config.configPath, workspace);
+  if (!fs.existsSync(configPath)) {
+    return false;
+  }
+  try {
+    return await syncApiKeyProviderAvailabilityToConfig(configPath);
+  } catch (error) {
+    output.appendLine(`Could not update API-key provider enablement: ${error.message}`);
+    return false;
+  }
+}
+
+async function syncApiKeyProviderAvailabilityToConfig(configPath) {
+  const existingText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
+  if (!existingText) {
+    return false;
+  }
+  const data = parseJsonConfigText(existingText).value;
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return false;
+  }
+  const changed = await applySavedApiKeyProviderAvailability(data);
+  if (!changed) {
+    return false;
+  }
+  data.routes = Array.isArray(data.routes) ? data.routes : [];
+  applyCloudRouteMode(data, configCloudRouteMode(data));
+  const nextText = `${JSON.stringify(data, null, 2)}\n`;
+  if (stableConfigText(existingText) === stableConfigText(nextText)) {
+    return false;
+  }
+  const backupPath = backupConfigFile(configPath);
+  ensureConfigDirectory(configPath);
+  fs.writeFileSync(configPath, nextText, "utf8");
+  output.appendLine(`Updated API-key provider enablement in ${configPath}.`);
+  output.appendLine(`Original config was backed up to ${backupPath}.`);
+  return true;
 }
 
 async function restartServerFromWebview(panel) {
@@ -9812,7 +9917,12 @@ async function ensureLocalConfig(config, workspace) {
 
   const sources = await detectLocalModelSources();
   const selectedSources = sources.length ? sources : fallbackLocalModelSources();
-  const data = localConfigForLocalModels(selectedSources, { workspaceDir, storageDir });
+  const keyEnvs = await availableApiKeyEnvs();
+  const data = localConfigForLocalModels(selectedSources, {
+    workspaceDir,
+    storageDir,
+    cloudSettings: cloudSettingsWithAvailableApiKeys(cloudModelSettingsPayload(config), keyEnvs)
+  });
   ensureConfigDirectory(configPath);
   fs.writeFileSync(configPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   output.appendLine(`Created Agent Hub config at ${configPath}.`);
@@ -9827,6 +9937,7 @@ async function ensureLocalConfig(config, workspace) {
 async function repairGeneratedLocalConfig(configPath, options = {}) {
   const workspaceDir = normalizeWorkspaceDirOption(options.workspaceDir);
   const storageDir = normalizeWorkspaceDirOption(options.storageDir);
+  const keyEnvs = await availableApiKeyEnvs();
   let raw;
   let usedLenientParser = false;
   try {
@@ -9838,7 +9949,11 @@ async function repairGeneratedLocalConfig(configPath, options = {}) {
     const sources = await detectLocalModelSources();
     const selectedSources = sources.length ? sources : fallbackLocalModelSources();
     const backupPath = backupConfigFile(configPath);
-    fs.writeFileSync(configPath, `${JSON.stringify(localConfigForLocalModels(selectedSources, { workspaceDir, storageDir }), null, 2)}\n`, "utf8");
+    fs.writeFileSync(configPath, `${JSON.stringify(localConfigForLocalModels(selectedSources, {
+      workspaceDir,
+      storageDir,
+      cloudSettings: cloudSettingsWithAvailableApiKeys({}, keyEnvs)
+    }), null, 2)}\n`, "utf8");
     output.appendLine(`Backed up unreadable Agent Hub config to ${backupPath}.`);
     output.appendLine(`Created a fresh local Agent Hub config at ${configPath}.`);
     output.appendLine(`Configured cloud control agents: ${describeCloudSources(selectedSources)}`);
@@ -9899,7 +10014,7 @@ async function repairGeneratedLocalConfig(configPath, options = {}) {
       : (sources.length ? sources : configuredLocalSources(raw));
     const repaired = localConfigForLocalModels(selectedSources, {
       cloudRouteMode: configCloudRouteMode(raw),
-      cloudSettings: cloudModelSettingsFromConfig(raw),
+      cloudSettings: cloudSettingsWithAvailableApiKeys(cloudModelSettingsFromConfig(raw), keyEnvs),
       approvalMode: raw.approval_mode,
       workspaceDir,
       storageDir
@@ -9925,7 +10040,11 @@ async function repairGeneratedLocalConfig(configPath, options = {}) {
   }
 
   const statePathsChanged = applyGeneratedStoragePaths(raw, storageDir, workspaceDir);
-  if ((workspaceDir && raw.workspace_dir !== workspaceDir) || statePathsChanged) {
+  const keyAvailabilityChanged = applyApiKeyProviderAvailability(raw, keyEnvs);
+  if (keyAvailabilityChanged && Array.isArray(raw.routes)) {
+    applyCloudRouteMode(raw, configCloudRouteMode(raw));
+  }
+  if ((workspaceDir && raw.workspace_dir !== workspaceDir) || statePathsChanged || keyAvailabilityChanged) {
     const backupPath = backupConfigFile(configPath);
     if (workspaceDir) {
       raw.workspace_dir = workspaceDir;
@@ -10090,6 +10209,8 @@ function applyLocalModelSelectionToConfig(configPath, source, options = {}) {
 async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options = {}) {
   const workspaceDir = normalizeWorkspaceDirOption(options.workspaceDir);
   const storageDir = normalizeWorkspaceDirOption(options.storageDir);
+  const keyEnvs = await availableApiKeyEnvs();
+  const effectiveCloudSettings = cloudSettingsWithAvailableApiKeys(cloudSettings, keyEnvs);
   const existingText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
   let data;
   let backedUpExisting = false;
@@ -10106,8 +10227,8 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     const sources = await detectLocalModelSources();
     data = localConfigForLocalModels(sources.length ? sources : fallbackLocalModelSources(), {
-      cloudRouteMode: cloudSettings.cloudRouteMode,
-      cloudSettings,
+      cloudRouteMode: effectiveCloudSettings.cloudRouteMode,
+      cloudSettings: effectiveCloudSettings,
       workspaceDir,
       storageDir
     });
@@ -10119,28 +10240,29 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
   applyGeneratedStoragePaths(data, storageDir, workspaceDir);
   data.agents = Array.isArray(data.agents) ? data.agents : [];
   data.routes = Array.isArray(data.routes) ? data.routes : [];
-  data.free_only = cloudSettings.freeOnly !== false;
-  data.enable_load_balancing = cloudSettings.enableLoadBalancing !== false;
-  data.expose_routing_details = !!cloudSettings.exposeRoutingDetails;
+  data.free_only = effectiveCloudSettings.freeOnly !== false;
+  data.enable_load_balancing = effectiveCloudSettings.enableLoadBalancing !== false;
+  data.expose_routing_details = !!effectiveCloudSettings.exposeRoutingDetails;
   data.cloud_control_selection = {
-    route_mode: normalizeCloudRouteMode(cloudSettings.cloudRouteMode),
-    api_key_models_enabled: !!cloudSettings.apiKeyModelsEnabled,
-    free_cloud_presets_enabled: !!cloudSettings.freeCloudPresetsEnabled
+    route_mode: normalizeCloudRouteMode(effectiveCloudSettings.cloudRouteMode),
+    api_key_models_enabled: !!effectiveCloudSettings.apiKeyModelsEnabled,
+    free_cloud_presets_enabled: !!effectiveCloudSettings.freeCloudPresetsEnabled
   };
-  if (cloudSettings.maxTokenSaveMode) {
-    applyMaxTokenSaveModeToConfig(data, cloudSettings);
+  if (effectiveCloudSettings.maxTokenSaveMode) {
+    applyMaxTokenSaveModeToConfig(data, effectiveCloudSettings);
   }
-  if (cloudSettings.codexCliMode) {
-    applyCodexCliModeToConfig(data, cloudSettings);
+  if (effectiveCloudSettings.codexCliMode) {
+    applyCodexCliModeToConfig(data, effectiveCloudSettings);
   }
 
-  for (const source of ollamaCloudModelSources(cloudSettings)) {
+  for (const source of ollamaCloudModelSources(effectiveCloudSettings)) {
     upsertAgentConfig(data.agents, ollamaCloudModelAgentConfig(source));
   }
-  for (const source of cloudModelSources(cloudSettings)) {
+  for (const source of cloudModelSources(effectiveCloudSettings)) {
     upsertAgentConfig(data.agents, cloudModelAgentConfig(source));
   }
   ensureDefaultOllamaCloudAgents(data);
+  applyApiKeyProviderAvailability(data, keyEnvs);
   applyCloudRouteMode(data, data.cloud_control_selection.route_mode);
 
   const nextText = `${JSON.stringify(data, null, 2)}\n`;
@@ -10231,6 +10353,91 @@ function applyCodexCliModeToConfig(data, settings = {}) {
     codex_cli_prompt_optimized: true,
     codex_cli_prompt_budget_tokens: budget
   };
+}
+
+async function applySavedApiKeyProviderAvailability(data) {
+  return applyApiKeyProviderAvailability(data, await availableApiKeyEnvs());
+}
+
+function applyApiKeyProviderAvailability(data, keyEnvs) {
+  if (!data || typeof data !== "object" || !Array.isArray(data.agents)) {
+    return false;
+  }
+  let changed = false;
+  for (const agent of data.agents) {
+    if (!agent || typeof agent !== "object" || !isManagedApiKeyProviderAgent(agent)) {
+      continue;
+    }
+    const desired = agentHasAvailableApiKey(agent, keyEnvs);
+    if (agent.enabled !== desired) {
+      agent.enabled = desired;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function isManagedApiKeyProviderAgent(agent) {
+  if (!agent || typeof agent !== "object") {
+    return false;
+  }
+  if (!agent.api_key_env && !agent.api_key) {
+    return false;
+  }
+  const provider = String(agent.provider || "").toLowerCase();
+  const providerType = String(agent.provider_type || agent.provider || "").toLowerCase();
+  if (provider === "openai-compatible" && isLocalOrPrivateUrl(agent.base_url)) {
+    return false;
+  }
+  if (LOCAL_API_KEY_OPTIONAL_PROVIDER_TYPES.has(providerType)) {
+    return false;
+  }
+  if (["openai", "anthropic", "gemini"].includes(provider)) {
+    return true;
+  }
+  if (CLOUD_PROVIDER_TYPES.has(providerType)) {
+    return true;
+  }
+  if (provider === "openai-compatible") {
+    return !!agent.base_url;
+  }
+  return false;
+}
+
+function agentHasAvailableApiKey(agent, keyEnvs) {
+  if (agent && typeof agent.api_key === "string" && agent.api_key.trim()) {
+    return true;
+  }
+  const envName = agent && typeof agent.api_key_env === "string" ? agent.api_key_env.trim() : "";
+  if (!envName) {
+    return false;
+  }
+  return (keyEnvs instanceof Set && keyEnvs.has(envName)) || !!process.env[envName];
+}
+
+function isLocalOrPrivateUrl(value) {
+  if (!value || typeof value !== "string") {
+    return false;
+  }
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (_error) {
+    return false;
+  }
+  const host = String(parsed.hostname || "").toLowerCase();
+  if (!host) {
+    return false;
+  }
+  if (["localhost", "host.docker.internal", "0.0.0.0", "127.0.0.1", "::1"].includes(host)) {
+    return true;
+  }
+  return (
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^169\.254\./.test(host)
+  );
 }
 
 function stableConfigText(text) {
@@ -10558,7 +10765,7 @@ function cloudModelSources(settings = {}) {
       name: "codex",
       label: "Codex",
       provider: "openai",
-      enabled: !!settings.apiKeyModelsEnabled,
+      enabled: false,
       free: settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.codexModel, process.env.AGENT_HUB_CODEX_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CODEX_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CODEX_API_KEY_ENV || "OPENAI_API_KEY",
@@ -10569,7 +10776,7 @@ function cloudModelSources(settings = {}) {
       name: "claude",
       label: "Claude",
       provider: "anthropic",
-      enabled: !!settings.apiKeyModelsEnabled,
+      enabled: false,
       free: settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.claudeModel, process.env.AGENT_HUB_CLAUDE_MODEL || DEFAULT_CLAUDE_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CLAUDE_API_KEY_ENV || "ANTHROPIC_API_KEY",
@@ -10580,7 +10787,7 @@ function cloudModelSources(settings = {}) {
       name: "gemini",
       label: "Gemini",
       provider: "gemini",
-      enabled: !!settings.apiKeyModelsEnabled,
+      enabled: false,
       free: settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.geminiModel, process.env.AGENT_HUB_GEMINI_MODEL || DEFAULT_GEMINI_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_GEMINI_API_KEY_ENV || "GEMINI_API_KEY",
@@ -10591,7 +10798,7 @@ function cloudModelSources(settings = {}) {
       name: "chatgpt",
       label: "ChatGPT",
       provider: "openai",
-      enabled: !!settings.apiKeyModelsEnabled,
+      enabled: false,
       free: settings.maxTokenSaveMode ? false : true,
       model: cleanSettingString(settings.chatgptModel, process.env.AGENT_HUB_CHATGPT_MODEL || process.env.AGENT_HUB_OPENAI_MODEL || DEFAULT_CHATGPT_MODEL),
       apiKeyEnv: process.env.AGENT_HUB_CHATGPT_API_KEY_ENV || "OPENAI_API_KEY",
@@ -10599,11 +10806,15 @@ function cloudModelSources(settings = {}) {
       contextWindow: 128000
     }
   ];
-  return [codexCli, ...hosted, ...freeCloudPresetSources(settings)];
+  const hostedWithAvailability = hosted.map((source) => ({
+    ...source,
+    enabled: apiKeySourceEnabled(source, !!settings.apiKeyModelsEnabled, settings)
+  }));
+  return [codexCli, ...hostedWithAvailability, ...freeCloudPresetSources(settings)];
 }
 
 function freeCloudPresetSources(settings = {}) {
-  const enabled = !!settings.freeCloudPresetsEnabled;
+  const familyEnabled = !!settings.freeCloudPresetsEnabled;
   const maxTokens = settings.maxTokenSaveMode ? MAX_TOKEN_SAVE_OUTPUT_TOKENS : undefined;
   return [
     {
@@ -10611,7 +10822,7 @@ function freeCloudPresetSources(settings = {}) {
       label: "Groq Qwen3 32B",
       provider: "openai-compatible",
       providerType: "groq",
-      enabled,
+      enabled: false,
       model: cleanSettingString(settings.groqModel, DEFAULT_GROQ_MODEL),
       apiKeyEnv: "GROQ_API_KEY",
       baseUrl: "https://api.groq.com/openai/v1",
@@ -10627,7 +10838,7 @@ function freeCloudPresetSources(settings = {}) {
       label: "OpenRouter Qwen free",
       provider: "openai-compatible",
       providerType: "openrouter",
-      enabled,
+      enabled: false,
       model: cleanSettingString(settings.openrouterModel, DEFAULT_OPENROUTER_MODEL),
       apiKeyEnv: "OPENROUTER_API_KEY",
       baseUrl: "https://openrouter.ai/api/v1",
@@ -10647,7 +10858,7 @@ function freeCloudPresetSources(settings = {}) {
       label: "Cerebras Llama 3.3 70B",
       provider: "openai-compatible",
       providerType: "cerebras",
-      enabled,
+      enabled: false,
       model: cleanSettingString(settings.cerebrasModel, DEFAULT_CEREBRAS_MODEL),
       apiKeyEnv: "CEREBRAS_API_KEY",
       baseUrl: "https://api.cerebras.ai/v1",
@@ -10662,7 +10873,7 @@ function freeCloudPresetSources(settings = {}) {
       label: "Mistral Small",
       provider: "openai-compatible",
       providerType: "mistral",
-      enabled,
+      enabled: false,
       model: cleanSettingString(settings.mistralModel, DEFAULT_MISTRAL_MODEL),
       apiKeyEnv: "MISTRAL_API_KEY",
       baseUrl: "https://api.mistral.ai/v1",
@@ -10678,7 +10889,7 @@ function freeCloudPresetSources(settings = {}) {
       label: "GitHub Models Qwen3 Coder",
       provider: "openai-compatible",
       providerType: "github-models",
-      enabled,
+      enabled: false,
       model: cleanSettingString(settings.githubModelsModel, DEFAULT_GITHUB_MODELS_MODEL),
       apiKeyEnv: "GITHUB_TOKEN",
       baseUrl: "https://models.github.ai/inference",
@@ -10698,7 +10909,7 @@ function freeCloudPresetSources(settings = {}) {
       label: "Hugging Face Qwen3 Coder",
       provider: "openai-compatible",
       providerType: "huggingface",
-      enabled,
+      enabled: false,
       model: cleanSettingString(settings.huggingfaceModel, DEFAULT_HUGGINGFACE_MODEL),
       apiKeyEnv: "HUGGINGFACE_API_KEY",
       baseUrl: "https://router.huggingface.co/v1",
@@ -10714,7 +10925,7 @@ function freeCloudPresetSources(settings = {}) {
       label: "NVIDIA Nemotron",
       provider: "openai-compatible",
       providerType: "nvidia-nim",
-      enabled,
+      enabled: false,
       model: cleanSettingString(settings.nvidiaModel, DEFAULT_NVIDIA_MODEL),
       apiKeyEnv: "NVIDIA_API_KEY",
       baseUrl: "https://integrate.api.nvidia.com/v1",
@@ -10730,7 +10941,7 @@ function freeCloudPresetSources(settings = {}) {
       label: "Cloudflare Workers AI",
       provider: "openai-compatible",
       providerType: "cloudflare-workers-ai",
-      enabled,
+      enabled: false,
       model: cleanSettingString(settings.cloudflareModel, DEFAULT_CLOUDFLARE_MODEL),
       apiKeyEnv: "CLOUDFLARE_API_TOKEN",
       baseUrl: "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1",
@@ -10742,8 +10953,16 @@ function freeCloudPresetSources(settings = {}) {
     }
   ].map((source) => ({
     ...source,
+    enabled: apiKeySourceEnabled(source, familyEnabled, settings),
     maxTokens
   }));
+}
+
+function apiKeySourceEnabled(source, familyEnabled, settings = {}) {
+  if (!source || !source.apiKeyEnv) {
+    return !!familyEnabled;
+  }
+  return sourceHasAvailableApiKey(source, settings);
 }
 
 function ollamaCloudModelSources(settings = {}) {

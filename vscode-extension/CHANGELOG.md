@@ -1,5 +1,11 @@
 # Changelog
 
+## 9.5.0
+
+- Keeps API-key-backed cloud providers disabled until their matching key is saved or present in the environment.
+- Auto-enables matching provider route entries after saving API keys in VS Code Secret Storage.
+- Classifies missing provider API keys as configuration errors instead of generic Cline-visible route failures.
+
 ## 9.4.0
 
 - Syncs extension and backend release metadata for the next package.

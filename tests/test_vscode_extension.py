@@ -382,6 +382,33 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('free: routeMode === "codex-cli"', cloud_sources_source)
         self.assertIn('maxTokens: routeMode === "codex-cli" ? CODEX_CLI_OUTPUT_TOKENS : undefined', cloud_sources_source)
 
+    def test_api_key_providers_auto_enable_only_when_key_exists(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertIn("function availableApiKeyEnvs", source)
+        self.assertIn("function syncApiKeyProviderAvailabilityForCurrentWorkspace", source)
+        self.assertIn("function applyApiKeyProviderAvailability", source)
+        self.assertIn("function sourceHasAvailableApiKey", source)
+        self.assertIn("function isManagedApiKeyProviderAgent", source)
+        self.assertIn("configSynced", source)
+        self.assertIn("Enabled matching provider route entries.", source)
+
+        cloud_sources_start = source.index("function cloudModelSources")
+        cloud_sources_end = source.index("function ollamaCloudModelSources", cloud_sources_start)
+        cloud_sources = source[cloud_sources_start:cloud_sources_end]
+
+        self.assertIn("enabled: apiKeySourceEnabled(source, !!settings.apiKeyModelsEnabled, settings)", cloud_sources)
+        self.assertIn("enabled: apiKeySourceEnabled(source, familyEnabled, settings)", cloud_sources)
+        self.assertNotIn("enabled: !!settings.apiKeyModelsEnabled", cloud_sources)
+        self.assertNotIn("const enabled = !!settings.freeCloudPresetsEnabled", cloud_sources)
+
+        repair_start = source.index("async function repairGeneratedLocalConfig")
+        repair_end = source.index("function configsEquivalent", repair_start)
+        repair = source[repair_start:repair_end]
+        self.assertIn("const keyEnvs = await availableApiKeyEnvs()", repair)
+        self.assertIn("applyApiKeyProviderAvailability(raw, keyEnvs)", repair)
+        self.assertIn("applyCloudRouteMode(raw, configCloudRouteMode(raw))", repair)
+
     def test_commit_message_generation_keeps_small_output_cap(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
         helper_start = source.index("function applyOptionalMaxTokens")

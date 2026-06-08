@@ -472,11 +472,13 @@ class ProviderAttemptExecutor:
                     failover=failover,
                     decision=decision,
                 )
+                error_type = helpers.route_error_type(failover) or exc.error_type
                 raise self.router_error_type(
                     str(exc),
                     failover=failover,
-                    error_type=exc.error_type,
-                    status_code=exc.status_code,
+                    error_type=error_type,
+                    suggested_fix=helpers.suggested_fix(error_type, failover),
+                    status_code=exc.status_code or helpers.route_status_code(error_type),
                 ) from exc
 
         if not tried_any:

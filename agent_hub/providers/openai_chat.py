@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from ..config import AgentConfig, normalize_provider
+from ..config import AgentConfig, _is_local_or_private_url, normalize_provider
 from ..models import HubRequest, ProviderResult
+from ..provider_presets import provider_defaults_for_agent
 from .base import BaseProviderAdapter, StreamChunk
 from .errors import ProviderError
 from .shared import (
@@ -24,13 +25,24 @@ from .shared import (
 )
 
 
+LOCAL_API_KEY_OPTIONAL_PROVIDER_TYPES = {
+    "llama-cpp",
+    "lm-studio",
+    "localai",
+    "ollama",
+    "ollama-local",
+    "openai-compatible",
+    "vllm",
+}
+
+
 class OpenAIChatProvider(BaseProviderAdapter):
     def __init__(self, agent: AgentConfig) -> None:
         self.agent = agent
 
     def complete(self, request: HubRequest) -> ProviderResult:
         api_key = self.agent.resolved_api_key
-        if not api_key and normalize_provider(self.agent.provider) == "openai":
+        if _missing_required_api_key(self.agent, api_key):
             raise ProviderError(
                 f"{self.agent.name} is missing API key env {self.agent.api_key_env}",
                 retryable=True,
@@ -55,7 +67,7 @@ class OpenAIChatProvider(BaseProviderAdapter):
         if not self.supports_streaming():
             raise NotImplementedError(f"{self.name} does not support native streaming")
         api_key = self.agent.resolved_api_key
-        if not api_key and normalize_provider(self.agent.provider) == "openai":
+        if _missing_required_api_key(self.agent, api_key):
             raise ProviderError(
                 f"{self.agent.name} is missing API key env {self.agent.api_key_env}",
                 retryable=True,
@@ -133,6 +145,23 @@ class OpenAIChatProvider(BaseProviderAdapter):
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         return payload
+
+
+def _missing_required_api_key(agent: AgentConfig, api_key: str | None) -> bool:
+    if api_key or not agent.api_key_env:
+        return False
+    provider = normalize_provider(agent.provider)
+    if provider == "openai":
+        return True
+    if provider == "openai-compatible" and agent.base_url:
+        return not _is_local_or_private_url(agent.base_url)
+    metadata = provider_defaults_for_agent(agent)
+    if metadata and metadata.api_key_env == agent.api_key_env:
+        if metadata.base_url:
+            return not _is_local_or_private_url(metadata.base_url)
+        provider_type = (agent.provider_type or agent.provider).lower()
+        return provider_type not in LOCAL_API_KEY_OPTIONAL_PROVIDER_TYPES
+    return False
 
 
 OpenAIChatAdapter = OpenAIChatProvider

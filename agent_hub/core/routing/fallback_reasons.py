@@ -5,6 +5,7 @@ from ..routing_policy import CONFIGURATION_ERROR, ECHO_DISABLED, NO_TOOL_CAPABLE
 
 
 ERROR_TYPE_ALIASES = {
+    "configuration": CONFIGURATION_ERROR,
     "rate_limited": "temporary_rate_limit",
     "context_limit": "context_too_large",
     "temporary_unavailable": "provider_overloaded",
@@ -83,6 +84,14 @@ def _route_error_type(failover: list[FailoverEvent]) -> str | None:
     no_tool_events = [event for event in failover if event.error_type == NO_TOOL_CAPABLE_MODEL]
     if no_tool_events and len(no_tool_events) == len(failover):
         return NO_TOOL_CAPABLE_MODEL
+    configuration_events = [
+        event
+        for event in failover
+        if _canonical_error_type(event.error_type) == CONFIGURATION_ERROR
+        or "missing API key env " in event.reason
+    ]
+    if configuration_events and len(configuration_events) == len(failover):
+        return CONFIGURATION_ERROR
     echo_events = [event for event in failover if event.error_type == ECHO_DISABLED]
     if echo_events and len(echo_events) == len(failover):
         return CONFIGURATION_ERROR
@@ -134,16 +143,16 @@ def _route_status_code(error_type: str | None) -> int | None:
 
 
 def _suggested_fix(error_type: str | None, failover: list[FailoverEvent]) -> str | None:
+    missing_keys = _missing_key_names(failover)
     if error_type == NO_TOOL_CAPABLE_MODEL:
         return _no_tool_capable_fix(failover)
-    if error_type == CONFIGURATION_ERROR:
-        return _no_model_available_fix()
-    missing_keys = _missing_key_names(failover)
     if missing_keys:
         return (
             f"Set {', '.join(missing_keys)} or disable that provider. "
             "For Cline, use model agent-hub-coding against the Agent Hub OpenAI endpoint."
         )
+    if error_type == CONFIGURATION_ERROR:
+        return _no_model_available_fix()
     return None
 
 
