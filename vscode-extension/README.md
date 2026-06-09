@@ -104,10 +104,11 @@ Good first tasks:
 - `Fix the failing test`
 - `Add a small feature`
 
-Use `Token Safe Mode` when you want confident free models to try safe work first
-while Codex CLI and API-key models stay available as full-strength fallback.
-Use `Free Only Mode` when you want to disable Codex CLI and non-free/API-key
-fallbacks entirely. Use `Codex CLI Mode` when you want Agent Hub to route
+Use `Save Codex Tokens` when you want confident free models to try safe work
+first while Codex CLI fallback gets an adaptive task-aware context digest,
+reduced tool and repo metadata, fewer agent steps, and shorter output caps. Use
+`Free Models Only` when you want to disable Codex CLI and non-free/API-key
+fallbacks entirely. Choose `Use Codex CLI` when you want Agent Hub to route
 directly through your existing `codex login` session without an `OPENAI_API_KEY`.
 
 ## Models
@@ -117,8 +118,8 @@ Pick one path:
 - Open `Settings` and save an OpenAI, Claude, Gemini, Groq, OpenRouter, or other API key.
 - Start Ollama or LM Studio locally and let Agent Hub route to the local endpoint.
 - Run `Agent Hub: Install Ollama Desktop` if the `ollama` command is not present, then choose a local model.
-- Run `Agent Hub: Install Codex CLI`, sign in, then use `Agent Hub: Use Codex CLI Without API Key`.
-- Run `Agent Hub: Disable Non-Free Models` to keep only free/local/free-tier routes eligible.
+- Run `Agent Hub: Install Codex CLI`, sign in, then use `Agent Hub: Use Signed-In Codex CLI`.
+- Run `Agent Hub: Use Free Models Only` to keep only free/local/free-tier routes eligible.
 - Connect Cline, Roo Code, Continue, Claude Code, or another OpenAI-compatible tool.
 
 ## Comparison
@@ -158,7 +159,7 @@ Local routes use `http://127.0.0.1:11434`. Hosted Ollama Cloud entries require
 
 - Ollama: install Ollama, pull a model, then start Agent Hub. Local routes use `http://127.0.0.1:11434`.
 - LM Studio: start the local server, load a model, then use Settings to select the endpoint.
-- Codex CLI: run `Agent Hub: Install Codex CLI`, sign in, then choose `Codex CLI Mode` in Agent Hub.
+- Codex CLI: run `Agent Hub: Install Codex CLI`, sign in, then choose `Use Codex CLI` in Agent Hub.
 - OpenAI, Claude, Gemini, Groq, OpenRouter: save the provider API key in Settings and keep `approval_mode` at `ask` or `auto` based on your workflow.
 
 ## Safety

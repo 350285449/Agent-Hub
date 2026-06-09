@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from agent_hub.application import AdaptiveApplicationService, DiagnosticsApplicationService
-from agent_hub.config import AgentConfig, HubConfig, MCPServerConfig
+from agent_hub.config import AgentConfig, HubConfig, MCPServerConfig, RouteRule
 from agent_hub.core.router import AgentRouter
 from agent_hub.evaluation import BenchmarkResult, ProviderScoreStore
 from agent_hub.models import HubRequest, ProviderResult
@@ -274,6 +274,20 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(body["summary"]["missing_count"], 0)
         self.assertTrue(body["maturity"]["machine_readable"])
 
+    def test_feature_scorecard_rates_local_contracts_10_of_10(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _echo_config(Path(tmp))
+            router = AgentRouter(config)
+
+            body = DiagnosticsApplicationService(config).feature_scorecard_body(router)
+
+        self.assertEqual(body["object"], "agent_hub.feature_scorecard")
+        self.assertEqual(body["rating"], 10.0)
+        self.assertTrue(body["all_local_areas_10"], body["blockers"])
+        self.assertEqual(len(body["areas"]), 12)
+        self.assertEqual({area["rating"] for area in body["areas"]}, {10.0})
+        self.assertIn("third-party provider quality", body["honesty"])
+
     def test_enterprise_status_summarizes_policy_and_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -392,6 +406,31 @@ def _config(root: Path) -> HubConfig:
             )
         },
     )
+
+
+def _echo_config(root: Path) -> HubConfig:
+    config = HubConfig(
+        state_dir=root / "state",
+        inbox_dir=root / "inbox",
+        outbox_dir=root / "outbox",
+        archive_dir=root / "archive",
+        workspace_dir=root,
+        default_route=["echo"],
+        routes=[RouteRule(name="cloud-agent", agents=["echo"])],
+        agents={
+            "echo": AgentConfig(
+                name="echo",
+                provider="echo",
+                provider_type="echo",
+                model="echo",
+                enabled=True,
+                free=True,
+            )
+        },
+        debug_echo_enabled=True,
+    )
+    config.ensure_dirs()
+    return config
 
 
 if __name__ == "__main__":

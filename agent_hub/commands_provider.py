@@ -745,6 +745,11 @@ def _production_check_report(config: Any) -> dict[str, Any]:
     return DiagnosticsApplicationService(config).production_check_body(router)
 
 
+def _feature_scorecard_report(config: Any) -> dict[str, Any]:
+    router = AgentRouter(config)
+    return DiagnosticsApplicationService(config).feature_scorecard_body(router)
+
+
 def _print_health(report: dict[str, Any]) -> None:
     print("Agent-Hub health")
     print(f"Route: {report['route']}")
@@ -792,6 +797,42 @@ def _print_production_check(report: dict[str, Any]) -> None:
         )
     if not failed and not warnings:
         print("All production checks passed.")
+
+
+def _print_feature_scorecard(report: dict[str, Any]) -> None:
+    print("Agent-Hub feature scorecard")
+    print(f"Rating: {report.get('rating', '?')}/10 ({report.get('state', 'unknown')})")
+    print(f"All local areas 10/10: {str(bool(report.get('all_local_areas_10'))).lower()}")
+    print()
+    areas = report.get("areas") if isinstance(report.get("areas"), list) else []
+    rows = [
+        {
+            "area": area.get("area"),
+            "rating": area.get("rating"),
+            "state": area.get("state"),
+            "checks": f"{area.get('passed_required', 0)}/{area.get('required_count', 0)}",
+            "honest_take": area.get("honest_take"),
+        }
+        for area in areas
+        if isinstance(area, dict)
+    ]
+    _print_table(rows, ["area", "rating", "state", "checks", "honest_take"])
+    blockers = report.get("blockers") if isinstance(report.get("blockers"), list) else []
+    if blockers:
+        print()
+        print("Blockers:")
+        blocker_rows = []
+        for blocker in blockers:
+            if not isinstance(blocker, dict):
+                continue
+            missing = blocker.get("missing") if isinstance(blocker.get("missing"), list) else []
+            blocker_rows.append(
+                {
+                    "area": blocker.get("area"),
+                    "missing": ", ".join(str(row.get("id")) for row in missing if isinstance(row, dict)),
+                }
+            )
+        _print_table(blocker_rows, ["area", "missing"])
 
 
 def _print_metrics(report: dict[str, Any]) -> None:

@@ -1,7 +1,21 @@
 # Changelog
 
+## 9.6.2
+
+- Adds the feature scorecard API, CLI, and dashboard proof for all 12 product areas.
+- Improves runtime kernel durability and dashboard proof surfaces in the bundled backend.
+- Fixes UTF-8 BOM config loading for Windows-authored JSON configs.
+
+## 9.6.1
+
+- Adds visible cost-mode state to the sidebar header and hero so `Standard`, `Token Save`, `Free Only`, and `Codex CLI` are obvious at a glance.
+- Polishes mode controls with live status text, `aria-pressed`, `aria-busy`, click-help toasts, and responsive sidebar state pills.
+- Packages the adaptive `Save Codex Tokens` routing and Codex CLI context-digest fallback as the 9.6.1 VSIX.
+
 ## 9.6.0
 
+- Renames the VS Code cost controls to `Save Codex Tokens`, `Free Models Only`, and `Use Codex CLI`.
+- Makes `Save Codex Tokens` compact Codex CLI fallback with adaptive task-aware context digests, reduced tool/repo metadata, fewer agent steps, and shorter output caps.
 - Syncs extension and backend release metadata for the next package.
 - Adds install verification, packaging checks, and command-runner hardening.
 

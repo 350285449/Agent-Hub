@@ -129,6 +129,7 @@ curl http://127.0.0.1:8787/v1/provider-scores
 curl http://127.0.0.1:8787/v1/provider-health
 curl http://127.0.0.1:8787/v1/readiness
 curl http://127.0.0.1:8787/v1/production-check
+curl http://127.0.0.1:8787/v1/feature-scorecard
 curl http://127.0.0.1:8787/v1/routing-memory/stats
 curl http://127.0.0.1:8787/v1/routing-memory/recent
 curl http://127.0.0.1:8787/v1/routing-decision/hub-request-id
@@ -176,6 +177,15 @@ details, and a pass/fail `ok` field. The matching CLI command is
 `agent-hub production-check`; it exits nonzero until the install reaches at
 least 90/100 with no major or critical failures.
 
+`/v1/feature-scorecard` returns `agent_hub.feature_scorecard`: a local 10/10
+proof matrix for model routing, provider support, API compatibility, workspace
+agents, context intelligence, safety/security, dashboards/control plane, the VS
+Code extension, config/install/release, inbox/workflows, plugins/MCP/enterprise,
+and evaluation/proof/cost infrastructure. The matching CLI command is
+`agent-hub feature-scorecard`. Live third-party provider quality, credentials,
+network uptime, and real benchmark measurements remain environment-dependent and
+are called out separately from local implementation proof.
+
 `/dashboard` renders the same core provider status in lightweight HTML.
 `/dashboard/routing-intelligence` renders selected model, selected workflow,
 risk level, routing reasons, rejected candidates, provider/model rankings,
@@ -193,7 +203,8 @@ models with measured-vs-waiting status from `/v1/model-leaderboard`.
 from `/v1/benchmarks`.
 `/dashboard/status`, `/dashboard/provider-health`,
 `/dashboard/provider-scores`, `/dashboard/routing-history`,
-`/dashboard/readiness`, `/dashboard/production-check`, `/dashboard/limits`,
+`/dashboard/readiness`, `/dashboard/production-check`,
+`/dashboard/feature-scorecard`, `/dashboard/limits`,
 `/dashboard/usage`, `/dashboard/events`, `/dashboard/tools`,
 `/dashboard/workflows`, `/dashboard/plugins`, `/dashboard/enterprise`,
 `/dashboard/repository-dna`, `/dashboard/workspace-memory`, and

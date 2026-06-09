@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import json
+import os
+import platform
 import re
+import sys
 import threading
 import time
+import tracemalloc
 import uuid
 from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
 _DYNAMIC_SEGMENT_RE = re.compile(r"^[0-9a-fA-F-]{12,}$|^\d+$")
+_KERNEL_HISTORY_MAX_SNAPSHOTS = 96
+_MB = 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -60,6 +68,9 @@ class AgentHubRuntimeKernel:
         self._recent_slow_requests: deque[KernelRequestSample] = deque(maxlen=max_recent_slow_requests)
         self._timeline: deque[dict[str, Any]] = deque(maxlen=80)
         self._routes: dict[str, dict[str, Any]] = {}
+        self._last_cpu_wall_seconds = time.monotonic()
+        self._last_cpu_process_seconds = time.process_time()
+        self._durability_errors: deque[str] = deque(maxlen=5)
         with self._lock:
             self._record_event_locked(
                 event_type="boot",
@@ -180,6 +191,7 @@ class AgentHubRuntimeKernel:
         provider_health, provider_error = _provider_health(router)
         routing_memory, routing_memory_error = _routing_memory(router)
         telemetry = self._telemetry_snapshot()
+        process_health = self._process_snapshot()
         subsystems = _subsystems(
             config=config,
             provider_health=provider_health,
@@ -195,8 +207,29 @@ class AgentHubRuntimeKernel:
             subsystems=subsystems,
             provider_health=provider_health,
             diagnostics_cache=diagnostics_cache,
+            process_health=process_health,
         )
         state = _kernel_state(score, subsystems)
+        history_record = _history_record(
+            boot_id=self.boot_id,
+            state=state,
+            score=score,
+            telemetry=telemetry,
+            pressure=pressure,
+            process_health=process_health,
+        )
+        durability, history = self._persist_history(config, history_record)
+        trends = _trend_snapshot(history)
+        alerts = _alert_snapshot(
+            state=state,
+            score=score,
+            telemetry=telemetry,
+            pressure=pressure,
+            subsystems=subsystems,
+            process_health=process_health,
+            trends=trends,
+            durability=durability,
+        )
         next_actions = _next_actions(
             config=config,
             telemetry=telemetry,
@@ -204,6 +237,9 @@ class AgentHubRuntimeKernel:
             provider_health=provider_health,
             diagnostics_cache=diagnostics_cache,
             pressure=pressure,
+            process_health=process_health,
+            trends=trends,
+            durability=durability,
         )
         return {
             "object": "agent_hub.runtime_kernel",
@@ -214,16 +250,21 @@ class AgentHubRuntimeKernel:
             "uptime_seconds": round(time.monotonic() - self._started_monotonic, 3),
             "subsystems": subsystems,
             "request_telemetry": telemetry,
+            "process_health": process_health,
             "pressure": pressure,
+            "alerts": alerts,
+            "trends": trends,
             "service_map": _service_map(subsystems),
             "timeline": self._timeline_snapshot(),
             "primary_next_action": next_actions[0],
             "next_actions": next_actions,
             "diagnostics_cache": diagnostics_cache,
+            "durability": durability,
             "kernel_policy": {
                 "slow_request_threshold_ms": round(self.slow_request_threshold_ms, 2),
                 "max_recent_slow_requests": self._recent_slow_requests.maxlen,
                 "max_route_stats": self.max_route_stats,
+                "max_persisted_snapshots": _KERNEL_HISTORY_MAX_SNAPSHOTS,
             },
         }
 
@@ -269,6 +310,94 @@ class AgentHubRuntimeKernel:
                 "routes": route_rows[:20],
                 "recent_slow_requests": slow_requests,
             }
+
+    def _process_snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        process_seconds = time.process_time()
+        with self._lock:
+            wall_delta = max(0.0, now - self._last_cpu_wall_seconds)
+            process_delta = max(0.0, process_seconds - self._last_cpu_process_seconds)
+            self._last_cpu_wall_seconds = now
+            self._last_cpu_process_seconds = process_seconds
+        cpu_percent = (process_delta / wall_delta) * 100.0 if wall_delta >= 0.25 else 0.0
+        rss_bytes = _rss_bytes()
+        allocated_bytes, peak_allocated_bytes = _tracemalloc_bytes()
+        memory_state = "unknown"
+        rss_mb = round(rss_bytes / _MB, 2) if rss_bytes else None
+        if rss_mb is not None:
+            memory_state = "hot" if rss_mb >= 4096 else "elevated" if rss_mb >= 2048 else "nominal"
+        return {
+            "object": "agent_hub.process_health",
+            "pid": os.getpid(),
+            "platform": platform.platform(),
+            "python": sys.version.split()[0],
+            "thread_count": threading.active_count(),
+            "cpu_percent": round(max(0.0, cpu_percent), 2),
+            "cpu_state": _threshold_state(cpu_percent, elevated=50.0, hot=85.0),
+            "process_time_seconds": round(process_seconds, 3),
+            "memory": {
+                "rss_bytes": rss_bytes,
+                "rss_mb": rss_mb,
+                "python_allocated_mb": round(allocated_bytes / _MB, 2) if allocated_bytes else 0.0,
+                "python_peak_allocated_mb": round(peak_allocated_bytes / _MB, 2) if peak_allocated_bytes else 0.0,
+                "state": memory_state,
+            },
+        }
+
+    def _persist_history(self, config: Any, record: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        path = _history_path(config)
+        if path is None:
+            return {
+                "object": "agent_hub.runtime_kernel.durability",
+                "enabled": False,
+                "path": "",
+                "retained_snapshots": 0,
+                "last_snapshot_at": "",
+                "error": "state_dir is not configured",
+                "recent_errors": ["state_dir is not configured"],
+            }, [record]
+        try:
+            with self._lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                history = _read_history(path)
+                history = [*history[-(_KERNEL_HISTORY_MAX_SNAPSHOTS - 1) :], record]
+                tmp_path = path.with_suffix(".tmp")
+                tmp_path.write_text(
+                    json.dumps(
+                        {
+                            "object": "agent_hub.runtime_kernel.history",
+                            "max_snapshots": _KERNEL_HISTORY_MAX_SNAPSHOTS,
+                            "snapshots": history,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
+                tmp_path.replace(path)
+                return {
+                    "object": "agent_hub.runtime_kernel.durability",
+                    "enabled": True,
+                    "path": str(path),
+                    "retained_snapshots": len(history),
+                    "last_snapshot_at": record.get("timestamp", ""),
+                    "error": "",
+                    "recent_errors": list(self._durability_errors),
+                }, history
+        except Exception as exc:  # pragma: no cover - defensive diagnostics path
+            error = str(exc)
+            with self._lock:
+                self._durability_errors.append(error)
+                recent_errors = list(self._durability_errors)
+            return {
+                "object": "agent_hub.runtime_kernel.durability",
+                "enabled": False,
+                "path": str(path),
+                "retained_snapshots": 0,
+                "last_snapshot_at": "",
+                "error": error,
+                "recent_errors": recent_errors,
+            }, [record]
 
     def _prune_routes_locked(self) -> None:
         overflow = len(self._routes) - self.max_route_stats
@@ -337,6 +466,189 @@ def _route_snapshot(row: dict[str, Any]) -> dict[str, Any]:
         "max_latency_ms": round(float(row.get("max_latency_ms") or 0.0), 2),
         "last_status": int(row.get("last_status") or 0),
         "last_seen": _iso_timestamp(float(row.get("last_seen") or 0.0)),
+    }
+
+
+def _history_path(config: Any) -> Path | None:
+    state_dir = getattr(config, "state_dir", None)
+    if state_dir is None:
+        return None
+    try:
+        return Path(state_dir).expanduser().resolve() / "kernel" / "history.json"
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _read_history(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    rows = payload.get("snapshots") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return []
+    return [dict(row) for row in rows if isinstance(row, dict)][-_KERNEL_HISTORY_MAX_SNAPSHOTS:]
+
+
+def _history_record(
+    *,
+    boot_id: str,
+    state: str,
+    score: int,
+    telemetry: dict[str, Any],
+    pressure: dict[str, Any],
+    process_health: dict[str, Any],
+) -> dict[str, Any]:
+    latency = telemetry.get("latency_ms") if isinstance(telemetry.get("latency_ms"), dict) else {}
+    memory = process_health.get("memory") if isinstance(process_health.get("memory"), dict) else {}
+    return {
+        "timestamp": _iso_timestamp(time.time()),
+        "boot_id": boot_id,
+        "state": state,
+        "operational_score": int(score),
+        "total_requests": int(telemetry.get("total_requests") or 0),
+        "error_rate": _float(telemetry.get("error_rate")),
+        "cache_hit_rate": _float(telemetry.get("cache_hit_rate")),
+        "ewma_latency_ms": _float(latency.get("ewma")),
+        "max_latency_ms": _float(latency.get("max")),
+        "pressure_state": str(pressure.get("state") or "unknown"),
+        "cpu_percent": _float(process_health.get("cpu_percent")),
+        "rss_mb": _float(memory.get("rss_mb")),
+        "thread_count": int(process_health.get("thread_count") or 0),
+    }
+
+
+def _trend_snapshot(history: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = [row for row in history if isinstance(row, dict)]
+    if len(rows) < 2:
+        return {
+            "object": "agent_hub.runtime_kernel.trends",
+            "state": "warming_up",
+            "sample_count": len(rows),
+            "window": {},
+            "deltas": {},
+            "detail": "Need at least two kernel snapshots before trend analysis is meaningful.",
+        }
+    first = rows[0]
+    last = rows[-1]
+    score_delta = (_float(last.get("operational_score")) or 0.0) - (_float(first.get("operational_score")) or 0.0)
+    error_delta = (_float(last.get("error_rate")) or 0.0) - (_float(first.get("error_rate")) or 0.0)
+    latency_delta = (_float(last.get("ewma_latency_ms")) or 0.0) - (_float(first.get("ewma_latency_ms")) or 0.0)
+    cache_delta = (_float(last.get("cache_hit_rate")) or 0.0) - (_float(first.get("cache_hit_rate")) or 0.0)
+    cpu_delta = (_float(last.get("cpu_percent")) or 0.0) - (_float(first.get("cpu_percent")) or 0.0)
+    state = "stable"
+    if score_delta <= -5 or error_delta >= 0.05 or latency_delta >= 500:
+        state = "degrading"
+    elif score_delta >= 5 or error_delta <= -0.02 or latency_delta <= -250 or cache_delta >= 0.20:
+        state = "improving"
+    return {
+        "object": "agent_hub.runtime_kernel.trends",
+        "state": state,
+        "sample_count": len(rows),
+        "window": {
+            "first": first.get("timestamp", ""),
+            "last": last.get("timestamp", ""),
+        },
+        "deltas": {
+            "operational_score": round(score_delta, 2),
+            "error_rate": round(error_delta, 4),
+            "ewma_latency_ms": round(latency_delta, 2),
+            "cache_hit_rate": round(cache_delta, 4),
+            "cpu_percent": round(cpu_delta, 2),
+        },
+        "latest": {
+            "state": last.get("state", "unknown"),
+            "pressure_state": last.get("pressure_state", "unknown"),
+            "total_requests": last.get("total_requests", 0),
+        },
+    }
+
+
+def _alert_snapshot(
+    *,
+    state: str,
+    score: int,
+    telemetry: dict[str, Any],
+    pressure: dict[str, Any],
+    subsystems: list[dict[str, Any]],
+    process_health: dict[str, Any],
+    trends: dict[str, Any],
+    durability: dict[str, Any],
+) -> dict[str, Any]:
+    active: list[dict[str, Any]] = []
+    subsystem_by_id = {str(row.get("id")): row for row in subsystems if isinstance(row, dict)}
+    for subsystem_id, row in subsystem_by_id.items():
+        subsystem_state = str(row.get("state") or "")
+        if subsystem_state == "critical":
+            active.append(
+                _alert(
+                    "critical",
+                    f"{subsystem_id}_critical",
+                    f"{subsystem_id.replace('_', ' ').title()} is critical",
+                    str(row.get("detail") or "Subsystem reported a critical state."),
+                )
+            )
+        elif subsystem_state == "degraded":
+            active.append(
+                _alert(
+                    "warn",
+                    f"{subsystem_id}_degraded",
+                    f"{subsystem_id.replace('_', ' ').title()} is degraded",
+                    str(row.get("detail") or "Subsystem reported a degraded state."),
+                )
+            )
+    error_rate = _float(telemetry.get("error_rate")) or 0.0
+    latency = telemetry.get("latency_ms") if isinstance(telemetry.get("latency_ms"), dict) else {}
+    ewma_latency = _float(latency.get("ewma")) or 0.0
+    slow_count = len(telemetry.get("recent_slow_requests") or [])
+    if error_rate >= 0.10:
+        active.append(_alert("critical", "http_error_rate_hot", "HTTP error rate is hot", f"{error_rate * 100:.1f}% of requests are non-success."))
+    elif error_rate >= 0.02:
+        active.append(_alert("warn", "http_error_rate_elevated", "HTTP error rate is elevated", f"{error_rate * 100:.1f}% of requests are non-success."))
+    if ewma_latency >= 1200:
+        active.append(_alert("critical", "latency_hot", "Kernel latency is hot", f"EWMA latency is {ewma_latency:.1f} ms."))
+    elif ewma_latency >= 750:
+        active.append(_alert("warn", "latency_elevated", "Kernel latency is elevated", f"EWMA latency is {ewma_latency:.1f} ms."))
+    if slow_count:
+        active.append(_alert("warn", "slow_requests", "Slow requests were retained", f"{slow_count} request(s) crossed the slow threshold."))
+    if str(pressure.get("state") or "") == "hot":
+        active.append(_alert("critical", "runtime_pressure_hot", "Runtime pressure is hot", "One or more pressure signals are hot."))
+    elif str(pressure.get("state") or "") == "elevated":
+        active.append(_alert("warn", "runtime_pressure_elevated", "Runtime pressure is elevated", "One or more pressure signals are elevated."))
+    if str(process_health.get("cpu_state") or "") == "hot":
+        active.append(_alert("critical", "process_cpu_hot", "Process CPU is hot", f"CPU sample is {process_health.get('cpu_percent')}%."))
+    elif str(process_health.get("cpu_state") or "") == "elevated":
+        active.append(_alert("warn", "process_cpu_elevated", "Process CPU is elevated", f"CPU sample is {process_health.get('cpu_percent')}%."))
+    memory = process_health.get("memory") if isinstance(process_health.get("memory"), dict) else {}
+    if memory.get("state") == "hot":
+        active.append(_alert("critical", "process_memory_hot", "Process memory is hot", f"RSS is {memory.get('rss_mb')} MB."))
+    elif memory.get("state") == "elevated":
+        active.append(_alert("warn", "process_memory_elevated", "Process memory is elevated", f"RSS is {memory.get('rss_mb')} MB."))
+    if trends.get("state") == "degrading":
+        active.append(_alert("warn", "kernel_trend_degrading", "Kernel trend is degrading", "Recent persisted snapshots show worsening runtime signals."))
+    if durability.get("error"):
+        active.append(_alert("warn", "kernel_history_not_persisted", "Kernel history is not persisting", str(durability.get("error"))))
+    if not active and state in {"production_ready", "ready"} and score >= 78:
+        active.append(_alert("ok", "runtime_clear", "Runtime is clear", "No active kernel alerts."))
+    severity_rank = {"critical": 0, "warn": 1, "info": 2, "ok": 3}
+    active.sort(key=lambda row: severity_rank.get(str(row.get("severity")), 4))
+    state_label = "critical" if any(row.get("severity") == "critical" for row in active) else "watch" if any(row.get("severity") == "warn" for row in active) else "clear"
+    return {
+        "object": "agent_hub.runtime_kernel.alerts",
+        "state": state_label,
+        "active_count": sum(1 for row in active if row.get("severity") != "ok"),
+        "active": active[:12],
+    }
+
+
+def _alert(severity: str, alert_id: str, title: str, detail: str) -> dict[str, Any]:
+    return {
+        "severity": severity,
+        "id": alert_id,
+        "title": title,
+        "detail": detail,
     }
 
 
@@ -450,13 +762,16 @@ def _next_actions(
     provider_health: dict[str, dict[str, Any]],
     diagnostics_cache: dict[str, Any],
     pressure: dict[str, Any],
+    process_health: dict[str, Any],
+    trends: dict[str, Any],
+    durability: dict[str, Any],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     by_id = {str(row.get("id")): row for row in subsystems if isinstance(row, dict)}
     router = by_id.get("router", {})
     providers = by_id.get("provider_pool", {})
     security = by_id.get("security_policy", {})
-    memory = by_id.get("routing_memory", {})
+    routing_memory = by_id.get("routing_memory", {})
     workspace_tools = by_id.get("workspace_tools", {})
     provider_metrics = providers.get("metrics") if isinstance(providers.get("metrics"), dict) else {}
     available = int(provider_metrics.get("available") or 0)
@@ -578,7 +893,63 @@ def _next_actions(
                 source="diagnostics_cache",
             )
         )
-    if memory.get("state") == "disabled":
+    if str(process_health.get("cpu_state") or "") in {"elevated", "hot"}:
+        actions.append(
+            _action(
+                "inspect_process_cpu",
+                "warn" if process_health.get("cpu_state") == "elevated" else "critical",
+                "Inspect Agent Hub process CPU",
+                f"Kernel sampled process CPU at {process_health.get('cpu_percent')}%.",
+                path="/dashboard/kernel",
+                source="process_health",
+            )
+        )
+    process_memory = process_health.get("memory") if isinstance(process_health.get("memory"), dict) else {}
+    if str(process_memory.get("state") or "") in {"elevated", "hot"}:
+        actions.append(
+            _action(
+                "inspect_process_memory",
+                "warn" if process_memory.get("state") == "elevated" else "critical",
+                "Inspect Agent Hub process memory",
+                f"Kernel sampled RSS at {process_memory.get('rss_mb')} MB.",
+                path="/dashboard/kernel",
+                source="process_health",
+            )
+        )
+    if trends.get("state") == "degrading":
+        actions.append(
+            _action(
+                "review_kernel_trends",
+                "warn",
+                "Review degrading kernel trend",
+                "Persisted kernel snapshots show worsening runtime health.",
+                path="/dashboard/kernel",
+                source="trends",
+            )
+        )
+    if durability.get("error"):
+        actions.append(
+            _action(
+                "repair_kernel_history",
+                "warn",
+                "Repair kernel history persistence",
+                str(durability.get("error")),
+                path="/dashboard/kernel",
+                source="durability",
+            )
+        )
+    if str(pressure.get("state") or "") == "hot":
+        actions.append(
+            _action(
+                "reduce_runtime_pressure",
+                "critical",
+                "Reduce runtime pressure",
+                "Kernel pressure is hot; check slow routes, error rate, and process metrics.",
+                path="/dashboard/kernel",
+                source="pressure",
+            )
+        )
+    if routing_memory.get("state") == "disabled":
         actions.append(
             _action(
                 "enable_routing_memory",
@@ -810,6 +1181,7 @@ def _operational_score(
     subsystems: list[dict[str, Any]],
     provider_health: dict[str, dict[str, Any]],
     diagnostics_cache: dict[str, Any],
+    process_health: dict[str, Any],
 ) -> int:
     score = 100.0
     states = {str(row.get("id")): str(row.get("state")) for row in subsystems}
@@ -844,6 +1216,17 @@ def _operational_score(
         score -= 3
     if provider_health and not any(bool(row.get("supports_tools") or row.get("tool_support")) for row in provider_health.values()):
         score -= 2
+    cpu_state = str(process_health.get("cpu_state") or "")
+    if cpu_state == "hot":
+        score -= 8
+    elif cpu_state == "elevated":
+        score -= 3
+    memory = process_health.get("memory") if isinstance(process_health.get("memory"), dict) else {}
+    memory_state = str(memory.get("state") or "")
+    if memory_state == "hot":
+        score -= 8
+    elif memory_state == "elevated":
+        score -= 3
     return max(0, min(100, int(round(score))))
 
 
@@ -857,6 +1240,83 @@ def _kernel_state(score: int, subsystems: list[dict[str, Any]]) -> str:
     if score >= 55:
         return "degraded"
     return "needs_attention"
+
+
+def _rss_bytes() -> int:
+    if os.name == "nt":
+        return _windows_rss_bytes()
+    try:
+        import resource
+
+        rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except (ImportError, OSError, ValueError):
+        return 0
+    if sys.platform == "darwin":
+        return max(0, rss)
+    return max(0, rss * 1024)
+
+
+def _windows_rss_bytes() -> int:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(ProcessMemoryCounters)
+        kernel32 = ctypes.WinDLL("kernel32.dll")
+        psapi = ctypes.WinDLL("psapi.dll")
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessMemoryCounters),
+            wintypes.DWORD,
+        ]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        handle = kernel32.GetCurrentProcess()
+        ok = psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
+        return int(counters.WorkingSetSize) if ok else 0
+    except (AttributeError, ImportError, OSError, ValueError):
+        return 0
+
+
+def _tracemalloc_bytes() -> tuple[int, int]:
+    try:
+        if not tracemalloc.is_tracing():
+            return 0, 0
+        current, peak = tracemalloc.get_traced_memory()
+        return int(current), int(peak)
+    except RuntimeError:
+        return 0, 0
+
+
+def _threshold_state(value: float, *, elevated: float, hot: float) -> str:
+    numeric = _float(value) or 0.0
+    if numeric >= hot:
+        return "hot"
+    if numeric >= elevated:
+        return "elevated"
+    return "nominal"
+
+
+def _float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _public_bind_host(host: str) -> bool:

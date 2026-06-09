@@ -48,16 +48,17 @@ By default the adapter runs with `--sandbox read-only`,
 `AGENT_HUB_CODEX_CLI_PROFILE` when needed.
 
 For the easiest no-key setup in VS Code, run `Agent Hub: Install Codex CLI` if
-`codex` is missing, then run `Agent Hub: Use Codex CLI Without API Key` or click
-`Codex CLI Mode` in Agent Hub. That enables `codex-cli`, disables API-key
+`codex` is missing, then run `Agent Hub: Use Signed-In Codex CLI` or click
+`Use Codex CLI` in Agent Hub. That enables `codex-cli`, disables API-key
 fallbacks, caps output, and uses compact Codex prompts. Set
 `AGENT_HUB_CODEX_CLI_PROMPT_TOKENS` to override the provider-side prompt budget.
 
-Token Safe Mode is separate from Codex CLI Mode: it routes free cloud models
-first to avoid spending Codex calls, but keeps Codex CLI and API-key fallback
-requests at the normal context and output budget.
+`Save Codex Tokens` is separate from `Use Codex CLI`: it routes free cloud
+models first to avoid spending Codex calls, then keeps Codex CLI fallback
+compact with an adaptive task-aware context digest, reduced tool and repo
+metadata, fewer agent steps, and shorter output caps.
 
-Free Only Mode is stricter. It sets `free_only=true` and
+`Free Models Only` is stricter. It sets `free_only=true` and
 `disable_non_free_models=true`, disables `codex-cli` and hosted API-key agents,
 and rewrites cloud routes to eligible free/local/free-tier models only. Use it
 when Codex CLI or paid/API-key fallback calls should not run at all.

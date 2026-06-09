@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -18,12 +19,48 @@ _CHARS_PER_TOKEN = 4
 _DEFAULT_PROMPT_BUDGET_TOKENS = 6_000
 _OPTIMIZED_PROMPT_BUDGET_TOKENS = 2_400
 _OPTIMIZED_RECENT_MESSAGES = 4
+_TASK_KEYWORD_LIMIT = 24
 _SECRET_RE = re.compile(
     r"(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*['\"]?[^'\"\s]{8,}|"
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----|"
     r"\bsk-[A-Za-z0-9_-]{20,}",
     re.DOTALL,
 )
+_CONTEXT_ANCHOR_RE = re.compile(
+    r"(?i)^\s*(file|current file|current folder|language|diff --git|@@|[-+]{3}\s|current folder files)\b"
+)
+_CODE_SYMBOL_RE = re.compile(
+    r"^\s*(async\s+)?(def|class|function|const|let|var|import|export|interface|type|enum)\b|"
+    r"^\s*[A-Za-z_][\w$.-]{2,}\s*[:=]\s*"
+)
+_TASK_STOPWORDS = {
+    "about",
+    "after",
+    "again",
+    "agent",
+    "because",
+    "before",
+    "codex",
+    "could",
+    "current",
+    "from",
+    "have",
+    "into",
+    "should",
+    "that",
+    "their",
+    "there",
+    "these",
+    "this",
+    "through",
+    "want",
+    "what",
+    "when",
+    "where",
+    "while",
+    "with",
+    "would",
+}
 
 
 class CodexCliProvider(BaseProviderAdapter):
@@ -36,6 +73,9 @@ class CodexCliProvider(BaseProviderAdapter):
         output_path = _temporary_output_path()
         command = _codex_exec_command(self.agent, output_path)
         prompt = _codex_prompt(request)
+        optimized = _codex_prompt_optimized(request)
+        budget_chars = _codex_prompt_budget_chars(request, optimized=optimized)
+        options = _agent_hub_options(request)
         try:
             completed = subprocess.run(
                 command,
@@ -58,7 +98,6 @@ class CodexCliProvider(BaseProviderAdapter):
                     },
                 )
             text = output_text or completed.stdout.strip()
-            optimized = _codex_prompt_optimized(request)
             return ProviderResult(
                 text=text,
                 model=self.agent.model,
@@ -66,7 +105,9 @@ class CodexCliProvider(BaseProviderAdapter):
                     "provider": "codex-cli",
                     "returncode": completed.returncode,
                     "prompt_chars": len(prompt),
+                    "prompt_budget_tokens": max(1, budget_chars // _CHARS_PER_TOKEN),
                     "prompt_optimized": optimized,
+                    "token_safe_profile": options.get("token_safe_profile") or ("optimized" if optimized else "standard"),
                     "stdout": _short(completed.stdout),
                     "stderr": _short(completed.stderr),
                 },
@@ -126,6 +167,8 @@ def _codex_prompt(request: HubRequest) -> str:
     optimized = _codex_prompt_optimized(request)
     budget_chars = _codex_prompt_budget_chars(request, optimized=optimized)
     selected_messages = _selected_messages(messages, optimized=optimized)
+    latest_task = _latest_task_text(selected_messages) or request.task or ""
+    options = _agent_hub_options(request)
     context_budget = max(800, int(budget_chars * (0.38 if optimized else 0.55)))
     message_budget = max(800, budget_chars - context_budget - 1200)
 
@@ -137,11 +180,17 @@ def _codex_prompt(request: HubRequest) -> str:
         "Do not mention this Codex CLI wrapper.",
     ]
     if optimized:
-        lines.append("Use the compact context below; prefer concise answers and avoid restating unchanged code.")
+        profile = str(options.get("token_safe_profile") or "surgical")
+        lines.append(
+            f"Token-safe profile: {profile}. Use the compact context digest below; "
+            "prefer concise answers, inspect files only when needed, and avoid restating unchanged code."
+        )
     if request.max_tokens:
         lines.append(f"Keep the response within about {request.max_tokens} tokens.")
     if request.context:
-        lines.extend(["", "Context:", _compact_text(request.context, context_budget)])
+        heading = "Context digest:" if optimized else "Context:"
+        context_text = _context_digest(request.context, latest_task, context_budget) if optimized else _compact_text(request.context, context_budget)
+        lines.extend(["", heading, context_text])
     lines.append("")
     lines.append("Conversation:")
     per_message_budget = max(600, int(message_budget / max(1, len(selected_messages))))
@@ -161,6 +210,89 @@ def _codex_prompt(request: HubRequest) -> str:
         lines.append(f"</{role}>")
         lines.append("")
     return _compact_text("\n".join(lines).strip(), budget_chars) + "\n"
+
+
+def _latest_task_text(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if str(message.get("role") or "").lower() == "user":
+            return _content_text(message.get("content"))
+    return ""
+
+
+def _context_digest(context: Any, task_text: str, budget_chars: int) -> str:
+    text = _redact_secrets(str(context or ""))
+    if len(text) <= budget_chars:
+        return text
+    maximum = max(800, int(budget_chars))
+    keywords = _task_keywords(task_text)
+    lines = text.splitlines()
+    selected: dict[int, int] = {}
+    for index, line in enumerate(lines):
+        score = _context_line_score(line, keywords)
+        if score <= 0:
+            continue
+        selected[index] = max(score, selected.get(index, 0))
+        if score >= 6:
+            if index > 0:
+                selected.setdefault(index - 1, 1)
+            if index + 1 < len(lines):
+                selected.setdefault(index + 1, 1)
+
+    if not selected:
+        return _compact_text(text, maximum)
+
+    digest_lines = [
+        "[Agent Hub token-safe context digest]",
+        f"source_chars={len(text)} source_sha256={hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]} selected_lines={len(selected)}",
+    ]
+    for index in sorted(selected, key=lambda item: (-selected[item], item))[:160]:
+        digest_lines.append(f"L{index + 1}: {lines[index]}")
+    digest_lines = digest_lines[:2] + sorted(digest_lines[2:], key=_digest_line_number)
+    digest = "\n".join(digest_lines)
+    if len(digest) <= maximum:
+        return digest
+    marker = "\n...[context digest trimmed; ask Agent Hub tools for exact file contents if needed]...\n"
+    keep = max(200, maximum - len(marker))
+    return digest[:keep].rstrip() + marker
+
+
+def _digest_line_number(line: str) -> int:
+    match = re.match(r"L(\d+):", line)
+    return int(match.group(1)) if match else 0
+
+
+def _context_line_score(line: str, keywords: list[str]) -> int:
+    stripped = line.strip()
+    if not stripped:
+        return 0
+    score = 0
+    lowered = stripped.lower()
+    if _CONTEXT_ANCHOR_RE.search(stripped):
+        score += 8
+    if _CODE_SYMBOL_RE.search(stripped):
+        score += 3
+    if stripped.startswith(("+", "-")) and not stripped.startswith(("+++", "---")):
+        score += 3
+    if "[redacted secret]" in lowered:
+        score += 4
+    if any(keyword in lowered for keyword in keywords):
+        score += 6
+    if re.search(r"[\w./-]+\.(py|js|ts|tsx|jsx|json|md|toml|yaml|yml|css|html)\b", stripped, re.I):
+        score += 2
+    return score
+
+
+def _task_keywords(text: str) -> list[str]:
+    counts: dict[str, int] = {}
+    for raw in re.findall(r"[A-Za-z0-9_./-]{4,}", text.lower()):
+        word = raw.strip("./-_")
+        if not word or word in _TASK_STOPWORDS or word.isdigit():
+            continue
+        counts[word] = counts.get(word, 0) + 1
+    return [
+        word
+        for word, _count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:_TASK_KEYWORD_LIMIT]
+    ]
 
 
 def _selected_messages(messages: list[dict[str, Any]], *, optimized: bool) -> list[dict[str, Any]]:

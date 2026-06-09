@@ -144,6 +144,7 @@ DIAGNOSTIC_ENDPOINTS = {
     "/v1/routing-intelligence",
     "/v1/routing/test-failover",
     "/v1/routing-history",
+    "/v1/feature-scorecard",
     "/v1/inbox/status",
     "/v1/mcp/status",
     "/v1/limits",
@@ -855,7 +856,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
                 )
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 client_connected = False
 
         def send_progress(event: dict[str, Any]) -> None:
@@ -945,7 +946,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(body)
+        if not self._write_response_body(body):
+            return
         _safe_flush(self)
 
     def _send_diagnostics_json(self, data: dict[str, Any]) -> None:
@@ -1005,8 +1007,17 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self._send_common_headers()
         self.end_headers()
-        self.wfile.write(body)
+        if not self._write_response_body(body):
+            return
         _safe_flush(self)
+
+    def _write_response_body(self, body: bytes) -> bool:
+        try:
+            self.wfile.write(body)
+            return True
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self._kernel_response_status = 499
+            return False
 
     def _send_common_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -1145,6 +1156,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     ("Runtime Kernel", "/dashboard/kernel", "Subsystem health, request telemetry, cache flow"),
                     ("Status", "/dashboard/status", "Backend, providers, and next dashboard links"),
                     ("Readiness", "/dashboard/readiness", "Setup scorecard and next action"),
+                    ("Feature Scorecard", "/dashboard/feature-scorecard", "10/10 area proof and remaining blockers"),
                     ("Provider Health", "/dashboard/provider-health", "Availability, reliability, cooldowns"),
                     ("Limits", "/dashboard/limits", "Quota, active model, fallback state"),
                     ("Usage", "/dashboard/usage", "Tokens, provider calls, tool and permission activity"),

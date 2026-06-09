@@ -108,6 +108,44 @@ class CliTests(unittest.TestCase):
             self.assertFalse(data["ok"])
             self.assertTrue(any(check["id"] == "route_ready_provider" for check in data["failed"]))
 
+    def test_feature_scorecard_reports_all_local_areas_10(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "state_dir": str(Path(tmp) / "state"),
+                        "inbox_dir": str(Path(tmp) / "inbox"),
+                        "outbox_dir": str(Path(tmp) / "outbox"),
+                        "archive_dir": str(Path(tmp) / "archive"),
+                        "auto_detect_local_models": False,
+                        "debug_echo_enabled": True,
+                        "default_route": ["echo"],
+                        "routes": [{"name": "cloud-agent", "agents": ["echo"]}],
+                        "agents": [
+                            {
+                                "name": "echo",
+                                "provider": "echo",
+                                "provider_type": "echo",
+                                "model": "local-echo",
+                                "free": True,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(["--config", str(path), "feature-scorecard", "--json"])
+
+            self.assertEqual(code, 0)
+            data = json.loads(buffer.getvalue())
+            self.assertEqual(data["object"], "agent_hub.feature_scorecard")
+            self.assertEqual(data["rating"], 10.0)
+            self.assertTrue(data["all_local_areas_10"], data["blockers"])
+
     def test_doctor_json_includes_install_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"

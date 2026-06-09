@@ -47,9 +47,15 @@ const DEFAULT_CODEX_CLI_MODEL = "gpt-5.5";
 const DEFAULT_AGENT_CONTEXT_BUDGET = 32000;
 const DEFAULT_AGENT_MAX_STEPS = 20;
 const MAX_TOKEN_SAVE_OUTPUT_TOKENS = 800;
+const CODEX_CLI_MICRO_CONTEXT_BUDGET = 1200;
 const CODEX_CLI_CONTEXT_BUDGET = 2400;
+const CODEX_CLI_RESCUE_CONTEXT_BUDGET = 3600;
+const CODEX_CLI_MICRO_OUTPUT_TOKENS = 320;
 const CODEX_CLI_OUTPUT_TOKENS = 500;
+const CODEX_CLI_RESCUE_OUTPUT_TOKENS = 700;
+const CODEX_CLI_MICRO_AGENT_STEPS = 3;
 const CODEX_CLI_AGENT_STEPS = 6;
+const CODEX_CLI_RESCUE_AGENT_STEPS = 8;
 const CODEX_CLI_REPO_FILES = 1;
 const CODEX_CLI_REPO_CHARS = 1800;
 const CODEX_CLI_NPM_PACKAGE = "@openai/codex@latest";
@@ -834,12 +840,26 @@ function updateStatusBar(dashboard = {}) {
   statusBarItem.text = status === "Running"
     ? `$(hubot) Agent Hub: ${provider || "provider"}${model ? `/${model}` : ""}${remaining}`
     : `$(circle-slash) Agent Hub: ${status}`;
-  statusBarItem.tooltip = dashboard.statusText || "Agent Hub";
+  const mode = dashboardModeLabel(dashboard);
+  statusBarItem.tooltip = [dashboard.statusText || "Agent Hub", mode ? `Mode: ${mode}` : ""].filter(Boolean).join("\n");
+}
+
+function dashboardModeLabel(dashboard = {}) {
+  if (dashboard.freeOnlyStrictMode) {
+    return "Free Models Only";
+  }
+  if (dashboard.codexCliMode) {
+    return "Use Codex CLI";
+  }
+  if (dashboard.tokenSafeMode) {
+    return "Save Codex Tokens";
+  }
+  return "";
 }
 
 async function sidebarDashboardState() {
   const config = settings();
-  const cloudSettings = cloudModelSettingsPayload(config);
+  const modes = modeToggleState(config);
   const dashboard = {
     status: serverLifecycleState,
     statusText: lastServerMessage || "Agent Hub is not running.",
@@ -847,9 +867,9 @@ async function sidebarDashboardState() {
     agentProviderMode: config.agentProviderMode,
     agentMode: config.agentMode,
     approvalMode: config.approvalMode,
-    tokenSafeMode: isFreeCloudSavingsMode(config),
-    freeOnlyStrictMode: cloudSettings.freeOnly !== false && cloudSettings.disableNonFreeModels === true,
-    codexCliMode: isMaxTokenSaveMode(config) && cloudSettings.cloudRouteMode === "codex-cli",
+    tokenSafeMode: modes.tokenSafeMode,
+    freeOnlyStrictMode: modes.freeOnlyStrictMode,
+    codexCliMode: modes.codexCliMode,
     autoStart: config.autoStart,
     automatedModelFeedback: config.automatedModelFeedback,
     extensionVersion: EXTENSION_VERSION,
@@ -2413,6 +2433,12 @@ function sidebarContextDiagnostics(debugContext) {
   };
 }
 
+function sidebarActionHelp(label, help) {
+  const safeLabel = escapeHtml(label);
+  const safeHelp = escapeHtml(help);
+  return `<button class="action-help" type="button" aria-label="${safeLabel} help: ${safeHelp}" title="${safeHelp}" data-help="${safeHelp}">i</button>`;
+}
+
 function sidebarHtml(webview, logoPath) {
   const nonce = getNonce();
   const logoSrc = webview.asWebviewUri(logoPath);
@@ -2591,6 +2617,24 @@ function sidebarHtml(webview, logoPath) {
       background: var(--error-soft);
     }
 
+    .topbar-chip[data-tone="ok"] {
+      color: var(--ok);
+      border-color: color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+      background: var(--ok-soft);
+    }
+
+    .topbar-chip[data-tone="cyan"] {
+      color: var(--cyan);
+      border-color: color-mix(in srgb, var(--cyan) 42%, var(--subtle-border));
+      background: var(--cyan-soft);
+    }
+
+    .topbar-chip[data-tone="accent"] {
+      color: var(--app-fg);
+      border-color: color-mix(in srgb, var(--accent) 42%, var(--subtle-border));
+      background: var(--accent-soft);
+    }
+
     .hero {
       position: relative;
       display: grid;
@@ -2726,7 +2770,7 @@ function sidebarHtml(webview, logoPath) {
 
     .hero-state-strip {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
       gap: 6px;
       min-width: 0;
     }
@@ -2767,6 +2811,30 @@ function sidebarHtml(webview, logoPath) {
 
     .state-pill:nth-child(4)::before {
       background: var(--amber);
+    }
+
+    .state-pill:nth-child(5)::before {
+      background: var(--ok);
+    }
+
+    .state-pill[data-tone="ok"] {
+      border-color: color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--ok) 10%, var(--card));
+    }
+
+    .state-pill[data-tone="warn"] {
+      border-color: color-mix(in srgb, var(--warn) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--warn) 10%, var(--card));
+    }
+
+    .state-pill[data-tone="accent"] {
+      border-color: color-mix(in srgb, var(--accent) 46%, var(--subtle-border));
+      background: color-mix(in srgb, var(--accent) 10%, var(--card));
+    }
+
+    .state-pill[data-tone="cyan"] {
+      border-color: color-mix(in srgb, var(--cyan) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--cyan) 9%, var(--card));
     }
 
     .state-pill span {
@@ -3578,6 +3646,19 @@ function sidebarHtml(webview, logoPath) {
       min-height: 32px;
     }
 
+    .action-with-help {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 26px;
+      gap: 5px;
+      align-items: stretch;
+      min-width: 0;
+    }
+
+    .main-action-with-help {
+      grid-template-columns: minmax(0, 1fr) 30px;
+    }
+
     button {
       width: 100%;
       min-height: 30px;
@@ -3590,6 +3671,10 @@ function sidebarHtml(webview, logoPath) {
       cursor: pointer;
       text-align: center;
       transition: background 120ms ease, border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+    }
+
+    .action-with-help > button:not(.action-help) {
+      min-width: 0;
     }
 
     .command-button {
@@ -3639,6 +3724,115 @@ function sidebarHtml(webview, logoPath) {
       border-radius: 999px;
       background: linear-gradient(90deg, var(--accent), transparent);
       opacity: 0.72;
+    }
+
+    .mode-toggle[data-active="true"],
+    .trust-preset[data-active="true"] {
+      color: #ffffff;
+      border-color: color-mix(in srgb, var(--ok) 58%, var(--subtle-border));
+      background: linear-gradient(135deg, color-mix(in srgb, var(--ok) 78%, var(--button)), color-mix(in srgb, var(--ok) 72%, var(--accent)));
+      box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--ok) 34%, transparent),
+        inset 0 1px 0 color-mix(in srgb, #ffffff 16%, transparent);
+    }
+
+    .command-button.mode-toggle[data-active="true"] .button-meta {
+      color: color-mix(in srgb, #ffffff 78%, var(--ok));
+    }
+
+    button[data-running="true"] {
+      color: #ffffff;
+      opacity: 1;
+      border-color: color-mix(in srgb, var(--warn) 62%, var(--subtle-border));
+      background: linear-gradient(135deg, var(--warn), color-mix(in srgb, var(--warn) 68%, var(--button)));
+      box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--warn) 34%, transparent),
+        inset 0 1px 0 color-mix(in srgb, #ffffff 16%, transparent);
+    }
+
+    button[data-running="true"]:disabled:hover {
+      color: #ffffff;
+      background: linear-gradient(135deg, var(--warn), color-mix(in srgb, var(--warn) 68%, var(--button)));
+      transform: none;
+    }
+
+    .command-button[data-running="true"] .button-meta {
+      color: color-mix(in srgb, #ffffff 78%, var(--warn));
+    }
+
+    .action-help {
+      position: relative;
+      z-index: 4;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      min-width: 26px;
+      min-height: 30px;
+      padding: 0;
+      border-radius: 999px;
+      color: color-mix(in srgb, var(--cyan) 82%, var(--app-fg));
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1;
+      background: color-mix(in srgb, var(--card) 84%, transparent);
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 7%, transparent);
+    }
+
+    .main-action-with-help .action-help {
+      width: 30px;
+      min-width: 30px;
+      min-height: 54px;
+      border-radius: 8px;
+    }
+
+    .action-help::after {
+      content: attr(data-help);
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 7px);
+      width: min(220px, calc(100vw - 34px));
+      padding: 8px 9px;
+      border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+      border-radius: 8px;
+      color: var(--app-fg);
+      background: color-mix(in srgb, var(--panel) 96%, #000000 4%);
+      box-shadow: var(--shadow);
+      font-size: 11px;
+      font-weight: 400;
+      line-height: 1.35;
+      text-align: left;
+      white-space: normal;
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(3px);
+      transition: opacity 120ms ease, transform 120ms ease;
+    }
+
+    .action-help:hover::after,
+    .action-help:focus-visible::after {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .help-toast {
+      position: sticky;
+      top: 8px;
+      z-index: 8;
+      display: none;
+      margin: 0 0 8px;
+      border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+      border-radius: 8px;
+      padding: 8px 9px;
+      color: var(--app-fg);
+      font-size: 11px;
+      line-height: 1.35;
+      background: color-mix(in srgb, var(--panel) 94%, var(--accent) 6%);
+      box-shadow: var(--shadow);
+    }
+
+    .help-toast[data-visible="true"] {
+      display: block;
     }
 
     .button-main,
@@ -3788,6 +3982,18 @@ function sidebarHtml(webview, logoPath) {
     .task-submit-row button {
       width: auto;
       white-space: nowrap;
+    }
+
+    .submit-action-with-help {
+      display: grid;
+      grid-template-columns: auto 24px;
+      gap: 5px;
+      align-items: stretch;
+    }
+
+    .submit-action-with-help .action-help {
+      width: 24px;
+      min-width: 24px;
     }
 
     button.primary {
@@ -3985,6 +4191,7 @@ function sidebarHtml(webview, logoPath) {
 </head>
 <body>
   <div class="shell">
+    <div class="help-toast" id="helpToast" role="status" aria-live="polite"></div>
     <header class="topbar">
       <img src="${logoSrc}" alt="">
       <div class="brand">
@@ -3995,6 +4202,7 @@ function sidebarHtml(webview, logoPath) {
       <div class="topbar-status">
         <span class="topbar-chip" id="headerStatus" data-state="Stopped">Offline</span>
         <span class="topbar-chip" id="headerRoute">cloud</span>
+        <span class="topbar-chip" id="headerCostMode" data-tone="standard">Standard</span>
       </div>
     </header>
     <section class="hero">
@@ -4026,8 +4234,15 @@ function sidebarHtml(webview, logoPath) {
           <span>Readiness</span>
           <strong id="heroReadiness">--</strong>
         </div>
+        <div class="state-pill" id="heroCostPill" data-tone="accent">
+          <span>Cost</span>
+          <strong id="heroCostMode">Standard</strong>
+        </div>
       </div>
-      <button class="primary hero-server-action" id="heroServerAction" type="button" data-primary-action="start-server" data-state="Stopped">Start</button>
+      <div class="action-with-help main-action-with-help">
+        <button class="primary hero-server-action" id="heroServerAction" type="button" data-primary-action="start-server" data-state="Stopped">Start</button>
+        ${sidebarActionHelp("Start", "Start, stop, or restart the local Agent Hub backend used by the sidebar, chat, Cline, and compatible clients.")}
+      </div>
       <div class="command-surface">
         <form class="quick-task" id="quickTaskForm">
           <label for="quickTaskInput">Task</label>
@@ -4036,59 +4251,98 @@ function sidebarHtml(webview, logoPath) {
             <div class="task-options">
               <label><input id="quickTaskIncludeSelection" type="checkbox" checked> Include selection</label>
             </div>
-            <button class="primary" id="quickTaskSend" type="submit">Send</button>
+            <div class="submit-action-with-help">
+              <button class="primary" id="quickTaskSend" type="submit">Send</button>
+              ${sidebarActionHelp("Send", "Send the task to Agent Hub chat with the selected workspace context and current routing settings.")}
+            </div>
           </div>
         </form>
       </div>
       <div class="actions quick-actions">
-        <button class="command-button" id="openChat" type="button" title="Open Agent Hub chat" data-icon="C">
-          <span class="button-main">Chat</span>
-          <span class="button-meta">Open chat</span>
-        </button>
-        <button class="command-button" id="quickDashboard" type="button" title="Open the Agent Hub dashboard in your browser" data-icon="D">
-          <span class="button-main">Dashboard</span>
-          <span class="button-meta">Browser</span>
-        </button>
-        <button class="command-button" id="quickKernel" type="button" title="Open the runtime kernel control plane" data-icon="K">
-          <span class="button-main">Kernel</span>
-          <span class="button-meta">Runtime</span>
-        </button>
-        <button class="command-button" id="quickCheckup" type="button" title="Repair config, check requirements, start Agent Hub, and open Route Lab" data-icon="V">
-          <span class="button-main">Checkup</span>
-          <span class="button-meta">One click</span>
-        </button>
-        <button class="command-button" id="quickRouteLab" type="button" title="Score current route candidates without calling a provider" data-icon="R">
-          <span class="button-main">Route Lab</span>
-          <span class="button-meta">Why model?</span>
-        </button>
-        <button class="command-button" id="quickSettings" type="button" title="Open Agent Hub settings" data-icon="S">
-          <span class="button-main">Settings</span>
-          <span class="button-meta">Models</span>
-        </button>
-        <button class="command-button" id="quickTokenSafeMode" type="button" title="Enable Token Safe Mode" data-icon="T">
-          <span class="button-main">Token Safe</span>
-          <span class="button-meta">Save context</span>
-        </button>
-        <button class="command-button" id="quickFreeOnlyMode" type="button" title="Disable Codex CLI and non-free models" data-icon="F">
-          <span class="button-main">Free Only</span>
-          <span class="button-meta">No paid models</span>
-        </button>
-        <button class="command-button" id="quickCodexCliMode" type="button" title="Use Codex CLI without an API key" data-icon="X">
-          <span class="button-main">Codex CLI</span>
-          <span class="button-meta">No API key</span>
-        </button>
-        <button class="command-button" id="quickInstallCodexCli" type="button" title="Install or sign in to Codex CLI" data-icon="I">
-          <span class="button-main">Install CLI</span>
-          <span class="button-meta">Codex setup</span>
-        </button>
-        <button class="command-button" id="codeAgent" type="button" title="Run the coding agent" data-icon="A">
-          <span class="button-main">Code</span>
-          <span class="button-meta">Edit files</span>
-        </button>
-        <button class="command-button" id="explainFile" type="button" title="Explain the current file" data-icon="E">
-          <span class="button-main">Explain</span>
-          <span class="button-meta">This file</span>
-        </button>
+        <div class="action-with-help">
+          <button class="command-button" id="openChat" type="button" title="Open Agent Hub chat" data-icon="C">
+            <span class="button-main">Chat</span>
+            <span class="button-meta">Open chat</span>
+          </button>
+          ${sidebarActionHelp("Chat", "Open Agent Hub chat for routed workspace questions, coding help, and follow-up tasks.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button" id="quickDashboard" type="button" title="Open the Agent Hub dashboard in your browser" data-icon="D">
+            <span class="button-main">Dashboard</span>
+            <span class="button-meta">Browser</span>
+          </button>
+          ${sidebarActionHelp("Dashboard", "Open the browser dashboard with routing, costs, benchmarks, and backend health.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button" id="quickKernel" type="button" title="Open the runtime kernel control plane" data-icon="K">
+            <span class="button-main">Kernel</span>
+            <span class="button-meta">Runtime</span>
+          </button>
+          ${sidebarActionHelp("Kernel", "Inspect runtime pressure, queues, tool activity, and subsystem health.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button" id="quickCheckup" type="button" title="Repair config, check requirements, start Agent Hub, and open Route Lab" data-icon="V">
+            <span class="button-main">Checkup</span>
+            <span class="button-meta">One click</span>
+          </button>
+          ${sidebarActionHelp("Checkup", "Run setup repair, dependency checks, server start, and route diagnostics in one pass.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button" id="quickRouteLab" type="button" title="Score current route candidates without calling a provider" data-icon="R">
+            <span class="button-main">Route Lab</span>
+            <span class="button-meta">Why model?</span>
+          </button>
+          ${sidebarActionHelp("Route Lab", "Score route candidates and explain model selection without calling a provider.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button" id="quickSettings" type="button" title="Open Agent Hub settings" data-icon="S">
+            <span class="button-main">Settings</span>
+            <span class="button-meta">Models</span>
+          </button>
+          ${sidebarActionHelp("Settings", "Open VS Code settings for Agent Hub model, server, permission, and token options.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button mode-toggle" id="quickTokenSafeMode" type="button" title="Save Codex tokens with adaptive compact fallback routing" data-icon="T">
+            <span class="button-main">Save Codex Tokens</span>
+            <span class="button-meta">Compact fallback</span>
+          </button>
+          ${sidebarActionHelp("Save Codex Tokens", "Use free models first, then send Codex fallback an adaptive compact digest with smaller context, shorter output, and reduced tool schema.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button mode-toggle" id="quickFreeOnlyMode" type="button" title="Use only free or local models" data-icon="F">
+            <span class="button-main">Free Models Only</span>
+            <span class="button-meta">No paid fallback</span>
+          </button>
+          ${sidebarActionHelp("Free Models Only", "Block Codex CLI and paid/API-key providers so routing stays on free or local models.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button mode-toggle" id="quickCodexCliMode" type="button" title="Use your signed-in Codex CLI" data-icon="X">
+            <span class="button-main">Use Codex CLI</span>
+            <span class="button-meta">Signed-in CLI</span>
+          </button>
+          ${sidebarActionHelp("Use Codex CLI", "Route through the locally signed-in Codex CLI instead of requiring an OpenAI API key.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button" id="quickInstallCodexCli" type="button" title="Install or sign in to Codex CLI" data-icon="I">
+            <span class="button-main">Install Codex CLI</span>
+            <span class="button-meta">Codex setup</span>
+          </button>
+          ${sidebarActionHelp("Install Codex CLI", "Install or sign in to the Codex CLI runtime used by Agent Hub.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button" id="codeAgent" type="button" title="Run the coding agent" data-icon="A">
+            <span class="button-main">Code</span>
+            <span class="button-meta">Edit files</span>
+          </button>
+          ${sidebarActionHelp("Code", "Run the workspace coding agent with file editing and a test-focused workflow.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button" id="explainFile" type="button" title="Explain the current file" data-icon="E">
+            <span class="button-main">Explain</span>
+            <span class="button-meta">This file</span>
+          </button>
+          ${sidebarActionHelp("Explain", "Ask Agent Hub to explain the current file or active editor context.")}
+        </div>
       </div>
     </section>
     <section class="model-control-plane">
@@ -4139,7 +4393,10 @@ function sidebarHtml(webview, logoPath) {
           <strong id="kernelTitle">Kernel offline</strong>
           <span id="kernelDetail">Start Agent Hub to inspect runtime pressure and subsystem state.</span>
         </div>
-        <button id="openRuntimeKernel" type="button">Open Kernel</button>
+        <div class="action-with-help">
+          <button id="openRuntimeKernel" type="button">Open Kernel</button>
+          ${sidebarActionHelp("Open Kernel", "Open the runtime kernel dashboard for subsystem health, queues, pressure, and recent runtime events.")}
+        </div>
       </div>
       <div class="signal-tile-grid" id="kernelSignalGrid"></div>
       <div class="model-board-grid compact">
@@ -4171,7 +4428,10 @@ function sidebarHtml(webview, logoPath) {
       <div class="flow-strip" id="flowStrip"></div>
       <div class="detail" id="flowDetail">planner &gt; worker &gt; reviewer &gt; fixer &gt; final</div>
       <div class="template-grid" id="workflowTemplateList"></div>
-      <button class="primary killer-button" id="killerWorkflow" type="button">Issue to PR</button>
+      <div class="action-with-help">
+        <button class="primary killer-button" id="killerWorkflow" type="button">Issue to PR</button>
+        ${sidebarActionHelp("Issue to PR", "Run the full workflow from issue or prompt through planning, edits, validation, fixes, and pull request summary.")}
+      </div>
     </section>
     <details class="panel">
       <summary class="section-head">
@@ -4226,12 +4486,30 @@ function sidebarHtml(webview, logoPath) {
       <div class="detail" id="serverDetail">Checking Agent Hub...</div>
       <ul class="list" id="onboardingList"></ul>
       <div class="actions">
-        <button id="stopServer" type="button">Stop</button>
-        <button id="restartServer" type="button">Restart</button>
-        <button id="runCheckup" type="button">Run Checkup</button>
-        <button id="checkRequirements" type="button">Check Requirements</button>
-        <button id="fixSafeConfig" type="button">Repair Config</button>
-        <button id="checkHealth" type="button">Check Status</button>
+        <div class="action-with-help">
+          <button id="stopServer" type="button">Stop</button>
+          ${sidebarActionHelp("Stop", "Stop the extension-owned Agent Hub backend process.")}
+        </div>
+        <div class="action-with-help">
+          <button id="restartServer" type="button">Restart</button>
+          ${sidebarActionHelp("Restart", "Restart Agent Hub so repaired config, provider changes, or backend updates take effect.")}
+        </div>
+        <div class="action-with-help">
+          <button id="runCheckup" type="button">Run Checkup</button>
+          ${sidebarActionHelp("Run Checkup", "Repair safe config issues, check local requirements, start Agent Hub, and open route diagnostics.")}
+        </div>
+        <div class="action-with-help">
+          <button id="checkRequirements" type="button">Check Requirements</button>
+          ${sidebarActionHelp("Check Requirements", "Check whether Python, Node.js, virtual environment, and backend files needed by Agent Hub are available.")}
+        </div>
+        <div class="action-with-help">
+          <button id="fixSafeConfig" type="button">Repair Config</button>
+          ${sidebarActionHelp("Repair Config", "Update generated Agent Hub config to safe defaults without touching unrelated workspace files.")}
+        </div>
+        <div class="action-with-help">
+          <button id="checkHealth" type="button">Check Status</button>
+          ${sidebarActionHelp("Check Status", "Refresh backend health, provider readiness, routing status, and setup signals.")}
+        </div>
       </div>
     </details>
     <details class="panel">
@@ -4241,10 +4519,22 @@ function sidebarHtml(webview, logoPath) {
       <div class="detail" id="permissionDetail">Approval: ask</div>
       <div class="trust-grid" id="trustControlGrid"></div>
       <div class="actions">
-        <button class="trust-preset" data-preset="safe" type="button">Safe</button>
-        <button class="trust-preset" data-preset="shellAsk" type="button">Ask Shell</button>
-        <button class="trust-preset" data-preset="readonly" type="button">Read Only</button>
-        <button class="trust-preset" data-preset="auto" type="button">Auto</button>
+        <div class="action-with-help">
+          <button class="trust-preset" data-preset="safe" type="button">Safe</button>
+          ${sidebarActionHelp("Safe", "Use the default guarded mode for privileged actions while keeping routine Agent Hub operations smooth.")}
+        </div>
+        <div class="action-with-help">
+          <button class="trust-preset" data-preset="shellAsk" type="button">Ask Shell</button>
+          ${sidebarActionHelp("Ask Shell", "Allow most safe actions automatically but ask before shell commands run.")}
+        </div>
+        <div class="action-with-help">
+          <button class="trust-preset" data-preset="readonly" type="button">Read Only</button>
+          ${sidebarActionHelp("Read Only", "Block file writes, shell commands, and other privileged changes for inspection-only sessions.")}
+        </div>
+        <div class="action-with-help">
+          <button class="trust-preset" data-preset="auto" type="button">Auto</button>
+          ${sidebarActionHelp("Auto", "Allow privileged actions without prompts. Use only in trusted workspaces.")}
+        </div>
       </div>
       <div class="tool-chip-list" id="toolControlList"></div>
       <ul class="list" id="permissionList"></ul>
@@ -4266,9 +4556,18 @@ function sidebarHtml(webview, logoPath) {
       <ul class="list" id="routingReasonList"></ul>
       <ul class="list" id="routingRejectedList"></ul>
       <div class="actions">
-        <button id="openRouteLab" type="button">Open Route Lab</button>
-        <button id="explainRoute" type="button">Plain Text Explain</button>
-        <button id="openRoutingDashboard" type="button">Dashboard</button>
+        <div class="action-with-help">
+          <button id="openRouteLab" type="button">Open Route Lab</button>
+          ${sidebarActionHelp("Open Route Lab", "Open the simulator that scores route candidates and shows why a model would be selected.")}
+        </div>
+        <div class="action-with-help">
+          <button id="explainRoute" type="button">Plain Text Explain</button>
+          ${sidebarActionHelp("Plain Text Explain", "Show a concise text explanation of the current routing decision.")}
+        </div>
+        <div class="action-with-help">
+          <button id="openRoutingDashboard" type="button">Dashboard</button>
+          ${sidebarActionHelp("Routing Dashboard", "Open the full routing intelligence dashboard in the browser.")}
+        </div>
       </div>
     </details>
     <details class="panel">
@@ -4284,10 +4583,16 @@ function sidebarHtml(webview, logoPath) {
       <div class="detail" id="tokenUsage">No token usage yet</div>
       <div class="detail" id="contextDiagnostics"></div>
       <div class="actions">
-        <button id="freeOnlyMode" type="button">Free Only Mode</button>
-        <button id="tokenSafeMode" type="button">Token Safe Mode</button>
+        <div class="action-with-help">
+          <button class="mode-toggle" id="freeOnlyMode" type="button">Free Models Only</button>
+          ${sidebarActionHelp("Free Models Only", "Prefer free and local routes while disabling non-free provider choices.")}
+        </div>
+        <div class="action-with-help">
+          <button class="mode-toggle" id="tokenSafeMode" type="button">Save Codex Tokens</button>
+          ${sidebarActionHelp("Save Codex Tokens", "Enable adaptive micro/surgical/rescue Codex fallback budgets, shorter responses, and token-conscious routing defaults.")}
+        </div>
       </div>
-      <div class="detail" id="tokenSafeModeDetail">Token Safe Mode: Off</div>
+      <div class="detail" id="tokenSafeModeDetail">Save Codex Tokens: Off</div>
     </details>
     <details class="panel">
       <summary class="section-head">
@@ -4301,7 +4606,10 @@ function sidebarHtml(webview, logoPath) {
       </summary>
       <div class="detail" id="logDetail">Open the output channel for live logs.</div>
       <div class="actions">
-        <button id="openOutput" type="button">Open Logs</button>
+        <div class="action-with-help">
+          <button id="openOutput" type="button">Open Logs</button>
+          ${sidebarActionHelp("Open Logs", "Open the Agent Hub output channel with backend startup, health, and request diagnostics.")}
+        </div>
       </div>
     </details>
     <details class="panel">
@@ -4310,13 +4618,34 @@ function sidebarHtml(webview, logoPath) {
       </summary>
       <div class="detail" id="settingsDetail"></div>
       <div class="actions">
-        <button id="openSettings" type="button">Open Settings</button>
-        <button id="copyClineConfig" type="button">Copy Cline Config</button>
-        <button id="testClineConnection" type="button">Test Cline Connection</button>
-        <button id="showClineSetup" type="button">Show Cline Setup</button>
-        <button id="copyClaudeCodeConfig" type="button">Copy Claude Code Config</button>
-        <button id="testAnthropicEndpoint" type="button">Test Anthropic Endpoint</button>
-        <button id="showClaudeCodeSetup" type="button">Show Claude Code Setup</button>
+        <div class="action-with-help">
+          <button id="openSettings" type="button">Open Settings</button>
+          ${sidebarActionHelp("Open Settings", "Open VS Code settings for Agent Hub server, provider, permission, and token controls.")}
+        </div>
+        <div class="action-with-help">
+          <button id="copyClineConfig" type="button">Copy Cline Config</button>
+          ${sidebarActionHelp("Copy Cline Config", "Copy the OpenAI-compatible Agent Hub endpoint settings for Cline.")}
+        </div>
+        <div class="action-with-help">
+          <button id="testClineConnection" type="button">Test Cline Connection</button>
+          ${sidebarActionHelp("Test Cline Connection", "Send a lightweight request through the Cline-compatible endpoint to confirm Agent Hub responds.")}
+        </div>
+        <div class="action-with-help">
+          <button id="showClineSetup" type="button">Show Cline Setup</button>
+          ${sidebarActionHelp("Show Cline Setup", "Open visual setup guidance for connecting Cline to Agent Hub.")}
+        </div>
+        <div class="action-with-help">
+          <button id="copyClaudeCodeConfig" type="button">Copy Claude Code Config</button>
+          ${sidebarActionHelp("Copy Claude Code Config", "Copy Anthropic-compatible endpoint settings for Claude Code.")}
+        </div>
+        <div class="action-with-help">
+          <button id="testAnthropicEndpoint" type="button">Test Anthropic Endpoint</button>
+          ${sidebarActionHelp("Test Anthropic Endpoint", "Send a lightweight request through the Anthropic-compatible endpoint to confirm Claude Code routing.")}
+        </div>
+        <div class="action-with-help">
+          <button id="showClaudeCodeSetup" type="button">Show Claude Code Setup</button>
+          ${sidebarActionHelp("Show Claude Code Setup", "Open visual setup guidance for connecting Claude Code to Agent Hub.")}
+        </div>
       </div>
     </details>
   </div>
@@ -4330,6 +4659,8 @@ function sidebarHtml(webview, logoPath) {
     const heroApproval = document.getElementById("heroApproval");
     const heroProviders = document.getElementById("heroProviders");
     const heroReadiness = document.getElementById("heroReadiness");
+    const heroCostMode = document.getElementById("heroCostMode");
+    const heroCostPill = document.getElementById("heroCostPill");
     const setupProgressText = document.getElementById("setupProgressText");
     const setupProgressFill = document.getElementById("setupProgressFill");
     const nextStepTitle = document.getElementById("nextStepTitle");
@@ -4360,6 +4691,7 @@ function sidebarHtml(webview, logoPath) {
     const tokenUsage = document.getElementById("tokenUsage");
     const contextDiagnostics = document.getElementById("contextDiagnostics");
     const tokenSafeModeDetail = document.getElementById("tokenSafeModeDetail");
+    const helpToast = document.getElementById("helpToast");
     const activityList = document.getElementById("activityList");
     const logDetail = document.getElementById("logDetail");
     const settingsDetail = document.getElementById("settingsDetail");
@@ -4368,6 +4700,7 @@ function sidebarHtml(webview, logoPath) {
     const quickTaskIncludeSelection = document.getElementById("quickTaskIncludeSelection");
     const headerStatus = document.getElementById("headerStatus");
     const headerRoute = document.getElementById("headerRoute");
+    const headerCostMode = document.getElementById("headerCostMode");
     const autoFeedbackToggle = document.getElementById("autoFeedbackToggle");
     const modelGatewayTitle = document.getElementById("modelGatewayTitle");
     const modelGatewayDetail = document.getElementById("modelGatewayDetail");
@@ -4379,8 +4712,48 @@ function sidebarHtml(webview, logoPath) {
     const modelAuditList = document.getElementById("modelAuditList");
     const modelIncidentList = document.getElementById("modelIncidentList");
 
-    function post(type) {
+    const runningTimers = new Map();
+    let helpToastTimer = null;
+
+    function post(type, sourceButton) {
+      markButtonRunning(sourceButton);
       vscode.postMessage({ type });
+    }
+
+    function postFromEvent(type, event) {
+      post(type, event && event.currentTarget);
+    }
+
+    function markButtonRunning(button) {
+      if (!button) {
+        return;
+      }
+      button.dataset.running = "true";
+      button.setAttribute("aria-busy", "true");
+      button.disabled = true;
+      if (runningTimers.has(button)) {
+        clearTimeout(runningTimers.get(button));
+      }
+      runningTimers.set(button, setTimeout(() => clearButtonRunning(button), 8000));
+    }
+
+    function clearButtonRunning(button) {
+      if (!button) {
+        return;
+      }
+      delete button.dataset.running;
+      button.removeAttribute("aria-busy");
+      button.disabled = false;
+      if (runningTimers.has(button)) {
+        clearTimeout(runningTimers.get(button));
+        runningTimers.delete(button);
+      }
+    }
+
+    function clearRunningButtons() {
+      for (const button of document.querySelectorAll("button[data-running='true']")) {
+        clearButtonRunning(button);
+      }
     }
 
     function setText(element, value) {
@@ -4389,6 +4762,7 @@ function sidebarHtml(webview, logoPath) {
 
     function renderDashboard(data) {
       const dashboard = data || {};
+      clearRunningButtons();
       const status = dashboard.status || "Stopped";
       serverStatus.textContent = status;
       serverStatus.dataset.state = status;
@@ -4396,10 +4770,15 @@ function sidebarHtml(webview, logoPath) {
       setText(headerStatus, status === "Running" ? "Online" : status);
       headerStatus.dataset.state = status;
       setText(headerRoute, compactModeText(dashboard.agentProviderMode || "cloud", dashboard.agentMode || "agent"));
+      const costMode = dashboardCostMode(dashboard);
+      setText(headerCostMode, costMode.label);
+      headerCostMode.dataset.tone = costMode.tone;
       setText(heroMode, compactModeText(dashboard.agentProviderMode || "cloud", dashboard.agentMode || "agent"));
       setText(heroApproval, dashboard.approvalMode || "ask");
       setText(heroProviders, providerCountText(dashboard.statistics || {}));
       setText(heroReadiness, readinessText(dashboard.readiness));
+      setText(heroCostMode, costMode.label);
+      heroCostPill.dataset.tone = costMode.tone;
       renderServerControls(status, dashboard);
       renderSetupSummary(dashboard);
       renderModelStats(dashboard.modelStats || {}, dashboard.automatedModelFeedback);
@@ -4417,6 +4796,7 @@ function sidebarHtml(webview, logoPath) {
       setText(tokenUsage, tokenUsageText(dashboard.tokenUsage || {}));
       setText(contextDiagnostics, contextDiagnosticsText(dashboard.contextDiagnostics || {}));
       setText(tokenSafeModeDetail, tokenSafeModeText(dashboard));
+      renderModeToggles(dashboard);
       renderActivityRows(dashboard.activity || []);
       setText(logDetail, dashboard.logs || "Open the output channel for live logs.");
       setText(settingsDetail, "Mode: " + (dashboard.agentProviderMode || "cloud") + " / " + (dashboard.agentMode || "agent") + ". Approval: " + (dashboard.approvalMode || "ask") + ". Auto-start: " + (dashboard.autoStart ? "on" : "off") + ".");
@@ -4426,6 +4806,19 @@ function sidebarHtml(webview, logoPath) {
       const mode = String(providerMode || "cloud");
       const agent = String(agentMode || "agent").replace("-agent", "");
       return mode + " / " + agent;
+    }
+
+    function dashboardCostMode(dashboard) {
+      if (dashboard.freeOnlyStrictMode) {
+        return { label: "Free Only", tone: "cyan" };
+      }
+      if (dashboard.codexCliMode) {
+        return { label: "Codex CLI", tone: "accent" };
+      }
+      if (dashboard.tokenSafeMode) {
+        return { label: "Token Save", tone: "ok" };
+      }
+      return { label: "Standard", tone: "standard" };
     }
 
     function providerCountText(stats) {
@@ -4752,9 +5145,58 @@ function sidebarHtml(webview, logoPath) {
       }
     }
 
+    function createActionHelpButton(label, help) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "action-help";
+      button.textContent = "i";
+      button.title = help;
+      button.dataset.help = help;
+      button.setAttribute("aria-label", label + " help: " + help);
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        showHelpToast(label, help);
+        button.focus();
+      });
+      return button;
+    }
+
+    function wireStaticActionHelpButtons() {
+      for (const button of document.querySelectorAll(".action-help")) {
+        if (button.dataset.wired === "true") {
+          continue;
+        }
+        button.dataset.wired = "true";
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          showHelpToast(button.getAttribute("aria-label") || "Help", button.dataset.help || button.title || "");
+          button.focus();
+        });
+      }
+    }
+
+    function showHelpToast(label, help) {
+      if (!helpToast || !help) {
+        return;
+      }
+      const cleanLabel = String(label || "Help").replace(/\s+help:.*/i, "").trim() || "Help";
+      helpToast.textContent = cleanLabel + ": " + help;
+      helpToast.dataset.visible = "true";
+      if (helpToastTimer) {
+        clearTimeout(helpToastTimer);
+      }
+      helpToastTimer = setTimeout(() => {
+        helpToast.dataset.visible = "false";
+      }, 5000);
+    }
+
     function renderWorkflowTemplates(templates) {
       workflowTemplateList.textContent = "";
       for (const template of templates.slice(0, 8)) {
+        const row = document.createElement("div");
+        row.className = "action-with-help";
         const button = document.createElement("button");
         button.type = "button";
         button.className = "command-button template-button";
@@ -4768,7 +5210,14 @@ function sidebarHtml(webview, logoPath) {
         meta.textContent = template.meta || "";
         button.append(main, meta);
         button.addEventListener("click", () => runWorkflowPrompt(template.prompt));
-        workflowTemplateList.append(button);
+        row.append(
+          button,
+          createActionHelpButton(
+            template.label || "Workflow",
+            "Run this workflow template by sending its saved prompt to Agent Hub chat."
+          )
+        );
+        workflowTemplateList.append(row);
       }
     }
 
@@ -5281,6 +5730,7 @@ function sidebarHtml(webview, logoPath) {
       }
       setText(permissionDetail, flags.join(" - "));
       renderTrustControls(controls || {});
+      renderTrustPresetButtons(state.approvalMode || "ask");
       permissionList.textContent = "";
       const recent = Array.isArray(state.recent) ? state.recent.slice(-4).reverse() : [];
       if (!recent.length) {
@@ -5296,6 +5746,14 @@ function sidebarHtml(webview, logoPath) {
             badge: item.denied ? "denied" : item.requires_approval ? "review" : item.allowed ? "allowed" : "event"
           }
         ));
+      }
+    }
+
+    function renderTrustPresetButtons(approvalMode) {
+      const activePreset = approvalMode === "shell-ask" ? "shellAsk" : approvalMode;
+      for (const button of document.querySelectorAll(".trust-preset")) {
+        const preset = button.getAttribute("data-preset") || "";
+        button.dataset.active = preset === activePreset ? "true" : "false";
       }
     }
 
@@ -5368,14 +5826,78 @@ function sidebarHtml(webview, logoPath) {
 
     function tokenSafeModeText(dashboard) {
       if (dashboard.freeOnlyStrictMode) {
-        return "Free Only Mode: On. Codex CLI and non-free/API-key fallbacks are disabled.";
+        return "Free Models Only: On. Codex CLI and non-free/API-key fallbacks are disabled.";
       }
       if (dashboard.codexCliMode) {
-        return "Codex CLI Mode: On. No OpenAI API key fallback, compacted workspace, 500-token output cap.";
+        return "Use Codex CLI: On. No OpenAI API key fallback, compacted workspace, 500-token output cap.";
       }
       return dashboard.tokenSafeMode
-        ? "Token Safe Mode: On. Free cloud first; Codex CLI/API-key fallback keeps normal context and output."
-        : "Token Safe Mode: Off. Uses the current token and context settings.";
+        ? "Save Codex Tokens: On. Free models first; Codex fallback uses adaptive micro/surgical/rescue digests, reduced tools, and short output caps."
+        : "Save Codex Tokens: Off. Uses the current token and context settings.";
+    }
+
+    function renderModeToggles(dashboard) {
+      const tokenSafeActive = !!dashboard.tokenSafeMode;
+      const freeOnlyActive = !!dashboard.freeOnlyStrictMode;
+      const codexCliActive = !!dashboard.codexCliMode;
+      updateCommandToggle(
+        "quickTokenSafeMode",
+        tokenSafeActive,
+        "Saving Codex Tokens",
+        "Save Codex Tokens",
+        "Click to turn off",
+        "Adaptive fallback",
+        "Codex token saving is on. Click to restore normal routing.",
+        "Save Codex tokens with adaptive compact fallback routing"
+      );
+      updateCommandToggle(
+        "quickFreeOnlyMode",
+        freeOnlyActive,
+        "Free Models Only",
+        "Free Models Only",
+        "Click to turn off",
+        "No paid fallback",
+        "Free Models Only is on. Click to re-enable normal routing.",
+        "Use only free or local models"
+      );
+      updateCommandToggle(
+        "quickCodexCliMode",
+        codexCliActive,
+        "Using Codex CLI",
+        "Use Codex CLI",
+        "Click to turn off",
+        "Signed-in CLI",
+        "Signed-in Codex CLI is active. Click to restore normal routing.",
+        "Use your signed-in Codex CLI"
+      );
+      updatePlainToggle("tokenSafeMode", tokenSafeActive, "Stop Saving Codex Tokens", "Save Codex Tokens");
+      updatePlainToggle("freeOnlyMode", freeOnlyActive, "Turn Off Free Models Only", "Free Models Only");
+    }
+
+    function updateCommandToggle(id, active, activeMain, inactiveMain, activeMeta, inactiveMeta, activeTitle, inactiveTitle) {
+      const button = document.getElementById(id);
+      if (!button) {
+        return;
+      }
+      button.dataset.active = active ? "true" : "false";
+      button.title = active ? activeTitle : inactiveTitle;
+      const main = button.querySelector(".button-main");
+      const meta = button.querySelector(".button-meta");
+      if (main) {
+        main.textContent = active ? activeMain : inactiveMain;
+      }
+      if (meta) {
+        meta.textContent = active ? activeMeta : inactiveMeta;
+      }
+    }
+
+    function updatePlainToggle(id, active, activeText, inactiveText) {
+      const button = document.getElementById(id);
+      if (!button) {
+        return;
+      }
+      button.dataset.active = active ? "true" : "false";
+      button.textContent = active ? activeText : inactiveText;
     }
 
     function renderActivityRows(rows) {
@@ -5530,6 +6052,8 @@ function sidebarHtml(webview, logoPath) {
       return item;
     }
 
+    wireStaticActionHelpButtons();
+
     quickTaskForm.addEventListener("submit", (event) => {
       event.preventDefault();
       const text = quickTaskInput.value.trim();
@@ -5537,6 +6061,7 @@ function sidebarHtml(webview, logoPath) {
         quickTaskInput.focus();
         return;
       }
+      markButtonRunning(document.getElementById("quickTaskSend"));
       quickTaskInput.value = "";
       vscode.postMessage({
         type: "quickTask",
@@ -5545,48 +6070,52 @@ function sidebarHtml(webview, logoPath) {
       });
     });
 
-    heroServerAction.addEventListener("click", () => {
+    heroServerAction.addEventListener("click", (event) => {
       const action = heroServerAction.dataset.action || "startServer";
       if (action) {
-        post(action);
+        post(action, event.currentTarget);
       }
     });
-    document.getElementById("openChat").addEventListener("click", () => post("openChat"));
-    document.getElementById("quickDashboard").addEventListener("click", () => post("openDashboard"));
-    document.getElementById("quickKernel").addEventListener("click", () => post("openRuntimeKernel"));
-    document.getElementById("openRuntimeKernel").addEventListener("click", () => post("openRuntimeKernel"));
-    document.getElementById("quickCheckup").addEventListener("click", () => post("runCheckup"));
-    document.getElementById("quickRouteLab").addEventListener("click", () => post("openRouteLab"));
-    document.getElementById("quickSettings").addEventListener("click", () => post("openSettings"));
-    document.getElementById("quickTokenSafeMode").addEventListener("click", () => post("enableTokenSafeMode"));
-    document.getElementById("quickFreeOnlyMode").addEventListener("click", () => post("enableFreeOnlyMode"));
-    document.getElementById("quickCodexCliMode").addEventListener("click", () => post("enableCodexCliMode"));
-    document.getElementById("quickInstallCodexCli").addEventListener("click", () => post("installCodexCli"));
-    autoFeedbackToggle.addEventListener("click", () => post("toggleAutomatedFeedback"));
-    document.getElementById("codeAgent").addEventListener("click", () => post("codeAgent"));
-    document.getElementById("explainFile").addEventListener("click", () => post("explainFile"));
-    document.getElementById("killerWorkflow").addEventListener("click", () => runWorkflowPrompt("Run the issue-to-PR workflow. Take the current issue or selected prompt through the full Agent Hub loop: plan the work, edit the needed files, run the most relevant tests, fix failures once, and summarize a pull request with files changed, validation, and risks. If no issue is selected, inspect the workspace first and choose the highest-impact actionable issue."));
-    document.getElementById("stopServer").addEventListener("click", () => post("stopServer"));
-    document.getElementById("restartServer").addEventListener("click", () => post("restartServer"));
-    document.getElementById("runCheckup").addEventListener("click", () => post("runCheckup"));
-    document.getElementById("checkRequirements").addEventListener("click", () => post("checkRequirements"));
-    document.getElementById("fixSafeConfig").addEventListener("click", () => post("fixSafeConfig"));
-    document.getElementById("checkHealth").addEventListener("click", () => post("checkHealth"));
-    document.getElementById("openRouteLab").addEventListener("click", () => post("openRouteLab"));
-    document.getElementById("explainRoute").addEventListener("click", () => post("explainRoute"));
-    document.getElementById("openRoutingDashboard").addEventListener("click", () => post("openRoutingDashboard"));
-    document.getElementById("tokenSafeMode").addEventListener("click", () => post("enableTokenSafeMode"));
-    document.getElementById("freeOnlyMode").addEventListener("click", () => post("enableFreeOnlyMode"));
-    document.getElementById("openOutput").addEventListener("click", () => post("openOutput"));
-    document.getElementById("openSettings").addEventListener("click", () => post("openSettings"));
-    document.getElementById("copyClineConfig").addEventListener("click", () => post("copyClineConfig"));
-    document.getElementById("testClineConnection").addEventListener("click", () => post("testClineConnection"));
-    document.getElementById("showClineSetup").addEventListener("click", () => post("showClineSetup"));
-    document.getElementById("copyClaudeCodeConfig").addEventListener("click", () => post("copyClaudeCodeConfig"));
-    document.getElementById("testAnthropicEndpoint").addEventListener("click", () => post("testAnthropicEndpoint"));
-    document.getElementById("showClaudeCodeSetup").addEventListener("click", () => post("showClaudeCodeSetup"));
+    document.getElementById("openChat").addEventListener("click", (event) => postFromEvent("openChat", event));
+    document.getElementById("quickDashboard").addEventListener("click", (event) => postFromEvent("openDashboard", event));
+    document.getElementById("quickKernel").addEventListener("click", (event) => postFromEvent("openRuntimeKernel", event));
+    document.getElementById("openRuntimeKernel").addEventListener("click", (event) => postFromEvent("openRuntimeKernel", event));
+    document.getElementById("quickCheckup").addEventListener("click", (event) => postFromEvent("runCheckup", event));
+    document.getElementById("quickRouteLab").addEventListener("click", (event) => postFromEvent("openRouteLab", event));
+    document.getElementById("quickSettings").addEventListener("click", (event) => postFromEvent("openSettings", event));
+    document.getElementById("quickTokenSafeMode").addEventListener("click", (event) => postFromEvent("enableTokenSafeMode", event));
+    document.getElementById("quickFreeOnlyMode").addEventListener("click", (event) => postFromEvent("enableFreeOnlyMode", event));
+    document.getElementById("quickCodexCliMode").addEventListener("click", (event) => postFromEvent("enableCodexCliMode", event));
+    document.getElementById("quickInstallCodexCli").addEventListener("click", (event) => postFromEvent("installCodexCli", event));
+    autoFeedbackToggle.addEventListener("click", (event) => postFromEvent("toggleAutomatedFeedback", event));
+    document.getElementById("codeAgent").addEventListener("click", (event) => postFromEvent("codeAgent", event));
+    document.getElementById("explainFile").addEventListener("click", (event) => postFromEvent("explainFile", event));
+    document.getElementById("killerWorkflow").addEventListener("click", (event) => {
+      markButtonRunning(event.currentTarget);
+      runWorkflowPrompt("Run the issue-to-PR workflow. Take the current issue or selected prompt through the full Agent Hub loop: plan the work, edit the needed files, run the most relevant tests, fix failures once, and summarize a pull request with files changed, validation, and risks. If no issue is selected, inspect the workspace first and choose the highest-impact actionable issue.");
+    });
+    document.getElementById("stopServer").addEventListener("click", (event) => postFromEvent("stopServer", event));
+    document.getElementById("restartServer").addEventListener("click", (event) => postFromEvent("restartServer", event));
+    document.getElementById("runCheckup").addEventListener("click", (event) => postFromEvent("runCheckup", event));
+    document.getElementById("checkRequirements").addEventListener("click", (event) => postFromEvent("checkRequirements", event));
+    document.getElementById("fixSafeConfig").addEventListener("click", (event) => postFromEvent("fixSafeConfig", event));
+    document.getElementById("checkHealth").addEventListener("click", (event) => postFromEvent("checkHealth", event));
+    document.getElementById("openRouteLab").addEventListener("click", (event) => postFromEvent("openRouteLab", event));
+    document.getElementById("explainRoute").addEventListener("click", (event) => postFromEvent("explainRoute", event));
+    document.getElementById("openRoutingDashboard").addEventListener("click", (event) => postFromEvent("openRoutingDashboard", event));
+    document.getElementById("tokenSafeMode").addEventListener("click", (event) => postFromEvent("enableTokenSafeMode", event));
+    document.getElementById("freeOnlyMode").addEventListener("click", (event) => postFromEvent("enableFreeOnlyMode", event));
+    document.getElementById("openOutput").addEventListener("click", (event) => postFromEvent("openOutput", event));
+    document.getElementById("openSettings").addEventListener("click", (event) => postFromEvent("openSettings", event));
+    document.getElementById("copyClineConfig").addEventListener("click", (event) => postFromEvent("copyClineConfig", event));
+    document.getElementById("testClineConnection").addEventListener("click", (event) => postFromEvent("testClineConnection", event));
+    document.getElementById("showClineSetup").addEventListener("click", (event) => postFromEvent("showClineSetup", event));
+    document.getElementById("copyClaudeCodeConfig").addEventListener("click", (event) => postFromEvent("copyClaudeCodeConfig", event));
+    document.getElementById("testAnthropicEndpoint").addEventListener("click", (event) => postFromEvent("testAnthropicEndpoint", event));
+    document.getElementById("showClaudeCodeSetup").addEventListener("click", (event) => postFromEvent("showClaudeCodeSetup", event));
     for (const button of document.querySelectorAll(".trust-preset")) {
-      button.addEventListener("click", () => {
+      button.addEventListener("click", (event) => {
+        markButtonRunning(event.currentTarget);
         vscode.postMessage({
           type: "applyTrustPreset",
           preset: button.getAttribute("data-preset") || "safe"
@@ -5639,13 +6168,13 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
   const prompt = (request && typeof request.prompt === "string" ? request.prompt : "").trim();
   const command = request && typeof request.command === "string" ? request.command : "agent";
   if (command === "token-safe") {
-    stream.progress("Turning on Token Safe Mode...");
+    stream.progress("Turning on Save Codex Tokens...");
     const result = await enableTokenSafeModeCommand();
     stream.markdown(result.message);
     return { metadata: { command, ok: !!result.ok, cancelled: !!result.cancelled } };
   }
   if (command === "codex-cli") {
-    stream.progress("Turning on Codex CLI Mode...");
+    stream.progress("Turning on Use Codex CLI...");
     const result = await enableCodexCliModeCommand();
     stream.markdown(result.message);
     return { metadata: { command, ok: !!result.ok, cancelled: !!result.cancelled } };
@@ -5696,7 +6225,8 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
     },
     agent_hub: agentHubRequestOptions(config, {
       classification_text: prompt,
-      user_task: prompt
+      user_task: prompt,
+      context_chars: String(context || "").length
     })
   };
   applyOptionalMaxTokens(body, config);
@@ -5717,6 +6247,7 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
     body.query = prompt;
     body.max_sources = 5;
   }
+  applyTokenSafeRequestPlan(body, config);
 
   output.appendLine("");
   output.appendLine(`[Agent Hub Chat /${command}] ${prompt}`);
@@ -6367,7 +6898,17 @@ function chatSettingsPayload(config) {
     maxTokens: config.maxTokens,
     autoStart: config.autoStart,
     automatedModelFeedback: config.automatedModelFeedback,
-    ...cloudModelSettingsPayload(config)
+    ...cloudModelSettingsPayload(config),
+    ...modeToggleState(config)
+  };
+}
+
+function modeToggleState(config = settings()) {
+  const cloudSettings = cloudModelSettingsPayload(config);
+  return {
+    tokenSafeMode: isFreeCloudSavingsMode(config),
+    freeOnlyStrictMode: cloudSettings.freeOnly !== false && cloudSettings.disableNonFreeModels === true,
+    codexCliMode: isCodexCliTokenOptimizedMode(config)
   };
 }
 
@@ -6417,7 +6958,14 @@ async function saveChatSettingsFromWebview(panel, rawSettings) {
 }
 
 async function enableTokenSafeModeCommand(options = {}) {
-  const result = await applyTokenSafeModeSettings(options.rawSettings);
+  const modes = modeToggleState(settings());
+  const result = modes.tokenSafeMode && options.forceEnable !== true
+    ? await applyStandardCloudModeSettings(options.rawSettings, "Save Codex Tokens")
+    : await applyTokenSafeModeSettings(options.rawSettings);
+  return finishModeCommand(result, options);
+}
+
+async function finishModeCommand(result, options = {}) {
   if (result.ok) {
     vscode.window.showInformationMessage(result.message);
     postChatSettings(chatPanel, result.message);
@@ -6433,7 +6981,10 @@ async function enableTokenSafeModeCommand(options = {}) {
 }
 
 async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
-  const result = await applyTokenSafeModeSettings(rawSettings);
+  const modes = modeToggleState(settings());
+  const result = modes.tokenSafeMode
+    ? await applyStandardCloudModeSettings(rawSettings, "Save Codex Tokens")
+    : await applyTokenSafeModeSettings(rawSettings);
   postChatSettings(panel, result.message);
   if (result.ok && sidebarProvider) {
     await sidebarProvider.refresh();
@@ -6442,29 +6993,26 @@ async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
 }
 
 async function enableFreeOnlyModeCommand(options = {}) {
-  const result = await applyFreeOnlyModeSettings(options.rawSettings);
-  if (result.ok) {
-    vscode.window.showInformationMessage(result.message);
-    postChatSettings(chatPanel, result.message);
-    if (sidebarProvider && options.refreshSidebar !== false) {
-      await sidebarProvider.refresh();
-    }
-  } else if (result.cancelled) {
-    vscode.window.showInformationMessage(result.message);
-  } else {
-    vscode.window.showErrorMessage(result.message);
-  }
-  return result;
+  const modes = modeToggleState(settings());
+  const result = modes.freeOnlyStrictMode && options.forceEnable !== true
+    ? await applyStandardCloudModeSettings(options.rawSettings, "Free Models Only")
+    : await applyFreeOnlyModeSettings(options.rawSettings);
+  return finishModeCommand(result, options);
 }
 
 async function enableCodexCliModeCommand(options = {}) {
+  const modes = modeToggleState(settings());
+  if (modes.codexCliMode && options.forceEnable !== true) {
+    const result = await applyStandardCloudModeSettings(options.rawSettings, "Use Codex CLI");
+    return finishModeCommand(result, options);
+  }
   if (options.skipCodexCliCheck !== true) {
     const status = await codexCliStatus();
     if (!status.installed) {
       const install = "Install Codex CLI";
       const continueAnyway = "Continue Anyway";
       const choice = await vscode.window.showWarningMessage(
-        "Codex CLI is not installed or is not on PATH. Install it before enabling no-key Codex CLI routing.",
+        "Codex CLI is not installed or is not on PATH. Install it before using signed-in Codex CLI routing.",
         install,
         continueAnyway,
         "Cancel"
@@ -6481,24 +7029,13 @@ async function enableCodexCliModeCommand(options = {}) {
         return {
           ok: false,
           cancelled: true,
-          message: "Codex CLI Mode was cancelled because Codex CLI is not installed."
+          message: "Use Codex CLI was cancelled because Codex CLI is not installed."
         };
       }
     }
   }
   const result = await applyCodexCliModeSettings(options.rawSettings);
-  if (result.ok) {
-    vscode.window.showInformationMessage(result.message);
-    postChatSettings(chatPanel, result.message);
-    if (sidebarProvider && options.refreshSidebar !== false) {
-      await sidebarProvider.refresh();
-    }
-  } else if (result.cancelled) {
-    vscode.window.showInformationMessage(result.message);
-  } else {
-    vscode.window.showErrorMessage(result.message);
-  }
-  return result;
+  return finishModeCommand(result, options);
 }
 
 async function checkRequirementsCommand(options = {}) {
@@ -6933,7 +7470,7 @@ async function installCodexCliCommand(options = {}) {
   }
 
   openCodexCliTerminal(command);
-  const message = "Opened a terminal to install Codex CLI. After login finishes, run Agent Hub: Use Codex CLI Without API Key again.";
+  const message = "Opened a terminal to install Codex CLI. After login finishes, run Agent Hub: Use Signed-In Codex CLI again.";
   vscode.window.showInformationMessage(message);
   return {
     ok: true,
@@ -6987,7 +7524,10 @@ async function installOllamaDesktopCommand(options = {}) {
 }
 
 async function enableCodexCliModeFromWebview(panel, rawSettings) {
-  const result = await applyCodexCliModeSettings(rawSettings);
+  const modes = modeToggleState(settings());
+  const result = modes.codexCliMode
+    ? await applyStandardCloudModeSettings(rawSettings, "Use Codex CLI")
+    : await applyCodexCliModeSettings(rawSettings);
   postChatSettings(panel, result.message);
   if (result.ok && sidebarProvider) {
     await sidebarProvider.refresh();
@@ -6996,7 +7536,10 @@ async function enableCodexCliModeFromWebview(panel, rawSettings) {
 }
 
 async function enableFreeOnlyModeFromWebview(panel, rawSettings) {
-  const result = await applyFreeOnlyModeSettings(rawSettings);
+  const modes = modeToggleState(settings());
+  const result = modes.freeOnlyStrictMode
+    ? await applyStandardCloudModeSettings(rawSettings, "Free Models Only")
+    : await applyFreeOnlyModeSettings(rawSettings);
   postChatSettings(panel, result.message);
   if (result.ok && sidebarProvider) {
     await sidebarProvider.refresh();
@@ -7029,7 +7572,7 @@ async function applyCodexCliModeSettings(rawSettings) {
       : "VS Code user settings";
     if (!(await requestPermission({
       category: "config_edit",
-      description: "Agent Hub wants to enable Codex CLI Mode without an OpenAI API key.",
+      description: "Agent Hub wants to use your signed-in Codex CLI without an OpenAI API key.",
       resource,
       risk: "medium",
       detail: "This uses the locally logged-in Codex CLI, disables API-key model fallbacks, and applies a smaller context/output budget for Codex requests."
@@ -7037,7 +7580,7 @@ async function applyCodexCliModeSettings(rawSettings) {
       return {
         ok: false,
         cancelled: true,
-        message: "Codex CLI Mode was cancelled."
+        message: "Use Codex CLI was cancelled."
       };
     }
 
@@ -7089,13 +7632,13 @@ async function applyCodexCliModeSettings(rawSettings) {
     return {
       ok: true,
       cancelled: false,
-      message: `Codex CLI Mode is on: codex-cli first, no OpenAI API key fallback, compact context.${migrationNote}${configNote}${restartNote}`
+      message: `Use Codex CLI is on: codex-cli first, no OpenAI API key fallback, compact context.${migrationNote}${configNote}${restartNote}`
     };
   } catch (error) {
     return {
       ok: false,
       cancelled: false,
-      message: `Could not enable Codex CLI Mode: ${error.message}`
+      message: `Could not enable Use Codex CLI: ${error.message}`
     };
   }
 }
@@ -7125,7 +7668,7 @@ async function applyFreeOnlyModeSettings(rawSettings) {
       : "VS Code user settings";
     if (!(await requestPermission({
       category: "config_edit",
-      description: "Agent Hub wants to disable Codex CLI and non-free model fallbacks.",
+      description: "Agent Hub wants to use free models only.",
       resource,
       risk: "medium",
       detail: "This keeps only free/local/free-tier models eligible and prevents Codex CLI, OpenAI, Claude, Gemini, and other non-free fallbacks from being selected."
@@ -7133,7 +7676,7 @@ async function applyFreeOnlyModeSettings(rawSettings) {
       return {
         ok: false,
         cancelled: true,
-        message: "Free Only Mode was cancelled."
+        message: "Free Models Only was cancelled."
       };
     }
 
@@ -7186,13 +7729,13 @@ async function applyFreeOnlyModeSettings(rawSettings) {
     return {
       ok: true,
       cancelled: false,
-      message: `Free Only Mode is on: Codex CLI and non-free/API-key fallbacks are disabled.${migrationNote}${configNote}${restartNote}`
+      message: `Free Models Only is on: Codex CLI and non-free/API-key fallbacks are disabled.${migrationNote}${configNote}${restartNote}`
     };
   } catch (error) {
     return {
       ok: false,
       cancelled: false,
-      message: `Could not enable Free Only Mode: ${error.message}`
+      message: `Could not enable Free Models Only: ${error.message}`
     };
   }
 }
@@ -7211,6 +7754,102 @@ async function applyTokenSafeModeSettings(rawSettings) {
       freeOnly: false,
       disableNonFreeModels: false,
       enableLoadBalancing: true,
+      maxTokens: CODEX_CLI_OUTPUT_TOKENS,
+      agentMaxSteps: CODEX_CLI_AGENT_STEPS,
+      groupPlanCandidates: 1
+    };
+    const next = normalizeChatSettingsInput(profileInput);
+    const workspace = workspaceRoot();
+    const resource = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
+      : "VS Code user settings";
+    if (!(await requestPermission({
+      category: "config_edit",
+      description: "Agent Hub wants to save Codex tokens with compact fallback routing.",
+      resource,
+      risk: "medium",
+      detail: "This promotes free models first, then keeps Codex CLI/API-key fallback compact with adaptive micro/surgical/rescue context budgets, reduced tool schemas, fewer agent steps, and shorter output caps."
+    }))) {
+      return {
+        ok: false,
+        cancelled: true,
+        message: "Save Codex Tokens was cancelled."
+      };
+    }
+
+    const target = vscode.ConfigurationTarget.Global;
+    const config = vscode.workspace.getConfiguration("agentHub");
+    for (const [key, value] of Object.entries(next.workspaceSettings)) {
+      await config.update(key, value, target);
+    }
+    await config.update("agentContextBudgetTokens", CODEX_CLI_CONTEXT_BUDGET, target);
+    await config.update("agentContextCompactionEnabled", true, target);
+    await config.update("contextMode", "minimal", target);
+
+    const clearKeys = [
+      ...Object.keys(next.workspaceSettings),
+      "agentContextBudgetTokens",
+      "agentContextCompactionEnabled",
+      "contextMode"
+    ];
+    const clearedWorkspaceSettings = workspace
+      ? await clearWorkspaceAgentHubSettings(config, clearKeys)
+      : false;
+    const configPath = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
+      : "";
+    const configChanged = configPath
+      ? await saveCloudModelSettingsToConfig(configPath, {
+        ...next.cloudSettings,
+        cloudRouteMode: "ollama-cloud",
+        codexCliEnabled: true,
+        apiKeyModelsEnabled: true,
+        freeCloudPresetsEnabled: true,
+        freeOnly: false,
+        disableNonFreeModels: false,
+        enableLoadBalancing: true,
+        maxTokenSaveMode: true,
+        freeCloudSavingsMode: true,
+        codexCliTokenOptimized: true,
+        agentContextBudgetTokens: CODEX_CLI_CONTEXT_BUDGET
+      }, {
+        workspaceDir: generatedConfigWorkspaceDir(next.workspaceSettings.configPath, workspace),
+        storageDir: generatedConfigStorageDir(next.workspaceSettings.configPath, workspace)
+      })
+      : false;
+    const restartNote = serverProcess || (await isServerOnline())
+      ? " Restart Agent Hub to use the updated config defaults."
+      : "";
+    const configNote = configChanged ? " Updated Agent Hub routing and token budgets." : "";
+    const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
+    return {
+      ok: true,
+      cancelled: false,
+      message: `Save Codex Tokens is on: free models first, Codex fallback now uses adaptive compact digests (${CODEX_CLI_MICRO_CONTEXT_BUDGET}-${CODEX_CLI_RESCUE_CONTEXT_BUDGET} context tokens, ${CODEX_CLI_MICRO_AGENT_STEPS}-${CODEX_CLI_RESCUE_AGENT_STEPS} agent steps, ${CODEX_CLI_MICRO_OUTPUT_TOKENS}-${CODEX_CLI_RESCUE_OUTPUT_TOKENS} output tokens).${migrationNote}${configNote}${restartNote}`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      cancelled: false,
+      message: `Could not enable Save Codex Tokens: ${error.message}`
+    };
+  }
+}
+
+async function applyStandardCloudModeSettings(rawSettings, modeName = "mode") {
+  try {
+    const baseSettings = chatSettingsPayload(settings());
+    const profileInput = {
+      ...baseSettings,
+      ...(rawSettings && typeof rawSettings === "object" ? rawSettings : {}),
+      agentProviderMode: "cloud",
+      cloudRouteMode: "ollama-cloud",
+      codexCliEnabled: false,
+      apiKeyModelsEnabled: true,
+      freeCloudPresetsEnabled: true,
+      freeOnly: false,
+      disableNonFreeModels: false,
+      enableLoadBalancing: true,
       maxTokens: null,
       agentMaxSteps: DEFAULT_AGENT_MAX_STEPS,
       groupPlanCandidates: 1
@@ -7222,15 +7861,15 @@ async function applyTokenSafeModeSettings(rawSettings) {
       : "VS Code user settings";
     if (!(await requestPermission({
       category: "config_edit",
-      description: "Agent Hub wants to enable Token Safe Mode for free cloud offload.",
+      description: `Agent Hub wants to turn off ${modeName} and restore normal cloud routing.`,
       resource,
       risk: "medium",
-      detail: "This enables free cloud models first with Codex CLI and API-key fallback kept at the normal context and output budget."
+      detail: "This re-enables normal cloud routing, restores the standard context/output budget, and removes Codex/token-saving route constraints."
     }))) {
       return {
         ok: false,
         cancelled: true,
-        message: "Token Safe Mode was cancelled."
+        message: `${modeName} was not changed.`
       };
     }
 
@@ -7259,14 +7898,16 @@ async function applyTokenSafeModeSettings(rawSettings) {
       ? await saveCloudModelSettingsToConfig(configPath, {
         ...next.cloudSettings,
         cloudRouteMode: "ollama-cloud",
-        codexCliEnabled: true,
+        codexCliEnabled: false,
         apiKeyModelsEnabled: true,
         freeCloudPresetsEnabled: true,
         freeOnly: false,
         disableNonFreeModels: false,
         enableLoadBalancing: true,
-        maxTokenSaveMode: true,
-        freeCloudSavingsMode: true,
+        maxTokenSaveMode: false,
+        freeCloudSavingsMode: false,
+        codexCliMode: false,
+        codexCliTokenOptimized: false,
         agentContextBudgetTokens: DEFAULT_AGENT_CONTEXT_BUDGET
       }, {
         workspaceDir: generatedConfigWorkspaceDir(next.workspaceSettings.configPath, workspace),
@@ -7274,20 +7915,20 @@ async function applyTokenSafeModeSettings(rawSettings) {
       })
       : false;
     const restartNote = serverProcess || (await isServerOnline())
-      ? " Restart Agent Hub to use the updated config defaults."
+      ? " Restart Agent Hub to use normal routing."
       : "";
-    const configNote = configChanged ? " Updated Agent Hub routing and token budgets." : "";
+    const configNote = configChanged ? " Updated Agent Hub routing and cleared mode-specific token settings." : "";
     const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
     return {
       ok: true,
       cancelled: false,
-      message: `Token Safe Mode is on: free cloud models first, full Codex CLI/API-key fallback preserved.${migrationNote}${configNote}${restartNote}`
+      message: `${modeName} is off: normal cloud routing is restored.${migrationNote}${configNote}${restartNote}`
     };
   } catch (error) {
     return {
       ok: false,
       cancelled: false,
-      message: `Could not enable Token Safe Mode: ${error.message}`
+      message: `Could not turn off ${modeName}: ${error.message}`
     };
   }
 }
@@ -7388,6 +8029,44 @@ function applyOptionalMaxTokens(body, config) {
   return body;
 }
 
+function applyTokenSafeRequestPlan(body, config) {
+  if (!body || !body.agent_hub || body.agent_hub.max_token_save_mode !== true) {
+    return body;
+  }
+  const options = body.agent_hub;
+  const budget = cleanSettingInteger(
+    options.codex_cli_prompt_budget_tokens || options.max_context_tokens || config.agentContextBudgetTokens,
+    CODEX_CLI_CONTEXT_BUDGET,
+    CODEX_CLI_MICRO_CONTEXT_BUDGET,
+    CODEX_CLI_RESCUE_CONTEXT_BUDGET
+  );
+  const outputTokens = cleanSettingInteger(
+    options.max_output_tokens || config.maxTokens,
+    CODEX_CLI_OUTPUT_TOKENS,
+    CODEX_CLI_MICRO_OUTPUT_TOKENS,
+    CODEX_CLI_RESCUE_OUTPUT_TOKENS
+  );
+  const agentSteps = cleanSettingInteger(
+    options.agent_max_steps || options.max_tool_steps || config.agentMaxSteps,
+    CODEX_CLI_AGENT_STEPS,
+    CODEX_CLI_MICRO_AGENT_STEPS,
+    CODEX_CLI_RESCUE_AGENT_STEPS
+  );
+  body.agent_context_budget_tokens = budget;
+  body.agent_context_compaction_enabled = true;
+  body.context_mode = "minimal";
+  if (body.agent_max_steps !== undefined || body.mode !== "route") {
+    body.agent_max_steps = agentSteps;
+  }
+  if (body.coder_max_steps !== undefined || body.mode !== "route") {
+    body.coder_max_steps = agentSteps;
+  }
+  if (!body.max_tokens || Number(body.max_tokens) > outputTokens) {
+    body.max_tokens = outputTokens;
+  }
+  return body;
+}
+
 function isMaxTokenSaveMode(config) {
   if (!config || normalizeContextMode(config.contextMode) !== "minimal") {
     return false;
@@ -7451,22 +8130,117 @@ function agentHubRequestOptions(config, extra = {}) {
     options.routing_mode = "cheapest";
   }
   if (isFreeCloudSavingsMode(config)) {
+    const plan = tokenSafeRequestPlan(config, extra);
     options.free_cloud_offload = true;
     options.prefer_free_cloud = true;
     options.allow_cloud_exploration = true;
     options.routing_mode = "cheapest";
-  }
-  if (isCodexCliTokenOptimizedMode(config)) {
     options.max_token_save_mode = true;
     options.context_mode = "minimal";
     options.minimal_tool_schema = true;
     options.reduced_repo_context = true;
     options.codex_cli_token_optimized = true;
-    options.codex_cli_prompt_budget_tokens = config.agentContextBudgetTokens;
-    options.max_context_tokens = config.agentContextBudgetTokens;
-    options.context_budget_tokens = config.agentContextBudgetTokens;
+    options.codex_cli_prompt_strategy = "task_context_digest";
+    options.token_safe_profile = plan.profile;
+    options.token_safe_reason = plan.reason;
+    options.token_safe_keywords = plan.keywords;
+    options.codex_cli_prompt_budget_tokens = plan.contextBudgetTokens;
+    options.max_context_tokens = plan.contextBudgetTokens;
+    options.context_budget_tokens = plan.contextBudgetTokens;
+    options.max_output_tokens = plan.outputTokens;
+    options.max_tool_steps = plan.agentSteps;
+    options.agent_max_steps = plan.agentSteps;
+  }
+  if (isCodexCliTokenOptimizedMode(config)) {
+    const plan = tokenSafeRequestPlan(config, extra);
+    options.max_token_save_mode = true;
+    options.context_mode = "minimal";
+    options.minimal_tool_schema = true;
+    options.reduced_repo_context = true;
+    options.codex_cli_token_optimized = true;
+    options.codex_cli_prompt_strategy = "task_context_digest";
+    options.token_safe_profile = plan.profile;
+    options.token_safe_reason = plan.reason;
+    options.token_safe_keywords = plan.keywords;
+    options.codex_cli_prompt_budget_tokens = plan.contextBudgetTokens;
+    options.max_context_tokens = plan.contextBudgetTokens;
+    options.context_budget_tokens = plan.contextBudgetTokens;
+    options.max_output_tokens = plan.outputTokens;
+    options.max_tool_steps = plan.agentSteps;
+    options.agent_max_steps = plan.agentSteps;
   }
   return options;
+}
+
+function tokenSafeCodexBudget(config) {
+  const budget = Number(config && config.agentContextBudgetTokens);
+  if (Number.isFinite(budget) && budget > 0) {
+    return Math.min(Math.floor(budget), CODEX_CLI_CONTEXT_BUDGET);
+  }
+  return CODEX_CLI_CONTEXT_BUDGET;
+}
+
+function tokenSafeRequestPlan(config, extra = {}) {
+  const text = [
+    extra.classification_text,
+    extra.user_task,
+    extra.task,
+    extra.prompt
+  ].filter((part) => typeof part === "string" && part.trim()).join("\n");
+  const contextChars = cleanSettingInteger(extra.context_chars, 0, 0, 2000000);
+  const taskChars = text.length;
+  const lower = text.toLowerCase();
+  const tinyIntent = /\b(explain|summari[sz]e|rename|typo|format|lint|one[- ]?line|quick|where|what is|describe)\b/.test(lower);
+  const hardIntent = /\b(implement|debug|fix|failing|failure|traceback|error|exception|test|refactor|security|vulnerability|migration|architecture|multi[- ]?file|workspace|repo|pull request|issue|benchmark|release|package)\b/.test(lower);
+  const hugeContext = contextChars > 12000 || taskChars > 5000;
+  if (tinyIntent && !hardIntent && contextChars < 5000 && taskChars < 1800) {
+    return {
+      profile: "micro",
+      reason: "small_or_explanatory_task",
+      contextBudgetTokens: CODEX_CLI_MICRO_CONTEXT_BUDGET,
+      outputTokens: CODEX_CLI_MICRO_OUTPUT_TOKENS,
+      agentSteps: CODEX_CLI_MICRO_AGENT_STEPS,
+      keywords: tokenSafeTaskKeywords(text, 10)
+    };
+  }
+  if (hardIntent || hugeContext) {
+    return {
+      profile: "rescue",
+      reason: hardIntent ? "complex_or_risky_task" : "large_context_digest",
+      contextBudgetTokens: Math.min(tokenSafeCodexBudget(config) + 1200, CODEX_CLI_RESCUE_CONTEXT_BUDGET),
+      outputTokens: CODEX_CLI_RESCUE_OUTPUT_TOKENS,
+      agentSteps: CODEX_CLI_RESCUE_AGENT_STEPS,
+      keywords: tokenSafeTaskKeywords(text, 18)
+    };
+  }
+  return {
+    profile: "surgical",
+    reason: "default_compact_fallback",
+    contextBudgetTokens: tokenSafeCodexBudget(config),
+    outputTokens: CODEX_CLI_OUTPUT_TOKENS,
+    agentSteps: CODEX_CLI_AGENT_STEPS,
+    keywords: tokenSafeTaskKeywords(text, 14)
+  };
+}
+
+function tokenSafeTaskKeywords(text, limit) {
+  const stop = new Set([
+    "about", "after", "again", "agent", "because", "before", "codex", "could",
+    "current", "should", "there", "these", "thing", "through", "while", "would"
+  ]);
+  const counts = new Map();
+  const matches = String(text || "").toLowerCase().match(/[a-z0-9_.\/-]{4,}/g) || [];
+  for (const raw of matches) {
+    const word = raw.replace(/^[./-]+|[./-]+$/g, "");
+    if (!word || stop.has(word) || /^\d+$/.test(word)) {
+      continue;
+    }
+    counts.set(word, (counts.get(word) || 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, limit)
+    .map(([word]) => word);
 }
 
 function normalizeServerUrl(value, fallback) {
@@ -8019,7 +8793,8 @@ async function sendChatTurn(panel, message) {
     cline_compatibility_mode: config.clineCompatibilityMode,
     agent_hub: agentHubRequestOptions(config, {
       classification_text: text,
-      user_task: text
+      user_task: text,
+      context_chars: String(context || "").length
     }),
     group_agent: {
       plan_candidates: config.groupPlanCandidates
@@ -8032,6 +8807,7 @@ async function sendChatTurn(panel, message) {
     }
   };
   applyOptionalMaxTokens(body, config);
+  applyTokenSafeRequestPlan(body, config);
 
   output.appendLine("");
   output.appendLine(`[Agent Hub Chat] ${text}`);
@@ -8211,6 +8987,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       --ok: var(--vscode-testing-iconPassed, #3fb950);
       --warn: var(--vscode-testing-iconQueued, #d29922);
       --error: var(--vscode-errorForeground, #f85149);
+      --cyan: #22d3ee;
       --accent: color-mix(in srgb, var(--button) 76%, #2dd4bf 24%);
       --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
       --panel: color-mix(in srgb, var(--surface) 88%, var(--app-fg) 12%);
@@ -8509,6 +9286,42 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       min-height: 16px;
       color: var(--muted);
       font-size: 11px;
+    }
+
+    .mode-summary {
+      display: grid;
+      gap: 3px;
+      margin: 10px 0;
+      border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--subtle-border));
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: color-mix(in srgb, var(--surface) 82%, var(--accent) 8%);
+    }
+
+    .mode-summary strong {
+      color: var(--app-fg);
+      font-size: 12px;
+    }
+
+    .mode-summary span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .mode-summary[data-mode="token-safe"] {
+      border-color: color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--surface) 82%, var(--ok) 8%);
+    }
+
+    .mode-summary[data-mode="free-only"] {
+      border-color: color-mix(in srgb, var(--cyan) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--surface) 82%, var(--cyan) 7%);
+    }
+
+    .mode-summary[data-mode="codex-cli"] {
+      border-color: color-mix(in srgb, var(--accent) 48%, var(--subtle-border));
+      background: color-mix(in srgb, var(--surface) 82%, var(--accent) 9%);
     }
 
     .transcript {
@@ -8810,6 +9623,20 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
       background: var(--secondary-hover);
     }
 
+    button[data-active="true"] {
+      color: #ffffff;
+      border-color: color-mix(in srgb, var(--ok) 58%, var(--subtle-border));
+      background: linear-gradient(135deg, color-mix(in srgb, var(--ok) 78%, var(--button)), color-mix(in srgb, var(--ok) 72%, var(--accent)));
+    }
+
+    button[data-running="true"] {
+      color: #ffffff;
+      opacity: 1;
+      border-color: color-mix(in srgb, var(--warn) 62%, var(--subtle-border));
+      background: linear-gradient(135deg, var(--warn), color-mix(in srgb, var(--warn) 68%, var(--button)));
+      transform: none;
+    }
+
     button:disabled,
     select:disabled,
     input:disabled,
@@ -8991,7 +9818,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
                 <span>Cloud route</span>
                 <select id="settingCloudRouteMode">
                   <option value="ollama-cloud">Ollama cloud models first</option>
-                  <option value="codex-cli">Codex CLI without API key</option>
+                  <option value="codex-cli">Signed-in Codex CLI</option>
                   <option value="api-key">API-key models first</option>
                 </select>
               </label>
@@ -9095,14 +9922,18 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
               <label class="settings-check"><input id="settingLoadBalancing" type="checkbox"> Load balancing</label>
               <label class="settings-check"><input id="settingRoutingDetails" type="checkbox"> Routing details</label>
             </div>
+            <div class="mode-summary" id="modeSummary" role="status" aria-live="polite" data-mode="standard">
+              <strong>Standard Routing</strong>
+              <span>Uses the current provider and token settings.</span>
+            </div>
             <div class="settings-actions">
-              <button class="secondary" id="codexCliMode" type="button">Codex CLI Mode</button>
-              <button class="secondary" id="freeOnlyModeSettings" type="button">Free Only Mode</button>
-              <button class="secondary" id="maxTokenSave" type="button">Token Safe Mode</button>
+              <button class="secondary" id="codexCliMode" type="button">Use Codex CLI</button>
+              <button class="secondary" id="freeOnlyModeSettings" type="button">Free Models Only</button>
+              <button class="secondary" id="maxTokenSave" type="button">Save Codex Tokens</button>
               <button id="saveSettings" type="button">Save Settings</button>
               <button class="secondary" id="openSettings" type="button">Open VS Code Settings</button>
             </div>
-            <div class="settings-message" id="settingsMessage"></div>
+            <div class="settings-message" id="settingsMessage" role="status" aria-live="polite"></div>
             <div class="settings-section">
               <div class="settings-section-title">Server</div>
               <div class="settings-actions">
@@ -9178,6 +10009,7 @@ ${apiKeyFieldsHtml()}
     const settingsMenu = document.getElementById("settingsMenu");
     const settingsClose = document.getElementById("settingsClose");
     const settingsMessage = document.getElementById("settingsMessage");
+    const modeSummary = document.getElementById("modeSummary");
     const includeSelection = document.getElementById("includeSelection");
     const controlMode = document.getElementById("controlMode");
     const pullModel = document.getElementById("pullModel");
@@ -9299,8 +10131,77 @@ ${apiKeyFieldsHtml()}
       settingInputs.allowShellTools.checked = !!next.allowShellTools;
       settingInputs.autoStart.checked = !!next.autoStart;
       settingInputs.automatedModelFeedback.checked = !!next.automatedModelFeedback;
+      renderChatModeButtons(next);
+      clearChatModeRunningButtons();
       if (messageText !== undefined) {
         settingsMessage.textContent = messageText || "";
+      }
+    }
+
+    function renderChatModeButtons(settings) {
+      updateChatModeButton("codexCliMode", !!settings.codexCliMode, "Stop Using Codex CLI", "Use Codex CLI");
+      updateChatModeButton("freeOnlyModeSettings", !!settings.freeOnlyStrictMode, "Turn Off Free Models Only", "Free Models Only");
+      updateChatModeButton("maxTokenSave", !!settings.tokenSafeMode, "Stop Saving Codex Tokens", "Save Codex Tokens");
+      renderChatModeSummary(settings);
+    }
+
+    function updateChatModeButton(id, active, activeText, inactiveText) {
+      const button = document.getElementById(id);
+      if (!button) {
+        return;
+      }
+      button.dataset.active = active ? "true" : "false";
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      button.textContent = active ? activeText : inactiveText;
+    }
+
+    function renderChatModeSummary(settings) {
+      if (!modeSummary) {
+        return;
+      }
+      const title = modeSummary.querySelector("strong");
+      const detail = modeSummary.querySelector("span");
+      if (settings.freeOnlyStrictMode) {
+        title.textContent = "Free Models Only";
+        detail.textContent = "Codex CLI and non-free/API-key fallbacks are blocked for this workspace.";
+        modeSummary.dataset.mode = "free-only";
+      } else if (settings.codexCliMode) {
+        title.textContent = "Using Signed-In Codex CLI";
+        detail.textContent = "Routes through your local Codex login with compact context and no OpenAI API-key fallback.";
+        modeSummary.dataset.mode = "codex-cli";
+      } else if (settings.tokenSafeMode) {
+        title.textContent = "Saving Codex Tokens";
+        detail.textContent = "Free models try safe work first; Codex fallback uses adaptive compact digests and short output caps.";
+        modeSummary.dataset.mode = "token-safe";
+      } else {
+        title.textContent = "Standard Routing";
+        detail.textContent = "Uses the current provider, context, and token settings.";
+        modeSummary.dataset.mode = "standard";
+      }
+    }
+
+    function markChatModeRunning(button) {
+      if (!button) {
+        return;
+      }
+      button.dataset.running = "true";
+      button.setAttribute("aria-busy", "true");
+      button.disabled = true;
+      setTimeout(() => clearChatModeRunningButton(button), 8000);
+    }
+
+    function clearChatModeRunningButton(button) {
+      if (!button) {
+        return;
+      }
+      delete button.dataset.running;
+      button.removeAttribute("aria-busy");
+      button.disabled = false;
+    }
+
+    function clearChatModeRunningButtons() {
+      for (const button of document.querySelectorAll(".settings-actions button[data-running='true']")) {
+        clearChatModeRunningButton(button);
       }
     }
 
@@ -9883,7 +10784,17 @@ ${apiKeyFieldsHtml()}
       });
     });
 
-    document.getElementById("codexCliMode").addEventListener("click", () => {
+    document.getElementById("codexCliMode").addEventListener("click", (event) => {
+      const active = event.currentTarget.dataset.active === "true";
+      markChatModeRunning(event.currentTarget);
+      if (active) {
+        settingsMessage.textContent = "Turning off Use Codex CLI...";
+        vscode.postMessage({
+          type: "enableCodexCliMode",
+          settings: collectChatSettings()
+        });
+        return;
+      }
       controlMode.value = "cloud";
       settingInputs.cloudRouteMode.value = "codex-cli";
       settingInputs.apiKeyModelsEnabled.checked = false;
@@ -9894,14 +10805,24 @@ ${apiKeyFieldsHtml()}
       settingInputs.maxTokens.value = String(${CODEX_CLI_OUTPUT_TOKENS});
       settingInputs.agentMaxSteps.value = String(${CODEX_CLI_AGENT_STEPS});
       settingInputs.groupPlanCandidates.value = "1";
-      settingsMessage.textContent = "Turning on Codex CLI Mode...";
+      settingsMessage.textContent = "Turning on Use Codex CLI...";
       vscode.postMessage({
         type: "enableCodexCliMode",
         settings: collectChatSettings()
       });
     });
 
-    document.getElementById("freeOnlyModeSettings").addEventListener("click", () => {
+    document.getElementById("freeOnlyModeSettings").addEventListener("click", (event) => {
+      const active = event.currentTarget.dataset.active === "true";
+      markChatModeRunning(event.currentTarget);
+      if (active) {
+        settingsMessage.textContent = "Turning off Free Models Only...";
+        vscode.postMessage({
+          type: "enableFreeOnlyMode",
+          settings: collectChatSettings()
+        });
+        return;
+      }
       controlMode.value = "cloud";
       settingInputs.cloudRouteMode.value = "ollama-cloud";
       settingInputs.apiKeyModelsEnabled.checked = false;
@@ -9912,14 +10833,24 @@ ${apiKeyFieldsHtml()}
       settingInputs.maxTokens.value = "";
       settingInputs.agentMaxSteps.value = String(${DEFAULT_AGENT_MAX_STEPS});
       settingInputs.groupPlanCandidates.value = "1";
-      settingsMessage.textContent = "Turning on Free Only Mode...";
+      settingsMessage.textContent = "Turning on Free Models Only...";
       vscode.postMessage({
         type: "enableFreeOnlyMode",
         settings: collectChatSettings()
       });
     });
 
-    document.getElementById("maxTokenSave").addEventListener("click", () => {
+    document.getElementById("maxTokenSave").addEventListener("click", (event) => {
+      const active = event.currentTarget.dataset.active === "true";
+      markChatModeRunning(event.currentTarget);
+      if (active) {
+        settingsMessage.textContent = "Turning off Save Codex Tokens...";
+        vscode.postMessage({
+          type: "enableMaxTokenSave",
+          settings: collectChatSettings()
+        });
+        return;
+      }
       controlMode.value = "cloud";
       settingInputs.cloudRouteMode.value = "ollama-cloud";
       settingInputs.apiKeyModelsEnabled.checked = true;
@@ -9930,7 +10861,7 @@ ${apiKeyFieldsHtml()}
       settingInputs.maxTokens.value = "";
       settingInputs.agentMaxSteps.value = String(${DEFAULT_AGENT_MAX_STEPS});
       settingInputs.groupPlanCandidates.value = "1";
-      settingsMessage.textContent = "Turning on Token Safe Mode...";
+      settingsMessage.textContent = "Turning on Save Codex Tokens...";
       vscode.postMessage({
         type: "enableMaxTokenSave",
         settings: collectChatSettings()
@@ -10877,6 +11808,9 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
     free_cloud_presets_enabled: !!effectiveCloudSettings.freeCloudPresetsEnabled,
     disable_non_free_models: effectiveCloudSettings.disableNonFreeModels === true
   };
+  if (effectiveCloudSettings.maxTokenSaveMode === false && effectiveCloudSettings.codexCliMode === false) {
+    clearModeOptimizationFromConfig(data);
+  }
   if (effectiveCloudSettings.maxTokenSaveMode) {
     applyMaxTokenSaveModeToConfig(data, effectiveCloudSettings);
   }
@@ -10911,21 +11845,46 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
   return true;
 }
 
+function clearModeOptimizationFromConfig(data) {
+  data.agent_context_budget_tokens = DEFAULT_AGENT_CONTEXT_BUDGET;
+  data.agent_context_compaction_enabled = true;
+  data.context_mode = "balanced";
+  delete data.max_context_tokens;
+  delete data.repo_context_max_files;
+  delete data.repo_context_max_chars;
+  if (data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)) {
+    delete data.routing.free_cloud_savings_mode;
+    delete data.routing.max_tokens_mode;
+    delete data.routing.simple_cloud_exploration_enabled;
+    delete data.routing.simple_cloud_exploration_rate;
+    delete data.routing.simple_cloud_min_relative_score;
+    delete data.routing.simple_cloud_min_samples;
+    delete data.routing.token_saver_enabled;
+  }
+  if (data.compatibility_mode && typeof data.compatibility_mode === "object" && !Array.isArray(data.compatibility_mode)) {
+    delete data.compatibility_mode.minimal_tool_schema;
+    delete data.compatibility_mode.reduced_repo_context;
+    delete data.compatibility_mode.max_context_tokens;
+    delete data.compatibility_mode.codex_cli_prompt_optimized;
+    delete data.compatibility_mode.codex_cli_prompt_budget_tokens;
+  }
+}
+
 function applyMaxTokenSaveModeToConfig(data, settings = {}) {
   const budget = cleanSettingInteger(
     settings.agentContextBudgetTokens,
-    DEFAULT_AGENT_CONTEXT_BUDGET,
-    1000,
+    CODEX_CLI_CONTEXT_BUDGET,
+    800,
     200000
   );
   data.agent_context_budget_tokens = budget;
   data.agent_context_compaction_enabled = true;
-  data.context_mode = "balanced";
+  data.context_mode = "minimal";
+  data.max_context_tokens = budget;
+  data.repo_context_max_files = CODEX_CLI_REPO_FILES;
+  data.repo_context_max_chars = CODEX_CLI_REPO_CHARS;
   data.free_only = false;
   data.enable_load_balancing = true;
-  delete data.max_context_tokens;
-  delete data.repo_context_max_files;
-  delete data.repo_context_max_chars;
   data.routing = {
     ...(data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)
       ? data.routing
@@ -10933,21 +11892,23 @@ function applyMaxTokenSaveModeToConfig(data, settings = {}) {
     free_cloud_savings_mode: true,
     free_first: true,
     prefer_available_quota: true,
-    max_tokens_mode: "auto",
+    max_tokens_mode: "explicit",
     simple_cloud_exploration_enabled: true,
     simple_cloud_exploration_rate: 0.35,
     simple_cloud_min_relative_score: 0.82,
-    simple_cloud_min_samples: 3
+    simple_cloud_min_samples: 3,
+    codex_cli_token_optimized: true
   };
-  const compatibility = data.compatibility_mode && typeof data.compatibility_mode === "object" && !Array.isArray(data.compatibility_mode)
-    ? { ...data.compatibility_mode }
-    : {};
-  delete compatibility.minimal_tool_schema;
-  delete compatibility.reduced_repo_context;
-  delete compatibility.max_context_tokens;
-  delete compatibility.codex_cli_prompt_optimized;
-  delete compatibility.codex_cli_prompt_budget_tokens;
-  data.compatibility_mode = compatibility;
+  data.compatibility_mode = {
+    ...(data.compatibility_mode && typeof data.compatibility_mode === "object" && !Array.isArray(data.compatibility_mode)
+      ? data.compatibility_mode
+      : {}),
+    minimal_tool_schema: true,
+    reduced_repo_context: true,
+    max_context_tokens: budget,
+    codex_cli_prompt_optimized: true,
+    codex_cli_prompt_budget_tokens: budget
+  };
 }
 
 function applyCodexCliModeToConfig(data, settings = {}) {
@@ -11471,7 +12432,7 @@ function cloudModelSources(settings = {}) {
     contextWindow: 400000,
     timeoutSeconds: 300,
     cooldownSeconds: 30,
-    maxTokens: routeMode === "codex-cli" ? CODEX_CLI_OUTPUT_TOKENS : undefined,
+    maxTokens: routeMode === "codex-cli" || settings.maxTokenSaveMode ? CODEX_CLI_OUTPUT_TOKENS : undefined,
     priority: 90,
     codingScore: 0.9,
     reasoningScore: 0.9,
@@ -13697,6 +14658,8 @@ async function requestCommitMessage(diffContext) {
     max_tokens: 160,
     agent_hub: agentHubRequestOptions(config, {
       classification_text: "Generate a concise Git commit message for the provided diff.",
+      user_task: commitMessageTask(diffContext.scope),
+      context_chars: String(diffContext.context || "").length,
       routing_mode: isMaxTokenSaveMode(config) ? "cheapest" : undefined
     }),
     metadata: {
@@ -13706,6 +14669,7 @@ async function requestCommitMessage(diffContext) {
     }
   };
   applyOptionalMaxTokens(body, config);
+  applyTokenSafeRequestPlan(body, config);
 
   output.show(true);
   output.appendLine("");
@@ -14116,7 +15080,8 @@ async function sendAgentRequest({ task, context, route, routingText, agentMode =
     agent_hub: agentHubRequestOptions(config, {
       ...(extraAgentHub && typeof extraAgentHub === "object" ? extraAgentHub : {}),
       classification_text: routingText || task,
-      user_task: routingText || task
+      user_task: routingText || task,
+      context_chars: String(context || "").length
     }),
     metadata: {
       source: "vscode",
@@ -14124,6 +15089,7 @@ async function sendAgentRequest({ task, context, route, routingText, agentMode =
     }
   };
   applyOptionalMaxTokens(body, config);
+  applyTokenSafeRequestPlan(body, config);
 
   output.show(true);
   output.appendLine("");

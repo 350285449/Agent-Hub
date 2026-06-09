@@ -279,11 +279,15 @@ class ProviderTests(unittest.TestCase):
 
         prompt = captured["input"].decode("utf-8")
         self.assertLessEqual(len(prompt), 2600)
+        self.assertIn("Context digest:", prompt)
+        self.assertIn("source_sha256=", prompt)
         self.assertIn("latest request keep this", prompt)
         self.assertNotIn("old turn 0", prompt)
         self.assertNotIn("sk-" + ("a" * 32), prompt)
         self.assertIn("[redacted secret]", prompt)
         self.assertEqual(result.raw["prompt_optimized"], True)
+        self.assertEqual(result.raw["prompt_budget_tokens"], 600)
+        self.assertEqual(result.raw["token_safe_profile"], "optimized")
 
     def test_openai_compatible_cloud_provider_headers_are_created(self) -> None:
         agent = AgentConfig(

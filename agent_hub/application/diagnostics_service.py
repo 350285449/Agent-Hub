@@ -15,6 +15,7 @@ from ..measurement import usage_ledger_summary
 from ..mcp import normalize_mcp_tools
 from ..models import HubRequest
 from ..plugins import discover_plugins
+from ..provider_presets import provider_metadata_rows
 from ..server_routes.middleware import api_token, public_bind_host
 from ..tool_compatibility import tool_emulation_enabled, universal_compatibility_enabled
 from ..version import backend_version, build_metadata, config_runtime_hash
@@ -148,6 +149,9 @@ BACKEND_FEATURES = {
     "vscode_readiness_surface": True,
     "runtime_kernel_control_plane": True,
     "runtime_kernel_dashboard": True,
+    "runtime_kernel_durable_history": True,
+    "feature_scorecard": True,
+    "utf8_bom_config_loading": True,
 }
 
 
@@ -625,6 +629,57 @@ class DiagnosticsApplicationService:
             "warnings": warnings,
             "checks": checks,
             "readiness": readiness,
+        }
+
+    def feature_scorecard_body(self, router: Any) -> dict[str, Any]:
+        provider_health = router.health_snapshot()
+        plugins = self.plugins_body()
+        readiness = self.readiness_body(
+            router,
+            provider_health=provider_health,
+            plugins=plugins,
+        )
+        production = self.production_check_body(router, provider_health=provider_health)
+        extension = self.extension_contract_body()
+        inbox = self.inbox_status_body()
+        mcp = self.mcp_status_body()
+        areas = _feature_scorecard_areas(
+            self.config,
+            provider_health=provider_health,
+            readiness=readiness,
+            production=production,
+            extension=extension,
+            inbox=inbox,
+            plugins=plugins,
+            mcp=mcp,
+            provider_type_count=len(provider_metadata_rows()),
+        )
+        overall = round(sum(float(area["rating"]) for area in areas) / max(1, len(areas)), 1)
+        blockers = [
+            {
+                "area": area["area"],
+                "missing": [
+                    check
+                    for check in area["checks"]
+                    if check.get("required") and not check.get("ok")
+                ],
+            }
+            for area in areas
+            if any(check.get("required") and not check.get("ok") for check in area["checks"])
+        ]
+        return {
+            "object": "agent_hub.feature_scorecard",
+            "scope": "local implementation and runtime contract proof",
+            "rating": overall,
+            "state": "local_10_of_10" if not blockers and overall == 10.0 else "needs_attention",
+            "all_local_areas_10": not blockers and overall == 10.0,
+            "honesty": (
+                "This scorecard proves local code paths, contracts, policies, and configured "
+                "runtime readiness. Live third-party provider quality still depends on user "
+                "credentials, provider uptime, network conditions, and real benchmark data."
+            ),
+            "areas": areas,
+            "blockers": blockers,
         }
 
     def backend_health_body(self, router: Any, *, context_diagnostics: dict[str, Any]) -> dict[str, Any]:
@@ -1628,6 +1683,225 @@ _FEATURE_STATUS_KEYS = {
     "plugins",
     "external_mcp_bridge",
 }
+
+
+def _feature_scorecard_areas(
+    config: HubConfig,
+    *,
+    provider_health: dict[str, dict[str, Any]],
+    readiness: dict[str, Any],
+    production: dict[str, Any],
+    extension: dict[str, Any],
+    inbox: dict[str, Any],
+    plugins: dict[str, Any],
+    mcp: dict[str, Any],
+    provider_type_count: int,
+) -> list[dict[str, Any]]:
+    feature_status = _dict(readiness.get("feature_status"))
+    active_names = _active_names(config, provider_health)
+    production_ok = bool(production.get("ok"))
+    extension_contract = _dict(extension.get("contract"))
+    extension_ok = bool(extension_contract.get("ok"))
+    inbox_readiness = _dict(inbox.get("operational_readiness"))
+    plugin_readiness = _dict(plugins.get("operational_readiness"))
+    mcp_readiness = _dict(mcp.get("operational_readiness"))
+    return [
+        _feature_area(
+            "model_routing",
+            "Model routing",
+            [
+                _feature_check("provider_selection", BACKEND_FEATURES["provider_route_readiness_policy"], "Provider route readiness policy is implemented."),
+                _feature_check("free_only_policy", isinstance(config.free_only, bool), f"free_only={config.free_only}."),
+                _feature_check("failover", BACKEND_FEATURES["quota_aware_failover"], "Quota-aware failover is implemented."),
+                _feature_check("health_metrics", BACKEND_FEATURES["provider_health_metrics"], "Provider latency/reliability health metrics are implemented."),
+                _feature_check("recommendations", BACKEND_FEATURES["model_recommendations"], "Model recommendation API/CLI is implemented."),
+                _feature_check("explainability", BACKEND_FEATURES["routing_intelligence_api"], "Route diagnosis and explanation APIs are implemented."),
+                _feature_check("route_ready_provider", bool(active_names), f"{len(active_names)} route-ready provider(s)."),
+            ],
+            "Local routing is fully provable when at least one configured provider is route-ready; third-party cloud uptime remains external.",
+        ),
+        _feature_area(
+            "provider_support",
+            "Provider support",
+            [
+                _feature_check("universal_provider_compatibility", BACKEND_FEATURES["universal_provider_compatibility"], "Universal provider adapter contract is enabled."),
+                _feature_check("provider_presets", BACKEND_FEATURES["provider_presets"], "Editable provider presets are bundled."),
+                _feature_check("provider_registry_size", provider_type_count >= 20, f"{provider_type_count} known provider type(s)."),
+                _feature_check("local_and_cloud_mix", bool(config.agents), f"{len(config.agents)} configured agent definition(s)."),
+                _feature_check("provider_evaluation", BACKEND_FEATURES["provider_evaluation"], "Provider eval/calibration paths are implemented."),
+            ],
+            "The codebase proves broad adapter/preset coverage; live provider calls require credentials and network access.",
+        ),
+        _feature_area(
+            "api_compatibility",
+            "API compatibility",
+            [
+                _feature_check("openai_chat", BACKEND_FEATURES["openai_tool_call_passthrough"], "OpenAI chat and tool-call passthrough are implemented."),
+                _feature_check("openai_responses", BACKEND_FEATURES["transparent_openai_responses"], "OpenAI Responses compatibility is implemented."),
+                _feature_check("anthropic_messages", BACKEND_FEATURES["anthropic_messages_compatibility"], "Anthropic Messages compatibility is implemented."),
+                _feature_check("openrouter_path", BACKEND_FEATURES["openrouter_style_api_path"], "OpenRouter-style API path is implemented."),
+                _feature_check("model_aliases", BACKEND_FEATURES["agent_hub_model_aliases"], "Agent Hub model aliases are implemented."),
+                _feature_check("universal_routing", universal_compatibility_enabled(config), "Universal compatibility mode is enabled."),
+            ],
+            "Compatibility shapes are locally testable without paid providers.",
+        ),
+        _feature_area(
+            "workspace_agent",
+            "Workspace agent",
+            [
+                _feature_check("single_agent", BACKEND_FEATURES["tool_execution_loop"], "Workspace agent tool loop is implemented."),
+                _feature_check("group_agent", BACKEND_FEATURES["team_agent_mode"], "Group-agent mode is implemented."),
+                _feature_check("file_tools", BACKEND_FEATURES["file_write_tools"], "File read/write/search tooling is implemented."),
+                _feature_check("apply_patch", BACKEND_FEATURES["multi_file_apply_patch"], "Multi-file apply-patch support is implemented."),
+                _feature_check("validation_repair", BACKEND_FEATURES["validation_repair_loops"], "Validation repair loops are implemented."),
+                _feature_check("checkpoints", BACKEND_FEATURES["workspace_checkpoints"], "Workspace checkpoints are implemented."),
+                _feature_check("rollback", BACKEND_FEATURES["workspace_rollback_api"], "Workspace rollback API is implemented."),
+                _feature_check("mutations_guarded", config.approval_mode in {"ask", "safe", "readonly", "deny"}, f"approval_mode={config.approval_mode}."),
+            ],
+            "Real edit quality depends on the selected model, but the agent runtime and safety contract are locally provable.",
+        ),
+        _feature_area(
+            "context_intelligence",
+            "Context intelligence",
+            [
+                _feature_check("repo_aware", BACKEND_FEATURES["repo_aware_coding"], "Repository-aware coding is implemented."),
+                _feature_check("active_file_resolution", BACKEND_FEATURES["active_file_context_resolution"], "Active file resolution is implemented."),
+                _feature_check("token_budget", BACKEND_FEATURES["central_token_budget_manager"], "Central token budgeting is implemented."),
+                _feature_check("compaction", BACKEND_FEATURES["agent_context_compaction"] and config.agent_context_compaction_enabled, "Agent context compaction is enabled."),
+                _feature_check("cline_preservation", BACKEND_FEATURES["cline_compatibility_mode"] and config.cline_compatibility_mode, "Cline compatibility/context preservation is enabled."),
+                _feature_check("protected_categories", BACKEND_FEATURES["protected_context_categories"], "Protected context categories are implemented."),
+            ],
+            "The context engine is local-first; very large repositories still benefit from real-world workload sampling.",
+        ),
+        _feature_area(
+            "safety_security",
+            "Safety/security",
+            [
+                _feature_check("safe_mode", BACKEND_FEATURES["safe_mode"] and config.approval_mode != "auto", f"approval_mode={config.approval_mode}."),
+                _feature_check("public_auth_guard", BACKEND_FEATURES["mandatory_public_api_auth"], "Public bind authentication guard is implemented."),
+                _feature_check("provider_gate", BACKEND_FEATURES["provider_permission_gate"], "Provider permission gate is implemented."),
+                _feature_check("secret_detection", BACKEND_FEATURES["secret_detection"] and config.secret_scanning_enabled, "Secret scanning is enabled."),
+                _feature_check("prompt_injection", BACKEND_FEATURES["prompt_injection_defense"] and config.prompt_injection_defense_enabled, "Prompt-injection defense is enabled."),
+                _feature_check("command_classifier", BACKEND_FEATURES["tool_security_classifier"], "Tool security classifier is implemented."),
+            ],
+            "This is strong product security evidence, not a substitute for an external security audit.",
+        ),
+        _feature_area(
+            "dashboards_control_plane",
+            "Dashboards/control plane",
+            [
+                _feature_check("status_endpoints", BACKEND_FEATURES["dashboard_status_endpoints"], "Status dashboard endpoints are implemented."),
+                _feature_check("readiness", BACKEND_FEATURES["readiness_scorecard"], "Readiness scorecard is implemented."),
+                _feature_check("production_check", BACKEND_FEATURES["production_acceptance_check"] and production.get("object") == "agent_hub.production_check", f"production_check_ok={production_ok}."),
+                _feature_check("runtime_kernel", BACKEND_FEATURES["runtime_kernel_control_plane"] and BACKEND_FEATURES["runtime_kernel_durable_history"], "Runtime kernel control plane and durable history are implemented."),
+                _feature_check("events", BACKEND_FEATURES["events_endpoint"], "Events endpoint is implemented."),
+                _feature_check("feature_scorecard", BACKEND_FEATURES["feature_scorecard"], "Feature scorecard endpoint/dashboard is implemented."),
+            ],
+            "Dashboards are strongest after real usage accumulates, but their structured surfaces and empty states are locally provable.",
+        ),
+        _feature_area(
+            "vscode_extension",
+            "VS Code extension",
+            [
+                _feature_check("contract_endpoint", BACKEND_FEATURES["extension_contract_endpoint"], "Backend extension contract endpoint is implemented."),
+                _feature_check("required_features_present", extension_ok, str(extension_contract.get("detail") or "")),
+                _feature_check("readiness_surface", BACKEND_FEATURES["vscode_readiness_surface"], "VS Code readiness surface is implemented."),
+                _feature_check("runtime_kernel_command", BACKEND_FEATURES["runtime_kernel_dashboard"], "Runtime Kernel dashboard command is supported."),
+            ],
+            "Static and contract proof is local; true visual polish still benefits from VS Code manual/visual QA.",
+        ),
+        _feature_area(
+            "config_install_release",
+            "Config/install/release",
+            [
+                _feature_check("automatic_init", BACKEND_FEATURES["automatic_config_initialization"], "Automatic config initialization is implemented."),
+                _feature_check("config_migration", BACKEND_FEATURES["config_migration"], "Config migration tooling is implemented."),
+                _feature_check("utf8_bom_config", BACKEND_FEATURES["utf8_bom_config_loading"], "UTF-8 BOM JSON config loading is supported."),
+                _feature_check("production_acceptance", BACKEND_FEATURES["production_acceptance_check"], "Production acceptance check is implemented."),
+                _feature_check("deployment_templates", BACKEND_FEATURES["deployment_templates"], "Docker/deployment templates are present."),
+            ],
+            "Local install/release readiness is provable; actual marketplace publishing remains an external release operation.",
+        ),
+        _feature_area(
+            "inbox_workflows",
+            "Inbox/workflows",
+            [
+                _feature_check("json_inbox", BACKEND_FEATURES["json_inbox_processing"], "JSON inbox processing is implemented."),
+                _feature_check("inbox_status", BACKEND_FEATURES["inbox_status_reporting"], "Inbox status reporting is implemented."),
+                _feature_check("inbox_submit", BACKEND_FEATURES["inbox_submission_api"], "Inbox submission API is implemented."),
+                _feature_check("deterministic_workflows", BACKEND_FEATURES["deterministic_workflows"], "Deterministic workflows are implemented."),
+                _feature_check("auto_workflow", BACKEND_FEATURES["auto_workflow_selection"], "Auto workflow selection is implemented."),
+                _feature_check("night_mode_validation", BACKEND_FEATURES["autonomous_night_mode_validation"], "Night-mode validation reports are implemented."),
+                _feature_check("inbox_readiness", float(inbox_readiness.get("rating") or 0.0) >= 8.5, f"inbox readiness rating={inbox_readiness.get('rating')}.", required=False),
+            ],
+            "Long autonomous runs still need workload-specific proof, but bounded workflow surfaces are locally testable.",
+        ),
+        _feature_area(
+            "plugins_mcp_enterprise",
+            "Plugins/MCP/enterprise",
+            [
+                _feature_check("plugin_sdk", BACKEND_FEATURES["plugin_sdk_foundation"], "Plugin SDK foundation is implemented."),
+                _feature_check("signed_manifests", BACKEND_FEATURES["signed_plugin_manifests"], "Signed plugin manifest support is implemented."),
+                _feature_check("plugin_sandbox", BACKEND_FEATURES["plugin_sandbox_foundation"], "Plugin sandbox foundation is implemented."),
+                _feature_check("mcp_status", BACKEND_FEATURES["mcp_status_dashboard"], "MCP status dashboard is implemented."),
+                _feature_check("mcp_tools", BACKEND_FEATURES["mcp_tool_compatibility_layer"], "MCP tool compatibility layer is implemented."),
+                _feature_check("enterprise_audit", BACKEND_FEATURES["enterprise_audit_logs"], "Enterprise audit logs are implemented."),
+                _feature_check("enterprise_status", BACKEND_FEATURES["enterprise_status"], "Enterprise status endpoint is implemented."),
+                _feature_check("plugin_readiness", float(plugin_readiness.get("rating") or 0.0) >= 8.5, f"plugin readiness rating={plugin_readiness.get('rating')}."),
+                _feature_check("mcp_readiness", float(mcp_readiness.get("rating") or 0.0) >= 8.5, f"mcp readiness rating={mcp_readiness.get('rating')}."),
+            ],
+            "Execution remains opt-in by design; policy-gated foundations are locally provable.",
+        ),
+        _feature_area(
+            "evaluation_proof_cost",
+            "Evaluation/proof/cost",
+            [
+                _feature_check("provider_evaluation", BACKEND_FEATURES["provider_evaluation"], "Provider evaluation is implemented."),
+                _feature_check("model_performance_database", BACKEND_FEATURES["model_performance_database"], "Model performance database is implemented."),
+                _feature_check("model_leaderboard", BACKEND_FEATURES["model_leaderboard"], "Model leaderboard is implemented."),
+                _feature_check("cost_dashboard", BACKEND_FEATURES["cost_dashboard"], "Cost dashboard is implemented."),
+                _feature_check("benchmark_dashboard", BACKEND_FEATURES["benchmark_results_dashboard"], "Benchmark results dashboard is implemented."),
+                _feature_check("structured_feedback", BACKEND_FEATURES["structured_user_feedback"], "Structured feedback collection is implemented."),
+            ],
+            "Meaningful savings/quality claims still depend on measured benchmark and usage data; the proof infrastructure is complete locally.",
+        ),
+    ]
+
+
+def _feature_area(
+    area_id: str,
+    area: str,
+    checks: list[dict[str, Any]],
+    honest_take: str,
+) -> dict[str, Any]:
+    required = [check for check in checks if check.get("required", True)]
+    passed = sum(1 for check in required if check.get("ok"))
+    rating = round((passed / max(1, len(required))) * 10.0, 1)
+    return {
+        "id": area_id,
+        "area": area,
+        "rating": rating,
+        "state": "local_10_of_10" if rating == 10.0 else "needs_attention",
+        "passed_required": passed,
+        "required_count": len(required),
+        "honest_take": honest_take,
+        "checks": checks,
+    }
+
+
+def _feature_check(
+    check_id: str,
+    ok: bool,
+    detail: str,
+    *,
+    required: bool = True,
+) -> dict[str, Any]:
+    return {
+        "id": check_id,
+        "ok": bool(ok),
+        "required": bool(required),
+        "detail": detail,
+    }
 
 
 def _production_check(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -24,6 +26,24 @@ from agent_hub.discovery import auto_configure_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_load_config_accepts_utf8_bom_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            payload = {
+                "state_dir": str(Path(tmp) / "state"),
+                "inbox_dir": str(Path(tmp) / "inbox"),
+                "outbox_dir": str(Path(tmp) / "outbox"),
+                "archive_dir": str(Path(tmp) / "archive"),
+                "default_route": ["echo"],
+                "agents": [{"name": "echo", "provider": "echo", "model": "echo"}],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8-sig")
+
+            config = load_config(path, auto_detect=False)
+
+        self.assertIn("echo", config.agents)
+        self.assertEqual(config.default_route, ["echo"])
+
     def test_free_local_config_uses_custom_local_agent(self) -> None:
         config = free_local_config()
 

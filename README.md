@@ -555,16 +555,18 @@ Cloud control starts with Ollama cloud model IDs in fresh VS Code configs. Those
 models run through Ollama Cloud, not on your local CPU/GPU. To put hosted API-key
 models first, open the chat `Settings` menu, set `Cloud route` to `API-key
 models first`, save provider keys, and restart Agent Hub.
-Use `Token Safe Mode` in the same chat `Settings` menu when you want confident
-free models to handle safe work first while Codex CLI and API-key models stay
-available as full-strength fallback. The router protects Codex for high-risk,
-large-context, security-sensitive, low-confidence, or tool-incompatible tasks.
-Use `Free Only Mode` when you want to disable Codex CLI, OpenAI, Claude, Gemini,
+Use `Save Codex Tokens` in the same chat `Settings` menu when you want confident
+free models to handle safe work first while Codex fallback stays compact. The
+router protects Codex for high-risk, large-context, security-sensitive,
+low-confidence, or tool-incompatible tasks, then gives Codex CLI fallback an
+adaptive micro/surgical/rescue context digest with reduced tool and repo
+metadata, fewer agent steps, and shorter output caps.
+Use `Free Models Only` when you want to disable Codex CLI, OpenAI, Claude, Gemini,
 ChatGPT, and other non-free/API-key fallbacks entirely. This keeps local,
 Ollama Cloud, local research, and configured free-tier models eligible, and it
 adds `disable_non_free_models=true` to the config so saved API keys cannot
 quietly re-enable paid routes.
-Use `Codex CLI Mode` when you want Codex through your existing `codex login`
+Choose `Use Codex CLI` when you want Codex through your existing `codex login`
 session instead of an `OPENAI_API_KEY`; it enables the `codex-cli` route,
 disables API-key fallbacks, and applies a smaller Codex prompt/output budget.
 If `codex` is missing, run `Agent Hub: Install Codex CLI` from VS Code first;
@@ -643,16 +645,18 @@ matching free provider presets at runtime and inserts them into the cloud/coding
 routes. For example, setting `GROQ_API_KEY` is enough for the Groq free presets
 to become eligible on the next start; no config edit is required.
 
-## Token Saver And Free Only Modes
+## Save Codex Tokens And Free Models Only
 
 These two modes solve different cost problems:
 
-- `Token Safe Mode` / `python -m agent_hub presets apply token-saver`: save
-  Codex tokens without losing fallback quality. Free models are promoted only
-  when the task classifier, provider health, context fit, tool support, and
-  recent outcomes say they are likely to handle the task within the configured
-  productivity-loss tolerance.
-- `Free Only Mode` / `python -m agent_hub presets apply free-only`: block
+- `Save Codex Tokens` / `python -m agent_hub presets apply token-saver`: save
+  Codex tokens by trying eligible free models first and making Codex fallback
+  compact. Free models are promoted only when the task classifier, provider
+  health, context fit, tool support, and recent outcomes say they are likely to
+  handle the task within the configured productivity-loss tolerance; Codex CLI
+  fallback uses an adaptive context digest, reduced tool schemas, reduced repo
+  context, fewer agent steps, and shorter output caps.
+- `Free Models Only` / `python -m agent_hub presets apply free-only`: block
   Codex CLI and non-free/API-key fallbacks. Use this when spending tokens or
   subscription-backed model calls is not acceptable for the current workspace.
 
@@ -688,8 +692,8 @@ and timeout with `AGENT_HUB_CODEX_CLI_COMMAND`,
 `AGENT_HUB_CODEX_CLI_TIMEOUT_SECONDS`.
 
 In VS Code, the easiest path is `Agent Hub: Install Codex CLI` if needed,
-followed by `Agent Hub: Use Codex CLI Without API Key` or the sidebar/chat
-`Codex CLI Mode` button. That writes the `codex-cli` route for you, keeps
+followed by `Agent Hub: Use Signed-In Codex CLI` or the sidebar/chat
+`Use Codex CLI` button. That writes the `codex-cli` route for you, keeps
 API-key model fallbacks off, and caps Codex requests to compact context by
 default.
 
@@ -850,6 +854,7 @@ agent-hub explain-route --route cloud-agent "fix a failing test"
 agent-hub benchmark run --route cloud-agent --baseline claude-sonnet
 agent-hub benchmark-suite --route cloud-agent --json
 agent-hub route-history --weeks 4
+agent-hub feature-scorecard
 python -m agent_hub doctor
 agent-hub production-check
 agent-hub debug-bundle --output agent-hub-debug-bundle.zip
@@ -872,6 +877,12 @@ reproducible 50-task corpus and writes `benchmark-report.json` plus
 provider health, production-safe security guardrails, honest feature maturity
 states, dashboard contracts, and VS Code/backend feature alignment. It exits
 nonzero until major/critical checks pass and the score reaches 90/100.
+`feature-scorecard` maps the product areas to local proof checks and reports
+whether routing, providers, APIs, agents, context, safety, dashboards, the VS
+Code extension, config/install, workflows, plugins/MCP/enterprise, and
+evaluation/cost infrastructure are all locally at 10/10. It is honest about
+external limits such as user credentials, third-party provider uptime, and
+real benchmark data.
 `benchmark-suite` compares static routing with adaptive routing and writes a
 JSON report under `.agent-hub/state/benchmark_reports`.
 `debug-bundle` exports sanitized version info, config, logs, doctor output,
@@ -883,6 +894,7 @@ Dashboard pages avoid raw empty JSON when data has not accumulated yet:
 - `/dashboard` groups feature pages into Operate, Routing, Models, Workspace,
   Automation, and Admin sections.
 - `/dashboard/status` summarizes backend status and links to follow-up pages.
+- `/dashboard/feature-scorecard` renders 10/10 area proof and blockers.
 - `/dashboard/provider-health` renders availability, latency, cooldowns, and failures.
 - `/dashboard/production-check` renders release-readiness acceptance checks.
 - `/dashboard/limits` renders quota, cooldown, active model, and fallback state.

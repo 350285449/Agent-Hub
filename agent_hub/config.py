@@ -287,7 +287,7 @@ def load_config(
             write_default_config(config_path, config)
             created_default_config = True
     else:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        raw = json.loads(config_path.read_text(encoding="utf-8-sig"))
         config = config_from_dict(raw)
 
     if auto_detect:

@@ -39,9 +39,9 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(commands["agentHub.openSettings"], "Agent Hub: Open Settings")
         self.assertEqual(commands["agentHub.openDashboard"], "Agent Hub: Open Dashboard")
         self.assertEqual(commands["agentHub.runCheckup"], "Agent Hub: Run Checkup")
-        self.assertEqual(commands["agentHub.enableFreeOnlyMode"], "Agent Hub: Disable Non-Free Models")
-        self.assertEqual(commands["agentHub.enableTokenSafeMode"], "Agent Hub: Enable Token Safe Mode")
-        self.assertEqual(commands["agentHub.enableCodexCliMode"], "Agent Hub: Use Codex CLI Without API Key")
+        self.assertEqual(commands["agentHub.enableFreeOnlyMode"], "Agent Hub: Use Free Models Only")
+        self.assertEqual(commands["agentHub.enableTokenSafeMode"], "Agent Hub: Save Codex Tokens")
+        self.assertEqual(commands["agentHub.enableCodexCliMode"], "Agent Hub: Use Signed-In Codex CLI")
         self.assertEqual(commands["agentHub.installCodexCli"], "Agent Hub: Install Codex CLI")
         self.assertEqual(commands["agentHub.installOllamaDesktop"], "Agent Hub: Install Ollama Desktop")
         self.assertEqual(commands["agentHub.checkHealth"], "Agent Hub: Check Health")
@@ -98,6 +98,78 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('.hero-server-action[data-state="Running"]', sidebar)
         self.assertIn("background: var(--ok);", sidebar)
         self.assertNotIn('id="startServer"', sidebar)
+
+    def test_sidebar_main_actions_have_inline_help_buttons(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        sidebar_start = source.index("function sidebarHtml")
+        sidebar_end = source.index("function registerChatParticipant", sidebar_start)
+        sidebar = source[sidebar_start:sidebar_end]
+
+        self.assertIn("function sidebarActionHelp", source)
+        self.assertIn('class="action-help"', source)
+        self.assertIn(".action-help::after", sidebar)
+        self.assertIn('id="helpToast"', sidebar)
+        self.assertIn("function showHelpToast", sidebar)
+        self.assertIn('helpToast.dataset.visible = "true"', sidebar)
+        self.assertIn("wireStaticActionHelpButtons()", sidebar)
+        self.assertIn("createActionHelpButton", sidebar)
+
+        for label in [
+            "Start",
+            "Send",
+            "Chat",
+            "Dashboard",
+            "Kernel",
+            "Checkup",
+            "Route Lab",
+            "Settings",
+            "Save Codex Tokens",
+            "Free Models Only",
+            "Use Codex CLI",
+            "Install Codex CLI",
+            "Code",
+            "Explain",
+            "Run Checkup",
+            "Check Requirements",
+            "Repair Config",
+            "Copy Cline Config",
+            "Test Cline Connection",
+            "Show Cline Setup",
+        ]:
+            self.assertIn(f'sidebarActionHelp("{label}"', sidebar)
+
+    def test_sidebar_mode_buttons_toggle_and_show_running_state(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        sidebar_start = source.index("function sidebarHtml")
+        sidebar_end = source.index("function registerChatParticipant", sidebar_start)
+        sidebar = source[sidebar_start:sidebar_end]
+
+        self.assertIn("function modeToggleState", source)
+        self.assertIn("function dashboardModeLabel", source)
+        self.assertIn("Mode: ${mode}", source)
+        self.assertIn('id="headerCostMode"', sidebar)
+        self.assertIn('id="heroCostMode"', sidebar)
+        self.assertIn("repeat(auto-fit, minmax(74px, 1fr))", sidebar)
+        self.assertIn("function dashboardCostMode", sidebar)
+        self.assertIn("applyStandardCloudModeSettings", source)
+        self.assertIn("modes.tokenSafeMode", source)
+        self.assertIn("modes.freeOnlyStrictMode", source)
+        self.assertIn("modes.codexCliMode", source)
+        self.assertIn('class="command-button mode-toggle" id="quickTokenSafeMode"', sidebar)
+        self.assertIn('class="command-button mode-toggle" id="quickFreeOnlyMode"', sidebar)
+        self.assertIn('class="command-button mode-toggle" id="quickCodexCliMode"', sidebar)
+        self.assertIn("renderModeToggles(dashboard)", sidebar)
+        self.assertIn("Saving Codex Tokens", sidebar)
+        self.assertIn("Adaptive fallback", sidebar)
+        self.assertIn("micro/surgical/rescue", sidebar)
+        self.assertIn("Free Models Only", sidebar)
+        self.assertIn("Using Codex CLI", sidebar)
+        self.assertIn("markButtonRunning", sidebar)
+        self.assertIn('button[data-running="true"]', sidebar)
+        self.assertIn('button.dataset.running = "true"', sidebar)
+        self.assertIn('button.setAttribute("aria-busy", "true")', source)
+        self.assertIn('button.removeAttribute("aria-busy")', source)
+        self.assertIn("Stop Using Codex CLI", source)
 
     def test_sidebar_title_bar_avoids_crowded_server_buttons(self) -> None:
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
@@ -169,7 +241,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('id="openRuntimeKernel"', sidebar)
         self.assertIn('id="kernelSignalGrid"', sidebar)
         self.assertIn('id="kernelActionList"', sidebar)
-        self.assertIn('post("openRuntimeKernel")', sidebar)
+        self.assertIn('postFromEvent("openRuntimeKernel"', sidebar)
 
     def test_route_lab_is_visible_from_sidebar_and_command_palette(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
@@ -187,7 +259,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('"route-diagnose"', source)
         self.assertIn('id="quickRouteLab"', sidebar)
         self.assertIn('id="openRouteLab"', sidebar)
-        self.assertIn('post("openRouteLab")', sidebar)
+        self.assertIn('postFromEvent("openRouteLab"', sidebar)
         self.assertIn("/dashboard/routing-intelligence", source)
 
     def test_checkup_is_visible_from_sidebar_and_command_palette(self) -> None:
@@ -204,7 +276,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("fixSafeConfigCommand({ quietNoChange: true", source)
         self.assertIn('id="quickCheckup"', sidebar)
         self.assertIn('id="runCheckup"', sidebar)
-        self.assertIn('post("runCheckup")', sidebar)
+        self.assertIn('postFromEvent("runCheckup"', sidebar)
 
     def test_safe_config_repair_is_visible_from_sidebar_and_command_palette(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
@@ -218,7 +290,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("function fixSafeConfigCommand", source)
         self.assertIn('"--fix-safe"', source)
         self.assertIn('id="fixSafeConfig"', sidebar)
-        self.assertIn('post("fixSafeConfig")', sidebar)
+        self.assertIn('postFromEvent("fixSafeConfig"', sidebar)
 
     def test_webview_theme_tokens_have_dark_mode_fallbacks(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
@@ -362,8 +434,8 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('id="freeOnlyModeSettings"', source)
         self.assertIn('id="quickFreeOnlyMode"', source)
         self.assertIn('id="freeOnlyMode"', source)
-        self.assertIn(">Token Safe Mode</button>", source)
-        self.assertIn(">Free Only Mode</button>", source)
+        self.assertIn(">Save Codex Tokens</button>", source)
+        self.assertIn(">Free Models Only</button>", source)
         self.assertIn('id="quickTokenSafeMode"', source)
         self.assertIn('id="quickCodexCliMode"', source)
         self.assertIn('id="quickInstallCodexCli"', source)
@@ -385,8 +457,15 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("CODEX_CLI_NPM_PACKAGE", source)
         self.assertIn("@openai/codex@latest", source)
         self.assertIn("applyCodexCliModeSettings", source)
-        self.assertIn("Codex CLI Mode is on", source)
+        self.assertIn("Use Codex CLI is on", source)
         self.assertIn('value="codex-cli"', source)
+        self.assertIn("Signed-in Codex CLI", source)
+        self.assertIn('id="modeSummary"', source)
+        self.assertIn('id="settingsMessage" role="status" aria-live="polite"', source)
+        self.assertIn("--cyan: #22d3ee;", source)
+        self.assertIn('.mode-summary[data-mode="token-safe"]', source)
+        self.assertIn("renderChatModeSummary", source)
+        self.assertIn('button.setAttribute("aria-pressed"', source)
         self.assertIn("CODEX_CLI_CONTEXT_BUDGET", source)
         self.assertIn("DEFAULT_AGENT_CONTEXT_BUDGET", source)
         self.assertIn("isFreeCloudSavingsMode", source)
@@ -399,8 +478,8 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("enableMaxTokenSaveModeFromWebview", source)
         self.assertIn("applyTokenSafeModeSettings", source)
         self.assertIn("applyFreeOnlyModeSettings", source)
-        self.assertIn("Token Safe Mode is on", source)
-        self.assertIn("Free Only Mode is on", source)
+        self.assertIn("Save Codex Tokens is on", source)
+        self.assertIn("Free Models Only is on", source)
         self.assertIn("disableNonFreeModels: true", source)
         self.assertIn("disable_non_free_models", source)
         self.assertIn("applyStrictFreeOnlyModeToConfig", source)
@@ -431,20 +510,25 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("simple_cloud_exploration_enabled: true", source)
         self.assertIn("free: source.free !== false", source)
 
-    def test_token_safe_preserves_full_codex_fallback_budget(self) -> None:
+    def test_save_codex_tokens_compacts_codex_fallback_budget(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
 
         token_safe_start = source.index("async function applyTokenSafeModeSettings")
         token_safe_end = source.index("function normalizeChatSettingsInput", token_safe_start)
         token_safe_source = source[token_safe_start:token_safe_end]
 
-        self.assertIn("maxTokens: null", token_safe_source)
-        self.assertIn("agentMaxSteps: DEFAULT_AGENT_MAX_STEPS", token_safe_source)
+        self.assertIn("maxTokens: CODEX_CLI_OUTPUT_TOKENS", token_safe_source)
+        self.assertIn("agentMaxSteps: CODEX_CLI_AGENT_STEPS", token_safe_source)
         self.assertIn("codexCliEnabled: true", token_safe_source)
-        self.assertIn("DEFAULT_AGENT_CONTEXT_BUDGET", token_safe_source)
-        self.assertIn('config.update("contextMode", "balanced"', token_safe_source)
+        self.assertIn("CODEX_CLI_CONTEXT_BUDGET", token_safe_source)
+        self.assertIn("CODEX_CLI_MICRO_CONTEXT_BUDGET", source)
+        self.assertIn("CODEX_CLI_RESCUE_CONTEXT_BUDGET", source)
+        self.assertIn('config.update("contextMode", "minimal"', token_safe_source)
         self.assertIn("freeCloudSavingsMode: true", token_safe_source)
-        self.assertNotIn("CODEX_CLI_CONTEXT_BUDGET", token_safe_source)
+        self.assertIn("codexCliTokenOptimized: true", token_safe_source)
+        self.assertIn("function applyTokenSafeRequestPlan", source)
+        self.assertIn("function tokenSafeRequestPlan", source)
+        self.assertIn("context_chars: String(context || \"\").length", source)
 
         request_options_start = source.index("function agentHubRequestOptions")
         request_options_end = source.index("function normalizeServerUrl", request_options_start)
@@ -455,22 +539,33 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         ]
         self.assertIn('options.routing_mode = "cheapest"', free_branch)
         self.assertIn("options.free_cloud_offload = true", free_branch)
-        self.assertNotIn("max_context_tokens", free_branch)
-        self.assertNotIn("codex_cli_token_optimized", free_branch)
+        self.assertIn("options.context_mode = \"minimal\"", free_branch)
+        self.assertIn("options.minimal_tool_schema = true", free_branch)
+        self.assertIn("options.reduced_repo_context = true", free_branch)
+        self.assertIn("options.codex_cli_token_optimized = true", free_branch)
+        self.assertIn('options.codex_cli_prompt_strategy = "task_context_digest"', free_branch)
+        self.assertIn("options.token_safe_profile = plan.profile", free_branch)
+        self.assertIn("options.token_safe_keywords = plan.keywords", free_branch)
+        self.assertIn("options.max_context_tokens = plan.contextBudgetTokens", free_branch)
+        self.assertIn("options.max_output_tokens = plan.outputTokens", free_branch)
+        self.assertIn("options.max_tool_steps = plan.agentSteps", free_branch)
+        self.assertIn("options.agent_max_steps = plan.agentSteps", free_branch)
 
         config_start = source.index("function applyMaxTokenSaveModeToConfig")
         config_end = source.index("function applyCodexCliModeToConfig", config_start)
         config_source = source[config_start:config_end]
-        self.assertIn("delete data.max_context_tokens", config_source)
+        self.assertIn('data.context_mode = "minimal"', config_source)
+        self.assertIn("data.max_context_tokens = budget", config_source)
         self.assertIn("free_cloud_savings_mode: true", config_source)
-        self.assertIn('max_tokens_mode: "auto"', config_source)
-        self.assertNotIn("minimal_tool_schema: true", config_source)
+        self.assertIn('max_tokens_mode: "explicit"', config_source)
+        self.assertIn("minimal_tool_schema: true", config_source)
+        self.assertIn("codex_cli_prompt_optimized: true", config_source)
 
         cloud_sources_start = source.index("function cloudModelSources")
         cloud_sources_end = source.index("function freeCloudPresetSources", cloud_sources_start)
         cloud_sources_source = source[cloud_sources_start:cloud_sources_end]
         self.assertIn('free: settings.disableNonFreeModels === true ? false : routeMode === "codex-cli"', cloud_sources_source)
-        self.assertIn('maxTokens: routeMode === "codex-cli" ? CODEX_CLI_OUTPUT_TOKENS : undefined', cloud_sources_source)
+        self.assertIn('maxTokens: routeMode === "codex-cli" || settings.maxTokenSaveMode ? CODEX_CLI_OUTPUT_TOKENS : undefined', cloud_sources_source)
 
     def test_api_key_providers_auto_enable_only_when_key_exists(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")

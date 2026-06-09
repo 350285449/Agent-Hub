@@ -20,6 +20,12 @@ def handle_get(handler: object, path: str) -> bool:
             lambda: handler.server.diagnostics_service.production_check_body(handler.server.router),
         )
         return True
+    if path == "/v1/feature-scorecard":
+        handler._send_cached_diagnostics_json(
+            "GET /v1/feature-scorecard",
+            lambda: handler.server.diagnostics_service.feature_scorecard_body(handler.server.router),
+        )
+        return True
     if path == "/v1/limits":
         handler._send_cached_diagnostics_json(
             "GET /v1/limits",

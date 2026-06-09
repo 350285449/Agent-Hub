@@ -227,6 +227,9 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("Agent Hub Runtime Kernel", dashboard)
             self.assertIn("Subsystems", dashboard)
             self.assertIn("Recommended Actions", dashboard)
+            self.assertIn("Active Alerts", dashboard)
+            self.assertIn("Process Health", dashboard)
+            self.assertIn("Trends And Durability", dashboard)
 
     def test_runtime_kernel_tracks_error_status_codes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -950,8 +953,10 @@ class ServerCompatibilityTests(unittest.TestCase):
                 base = f"http://127.0.0.1:{server.server_address[1]}"
                 readiness = _get_json(f"{base}/v1/readiness")
                 production = _get_json(f"{base}/v1/production-check")
+                feature_scorecard = _get_json(f"{base}/v1/feature-scorecard")
                 dashboard = _get_text(f"{base}/dashboard")
                 readiness_dashboard = _get_text(f"{base}/dashboard/readiness")
+                feature_dashboard = _get_text(f"{base}/dashboard/feature-scorecard")
             finally:
                 _stop(server, thread)
 
@@ -966,14 +971,20 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(production["object"], "agent_hub.production_check")
             self.assertIn("checks", production)
             self.assertTrue(any(check["id"] == "vscode_backend_contract" for check in production["checks"]))
+            self.assertEqual(feature_scorecard["object"], "agent_hub.feature_scorecard")
+            self.assertEqual(feature_scorecard["rating"], 10.0)
+            self.assertTrue(feature_scorecard["all_local_areas_10"], feature_scorecard["blockers"])
             self.assertIn("readiness", dashboard.lower())
             self.assertIn("/dashboard/readiness", dashboard)
+            self.assertIn("/dashboard/feature-scorecard", dashboard)
             self.assertIn("/dashboard/status", dashboard)
             self.assertIn("/dashboard/provider-health", dashboard)
             self.assertIn("/dashboard/production-check", dashboard)
             self.assertIn("Raw APIs:", dashboard)
             self.assertIn("Agent Hub Readiness", readiness_dashboard)
             self.assertIn("Readiness Scorecard", readiness_dashboard)
+            self.assertIn("Agent Hub Feature Scorecard", feature_dashboard)
+            self.assertIn("Area Ratings", feature_dashboard)
 
     def test_health_exposes_capability_graph_and_token_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

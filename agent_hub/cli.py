@@ -38,8 +38,10 @@ from .commands_provider import (
     _estimate,
     _explain_route,
     _eval_providers,
+    _feature_scorecard_report,
     _health_report,
     _local_models_report,
+    _print_feature_scorecard,
     _print_health,
     _print_local_models,
     _print_metrics,
@@ -131,6 +133,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Run a strict local acceptance check for production readiness.",
     )
     production_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    feature_scorecard_parser = subparsers.add_parser(
+        "feature-scorecard",
+        help="Show 10/10 feature-area proof and remaining blockers.",
+    )
+    feature_scorecard_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     metrics_parser = subparsers.add_parser("metrics", help="Show persisted provider metrics and failover history.")
     metrics_parser.add_argument("--route", default="cloud-agent", help="Route to summarize.")
@@ -552,6 +560,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             _print_production_check(report)
         return 0 if report.get("ok") else 1
+    if command == "feature-scorecard":
+        report = _feature_scorecard_report(config)
+        if args.json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            _print_feature_scorecard(report)
+        return 0 if report.get("all_local_areas_10") else 1
     if command == "metrics":
         report = _health_report(config, route=args.route, include_history=True)
         if args.json:

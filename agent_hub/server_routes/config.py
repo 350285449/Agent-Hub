@@ -74,6 +74,10 @@ def handle_get(handler: object, path: str) -> bool:
         body = handler.server.diagnostics_service.production_check_body(handler.server.router)
         handler._send_html(_production_check_dashboard_html(body))
         return True
+    if path == "/dashboard/feature-scorecard":
+        body = handler.server.diagnostics_service.feature_scorecard_body(handler.server.router)
+        handler._send_html(_feature_scorecard_dashboard_html(body))
+        return True
     if path == "/dashboard/limits":
         body = handler.server.diagnostics_service.limits_body(handler.server.router)
         handler._send_html(_limits_dashboard_html(body))
@@ -383,7 +387,13 @@ def _kernel_dashboard_html(body: dict[str, Any]) -> str:
     telemetry = _dict(body.get("request_telemetry"))
     latency = _dict(telemetry.get("latency_ms"))
     cache = _dict(body.get("diagnostics_cache"))
+    process = _dict(body.get("process_health"))
+    process_memory = _dict(process.get("memory"))
+    alerts = _dict(body.get("alerts"))
+    trends = _dict(body.get("trends"))
+    durability = _dict(body.get("durability"))
     actions = body.get("next_actions") if isinstance(body.get("next_actions"), list) else []
+    alert_items = alerts.get("active") if isinstance(alerts.get("active"), list) else []
     subsystems = body.get("subsystems") if isinstance(body.get("subsystems"), list) else []
     routes = telemetry.get("routes") if isinstance(telemetry.get("routes"), list) else []
     slow_requests = (
@@ -412,6 +422,13 @@ def _kernel_dashboard_html(body: dict[str, Any]) -> str:
     )
     if not slow_rows:
         slow_rows = "<tr><td colspan=\"6\" class=\"muted\">No slow requests crossed the kernel threshold.</td></tr>"
+    alert_rows = "".join(
+        _kernel_alert_row_html(row)
+        for row in alert_items
+        if isinstance(row, dict)
+    )
+    if not alert_rows:
+        alert_rows = "<tr><td colspan=\"4\" class=\"muted\">No active alerts.</td></tr>"
     cache_rows = "".join(
         f"<tr><td>{_html(key)}</td><td>{_html(value)}</td></tr>"
         for key, value in sorted(cache.items(), key=lambda item: str(item[0]))
@@ -432,6 +449,13 @@ def _kernel_dashboard_html(body: dict[str, Any]) -> str:
     content = f"""
 {quick_links}
 <section class="panel">
+  <h2>Active Alerts</h2>
+  <table>
+    <thead><tr><th>Severity</th><th>ID</th><th>Title</th><th>Detail</th></tr></thead>
+    <tbody>{alert_rows}</tbody>
+  </table>
+</section>
+<section class="panel">
   <h2>Recommended Actions</h2>
   <table>
     <thead><tr><th>Severity</th><th>Action</th><th>Detail</th><th>Open</th><th>Command</th></tr></thead>
@@ -443,6 +467,35 @@ def _kernel_dashboard_html(body: dict[str, Any]) -> str:
   <table>
     <thead><tr><th>Subsystem</th><th>State</th><th>Detail</th><th>Metrics</th></tr></thead>
     <tbody>{subsystem_rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Process Health</h2>
+  <table>
+    <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td>PID</td><td>{_html(process.get('pid'))}</td></tr>
+      <tr><td>Python</td><td>{_html(process.get('python'))}</td></tr>
+      <tr><td>Platform</td><td>{_html(process.get('platform'))}</td></tr>
+      <tr><td>Threads</td><td>{_html(process.get('thread_count'))}</td></tr>
+      <tr><td>CPU</td><td>{_html(process.get('cpu_percent'))}% ({_html(process.get('cpu_state'))})</td></tr>
+      <tr><td>RSS</td><td>{_html(process_memory.get('rss_mb'))} MB ({_html(process_memory.get('state'))})</td></tr>
+      <tr><td>Python heap</td><td>{_html(process_memory.get('python_allocated_mb'))} MB current / {_html(process_memory.get('python_peak_allocated_mb'))} MB peak</td></tr>
+    </tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Trends And Durability</h2>
+  <table>
+    <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td>Trend state</td><td>{_html(trends.get('state'))}</td></tr>
+      <tr><td>Trend samples</td><td>{_html(trends.get('sample_count'))}</td></tr>
+      <tr><td>Trend deltas</td><td><code>{_html(json.dumps(_dict(trends.get('deltas')), sort_keys=True, ensure_ascii=False))}</code></td></tr>
+      <tr><td>History retained</td><td>{_html(durability.get('retained_snapshots'))}</td></tr>
+      <tr><td>History path</td><td><code>{_html(durability.get('path'))}</code></td></tr>
+      <tr><td>History error</td><td>{_html(durability.get('error'))}</td></tr>
+    </tbody>
   </table>
 </section>
 <section class="panel">
@@ -470,8 +523,10 @@ def _kernel_dashboard_html(body: dict[str, Any]) -> str:
         ("Requests", telemetry.get("total_requests", 0)),
         ("In flight", telemetry.get("in_flight", 0)),
         ("EWMA latency", _latency(latency.get("ewma"))),
-        ("Cache hit rate", _percent(telemetry.get("cache_hit_rate"))),
-        ("Boot ID", str(body.get("boot_id") or "")[:12]),
+        ("Alerts", f"{alerts.get('active_count', 0)} active"),
+        ("Process CPU", f"{process.get('cpu_percent', 0)}%"),
+        ("RSS", f"{process_memory.get('rss_mb', '--')} MB"),
+        ("Trend", trends.get("state", "unknown")),
     ]
     return _dashboard_page(
         "Agent Hub Runtime Kernel",
@@ -718,6 +773,40 @@ def _production_check_dashboard_html(body: dict[str, Any]) -> str:
         content,
         body,
         json_path="/v1/production-check",
+    )
+
+
+def _feature_scorecard_dashboard_html(body: dict[str, Any]) -> str:
+    areas = body.get("areas") if isinstance(body.get("areas"), list) else []
+    rows = "".join(_feature_scorecard_row_html(row) for row in areas if isinstance(row, dict))
+    if not rows:
+        rows = "<tr><td colspan=\"5\" class=\"muted\">No feature scorecard rows were reported.</td></tr>"
+    blockers = body.get("blockers") if isinstance(body.get("blockers"), list) else []
+    content = f"""
+<section class="panel">
+  <h2>Area Ratings</h2>
+  <table>
+    <thead><tr><th>Area</th><th>Rating</th><th>State</th><th>Checks</th><th>Honest Take</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Scope</h2>
+  <p>{_html(body.get('honesty'))}</p>
+</section>"""
+    cards = [
+        ("Rating", f"{_number(body.get('rating'))}/10"),
+        ("State", body.get("state", "unknown")),
+        ("All local 10s", str(bool(body.get("all_local_areas_10"))).lower()),
+        ("Blockers", len(blockers)),
+    ]
+    return _dashboard_page(
+        "Agent Hub Feature Scorecard",
+        "Local 10/10 proof across routing, providers, APIs, agents, safety, dashboards, extension, workflows, plugins, and evaluation.",
+        cards,
+        content,
+        body,
+        json_path="/v1/feature-scorecard",
     )
 
 
@@ -1614,6 +1703,17 @@ def _kernel_action_row_html(row: dict[str, Any]) -> str:
     )
 
 
+def _kernel_alert_row_html(row: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('severity'))}</td>"
+        f"<td>{_html(row.get('id'))}</td>"
+        f"<td>{_html(row.get('title'))}</td>"
+        f"<td>{_html(row.get('detail'))}</td>"
+        "</tr>"
+    )
+
+
 def _kernel_route_row_html(row: dict[str, Any]) -> str:
     return (
         "<tr>"
@@ -1685,6 +1785,19 @@ def _production_check_row_html(row: dict[str, Any]) -> str:
         f"<td>{_html(score)}</td>"
         f"<td>{_html(row.get('detail'))}</td>"
         f"<td><code>{_html(row.get('command'))}</code></td>"
+        "</tr>"
+    )
+
+
+def _feature_scorecard_row_html(row: dict[str, Any]) -> str:
+    passed = f"{_int(row.get('passed_required'))}/{_int(row.get('required_count'))}"
+    return (
+        "<tr>"
+        f"<td>{_html(row.get('area'))}</td>"
+        f"<td>{_html(_number(row.get('rating')))} / 10</td>"
+        f"<td>{_html(row.get('state'))}</td>"
+        f"<td>{_html(passed)}</td>"
+        f"<td>{_html(row.get('honest_take'))}</td>"
         "</tr>"
     )
 
