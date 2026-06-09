@@ -860,6 +860,7 @@ async function sidebarDashboardState() {
     optimization: null,
     routingIntelligence: null,
     routingExplanation: null,
+    experience: null,
     runtimeKernel: sidebarRuntimeKernel(null),
     modelStats: sidebarModelStats(null, null, null, null),
     orchestrationFlow: sidebarOrchestrationFlow(null, null),
@@ -951,6 +952,7 @@ async function sidebarDashboardState() {
     dashboard.statusText = `Running at ${config.serverUrl}`;
     dashboard.health = health;
     dashboard.readiness = health && health.readiness && typeof health.readiness === "object" ? health.readiness : null;
+    dashboard.experience = health && health.experience_summary && typeof health.experience_summary === "object" ? health.experience_summary : null;
     dashboard.activeModel = sidebarActiveModel(health, limits);
     dashboard.providers = sidebarProviderRows(health, limits);
     dashboard.limits = sidebarLimitRows(health, limits);
@@ -1613,8 +1615,16 @@ function moneySummaryText(knownCost, averageKnownCost) {
 function sidebarInsightRows(dashboard, metrics) {
   const stats = dashboard.statistics || {};
   const insights = [];
+  const experience = dashboard.experience && typeof dashboard.experience === "object" ? dashboard.experience : null;
   if (dashboard.status !== "Running") {
     insights.push({ tone: "warn", main: "Agent Hub is off", meta: "Click Start to collect health and usage numbers." });
+  }
+  if (dashboard.status === "Running" && experience && experience.title) {
+    insights.push({
+      tone: experienceTone(experience.state),
+      main: experience.title,
+      meta: experience.detail || "Agent Hub summarized the next useful step."
+    });
   }
   if (dashboard.status === "Running" && stats.readinessScore !== null && stats.readinessScore !== undefined) {
     if (stats.readinessScore >= 90) {
@@ -1663,6 +1673,19 @@ function sidebarInsightRows(dashboard, metrics) {
     insights.push({ tone: "ok", main: "Everything looks healthy", meta: "No immediate provider, permission, or context issues detected." });
   }
   return insights.slice(0, 5);
+}
+
+function experienceTone(state) {
+  if (state === "ready") {
+    return "ok";
+  }
+  if (state === "ready_with_warnings" || state === "needs_context") {
+    return "warn";
+  }
+  if (state === "needs_setup" || state === "needs_provider") {
+    return "error";
+  }
+  return "info";
 }
 
 function percent(part, total) {
@@ -2178,6 +2201,7 @@ async function sidebarOnboardingState(config, health) {
   const python = await detectPythonForOnboarding(config, workspace);
   const node = await nodeRuntimeStatus();
   const npm = await npmRuntimeStatus();
+  const cline = await clineCliStatus();
   const codex = await codexCliStatus();
   const ollama = await ollamaDesktopStatus();
   const providers = health && Array.isArray(health.agents) ? health.agents.length : 0;
@@ -2239,6 +2263,17 @@ async function sidebarOnboardingState(config, health) {
       optional: true,
       actionType: npm.ok ? "" : "installNode",
       actionLabel: "Install Node",
+      setupRequired: false
+    },
+    {
+      label: "Cline",
+      ok: cline.installed,
+      detail: cline.installed
+        ? `${cline.version || "installed"} - OpenAI-compatible setup is available from the main button`
+        : "Auto-Configure Cline will install the CLI and set model agent-hub-coding",
+      optional: true,
+      actionType: cline.installed ? "" : "autoSetupCline",
+      actionLabel: "Install",
       setupRequired: false
     },
     {
@@ -4948,6 +4983,7 @@ function sidebarHtml(webview, logoPath) {
 
     function renderServerControls(status, dashboard) {
       const serverUrl = dashboard.serverUrl || "Agent Hub";
+      const experience = dashboard.experience && typeof dashboard.experience === "object" ? dashboard.experience : null;
       const isRunning = status === "Running";
       const isStarting = status === "Starting";
       const isError = status === "Error";
@@ -4956,8 +4992,8 @@ function sidebarHtml(webview, logoPath) {
         heroServerAction.textContent = "Stop";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "stopServer";
-        setText(heroSummary, "Ready");
-        setText(serverDetail, "Ready at " + serverUrl + ".");
+        setText(heroSummary, experience && experience.title ? experience.title : "Ready");
+        setText(serverDetail, experience && experience.detail ? experience.detail : "Ready at " + serverUrl + ".");
       } else if (isStarting) {
         heroServerAction.textContent = "Starting...";
         heroServerAction.disabled = true;
@@ -4988,6 +5024,10 @@ function sidebarHtml(webview, logoPath) {
 
     function renderSetupSummary(dashboard) {
       const readiness = dashboard.readiness && typeof dashboard.readiness === "object" ? dashboard.readiness : null;
+      const experience = dashboard.experience && typeof dashboard.experience === "object" ? dashboard.experience : null;
+      const experienceAction = experience && experience.primary_action && typeof experience.primary_action === "object"
+        ? experience.primary_action
+        : null;
       const rows = Array.isArray(dashboard.onboarding) ? dashboard.onboarding : [];
       const setupRows = rows.filter((row) => row && row.setupRequired !== false && row.action !== true);
       const complete = setupRows.filter((row) => row && row.ok).length;
@@ -5006,6 +5046,11 @@ function sidebarHtml(webview, logoPath) {
         : null;
       const nextSetup = setupRows.find((row) => row && !row.ok);
       const nextAction = rows.find((row) => row && row.action === true && !row.ok);
+      if (dashboard.status === "Running" && experienceAction && experience && experience.state !== "ready") {
+        nextStepTitle.textContent = (experience.state === "ready_with_warnings" ? "Review: " : "Next: ") + experienceAction.label;
+        nextStepDetail.textContent = experienceAction.detail || experience.detail || experienceAction.command || "Review Agent Hub readiness.";
+        return;
+      }
       if (readinessStep && dashboard.status === "Running") {
         nextStepTitle.textContent = readinessStep.status === "warn" ? "Review: " + readinessStep.label : "Next: " + readinessStep.label;
         nextStepDetail.textContent = readinessStep.detail || readinessStep.command || "Review Agent Hub readiness.";
@@ -5049,6 +5094,9 @@ function sidebarHtml(webview, logoPath) {
       }
       if (label === "Codex CLI") {
         return "Install Codex CLI to use no-key Codex routing.";
+      }
+      if (label === "Cline") {
+        return "Run Auto-Configure Cline to install the CLI and write Agent Hub's OpenAI-compatible settings.";
       }
       if (label === "Backend") {
         return "Reinstall or rebuild the VSIX so the bundled backend is included.";
@@ -14587,6 +14635,114 @@ function clineCliInstallTerminalCommand() {
   return process.platform === "win32" ? "npm.cmd install -g cline" : "npm install -g cline";
 }
 
+async function openClineCliInstallTerminalWithPermission() {
+  const command = clineCliInstallTerminalCommand();
+  if (!(await requestPermission({
+    category: "shell_command",
+    description: "Agent Hub wants to open a terminal to install the Cline CLI with npm.",
+    resource: command,
+    risk: "high",
+    detail: "This opens a visible VS Code terminal and installs the official Cline npm package globally."
+  }))) {
+    return { ok: false, cancelled: true, message: "Cline CLI terminal install was cancelled." };
+  }
+  openSetupTerminal("Install Cline CLI", command);
+  return { ok: true, message: "Opened a terminal to install Cline CLI." };
+}
+
+function clineCliInstallArgs() {
+  return ["install", "-g", "cline"];
+}
+
+async function clineCliStatus() {
+  try {
+    const { stdout, stderr } = await execFile(clineExecutableName(), ["--version"], {
+      shell: process.platform === "win32",
+      timeout: 5000
+    });
+    const version = String(stdout || stderr || "").trim().split(/\r?\n/).find(Boolean) || "";
+    return {
+      installed: true,
+      version
+    };
+  } catch (_error) {
+    return {
+      installed: false,
+      version: ""
+    };
+  }
+}
+
+async function installClineCliWithNpm() {
+  const args = clineCliInstallArgs();
+  const options = { shell: process.platform === "win32", timeout: 180000, maxBuffer: 1024 * 1024 };
+  output.appendLine(`$ ${formatCliCommandForLog("npm", args)}`);
+  const result = await execFile("npm", args, options);
+  if (result.stdout && result.stdout.trim()) {
+    output.appendLine(result.stdout.trim());
+  }
+  if (result.stderr && result.stderr.trim()) {
+    output.appendLine(result.stderr.trim());
+  }
+  return result;
+}
+
+async function ensureClineCliInstalled() {
+  const status = await clineCliStatus();
+  if (status.installed) {
+    const versionText = status.version ? ` ${status.version}` : "";
+    output.appendLine(`Cline CLI detected${versionText}.`);
+    return { ok: true, installed: true, alreadyInstalled: true, version: status.version };
+  }
+
+  const npm = await npmRuntimeStatus();
+  if (!npm.ok) {
+    const choice = await vscode.window.showWarningMessage(
+      "Cline CLI installs through npm, but npm was not found. Install Node.js first.",
+      "Install Node.js",
+      "Show Values"
+    );
+    if (choice === "Install Node.js") {
+      await installNodeCommand({ force: true });
+    } else if (choice === "Show Values") {
+      await showClineSetup();
+    }
+    return { ok: false, missingNpm: true, message: "npm was not found." };
+  }
+
+  if (!(await requestPermission({
+    category: "shell_command",
+    description: "Agent Hub wants to install the Cline CLI with npm so it can configure Cline automatically.",
+    resource: "npm install -g cline",
+    risk: "high",
+    detail: "This installs the official Cline npm package globally, then Agent Hub writes the OpenAI-compatible provider, Base URL, API key, and model through Cline CLI auth."
+  }))) {
+    return { ok: false, cancelled: true, message: "Cline CLI install was cancelled." };
+  }
+
+  try {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Agent Hub: Installing Cline CLI",
+        cancellable: false
+      },
+      installClineCliWithNpm
+    );
+  } catch (error) {
+    output.appendLine(`Cline CLI install failed: ${formatClineSetupError(error)}`);
+    return { ok: false, error, message: formatClineSetupError(error) };
+  }
+
+  const installed = await clineCliStatus();
+  if (!installed.installed) {
+    return { ok: false, message: "Cline CLI install finished, but the cline command was not found on PATH." };
+  }
+  const versionText = installed.version ? ` ${installed.version}` : "";
+  output.appendLine(`Cline CLI installed${versionText}.`);
+  return { ok: true, installed: true, alreadyInstalled: false, version: installed.version };
+}
+
 function clineAuthArgVariants(values) {
   return [
     [
@@ -14683,15 +14839,30 @@ async function autoSetupCline() {
   const values = clineSetupValues(settings());
   output.appendLine("");
   output.appendLine("Agent Hub automatic Cline setup");
+  output.appendLine("Provider: OpenAI Compatible");
   output.appendLine(`Base URL: ${values.baseUrl}`);
+  output.appendLine("API key: <local Agent Hub key>");
   output.appendLine(`Model: ${values.model}`);
-  const ready = await ensureServerReady();
-  if (!ready) {
+
+  const cline = await ensureClineCliInstalled();
+  if (!cline.ok) {
     await copyClineConfig({ quiet: true });
-    vscode.window.showWarningMessage("Agent Hub values were copied, but the local server did not start. Run Checkup, then click Auto-Configure Cline again.");
+    const install = "Open Install Terminal";
+    const guide = "Show Values";
+    const choice = await vscode.window.showWarningMessage(
+      "Cline CLI could not be installed automatically. Agent Hub values were copied instead.",
+      install,
+      guide
+    );
+    if (choice === install) {
+      await openClineCliInstallTerminalWithPermission();
+    } else if (choice === guide) {
+      await showClineSetup();
+    }
     output.show(true);
-    return { ok: false, copied: true };
+    return { ok: false, copied: true, cline };
   }
+
   try {
     await vscode.window.withProgress(
       {
@@ -14713,11 +14884,18 @@ async function autoSetupCline() {
       guide
     );
     if (choice === install) {
-      openSetupTerminal("Install Cline CLI", clineCliInstallTerminalCommand());
+      await openClineCliInstallTerminalWithPermission();
     } else if (choice === guide) {
       await showClineSetup();
     }
     return { ok: false, copied: true, error };
+  }
+
+  const ready = await ensureServerReady();
+  if (!ready) {
+    vscode.window.showWarningMessage("Cline was configured, but Agent Hub did not start. Run Checkup, then use model agent-hub-coding in Cline.");
+    output.show(true);
+    return { ok: false, configured: true, serverReady: false };
   }
   const test = await testClineConnection({ quietSuccess: true, quietFailure: true });
   if (test && test.ok) {

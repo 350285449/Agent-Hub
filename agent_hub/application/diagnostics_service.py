@@ -693,6 +693,13 @@ class DiagnosticsApplicationService:
             setup_guidance=setup_guidance,
             plugins=plugins,
         )
+        experience_summary = _experience_summary(
+            config,
+            provider_health=provider_health,
+            setup_guidance=setup_guidance,
+            readiness=readiness,
+            context_diagnostics=context_diagnostics,
+        )
         return {
             "status": "ok",
             "running": True,
@@ -768,6 +775,7 @@ class DiagnosticsApplicationService:
             "context_diagnostics": context_diagnostics,
             "setup_guidance": setup_guidance,
             "readiness": readiness,
+            "experience_summary": experience_summary,
             "feature_status": readiness["feature_status"],
             "streaming": {
                 "force_compatibility_streaming": config.force_compatibility_streaming,
@@ -2978,6 +2986,103 @@ def _setup_item(
     if command:
         item["command"] = command
     return item
+
+
+def _experience_summary(
+    config: HubConfig,
+    *,
+    provider_health: dict[str, dict[str, Any]],
+    setup_guidance: dict[str, Any],
+    readiness: dict[str, Any],
+    context_diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    active_names = _active_names(config, provider_health)
+    readiness_state = str(readiness.get("state") or "")
+    readiness_score = int(_float(readiness.get("score")) or 0)
+    setup_next = _dict(setup_guidance.get("next_step"))
+    readiness_next = _dict(readiness.get("next_step"))
+    next_step = setup_next or readiness_next
+    suspicious_context = bool(context_diagnostics.get("suspiciously_empty"))
+    action_count = int(setup_guidance.get("action_count") or 0)
+    warning_count = int(setup_guidance.get("warning_count") or 0)
+
+    if action_count or readiness_state == "needs_setup":
+        state = "needs_setup"
+        title = "Finish setup"
+        detail = next_step.get("detail") or "Agent Hub needs one more setup step before it can route coding work reliably."
+    elif not active_names:
+        state = "needs_provider"
+        title = "Connect a model provider"
+        detail = "Agent Hub is running, but no enabled provider is currently route-ready."
+        if not next_step:
+            next_step = _setup_item(
+                "route_ready",
+                "action",
+                "Make a provider route-ready",
+                "Check API keys, local model servers, or provider cooldowns.",
+                "python -m agent_hub doctor --providers",
+            )
+    elif suspicious_context:
+        state = "needs_context"
+        title = "Check tool context"
+        detail = "A recent coding-tool request reached Agent Hub with very little workspace context."
+        if not next_step:
+            next_step = _setup_item(
+                "tool_context",
+                "warn",
+                "Send workspace context",
+                "Open a workspace file and retry from Cline or the Agent Hub sidebar.",
+            )
+    elif warning_count or readiness_score < 90:
+        state = "ready_with_warnings"
+        title = "Ready with notes"
+        detail = next_step.get("detail") or "Agent Hub can answer tasks, but one readiness note should be reviewed."
+    else:
+        state = "ready"
+        title = "Ready for coding tasks"
+        detail = "Send a task from the sidebar or use Cline with model agent-hub-coding."
+
+    primary_action = None
+    if next_step:
+        primary_action = {
+            "id": next_step.get("id") or "next_step",
+            "label": next_step.get("label") or "Review next step",
+            "detail": next_step.get("detail") or "",
+        }
+        if next_step.get("command"):
+            primary_action["command"] = next_step.get("command")
+    elif state == "ready":
+        primary_action = {
+            "id": "send_task",
+            "label": "Send a task",
+            "detail": "Use the sidebar prompt or Cline model agent-hub-coding.",
+        }
+
+    client_host = str(config.host or "127.0.0.1")
+    if client_host in {"0.0.0.0", "::"}:
+        client_host = "127.0.0.1"
+    return {
+        "object": "agent_hub.experience_summary",
+        "state": state,
+        "title": title,
+        "detail": detail,
+        "readiness_score": readiness_score,
+        "primary_action": primary_action,
+        "coding_tool": {
+            "provider": "openai-compatible",
+            "base_url": f"http://{client_host}:{config.port}/v1",
+            "api_key": "agent-hub-local",
+            "model": "agent-hub-coding",
+            "cline_compatibility_mode": bool(config.cline_compatibility_mode),
+        },
+        "checks": {
+            "providers_configured": bool(config.agents),
+            "providers_enabled": any(agent.enabled for agent in config.agents.values()),
+            "route_ready_provider": bool(active_names),
+            "safe_permissions": config.approval_mode != "auto",
+            "context_healthy": not suspicious_context,
+        },
+    }
 
 
 __all__ = ["BACKEND_FEATURES", "BACKEND_VERSION", "DiagnosticsApplicationService"]

@@ -101,6 +101,12 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(readiness["object"], "agent_hub.readiness")
             self.assertEqual(readiness["state"], "needs_setup")
             self.assertEqual(readiness["next_step"]["id"], "providers_configured")
+            experience = data["experience_summary"]
+            self.assertEqual(experience["object"], "agent_hub.experience_summary")
+            self.assertEqual(experience["state"], "needs_setup")
+            self.assertEqual(experience["primary_action"]["id"], "configure_agents")
+            self.assertEqual(experience["coding_tool"]["provider"], "openai-compatible")
+            self.assertEqual(experience["coding_tool"]["model"], "agent-hub-coding")
             self.assertEqual(data["feature_status"]["provider_routing"]["state"], "needs_setup")
 
     def test_health_uses_short_lived_diagnostics_cache(self) -> None:
