@@ -51,6 +51,9 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(commands["agentHub.installPython"], "Agent Hub: Install Python")
         self.assertEqual(commands["agentHub.installNode"], "Agent Hub: Install Node.js")
         self.assertEqual(commands["agentHub.generateCommitMessage"], "Agent Hub: Generate Commit Message")
+        self.assertEqual(commands["agentHub.autoSetupCline"], "Agent Hub: Auto-Configure Cline")
+        self.assertEqual(commands["agentHub.setupCodingTool"], "Agent Hub: Set Up Coding Tool")
+        self.assertEqual(commands["agentHub.setupCline"], "Agent Hub: Set Up Cline")
         self.assertEqual(commands["agentHub.copyClineConfig"], "Agent Hub: Copy Cline Config")
         self.assertEqual(commands["agentHub.testClineConnection"], "Agent Hub: Test Cline Connection")
         self.assertEqual(commands["agentHub.copyClaudeCodeConfig"], "Agent Hub: Copy Claude Code Config")
@@ -184,16 +187,19 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertNotIn("agentHub.checkHealth", sidebar_commands)
         self.assertNotIn("agentHub.openSettings", sidebar_commands)
 
-    def test_sidebar_sections_match_platform_dashboard(self) -> None:
+    def test_sidebar_is_simple_first_with_advanced_details_collapsed(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
 
         headings = [
-            "<h2>Command Center</h2>",
+            "<h2>What do you need?</h2>",
+            "<h2>Use With Coding Tools</h2>",
+            "<h2>Setup</h2>",
+            "<h2>Advanced</h2>",
+            "<h2>Tools</h2>",
             "<h2>Model Stats</h2>",
             "<h2>Runtime Kernel</h2>",
             "<h2>Orchestration</h2>",
             "<h2>Health</h2>",
-            "<h2>Setup</h2>",
             "<h2>Permissions</h2>",
             "<h2>Models</h2>",
             "<h2>Routing Intelligence</h2>",
@@ -205,6 +211,50 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         ]
         positions = [source.index(heading) for heading in headings]
         self.assertEqual(positions, sorted(positions))
+        self.assertIn('<details class="advanced-shell">', source)
+        self.assertIn("Fix a bug, explain a file, write tests, or make a small change", source)
+        self.assertIn('class="task-preset"', source)
+        self.assertIn("data-task-template", source)
+        self.assertIn("function setQuickTaskText", source)
+        self.assertIn("Fix bug", source)
+        self.assertIn("Write tests", source)
+        self.assertIn("Review code", source)
+        self.assertIn("Refactor", source)
+        self.assertIn('setText(heroSummary, "Ready")', source)
+        self.assertIn('setText(heroSummary, "Needs checkup")', source)
+        self.assertIn('setText(heroSummary, "Start or send a task")', source)
+        self.assertIn('class="topbar-chip hidden-telemetry" id="headerRoute"', source)
+        self.assertIn('class="topbar-chip hidden-telemetry" id="headerCostMode"', source)
+        self.assertIn('<span class="health-label">Status</span>', source)
+        self.assertIn('id="quickTaskSend" type="submit" disabled>Send task</button>', source)
+        self.assertIn("function currentSidebarState", source)
+        self.assertIn("function updateQuickTaskState", source)
+        self.assertIn("vscode.setState(currentSidebarState())", source)
+        self.assertIn("quickTaskForm.requestSubmit()", source)
+        self.assertIn("heroStatusText(stats, status)", source)
+        self.assertIn('id="autoSetupCline"', source)
+        self.assertIn("Auto-Configure Cline", source)
+        self.assertIn('id="setupCodingTool"', source)
+        self.assertIn("Copy + Test Tool", source)
+        self.assertIn("Roo Code, Continue", source)
+        self.assertIn("Provider: OpenAI Compatible", source)
+        self.assertIn("Model: agent-hub-coding", source)
+        self.assertIn('registerCommand("agentHub.autoSetupCline"', source)
+        self.assertIn('registerCommand("agentHub.setupCodingTool"', source)
+        self.assertIn('registerCommand("agentHub.setupCline"', source)
+        self.assertIn('"autoSetupCline"', source)
+        self.assertIn('"setupCodingTool"', source)
+        self.assertIn("async function autoSetupCline", source)
+        self.assertIn("function runClineAuthSetup", source)
+        self.assertIn('"--provider"', source)
+        self.assertIn('"--baseurl"', source)
+        self.assertIn('"--modelid"', source)
+        self.assertIn("async function setupCodingTool", source)
+        self.assertIn("async function setupCline", source)
+        self.assertIn('postFromEvent("autoSetupCline"', source)
+        self.assertIn('postFromEvent("setupCodingTool"', source)
+        self.assertNotIn("Gateway Control Plane", source)
+        self.assertNotIn("Mission Control", source)
         self.assertIn("createStatusBarItem", source)
         self.assertIn('id="routingChain"', source)
         self.assertIn('id="routingSummaryGrid"', source)
@@ -223,6 +273,52 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("averageTokensPerCall", source)
         self.assertIn("health score", source)
         self.assertIn("readiness score", source)
+
+    def test_advanced_commands_are_hidden_from_command_palette(self) -> None:
+        package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
+        command_palette = package["contributes"]["menus"]["commandPalette"]
+        hidden = {
+            item["command"]
+            for item in command_palette
+            if item.get("when") == "false"
+        }
+
+        for command in [
+            "agentHub.openDashboard",
+            "agentHub.openRuntimeKernel",
+            "agentHub.checkRequirements",
+            "agentHub.fixSafeConfig",
+            "agentHub.enableTokenSafeMode",
+            "agentHub.enableFreeOnlyMode",
+            "agentHub.enableCodexCliMode",
+            "agentHub.setupCline",
+            "agentHub.copyClineConfig",
+            "agentHub.openRouteLab",
+            "agentHub.runPersonalBenchmark",
+        ]:
+            self.assertIn(command, hidden)
+
+        for command in [
+            "agentHub.chat",
+            "agentHub.startServer",
+            "agentHub.runCheckup",
+            "agentHub.ask",
+            "agentHub.codeAgent",
+            "agentHub.research",
+            "agentHub.explainFile",
+            "agentHub.autoSetupCline",
+            "agentHub.setupCodingTool",
+        ]:
+            self.assertNotIn(command, hidden)
+
+    def test_first_run_does_not_auto_prompt_for_proofs(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        activate_start = source.index("function activate")
+        activate_end = source.index("async function openAgentHubDashboard", activate_start)
+        activate = source[activate_start:activate_end]
+
+        self.assertNotIn("scheduleFirstRunProofPrompt(context)", activate)
+        self.assertNotIn("showFirstRunProofPrompt(context)", activate)
 
     def test_runtime_kernel_is_visible_from_sidebar_and_command_palette(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")

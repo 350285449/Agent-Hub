@@ -34,18 +34,9 @@ function splitCommandLine(value) {
   return parts;
 }
 
-function shouldShowFirstRunProofPrompt(storedVersion, currentVersion) {
-  const current = typeof currentVersion === "string" ? currentVersion.trim() : "";
-  if (!current) {
-    return false;
-  }
-  return String(storedVersion || "").trim() !== current;
-}
-
 module.exports = {
   backendReadiness,
   missingBackendFeatures,
   normalizeApprovalMode,
-  shouldShowFirstRunProofPrompt,
   splitCommandLine
 };

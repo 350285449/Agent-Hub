@@ -65,7 +65,6 @@ const LM_STUDIO_BASE_URL = "http://127.0.0.1:1234";
 const PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/";
 const NODE_DOWNLOAD_URL = "https://nodejs.org/en/download";
 const README_PROOF_URL = "https://github.com/350285449/Agent-Hub#proof-you-can-run-locally";
-const FIRST_RUN_PROOF_VERSION_KEY = "agentHub.firstRunProofPromptedVersion";
 const PERSONAL_BENCHMARK_LIMIT = 50;
 const PERSONAL_BENCHMARK_PROMPT = "Fix a failing pytest in a repository service layer, update the regression test, and explain why the route was selected.";
 const PYTHON_WINGET_ID = "Python.Python.3.12";
@@ -431,14 +430,6 @@ function activate(context) {
       }
     })
   );
-  context.subscriptions.push(
-    vscode.workspace.onDidChangeWorkspaceFolders(() => {
-      showFirstRunProofPrompt(context).catch((error) => {
-        output.appendLine(`Could not show first-run proof prompt after workspace change: ${error.message}`);
-      });
-    })
-  );
-
   registerChatParticipant(context);
   sidebarProvider = new AgentHubSidebarProvider(context);
   context.subscriptions.push(
@@ -473,6 +464,9 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.research", researchWeb),
     vscode.commands.registerCommand("agentHub.explainSelection", explainSelection),
     vscode.commands.registerCommand("agentHub.explainFile", explainFile),
+    vscode.commands.registerCommand("agentHub.autoSetupCline", autoSetupCline),
+    vscode.commands.registerCommand("agentHub.setupCodingTool", setupCodingTool),
+    vscode.commands.registerCommand("agentHub.setupCline", setupCline),
     vscode.commands.registerCommand("agentHub.copyClineConfig", copyClineConfig),
     vscode.commands.registerCommand("agentHub.testClineConnection", testClineConnection),
     vscode.commands.registerCommand("agentHub.showClineSetup", showClineSetup),
@@ -490,55 +484,11 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.openReadmeProof", openReadmeProofSection),
     vscode.commands.registerCommand("agentHub.openOutput", () => output.show())
   );
-  scheduleFirstRunProofPrompt(context);
 }
 
 async function openAgentHubDashboard(pathname) {
   const url = new URL(pathname, settings().serverUrl);
   await vscode.env.openExternal(vscode.Uri.parse(url.toString()));
-}
-
-function scheduleFirstRunProofPrompt(context) {
-  setTimeout(() => {
-    showFirstRunProofPrompt(context).catch((error) => {
-      output.appendLine(`Could not show first-run proof prompt: ${error.message}`);
-    });
-  }, 1800);
-}
-
-async function showFirstRunProofPrompt(context, options = {}) {
-  if (!context || !context.globalState) {
-    return;
-  }
-  const storedVersion = context.globalState.get(FIRST_RUN_PROOF_VERSION_KEY, "");
-  if (options.force !== true && !runtimePolicy.shouldShowFirstRunProofPrompt(storedVersion, EXTENSION_VERSION)) {
-    return;
-  }
-  if (!workspaceRoot()) {
-    return;
-  }
-  await context.globalState.update(FIRST_RUN_PROOF_VERSION_KEY, EXTENSION_VERSION);
-  const checkup = "Run Checkup";
-  const run = "Run Benchmark";
-  const routeLab = "Open Route Lab";
-  const proof = "Open Proof";
-  const choice = await vscode.window.showInformationMessage(
-    "Agent-Hub can check setup, repair safe config issues, start the backend, and show route reasoning in one pass.",
-    checkup,
-    run,
-    routeLab,
-    proof,
-    "Later"
-  );
-  if (choice === checkup) {
-    await runCheckupCommand({ source: "first-run" });
-  } else if (choice === run) {
-    await runPersonalBenchmark({ source: "first-run" });
-  } else if (choice === routeLab) {
-    await openRouteLabCommand({ prompt: PERSONAL_BENCHMARK_PROMPT });
-  } else if (choice === proof) {
-    await openReadmeProofSection();
-  }
 }
 
 async function openReadmeProofSection() {
@@ -715,6 +665,21 @@ class AgentHubSidebarProvider {
     }
     if (message.type === "installNode") {
       await installNodeCommand();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "autoSetupCline") {
+      await autoSetupCline();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "setupCodingTool") {
+      await setupCodingTool();
+      await this.refresh();
+      return;
+    }
+    if (message.type === "setupCline") {
+      await setupCline();
       await this.refresh();
       return;
     }
@@ -2492,26 +2457,13 @@ function sidebarHtml(webview, logoPath) {
     body {
       margin: 0;
       color: var(--app-fg);
-      background:
-        linear-gradient(180deg, color-mix(in srgb, var(--app-bg) 78%, #020617 22%) 0%, var(--app-bg) 45%),
-        linear-gradient(135deg, var(--cyan-soft), transparent 42%),
-        linear-gradient(215deg, var(--violet-soft), transparent 46%),
-        var(--app-bg);
+      background: var(--app-bg);
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
     }
 
     body::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      background:
-        linear-gradient(color-mix(in srgb, var(--app-fg) 4%, transparent) 1px, transparent 1px),
-        linear-gradient(90deg, color-mix(in srgb, var(--app-fg) 4%, transparent) 1px, transparent 1px);
-      background-size: 22px 22px;
-      mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent 68%);
-      opacity: 0.45;
+      content: none;
     }
 
     .shell {
@@ -2542,6 +2494,53 @@ function sidebarHtml(webview, logoPath) {
       background: color-mix(in srgb, var(--panel) 96%, var(--accent) 4%);
     }
 
+    details.advanced-shell {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    details.advanced-shell > summary.section-head {
+      position: relative;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--panel) 94%, var(--app-bg) 6%);
+      box-shadow: inset 0 1px 0 var(--panel-line);
+      cursor: pointer;
+      list-style: none;
+    }
+
+    details.advanced-shell > summary.section-head::-webkit-details-marker {
+      display: none;
+    }
+
+    details.advanced-shell > summary.section-head::after {
+      content: "Show";
+      border: 1px solid var(--subtle-border);
+      border-radius: 999px;
+      padding: 3px 8px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.2;
+      background: color-mix(in srgb, var(--card) 72%, transparent);
+    }
+
+    details.advanced-shell[open] > summary.section-head::after {
+      content: "Hide";
+    }
+
+    .advanced-content {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .advanced-shortcuts {
+      display: grid;
+      gap: 8px;
+    }
+
     header {
       display: flex;
       align-items: center;
@@ -2553,12 +2552,9 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .topbar {
-      border-color: color-mix(in srgb, var(--cyan) 24%, var(--border));
-      background:
-        linear-gradient(90deg, color-mix(in srgb, var(--cyan) 10%, var(--panel)), color-mix(in srgb, var(--violet) 8%, var(--panel)));
-      box-shadow:
-        0 10px 26px rgba(0, 0, 0, 0.22),
-        inset 0 1px 0 var(--panel-line);
+      border-color: var(--border);
+      background: color-mix(in srgb, var(--panel) 94%, var(--app-bg) 6%);
+      box-shadow: inset 0 1px 0 var(--panel-line);
     }
 
     .brand {
@@ -2635,22 +2631,21 @@ function sidebarHtml(webview, logoPath) {
       background: var(--accent-soft);
     }
 
+    .hidden-telemetry {
+      display: none;
+    }
+
     .hero {
       position: relative;
       display: grid;
       gap: 10px;
       overflow: hidden;
-      border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
-      background:
-        linear-gradient(135deg, color-mix(in srgb, var(--accent) 20%, var(--panel)) 0%, color-mix(in srgb, var(--panel) 95%, #020617 5%) 48%, color-mix(in srgb, var(--violet) 12%, var(--panel)) 100%);
+      border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+      background: color-mix(in srgb, var(--panel) 94%, var(--app-bg) 6%);
     }
 
     .hero::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      border-top: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
-      pointer-events: none;
+      content: none;
     }
 
     .hero > * {
@@ -2763,13 +2758,13 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .health-value {
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 700;
       line-height: 1.1;
     }
 
     .hero-state-strip {
-      display: grid;
+      display: none;
       grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
       gap: 6px;
       min-width: 0;
@@ -3939,6 +3934,33 @@ function sidebarHtml(webview, logoPath) {
       background: transparent;
     }
 
+    .task-presets {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .task-preset {
+      min-height: 28px;
+      padding: 5px 7px;
+      border-radius: 6px;
+      font-size: 11px;
+      line-height: 1.2;
+      text-align: left;
+      background: color-mix(in srgb, var(--secondary) 88%, var(--card));
+    }
+
+    .task-preset:focus-visible {
+      outline: 1px solid var(--button);
+      outline-offset: 2px;
+    }
+
+    .task-preset[data-active="true"] {
+      color: var(--button-fg);
+      border-color: transparent;
+      background: var(--button);
+    }
+
     .quick-task label,
     .task-options label {
       color: var(--muted);
@@ -3982,6 +4004,55 @@ function sidebarHtml(webview, logoPath) {
     .task-submit-row button {
       width: auto;
       white-space: nowrap;
+    }
+
+    .task-submit-row button:disabled {
+      cursor: default;
+      opacity: 0.58;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .tool-path {
+      display: grid;
+      gap: 9px;
+      border-color: color-mix(in srgb, var(--button) 28%, var(--border));
+      background: color-mix(in srgb, var(--panel) 95%, var(--button) 5%);
+    }
+
+    .tool-summary {
+      display: grid;
+      gap: 3px;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 9px;
+      background: color-mix(in srgb, var(--card) 88%, transparent);
+    }
+
+    .tool-summary strong,
+    .tool-summary span {
+      display: block;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .tool-summary strong {
+      font-size: 12px;
+      line-height: 1.25;
+    }
+
+    .tool-summary span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .tool-actions {
+      margin-top: 0;
+    }
+
+    .tool-actions .primary {
+      grid-column: 1 / -1;
     }
 
     .submit-action-with-help {
@@ -4169,6 +4240,7 @@ function sidebarHtml(webview, logoPath) {
       .hero-head,
       .task-submit-row,
       .actions,
+      .task-presets,
       .routing-summary-grid,
       .template-grid,
       .trust-grid,
@@ -4195,25 +4267,25 @@ function sidebarHtml(webview, logoPath) {
     <header class="topbar">
       <img src="${logoSrc}" alt="">
       <div class="brand">
-        <div class="brand-kicker">Mission Control</div>
+        <div class="brand-kicker">Workspace assistant</div>
         <h1>Agent Hub</h1>
         <div class="meta" id="extensionVersion">VS Code extension</div>
       </div>
       <div class="topbar-status">
         <span class="topbar-chip" id="headerStatus" data-state="Stopped">Offline</span>
-        <span class="topbar-chip" id="headerRoute">cloud</span>
-        <span class="topbar-chip" id="headerCostMode" data-tone="standard">Standard</span>
+        <span class="topbar-chip hidden-telemetry" id="headerRoute">cloud</span>
+        <span class="topbar-chip hidden-telemetry" id="headerCostMode" data-tone="standard">Standard</span>
       </div>
     </header>
     <section class="hero">
       <div class="hero-head">
         <div>
-          <div class="hero-kicker">Gateway Control Plane</div>
-          <h2>Command Center</h2>
+          <div class="hero-kicker">Simple start</div>
+          <h2>What do you need?</h2>
           <div class="hero-copy" id="heroSummary">Checking status</div>
         </div>
-        <div class="health-card" id="heroHealthCard" data-state="Stopped" title="Health score is a 0-100 summary of provider availability, success rate, fallbacks, permissions, context pressure, stream failures, and degraded providers. Open Statistics > Help for details.">
-          <span class="health-label">Health</span>
+        <div class="health-card" id="heroHealthCard" data-state="Stopped" title="Shows whether Agent Hub is ready to answer tasks.">
+          <span class="health-label">Status</span>
           <strong class="health-value" id="heroHealthScore">--</strong>
         </div>
       </div>
@@ -4246,13 +4318,19 @@ function sidebarHtml(webview, logoPath) {
       <div class="command-surface">
         <form class="quick-task" id="quickTaskForm">
           <label for="quickTaskInput">Task</label>
-          <textarea id="quickTaskInput" placeholder="Describe the change, investigation, or review"></textarea>
+          <div class="task-presets" aria-label="Task starters">
+            <button class="task-preset" type="button" data-task-template="Find and fix the most likely bug in the current file. Explain the change and run the most relevant test if available.">Fix bug</button>
+            <button class="task-preset" type="button" data-task-template="Add or improve tests for the current file. Focus on the most important behavior and run the relevant test command if available.">Write tests</button>
+            <button class="task-preset" type="button" data-task-template="Review the current file or selected code for bugs, confusing logic, and missing tests. Prioritize the highest-impact issues.">Review code</button>
+            <button class="task-preset" type="button" data-task-template="Refactor the current file for clarity while preserving behavior. Keep the change small and verify it if a relevant test exists.">Refactor</button>
+          </div>
+          <textarea id="quickTaskInput" placeholder="Fix a bug, explain a file, write tests, or make a small change"></textarea>
           <div class="task-submit-row">
             <div class="task-options">
               <label><input id="quickTaskIncludeSelection" type="checkbox" checked> Include selection</label>
             </div>
             <div class="submit-action-with-help">
-              <button class="primary" id="quickTaskSend" type="submit">Send</button>
+              <button class="primary" id="quickTaskSend" type="submit" disabled>Send task</button>
               ${sidebarActionHelp("Send", "Send the task to Agent Hub chat with the selected workspace context and current routing settings.")}
             </div>
           </div>
@@ -4265,69 +4343,6 @@ function sidebarHtml(webview, logoPath) {
             <span class="button-meta">Open chat</span>
           </button>
           ${sidebarActionHelp("Chat", "Open Agent Hub chat for routed workspace questions, coding help, and follow-up tasks.")}
-        </div>
-        <div class="action-with-help">
-          <button class="command-button" id="quickDashboard" type="button" title="Open the Agent Hub dashboard in your browser" data-icon="D">
-            <span class="button-main">Dashboard</span>
-            <span class="button-meta">Browser</span>
-          </button>
-          ${sidebarActionHelp("Dashboard", "Open the browser dashboard with routing, costs, benchmarks, and backend health.")}
-        </div>
-        <div class="action-with-help">
-          <button class="command-button" id="quickKernel" type="button" title="Open the runtime kernel control plane" data-icon="K">
-            <span class="button-main">Kernel</span>
-            <span class="button-meta">Runtime</span>
-          </button>
-          ${sidebarActionHelp("Kernel", "Inspect runtime pressure, queues, tool activity, and subsystem health.")}
-        </div>
-        <div class="action-with-help">
-          <button class="command-button" id="quickCheckup" type="button" title="Repair config, check requirements, start Agent Hub, and open Route Lab" data-icon="V">
-            <span class="button-main">Checkup</span>
-            <span class="button-meta">One click</span>
-          </button>
-          ${sidebarActionHelp("Checkup", "Run setup repair, dependency checks, server start, and route diagnostics in one pass.")}
-        </div>
-        <div class="action-with-help">
-          <button class="command-button" id="quickRouteLab" type="button" title="Score current route candidates without calling a provider" data-icon="R">
-            <span class="button-main">Route Lab</span>
-            <span class="button-meta">Why model?</span>
-          </button>
-          ${sidebarActionHelp("Route Lab", "Score route candidates and explain model selection without calling a provider.")}
-        </div>
-        <div class="action-with-help">
-          <button class="command-button" id="quickSettings" type="button" title="Open Agent Hub settings" data-icon="S">
-            <span class="button-main">Settings</span>
-            <span class="button-meta">Models</span>
-          </button>
-          ${sidebarActionHelp("Settings", "Open VS Code settings for Agent Hub model, server, permission, and token options.")}
-        </div>
-        <div class="action-with-help">
-          <button class="command-button mode-toggle" id="quickTokenSafeMode" type="button" title="Save Codex tokens with adaptive compact fallback routing" data-icon="T">
-            <span class="button-main">Save Codex Tokens</span>
-            <span class="button-meta">Compact fallback</span>
-          </button>
-          ${sidebarActionHelp("Save Codex Tokens", "Use free models first, then send Codex fallback an adaptive compact digest with smaller context, shorter output, and reduced tool schema.")}
-        </div>
-        <div class="action-with-help">
-          <button class="command-button mode-toggle" id="quickFreeOnlyMode" type="button" title="Use only free or local models" data-icon="F">
-            <span class="button-main">Free Models Only</span>
-            <span class="button-meta">No paid fallback</span>
-          </button>
-          ${sidebarActionHelp("Free Models Only", "Block Codex CLI and paid/API-key providers so routing stays on free or local models.")}
-        </div>
-        <div class="action-with-help">
-          <button class="command-button mode-toggle" id="quickCodexCliMode" type="button" title="Use your signed-in Codex CLI" data-icon="X">
-            <span class="button-main">Use Codex CLI</span>
-            <span class="button-meta">Signed-in CLI</span>
-          </button>
-          ${sidebarActionHelp("Use Codex CLI", "Route through the locally signed-in Codex CLI instead of requiring an OpenAI API key.")}
-        </div>
-        <div class="action-with-help">
-          <button class="command-button" id="quickInstallCodexCli" type="button" title="Install or sign in to Codex CLI" data-icon="I">
-            <span class="button-main">Install Codex CLI</span>
-            <span class="button-meta">Codex setup</span>
-          </button>
-          ${sidebarActionHelp("Install Codex CLI", "Install or sign in to the Codex CLI runtime used by Agent Hub.")}
         </div>
         <div class="action-with-help">
           <button class="command-button" id="codeAgent" type="button" title="Run the coding agent" data-icon="A">
@@ -4343,8 +4358,149 @@ function sidebarHtml(webview, logoPath) {
           </button>
           ${sidebarActionHelp("Explain", "Ask Agent Hub to explain the current file or active editor context.")}
         </div>
+        <div class="action-with-help">
+          <button class="command-button" id="quickCheckup" type="button" title="Repair config, check requirements, start Agent Hub, and open Route Lab" data-icon="V">
+            <span class="button-main">Checkup</span>
+            <span class="button-meta">Fix setup</span>
+          </button>
+          ${sidebarActionHelp("Checkup", "Run setup repair, dependency checks, server start, and route diagnostics in one pass.")}
+        </div>
+        <div class="action-with-help">
+          <button class="command-button" id="quickSettings" type="button" title="Open Agent Hub settings" data-icon="S">
+            <span class="button-main">Settings</span>
+            <span class="button-meta">Models</span>
+          </button>
+          ${sidebarActionHelp("Settings", "Open VS Code settings for Agent Hub model, server, permission, and token options.")}
+        </div>
       </div>
     </section>
+    <section class="tool-path">
+      <div class="section-head">
+        <h2>Use With Coding Tools</h2>
+        <span class="status" id="toolReadyStatus">OpenAI Compatible</span>
+      </div>
+      <div class="tool-summary">
+        <strong>Set up Cline automatically, or copy values for Roo Code, Continue, and similar tools</strong>
+        <span>Provider: OpenAI Compatible</span>
+        <span>Base URL: ${escapeHtml(settings().serverUrl.replace(/\/+$/, ""))}/v1</span>
+        <span>Model: agent-hub-coding</span>
+      </div>
+      <div class="actions tool-actions">
+        <button class="primary" id="autoSetupCline" type="button">Auto-Configure Cline</button>
+        <button id="setupCodingTool" type="button">Copy + Test Tool</button>
+        <button id="copyCodingToolConfigQuick" type="button">Copy Values</button>
+        <button id="testCodingToolConnectionQuick" type="button">Test</button>
+        <button id="showCodingToolSetupQuick" type="button">Guide</button>
+      </div>
+    </section>
+    <details class="panel">
+      <summary class="section-head">
+        <h2>Setup</h2>
+        <span class="status" id="serverStatus">Stopped</span>
+      </summary>
+      <div class="hero-card">
+        <div class="hero-card-title">
+          <span>Setup</span>
+          <span class="status" id="setupProgressText">0%</span>
+        </div>
+        <div class="progress-track" aria-hidden="true"><div class="progress-fill" id="setupProgressFill"></div></div>
+        <div class="next-step">
+          <div class="main" id="nextStepTitle">Checking setup...</div>
+          <div class="meta" id="nextStepDetail">Agent Hub is collecting local status.</div>
+        </div>
+      </div>
+      <div class="detail" id="serverDetail">Checking Agent Hub...</div>
+      <ul class="list" id="onboardingList"></ul>
+      <div class="actions">
+        <div class="action-with-help">
+          <button id="stopServer" type="button">Stop</button>
+          ${sidebarActionHelp("Stop", "Stop the extension-owned Agent Hub backend process.")}
+        </div>
+        <div class="action-with-help">
+          <button id="restartServer" type="button">Restart</button>
+          ${sidebarActionHelp("Restart", "Restart Agent Hub so repaired config, provider changes, or backend updates take effect.")}
+        </div>
+        <div class="action-with-help">
+          <button id="runCheckup" type="button">Run Checkup</button>
+          ${sidebarActionHelp("Run Checkup", "Repair safe config issues, check local requirements, start Agent Hub, and open route diagnostics.")}
+        </div>
+        <div class="action-with-help">
+          <button id="checkRequirements" type="button">Check Requirements</button>
+          ${sidebarActionHelp("Check Requirements", "Check whether Python, Node.js, virtual environment, and backend files needed by Agent Hub are available.")}
+        </div>
+        <div class="action-with-help">
+          <button id="fixSafeConfig" type="button">Repair Config</button>
+          ${sidebarActionHelp("Repair Config", "Update generated Agent Hub config to safe defaults without touching unrelated workspace files.")}
+        </div>
+        <div class="action-with-help">
+          <button id="checkHealth" type="button">Check Status</button>
+          ${sidebarActionHelp("Check Status", "Refresh backend health, provider readiness, routing status, and setup signals.")}
+        </div>
+      </div>
+    </details>
+    <details class="advanced-shell">
+      <summary class="section-head">
+        <h2>Advanced</h2>
+        <span class="status">Optional</span>
+      </summary>
+      <div class="advanced-content">
+      <section class="advanced-shortcuts">
+        <div class="section-head">
+          <h2>Tools</h2>
+          <span class="status">Power user</span>
+        </div>
+        <div class="actions">
+          <div class="action-with-help">
+            <button class="command-button" id="quickDashboard" type="button" title="Open the Agent Hub dashboard in your browser" data-icon="D">
+              <span class="button-main">Dashboard</span>
+              <span class="button-meta">Browser</span>
+            </button>
+            ${sidebarActionHelp("Dashboard", "Open the browser dashboard with routing, costs, benchmarks, and backend health.")}
+          </div>
+          <div class="action-with-help">
+            <button class="command-button" id="quickKernel" type="button" title="Open the runtime kernel control plane" data-icon="K">
+              <span class="button-main">Kernel</span>
+              <span class="button-meta">Runtime</span>
+            </button>
+            ${sidebarActionHelp("Kernel", "Inspect runtime pressure, queues, tool activity, and subsystem health.")}
+          </div>
+          <div class="action-with-help">
+            <button class="command-button" id="quickRouteLab" type="button" title="Score current route candidates without calling a provider" data-icon="R">
+              <span class="button-main">Route Lab</span>
+              <span class="button-meta">Why model?</span>
+            </button>
+            ${sidebarActionHelp("Route Lab", "Score route candidates and explain model selection without calling a provider.")}
+          </div>
+          <div class="action-with-help">
+            <button class="command-button mode-toggle" id="quickTokenSafeMode" type="button" title="Save Codex tokens with adaptive compact fallback routing" data-icon="T">
+              <span class="button-main">Save Codex Tokens</span>
+              <span class="button-meta">Compact fallback</span>
+            </button>
+            ${sidebarActionHelp("Save Codex Tokens", "Use free models first, then send Codex fallback an adaptive compact digest with smaller context, shorter output, and reduced tool schema.")}
+          </div>
+          <div class="action-with-help">
+            <button class="command-button mode-toggle" id="quickFreeOnlyMode" type="button" title="Use only free or local models" data-icon="F">
+              <span class="button-main">Free Models Only</span>
+              <span class="button-meta">No paid fallback</span>
+            </button>
+            ${sidebarActionHelp("Free Models Only", "Block Codex CLI and paid/API-key providers so routing stays on free or local models.")}
+          </div>
+          <div class="action-with-help">
+            <button class="command-button mode-toggle" id="quickCodexCliMode" type="button" title="Use your signed-in Codex CLI" data-icon="X">
+              <span class="button-main">Use Codex CLI</span>
+              <span class="button-meta">Signed-in CLI</span>
+            </button>
+            ${sidebarActionHelp("Use Codex CLI", "Route through the locally signed-in Codex CLI instead of requiring an OpenAI API key.")}
+          </div>
+          <div class="action-with-help">
+            <button class="command-button" id="quickInstallCodexCli" type="button" title="Install or sign in to Codex CLI" data-icon="I">
+              <span class="button-main">Install Codex CLI</span>
+              <span class="button-meta">Codex setup</span>
+            </button>
+            ${sidebarActionHelp("Install Codex CLI", "Install or sign in to the Codex CLI runtime used by Agent Hub.")}
+          </div>
+        </div>
+      </section>
     <section class="model-control-plane">
       <div class="section-head">
         <h2>Model Stats</h2>
@@ -4466,51 +4622,6 @@ function sidebarHtml(webview, logoPath) {
           </div>
         </div>
       </details>
-    </details>
-    <details class="panel">
-      <summary class="section-head">
-        <h2>Setup</h2>
-        <span class="status" id="serverStatus">Stopped</span>
-      </summary>
-      <div class="hero-card">
-        <div class="hero-card-title">
-          <span>Setup</span>
-          <span class="status" id="setupProgressText">0%</span>
-        </div>
-        <div class="progress-track" aria-hidden="true"><div class="progress-fill" id="setupProgressFill"></div></div>
-        <div class="next-step">
-          <div class="main" id="nextStepTitle">Checking setup...</div>
-          <div class="meta" id="nextStepDetail">Agent Hub is collecting local status.</div>
-        </div>
-      </div>
-      <div class="detail" id="serverDetail">Checking Agent Hub...</div>
-      <ul class="list" id="onboardingList"></ul>
-      <div class="actions">
-        <div class="action-with-help">
-          <button id="stopServer" type="button">Stop</button>
-          ${sidebarActionHelp("Stop", "Stop the extension-owned Agent Hub backend process.")}
-        </div>
-        <div class="action-with-help">
-          <button id="restartServer" type="button">Restart</button>
-          ${sidebarActionHelp("Restart", "Restart Agent Hub so repaired config, provider changes, or backend updates take effect.")}
-        </div>
-        <div class="action-with-help">
-          <button id="runCheckup" type="button">Run Checkup</button>
-          ${sidebarActionHelp("Run Checkup", "Repair safe config issues, check local requirements, start Agent Hub, and open route diagnostics.")}
-        </div>
-        <div class="action-with-help">
-          <button id="checkRequirements" type="button">Check Requirements</button>
-          ${sidebarActionHelp("Check Requirements", "Check whether Python, Node.js, virtual environment, and backend files needed by Agent Hub are available.")}
-        </div>
-        <div class="action-with-help">
-          <button id="fixSafeConfig" type="button">Repair Config</button>
-          ${sidebarActionHelp("Repair Config", "Update generated Agent Hub config to safe defaults without touching unrelated workspace files.")}
-        </div>
-        <div class="action-with-help">
-          <button id="checkHealth" type="button">Check Status</button>
-          ${sidebarActionHelp("Check Status", "Refresh backend health, provider readiness, routing status, and setup signals.")}
-        </div>
-      </div>
     </details>
     <details class="panel">
       <summary class="section-head">
@@ -4648,6 +4759,8 @@ function sidebarHtml(webview, logoPath) {
         </div>
       </div>
     </details>
+      </div>
+    </details>
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
@@ -4698,6 +4811,8 @@ function sidebarHtml(webview, logoPath) {
     const quickTaskForm = document.getElementById("quickTaskForm");
     const quickTaskInput = document.getElementById("quickTaskInput");
     const quickTaskIncludeSelection = document.getElementById("quickTaskIncludeSelection");
+    const quickTaskSend = document.getElementById("quickTaskSend");
+    const toolReadyStatus = document.getElementById("toolReadyStatus");
     const headerStatus = document.getElementById("headerStatus");
     const headerRoute = document.getElementById("headerRoute");
     const headerCostMode = document.getElementById("headerCostMode");
@@ -4713,6 +4828,7 @@ function sidebarHtml(webview, logoPath) {
     const modelIncidentList = document.getElementById("modelIncidentList");
 
     const runningTimers = new Map();
+    const savedState = vscode.getState() || {};
     let helpToastTimer = null;
 
     function post(type, sourceButton) {
@@ -4748,6 +4864,9 @@ function sidebarHtml(webview, logoPath) {
         clearTimeout(runningTimers.get(button));
         runningTimers.delete(button);
       }
+      if (button === quickTaskSend) {
+        updateQuickTaskState();
+      }
     }
 
     function clearRunningButtons() {
@@ -4779,6 +4898,8 @@ function sidebarHtml(webview, logoPath) {
       setText(heroReadiness, readinessText(dashboard.readiness));
       setText(heroCostMode, costMode.label);
       heroCostPill.dataset.tone = costMode.tone;
+      setText(toolReadyStatus, status === "Running" ? "Ready" : "Needs start");
+      toolReadyStatus.dataset.state = status === "Running" ? "Running" : status;
       renderServerControls(status, dashboard);
       renderSetupSummary(dashboard);
       renderModelStats(dashboard.modelStats || {}, dashboard.automatedModelFeedback);
@@ -4835,26 +4956,26 @@ function sidebarHtml(webview, logoPath) {
         heroServerAction.textContent = "Stop";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "stopServer";
-        setText(heroSummary, "Running");
-        setText(serverDetail, "Running at " + serverUrl + ".");
+        setText(heroSummary, "Ready");
+        setText(serverDetail, "Ready at " + serverUrl + ".");
       } else if (isStarting) {
         heroServerAction.textContent = "Starting...";
         heroServerAction.disabled = true;
         heroServerAction.dataset.action = "";
         setText(heroSummary, "Starting");
-        setText(serverDetail, "Starting Agent Hub.");
+        setText(serverDetail, "Starting local server.");
       } else if (isError) {
         heroServerAction.textContent = "Restart";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "restartServer";
-        setText(heroSummary, "Needs attention");
-        setText(serverDetail, dashboard.statusText || "Open logs or restart Agent Hub.");
+        setText(heroSummary, "Needs checkup");
+        setText(serverDetail, dashboard.statusText || "Run Checkup or restart.");
       } else {
         heroServerAction.textContent = "Start";
         heroServerAction.disabled = false;
         heroServerAction.dataset.action = "startServer";
-        setText(heroSummary, "Off");
-        setText(serverDetail, "Start Agent Hub to use the sidebar, VS Code Chat, or Cline.");
+        setText(heroSummary, "Start or send a task");
+        setText(serverDetail, "Ready to start when you send work.");
       }
       heroServerAction.dataset.state = status;
 
@@ -5237,7 +5358,7 @@ function sidebarHtml(webview, logoPath) {
     function renderStatistics(stats, insights, status) {
       statsGrid.textContent = "";
       const score = status === "Running" ? Number(stats.healthScore || 0) : 0;
-      heroHealthScore.textContent = status === "Running" ? String(score) : "--";
+      heroHealthScore.textContent = heroStatusText(stats, status);
       statsHealth.textContent = status === "Running" ? healthLabel(stats) : "Offline";
       statsHealth.dataset.state = statisticsStatusState(stats, status);
       heroHealthCard.dataset.state = statisticsStatusState(stats, status);
@@ -5373,6 +5494,25 @@ function sidebarHtml(webview, logoPath) {
       if (!rows.length) {
         insightList.append(emptyRow("No statistics yet"));
       }
+    }
+
+    function heroStatusText(stats, status) {
+      if (status === "Starting") {
+        return "Starting";
+      }
+      if (status === "Error") {
+        return "Checkup";
+      }
+      if (status !== "Running") {
+        return "Start";
+      }
+      if (Number(stats.providersTotal || 0) && !Number(stats.providersAvailable || 0)) {
+        return "Setup";
+      }
+      if (Number(stats.providersDegraded || 0) || Number(stats.recentFailures || 0)) {
+        return "Check";
+      }
+      return "Ready";
     }
 
     function healthCaption(stats, status) {
@@ -6054,6 +6194,65 @@ function sidebarHtml(webview, logoPath) {
 
     wireStaticActionHelpButtons();
 
+    function currentSidebarState() {
+      return {
+        quickTaskText: quickTaskInput.value,
+        includeSelection: quickTaskIncludeSelection.checked
+      };
+    }
+
+    function persistSidebarState() {
+      vscode.setState(currentSidebarState());
+    }
+
+    function autoResizeQuickTask() {
+      quickTaskInput.style.height = "auto";
+      quickTaskInput.style.height = Math.min(140, Math.max(56, quickTaskInput.scrollHeight)) + "px";
+    }
+
+    function syncTaskPresetActive() {
+      const current = quickTaskInput.value.trim();
+      for (const button of document.querySelectorAll(".task-preset")) {
+        button.dataset.active = button.dataset.taskTemplate === current ? "true" : "false";
+      }
+    }
+
+    function updateQuickTaskState() {
+      quickTaskSend.disabled = !quickTaskInput.value.trim();
+      autoResizeQuickTask();
+      syncTaskPresetActive();
+      persistSidebarState();
+    }
+
+    function setQuickTaskText(text) {
+      quickTaskInput.value = String(text || "").trim();
+      updateQuickTaskState();
+      quickTaskInput.focus();
+    }
+
+    if (typeof savedState.quickTaskText === "string") {
+      quickTaskInput.value = savedState.quickTaskText;
+    }
+    if (typeof savedState.includeSelection === "boolean") {
+      quickTaskIncludeSelection.checked = savedState.includeSelection;
+    }
+    updateQuickTaskState();
+
+    for (const button of document.querySelectorAll(".task-preset")) {
+      button.addEventListener("click", () => {
+        setQuickTaskText(button.dataset.taskTemplate || "");
+      });
+    }
+
+    quickTaskInput.addEventListener("input", updateQuickTaskState);
+    quickTaskInput.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        quickTaskForm.requestSubmit();
+      }
+    });
+    quickTaskIncludeSelection.addEventListener("change", persistSidebarState);
+
     quickTaskForm.addEventListener("submit", (event) => {
       event.preventDefault();
       const text = quickTaskInput.value.trim();
@@ -6061,8 +6260,9 @@ function sidebarHtml(webview, logoPath) {
         quickTaskInput.focus();
         return;
       }
-      markButtonRunning(document.getElementById("quickTaskSend"));
+      markButtonRunning(quickTaskSend);
       quickTaskInput.value = "";
+      updateQuickTaskState();
       vscode.postMessage({
         type: "quickTask",
         text,
@@ -6107,6 +6307,11 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("freeOnlyMode").addEventListener("click", (event) => postFromEvent("enableFreeOnlyMode", event));
     document.getElementById("openOutput").addEventListener("click", (event) => postFromEvent("openOutput", event));
     document.getElementById("openSettings").addEventListener("click", (event) => postFromEvent("openSettings", event));
+    document.getElementById("autoSetupCline").addEventListener("click", (event) => postFromEvent("autoSetupCline", event));
+    document.getElementById("setupCodingTool").addEventListener("click", (event) => postFromEvent("setupCodingTool", event));
+    document.getElementById("copyCodingToolConfigQuick").addEventListener("click", (event) => postFromEvent("copyClineConfig", event));
+    document.getElementById("testCodingToolConnectionQuick").addEventListener("click", (event) => postFromEvent("testClineConnection", event));
+    document.getElementById("showCodingToolSetupQuick").addEventListener("click", (event) => postFromEvent("showClineSetup", event));
     document.getElementById("copyClineConfig").addEventListener("click", (event) => postFromEvent("copyClineConfig", event));
     document.getElementById("testClineConnection").addEventListener("click", (event) => postFromEvent("testClineConnection", event));
     document.getElementById("showClineSetup").addEventListener("click", (event) => postFromEvent("showClineSetup", event));
@@ -14364,19 +14569,196 @@ function formatCliCommandForLog(command, args) {
     .join(" ");
 }
 
-async function copyClineConfig() {
+function clineSetupValues(config) {
+  return {
+    provider: "openai",
+    apiProvider: "openai-compatible",
+    baseUrl: `${config.serverUrl.replace(/\/+$/, "")}/v1`,
+    apiKey: "agent-hub-local",
+    model: "agent-hub-coding"
+  };
+}
+
+function clineExecutableName() {
+  return "cline";
+}
+
+function clineCliInstallTerminalCommand() {
+  return process.platform === "win32" ? "npm.cmd install -g cline" : "npm install -g cline";
+}
+
+function clineAuthArgVariants(values) {
+  return [
+    [
+      "auth",
+      "--provider",
+      values.provider,
+      "--apikey",
+      values.apiKey,
+      "--baseurl",
+      values.baseUrl,
+      "--modelid",
+      values.model
+    ],
+    [
+      "auth",
+      "-p",
+      values.provider,
+      "-k",
+      values.apiKey,
+      "-b",
+      values.baseUrl,
+      "-m",
+      values.model
+    ]
+  ];
+}
+
+function redactClineAuthArgs(args) {
+  const redacted = [...args];
+  for (let index = 0; index < redacted.length - 1; index += 1) {
+    if (redacted[index] === "--apikey" || redacted[index] === "-k") {
+      redacted[index + 1] = "<local-key>";
+    }
+  }
+  return redacted;
+}
+
+function isMissingExecutableError(error) {
+  const message = String(error && error.message ? error.message : "");
+  return error && (error.code === "ENOENT" || /not recognized|not found|ENOENT/i.test(message));
+}
+
+function formatClineSetupError(error) {
+  if (isMissingExecutableError(error)) {
+    return "Cline CLI was not found on PATH.";
+  }
+  const stderr = String(error && error.stderr ? error.stderr : "").trim();
+  if (stderr) {
+    return stderr.split(/\r?\n/)[0];
+  }
+  return error && error.message ? error.message : "Cline CLI setup failed.";
+}
+
+async function runClineAuthSetup(values) {
+  const command = clineExecutableName();
+  const options = { shell: process.platform === "win32", timeout: 60000, maxBuffer: 1024 * 1024 };
+  const root = workspaceRoot();
+  if (root) {
+    options.cwd = root;
+  }
+  let lastError;
+  for (const args of clineAuthArgVariants(values)) {
+    output.appendLine(`$ ${formatCliCommandForLog(command, redactClineAuthArgs(args))}`);
+    try {
+      const result = await execFile(command, args, options);
+      if (result.stdout && result.stdout.trim()) {
+        output.appendLine(result.stdout.trim());
+      }
+      if (result.stderr && result.stderr.trim()) {
+        output.appendLine(result.stderr.trim());
+      }
+      return { ok: true, command, args };
+    } catch (error) {
+      lastError = error;
+      output.appendLine(`Cline auth attempt failed: ${formatClineSetupError(error)}`);
+      if (isMissingExecutableError(error)) {
+        break;
+      }
+    }
+  }
+  throw lastError || new Error("Cline CLI setup failed.");
+}
+
+async function copyClineConfig(options = {}) {
   const text = clineConfigText(settings());
   await vscode.env.clipboard.writeText(text);
-  vscode.window.showInformationMessage("Cline setup copied. Paste it into Cline's OpenAI Compatible provider settings.");
+  if (options.quiet !== true) {
+    vscode.window.showInformationMessage("OpenAI-compatible setup copied. Paste it into Cline, Roo Code, Continue, or another compatible coding tool.");
+  }
+  return text;
+}
+
+async function autoSetupCline() {
+  const values = clineSetupValues(settings());
+  output.appendLine("");
+  output.appendLine("Agent Hub automatic Cline setup");
+  output.appendLine(`Base URL: ${values.baseUrl}`);
+  output.appendLine(`Model: ${values.model}`);
+  const ready = await ensureServerReady();
+  if (!ready) {
+    await copyClineConfig({ quiet: true });
+    vscode.window.showWarningMessage("Agent Hub values were copied, but the local server did not start. Run Checkup, then click Auto-Configure Cline again.");
+    output.show(true);
+    return { ok: false, copied: true };
+  }
+  try {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Agent Hub: Configuring Cline",
+        cancellable: false
+      },
+      () => runClineAuthSetup(values)
+    );
+  } catch (error) {
+    await copyClineConfig({ quiet: true });
+    output.appendLine(`Automatic Cline setup failed: ${formatClineSetupError(error)}`);
+    output.show(true);
+    const install = "Install Cline CLI";
+    const guide = "Show Values";
+    const choice = await vscode.window.showWarningMessage(
+      "Cline could not be configured automatically. Agent Hub values were copied instead.",
+      install,
+      guide
+    );
+    if (choice === install) {
+      openSetupTerminal("Install Cline CLI", clineCliInstallTerminalCommand());
+    } else if (choice === guide) {
+      await showClineSetup();
+    }
+    return { ok: false, copied: true, error };
+  }
+  const test = await testClineConnection({ quietSuccess: true, quietFailure: true });
+  if (test && test.ok) {
+    vscode.window.showInformationMessage("Cline is configured for Agent Hub. Use model agent-hub-coding.");
+    return { ok: true, configured: true, test };
+  }
+  vscode.window.showWarningMessage("Cline was configured, but Agent Hub's compatibility test needs attention. Open Agent Hub output for details.");
+  output.show(true);
+  return { ok: false, configured: true, test };
+}
+
+async function setupCodingTool() {
+  const text = clineConfigText(settings());
+  await vscode.env.clipboard.writeText(text);
+  const ready = await ensureServerReady();
+  if (!ready) {
+    vscode.window.showWarningMessage("Coding-tool values copied, but Agent Hub did not start. Open Agent Hub output for details.");
+    output.show(true);
+    return { ok: false, copied: true };
+  }
+  const test = await testClineConnection({ quietSuccess: true, quietFailure: true });
+  if (test && test.ok) {
+    vscode.window.showInformationMessage("Coding-tool values copied and Agent Hub passed the OpenAI-compatible test. Paste them into your tool's custom/OpenAI-compatible provider.");
+    return { ok: true, copied: true };
+  }
+  vscode.window.showWarningMessage("Coding-tool values copied. Agent Hub is running, but the compatibility test needs attention. Open logs for details.");
+  output.show(true);
+  return { ok: false, copied: true, test };
+}
+
+async function setupCline() {
+  return autoSetupCline();
 }
 
 async function showClineSetup() {
   output.show(true);
   output.appendLine("");
-  output.appendLine("Agent Hub setup for Cline");
+  output.appendLine("Agent Hub setup for OpenAI-compatible coding tools");
   output.appendLine("");
-  output.appendLine("1. Start Agent Hub from the sidebar.");
-  output.appendLine("2. In Cline, choose OpenAI Compatible.");
+  output.appendLine("1. Click Auto-Configure Cline for one-click setup when the Cline CLI is installed.");
+  output.appendLine("2. For Roo Code, Continue, or manual Cline setup, choose OpenAI Compatible or custom OpenAI endpoint.");
   output.appendLine("3. Paste these values:");
   output.appendLine("");
   output.appendLine(clineConfigText(settings()));
@@ -14384,10 +14766,10 @@ async function showClineSetup() {
   output.appendLine("Tip: the Base URL must end with /v1.");
 }
 
-async function testClineConnection() {
+async function testClineConnection(options = {}) {
   if (!(await ensureServerReady())) {
     vscode.window.showWarningMessage("Agent Hub is not running. Click Start first.");
-    return;
+    return { ok: false };
   }
   const payload = {
     api_shape: "openai-chat",
@@ -14419,12 +14801,22 @@ async function testClineConnection() {
     const diagnostics = response.diagnostics || {};
     const ok = diagnostics.structured_content_messages > 0 && diagnostics.preserved_tool_results > 0;
     const message = ok
-      ? "Cline can reach Agent Hub. You are ready to use model agent-hub-coding."
-      : "Cline reached Agent Hub, but the test found missing context details. Open logs for more information.";
+      ? "Your OpenAI-compatible coding tool can reach Agent Hub. Use model agent-hub-coding."
+      : "The OpenAI-compatible endpoint reached Agent Hub, but the test found missing context details. Open logs for more information.";
     output.appendLine(JSON.stringify(response, null, 2));
-    vscode.window.showInformationMessage(message);
+    if (ok && options.quietSuccess !== true) {
+      vscode.window.showInformationMessage(message);
+    } else if (!ok && options.quietFailure !== true) {
+      vscode.window.showWarningMessage(message);
+    }
+    return { ok, response };
   } catch (error) {
-    vscode.window.showErrorMessage(`Cline connection test failed: ${formatAgentHubError(error)}`);
+    if (options.quietFailure !== true) {
+      vscode.window.showErrorMessage(`OpenAI-compatible connection test failed: ${formatAgentHubError(error)}`);
+    } else {
+      output.appendLine(`OpenAI-compatible connection test failed: ${formatAgentHubError(error)}`);
+    }
+    return { ok: false, error };
   }
 }
 
@@ -14490,13 +14882,13 @@ async function testAnthropicEndpoint() {
 }
 
 function clineConfigText(config) {
-  const baseUrl = `${config.serverUrl.replace(/\/+$/, "")}/v1`;
+  const values = clineSetupValues(config);
   return JSON.stringify({
-    apiProvider: "openai-compatible",
-    openAiBaseUrl: baseUrl,
-    openAiApiKey: "agent-hub-local",
-    openAiModelId: "agent-hub-coding",
-    model: "agent-hub-coding",
+    apiProvider: values.apiProvider,
+    openAiBaseUrl: values.baseUrl,
+    openAiApiKey: values.apiKey,
+    openAiModelId: values.model,
+    model: values.model,
     agentHub: {
       cline_compatibility_mode: true
     }

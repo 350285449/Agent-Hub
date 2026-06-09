@@ -1,7 +1,7 @@
 {
   "name": "agent-hub-vscode",
-  "displayName": "Agent Hub - Local-First AI Model Router",
-  "description": "Cline, Codex and Claude Code compatible AI model router with free-model routing, workspace agents, and cost-saving local-first orchestration.",
+  "displayName": "Agent Hub",
+  "description": "Start a local Agent Hub server, send coding tasks to the best available model, and recover setup issues from one simple sidebar.",
   "version": "9.6.2",
   "publisher": "agent-hub",
   "license": "MIT",
@@ -82,6 +82,9 @@
     "onCommand:agentHub.research",
     "onCommand:agentHub.explainSelection",
     "onCommand:agentHub.explainFile",
+    "onCommand:agentHub.autoSetupCline",
+    "onCommand:agentHub.setupCodingTool",
+    "onCommand:agentHub.setupCline",
     "onCommand:agentHub.copyClineConfig",
     "onCommand:agentHub.testClineConnection",
     "onCommand:agentHub.showClineSetup",
@@ -266,6 +269,21 @@
       {
         "command": "agentHub.explainFile",
         "title": "Agent Hub: Explain Current File"
+      },
+      {
+        "command": "agentHub.autoSetupCline",
+        "title": "Agent Hub: Auto-Configure Cline",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "agentHub.setupCline",
+        "title": "Agent Hub: Set Up Cline",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "agentHub.setupCodingTool",
+        "title": "Agent Hub: Set Up Coding Tool",
+        "icon": "$(plug)"
       },
       {
         "command": "agentHub.copyClineConfig",
@@ -494,6 +512,128 @@
       ]
     },
     "menus": {
+      "commandPalette": [
+        {
+          "command": "agentHub.checkHealth",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openDashboard",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openRuntimeKernel",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.checkRequirements",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.fixSafeConfig",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.installPython",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.installNode",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.enableFreeOnlyMode",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.enableTokenSafeMode",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.enableCodexCliMode",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.installCodexCli",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.installOllamaDesktop",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.status",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.setupCline",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.copyClineConfig",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.testClineConnection",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.showClineSetup",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.copyClaudeCodeConfig",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.testAnthropicEndpoint",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.showClaudeCodeSetup",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openOutput",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.rollbackLatestCheckpoint",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openModelLeaderboard",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openCostDashboard",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openBenchmarkResults",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.runPersonalBenchmark",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.explainRoute",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openRouteLab",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openBenchmarkShareCard",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openReadmeProof",
+          "when": "false"
+        }
+      ],
       "scm/title": [
         {
           "command": "agentHub.generateCommitMessage",
