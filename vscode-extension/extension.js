@@ -302,6 +302,118 @@ const LOCAL_API_KEY_OPTIONAL_PROVIDER_TYPES = new Set([
   "ollama-local",
   "vllm"
 ]);
+const MODEL_PROVIDER_MENU_OPTIONS = [
+  {
+    label: "OpenAI / Codex",
+    description: "OPENAI_API_KEY",
+    detail: "Enable an OpenAI/Codex API-key model on the cloud route.",
+    command: "enable-provider",
+    provider: "openai",
+    defaultModel: DEFAULT_OPENAI_MODEL,
+    apiKeyEnv: "OPENAI_API_KEY",
+    defaultPaid: true
+  },
+  {
+    label: "Claude / Anthropic",
+    description: "ANTHROPIC_API_KEY",
+    detail: "Enable a Claude API-key model on the cloud route.",
+    command: "enable-provider",
+    provider: "claude",
+    defaultModel: DEFAULT_CLAUDE_MODEL,
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+    defaultPaid: true
+  },
+  {
+    label: "Gemini / Google",
+    description: "GEMINI_API_KEY",
+    detail: "Enable a Gemini API-key model on the cloud route.",
+    command: "enable-provider",
+    provider: "gemini",
+    defaultModel: DEFAULT_GEMINI_MODEL,
+    apiKeyEnv: "GEMINI_API_KEY",
+    defaultPaid: true
+  },
+  {
+    label: "Groq",
+    description: "GROQ_API_KEY",
+    detail: "Add or update a Groq OpenAI-compatible route.",
+    command: "add-provider",
+    providerType: "groq",
+    defaultModel: DEFAULT_GROQ_MODEL,
+    apiKeyEnv: "GROQ_API_KEY"
+  },
+  {
+    label: "OpenRouter",
+    description: "OPENROUTER_API_KEY",
+    detail: "Add or update an OpenRouter model route.",
+    command: "add-provider",
+    providerType: "openrouter",
+    defaultModel: DEFAULT_OPENROUTER_MODEL,
+    apiKeyEnv: "OPENROUTER_API_KEY"
+  },
+  {
+    label: "Cerebras",
+    description: "CEREBRAS_API_KEY",
+    detail: "Add or update a Cerebras model route.",
+    command: "add-provider",
+    providerType: "cerebras",
+    defaultModel: DEFAULT_CEREBRAS_MODEL,
+    apiKeyEnv: "CEREBRAS_API_KEY"
+  },
+  {
+    label: "Mistral",
+    description: "MISTRAL_API_KEY",
+    detail: "Add or update a Mistral model route.",
+    command: "add-provider",
+    providerType: "mistral",
+    defaultModel: DEFAULT_MISTRAL_MODEL,
+    apiKeyEnv: "MISTRAL_API_KEY"
+  },
+  {
+    label: "GitHub Models",
+    description: "GITHUB_TOKEN",
+    detail: "Add or update a GitHub Models route.",
+    command: "add-provider",
+    providerType: "github-models",
+    defaultModel: DEFAULT_GITHUB_MODELS_MODEL,
+    apiKeyEnv: "GITHUB_TOKEN"
+  },
+  {
+    label: "Hugging Face",
+    description: "HUGGINGFACE_API_KEY",
+    detail: "Add or update a Hugging Face Inference Providers route.",
+    command: "add-provider",
+    providerType: "huggingface",
+    defaultModel: DEFAULT_HUGGINGFACE_MODEL,
+    apiKeyEnv: "HUGGINGFACE_API_KEY"
+  },
+  {
+    label: "NVIDIA NIM",
+    description: "NVIDIA_API_KEY",
+    detail: "Add or update an NVIDIA NIM route.",
+    command: "add-provider",
+    providerType: "nvidia-nim",
+    defaultModel: DEFAULT_NVIDIA_MODEL,
+    apiKeyEnv: "NVIDIA_API_KEY"
+  },
+  {
+    label: "Cloudflare Workers AI",
+    description: "CLOUDFLARE_API_TOKEN",
+    detail: "Add or update a Cloudflare Workers AI route.",
+    command: "add-provider",
+    providerType: "cloudflare-workers-ai",
+    defaultModel: DEFAULT_CLOUDFLARE_MODEL,
+    apiKeyEnv: "CLOUDFLARE_API_TOKEN"
+  },
+  {
+    label: "Custom OpenAI-compatible",
+    description: "base URL + model",
+    detail: "Add any local, private, or hosted OpenAI-compatible endpoint.",
+    command: "custom-openai-compatible",
+    providerType: "openai-compatible",
+    defaultModel: "model-id"
+  }
+];
 const REQUIRED_BACKEND_FEATURES = [
   "native_agent_streaming",
   "native_agent_tool_schemas",
@@ -447,6 +559,7 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.openDashboard", () => openAgentHubDashboard("/dashboard")),
     vscode.commands.registerCommand("agentHub.openRuntimeKernel", () => openAgentHubDashboard("/dashboard/kernel")),
     vscode.commands.registerCommand("agentHub.openSettings", openAgentHubSettings),
+    vscode.commands.registerCommand("agentHub.configureModels", configureModelsProvidersCommand),
     vscode.commands.registerCommand("agentHub.runCheckup", () => runCheckupCommand()),
     vscode.commands.registerCommand("agentHub.checkRequirements", checkRequirementsCommand),
     vscode.commands.registerCommand("agentHub.fixSafeConfig", fixSafeConfigCommand),
@@ -477,6 +590,7 @@ function activate(context) {
     vscode.commands.registerCommand("agentHub.openModelLeaderboard", () => openAgentHubDashboard("/dashboard/model-leaderboard")),
     vscode.commands.registerCommand("agentHub.openCostDashboard", () => openAgentHubDashboard("/dashboard/costs")),
     vscode.commands.registerCommand("agentHub.openBenchmarkResults", () => openAgentHubDashboard("/dashboard/benchmarks")),
+    vscode.commands.registerCommand("agentHub.openBenchmarkReportMenu", openBenchmarkReportMenu),
     vscode.commands.registerCommand("agentHub.runPersonalBenchmark", () => runPersonalBenchmark()),
     vscode.commands.registerCommand("agentHub.explainRoute", () => explainRouteCommand()),
     vscode.commands.registerCommand("agentHub.openRouteLab", () => openRouteLabCommand()),
@@ -616,6 +730,11 @@ class AgentHubSidebarProvider {
       await this.refresh();
       return;
     }
+    if (message.type === "openBenchmarkReportMenu") {
+      await openBenchmarkReportMenu();
+      await this.refresh();
+      return;
+    }
     if (message.type === "openBenchmarkShareCard") {
       await openLatestBenchmarkShareCard();
       return;
@@ -646,6 +765,11 @@ class AgentHubSidebarProvider {
     }
     if (message.type === "openSettings") {
       await openAgentHubSettings();
+      return;
+    }
+    if (message.type === "configureModelsProviders") {
+      await configureModelsProvidersCommand();
+      await this.refresh();
       return;
     }
     if (message.type === "checkRequirements") {
@@ -2409,8 +2533,8 @@ async function sidebarOnboardingState(config, health) {
         : availableKeys > 0
           ? `${savedKeys} saved key(s), ${envKeys} env key(s)`
           : "save a key or start a local model",
-      actionType: providerReady ? "" : "installOllamaDesktop",
-      actionLabel: "Install Ollama",
+      actionType: providerReady ? "" : "configureModelsProviders",
+      actionLabel: "Add",
       setupRequired: true
     },
     {
@@ -4725,11 +4849,11 @@ function sidebarHtml(webview, logoPath) {
           ${sidebarActionHelp("Checkup", "Run setup repair, dependency checks, server start, and route diagnostics in one pass.")}
         </div>
         <div class="action-with-help">
-          <button class="command-button" id="quickSettings" type="button" title="Open Agent Hub settings" data-icon="S">
-            <span class="button-main">Settings</span>
-            <span class="button-meta">Models</span>
+          <button class="command-button" id="quickSettings" type="button" title="Configure Agent Hub models and providers" data-icon="M">
+            <span class="button-main">Models</span>
+            <span class="button-meta">Add provider</span>
           </button>
-          ${sidebarActionHelp("Settings", "Open VS Code settings for Agent Hub model, server, permission, and token options.")}
+          ${sidebarActionHelp("Models", "Open the model and provider menu to choose local models, add cloud providers, save keys, or edit the config.")}
         </div>
       </div>
     </section>
@@ -4831,11 +4955,11 @@ function sidebarHtml(webview, logoPath) {
             ${sidebarActionHelp("Route Lab", "Score route candidates and explain model selection without calling a provider.")}
           </div>
           <div class="action-with-help">
-            <button class="command-button primary" id="quickStartBenchmark" type="button" title="Run the personal benchmark corpus and generate proof reports" data-icon="B">
-              <span class="button-main">Start Benchmarks</span>
-              <span class="button-meta">Local proof</span>
+            <button class="command-button primary" id="quickBenchmarkReports" type="button" title="Open benchmark reports and proof actions" data-icon="B">
+              <span class="button-main">Benchmarks</span>
+              <span class="button-meta">Reports</span>
             </button>
-            ${sidebarActionHelp("Start Benchmarks", "Run the shipped benchmark corpus against your configured baseline and routed models, then generate local proof reports.")}
+            ${sidebarActionHelp("Benchmarks", "Open benchmark reports, report folder, dashboard, share card, or start a new 50-task benchmark run.")}
           </div>
           <div class="action-with-help">
             <button class="command-button mode-toggle" id="quickTokenSafeMode" type="button" title="Save Codex tokens with adaptive compact fallback routing" data-icon="T">
@@ -6768,8 +6892,8 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("openRuntimeKernel").addEventListener("click", (event) => postFromEvent("openRuntimeKernel", event));
     document.getElementById("quickCheckup").addEventListener("click", (event) => postFromEvent("runCheckup", event));
     document.getElementById("quickRouteLab").addEventListener("click", (event) => postFromEvent("openRouteLab", event));
-    document.getElementById("quickStartBenchmark").addEventListener("click", (event) => postFromEvent("runPersonalBenchmark", event));
-    document.getElementById("quickSettings").addEventListener("click", (event) => postFromEvent("openSettings", event));
+    document.getElementById("quickBenchmarkReports").addEventListener("click", (event) => postFromEvent("openBenchmarkReportMenu", event));
+    document.getElementById("quickSettings").addEventListener("click", (event) => postFromEvent("configureModelsProviders", event));
     document.getElementById("quickTokenSafeMode").addEventListener("click", (event) => postFromEvent("enableTokenSafeMode", event));
     document.getElementById("quickFreeOnlyMode").addEventListener("click", (event) => postFromEvent("enableFreeOnlyMode", event));
     document.getElementById("quickCodexCliMode").addEventListener("click", (event) => postFromEvent("enableCodexCliMode", event));
@@ -8116,6 +8240,9 @@ async function runRequirementAction(actionType) {
   }
   if (actionType === "openSettings") {
     return openAgentHubSettings();
+  }
+  if (actionType === "configureModelsProviders") {
+    return configureModelsProvidersCommand();
   }
   if (actionType === "runPersonalBenchmark") {
     return runPersonalBenchmark({ source: "sidebar" });
@@ -14129,6 +14256,503 @@ async function openAgentHubSettings() {
   await vscode.commands.executeCommand("workbench.action.openSettings", "Agent Hub");
 }
 
+async function configureModelsProvidersCommand() {
+  const choice = await vscode.window.showQuickPick(
+    [
+      {
+        label: "$(server-process) Add API-key or cloud provider",
+        description: "model + optional key",
+        detail: "Pick OpenAI, Claude, Gemini, Groq, OpenRouter, GitHub Models, or a custom OpenAI-compatible endpoint.",
+        action: "addProvider"
+      },
+      {
+        label: "$(device-desktop) Choose local model",
+        description: "LM Studio / Ollama",
+        detail: "Scan local model servers or pull a recommended Ollama model.",
+        action: "localModel"
+      },
+      {
+        label: "$(key) Save provider API key",
+        description: "VS Code Secret Storage",
+        detail: "Save a key without editing files; Agent Hub injects it into the backend environment on restart.",
+        action: "saveKey"
+      },
+      {
+        label: "$(sparkle) Enable free cloud presets",
+        description: "merge preset routes",
+        detail: "Add the bundled free/free-tier model presets and enable them on the cloud route.",
+        action: "freePresets"
+      },
+      {
+        label: "$(terminal) Use signed-in Codex CLI",
+        description: "no API key",
+        detail: "Route through the locally signed-in Codex CLI with compact defaults.",
+        action: "codexCli"
+      },
+      {
+        label: "$(json) Open Agent Hub config",
+        description: "advanced",
+        detail: "Open the active agent-hub.config.json for direct edits.",
+        action: "openConfig"
+      },
+      {
+        label: "$(settings-gear) Open Agent Hub settings",
+        description: "VS Code",
+        detail: "Open extension settings for routes, approval mode, token limits, and server path.",
+        action: "settings"
+      },
+      {
+        label: "$(debug-restart) Restart Agent Hub",
+        description: "reload providers",
+        detail: "Restart the backend so newly added providers and saved keys are used.",
+        action: "restart"
+      }
+    ],
+    {
+      title: "Agent Hub Models / Providers",
+      placeHolder: "Add a model/provider, save a key, or open the active config"
+    }
+  );
+  if (!choice) {
+    return { ok: false, cancelled: true };
+  }
+
+  if (choice.action === "addProvider") {
+    return configureCloudProviderCommand();
+  }
+  if (choice.action === "localModel") {
+    await chooseLocalModel(commandWebviewShim("Local model"));
+    refreshSidebar();
+    return { ok: true };
+  }
+  if (choice.action === "saveKey") {
+    return saveProviderApiKeyCommand();
+  }
+  if (choice.action === "freePresets") {
+    return addFreeCloudPresetsCommand();
+  }
+  if (choice.action === "codexCli") {
+    return enableCodexCliModeCommand();
+  }
+  if (choice.action === "openConfig") {
+    return openAgentHubConfigCommand();
+  }
+  if (choice.action === "settings") {
+    await openAgentHubSettings();
+    return { ok: true };
+  }
+  if (choice.action === "restart") {
+    await restartServer();
+    return { ok: true };
+  }
+  return { ok: false, cancelled: true };
+}
+
+async function configureCloudProviderCommand() {
+  const provider = await vscode.window.showQuickPick(
+    MODEL_PROVIDER_MENU_OPTIONS.map((item) => ({
+      ...item,
+      label: `$(server-process) ${item.label}`
+    })),
+    {
+      title: "Add Model / Provider",
+      placeHolder: "Choose a provider type"
+    }
+  );
+  if (!provider) {
+    return { ok: false, cancelled: true };
+  }
+  if (provider.command === "custom-openai-compatible") {
+    return configureCustomOpenAiCompatibleProvider();
+  }
+
+  const model = await vscode.window.showInputBox({
+    title: `Model for ${provider.label.replace(/^\$\([^)]+\)\s*/, "")}`,
+    prompt: "Enter the provider model ID.",
+    value: provider.defaultModel || "",
+    ignoreFocusOut: true
+  });
+  if (!model || !model.trim()) {
+    return { ok: false, cancelled: true };
+  }
+
+  const apiKeySaved = await promptAndMaybeSaveProviderKey(provider);
+  if (!apiKeySaved.ok) {
+    return apiKeySaved;
+  }
+
+  const cost = await providerCostChoice(provider);
+  if (!cost) {
+    return { ok: false, cancelled: true };
+  }
+
+  const args = provider.command === "enable-provider"
+    ? [
+      "enable-provider",
+      provider.provider,
+      "--model",
+      model.trim(),
+      "--route",
+      "cloud-agent",
+      "--api-key-env",
+      provider.apiKeyEnv
+    ]
+    : [
+      "add-provider",
+      provider.providerType,
+      "--model",
+      model.trim(),
+      "--route",
+      "cloud-agent",
+      "--enabled",
+      "--api-key-env",
+      provider.apiKeyEnv
+    ];
+  if (cost.paid) {
+    args.push("--paid");
+  }
+
+  const result = await runAgentHubConfigEditCommand(args, {
+    title: "Agent Hub: Adding provider",
+    description: `Agent Hub wants to add or update ${provider.label.replace(/^\$\([^)]+\)\s*/, "")} in the active config.`,
+    detail: `Model: ${model.trim()}. API key env: ${provider.apiKeyEnv}.`
+  });
+  if (!result.ok) {
+    return result;
+  }
+  await syncApiKeyProviderAvailabilityForCurrentWorkspace();
+  await offerRestartAfterProviderChange(`${provider.label.replace(/^\$\([^)]+\)\s*/, "")} ${model.trim()} was added.`);
+  refreshSidebar();
+  return { ok: true };
+}
+
+async function configureCustomOpenAiCompatibleProvider() {
+  const baseUrl = await vscode.window.showInputBox({
+    title: "Custom OpenAI-compatible Base URL",
+    prompt: "Enter the endpoint base URL, for example http://127.0.0.1:1234 or https://gateway.example.com/v1.",
+    value: "http://127.0.0.1:1234",
+    ignoreFocusOut: true,
+    validateInput(value) {
+      const text = String(value || "").trim();
+      if (!text) {
+        return "Base URL is required.";
+      }
+      try {
+        const parsed = new URL(text);
+        return ["http:", "https:"].includes(parsed.protocol) ? null : "Use an http:// or https:// URL.";
+      } catch (_error) {
+        return "Enter a valid URL.";
+      }
+    }
+  });
+  if (!baseUrl) {
+    return { ok: false, cancelled: true };
+  }
+  const model = await vscode.window.showInputBox({
+    title: "Custom Model ID",
+    prompt: "Enter the model ID exposed by this endpoint.",
+    value: DEFAULT_LM_STUDIO_MODEL,
+    ignoreFocusOut: true
+  });
+  if (!model || !model.trim()) {
+    return { ok: false, cancelled: true };
+  }
+  const name = await vscode.window.showInputBox({
+    title: "Agent Name",
+    prompt: "Optional stable Agent Hub name. Leave blank to generate one from provider and model.",
+    value: "",
+    ignoreFocusOut: true
+  });
+  if (name === undefined) {
+    return { ok: false, cancelled: true };
+  }
+  const apiKeyEnv = await vscode.window.showInputBox({
+    title: "API Key Environment Variable",
+    prompt: "Optional. Leave blank for local/private endpoints that do not require a key.",
+    value: isLocalOrPrivateUrl(baseUrl) ? "" : "CUSTOM_OPENAI_API_KEY",
+    ignoreFocusOut: true
+  });
+  if (apiKeyEnv === undefined) {
+    return { ok: false, cancelled: true };
+  }
+  const route = isLocalOrPrivateUrl(baseUrl) ? "local-agent" : "cloud-agent";
+  const cost = isLocalOrPrivateUrl(baseUrl)
+    ? { paid: false }
+    : await providerCostChoice({ label: "Custom OpenAI-compatible", defaultPaid: true });
+  if (!cost) {
+    return { ok: false, cancelled: true };
+  }
+  const args = [
+    "add-provider",
+    "openai-compatible",
+    "--model",
+    model.trim(),
+    "--route",
+    route,
+    "--enabled",
+    "--base-url",
+    baseUrl.trim()
+  ];
+  if (name && name.trim()) {
+    args.push("--name", name.trim());
+  }
+  if (apiKeyEnv && apiKeyEnv.trim()) {
+    args.push("--api-key-env", apiKeyEnv.trim());
+  }
+  if (cost.paid) {
+    args.push("--paid");
+  }
+
+  const result = await runAgentHubConfigEditCommand(args, {
+    title: "Agent Hub: Adding custom provider",
+    description: "Agent Hub wants to add a custom OpenAI-compatible provider to the active config.",
+    detail: `Base URL: ${baseUrl.trim()}. Model: ${model.trim()}. Route: ${route}.`
+  });
+  if (!result.ok) {
+    return result;
+  }
+  const envNote = apiKeyEnv && apiKeyEnv.trim() && !apiKeySecretForEnv(apiKeyEnv)
+    ? ` Set ${apiKeyEnv.trim()} in your environment before restarting Agent Hub.`
+    : "";
+  await offerRestartAfterProviderChange(`Custom provider ${model.trim()} was added.${envNote}`);
+  refreshSidebar();
+  return { ok: true };
+}
+
+async function addFreeCloudPresetsCommand() {
+  const result = await runAgentHubConfigEditCommand(
+    ["add-free-presets", "--enable", "--route", "cloud-agent"],
+    {
+      title: "Agent Hub: Enabling free presets",
+      description: "Agent Hub wants to add bundled free cloud provider presets to the active config.",
+      detail: "This adds editable preset model routes and enables them on cloud-agent."
+    }
+  );
+  if (!result.ok) {
+    return result;
+  }
+  await syncApiKeyProviderAvailabilityForCurrentWorkspace();
+  await offerRestartAfterProviderChange("Free cloud presets were added.");
+  refreshSidebar();
+  return { ok: true };
+}
+
+async function saveProviderApiKeyCommand() {
+  const spec = await vscode.window.showQuickPick(
+    API_KEY_SECRETS.map((item) => ({
+      label: `$(key) ${item.label}`,
+      description: item.env,
+      detail: "Saved in VS Code Secret Storage.",
+      spec: item
+    })),
+    {
+      title: "Save Provider API Key",
+      placeHolder: "Choose the provider key to save"
+    }
+  );
+  if (!spec) {
+    return { ok: false, cancelled: true };
+  }
+  const value = await vscode.window.showInputBox({
+    title: `${spec.spec.label} API Key`,
+    prompt: `Paste the key for ${spec.spec.env}. It will be saved in VS Code Secret Storage.`,
+    password: true,
+    ignoreFocusOut: true
+  });
+  if (!value || !value.trim()) {
+    return { ok: false, cancelled: true };
+  }
+  if (!(await requestPermission({
+    category: "secret_edit",
+    description: `Agent Hub wants to save ${spec.spec.label} API key in VS Code Secret Storage.`,
+    resource: spec.spec.env,
+    risk: "high"
+  }))) {
+    return { ok: false, cancelled: true };
+  }
+  if (!extensionContext || !extensionContext.secrets) {
+    vscode.window.showErrorMessage("VS Code secret storage is unavailable.");
+    return { ok: false, cancelled: false };
+  }
+  await extensionContext.secrets.store(spec.spec.secret, value.trim());
+  const synced = await syncApiKeyProviderAvailabilityForCurrentWorkspace();
+  await offerRestartAfterProviderChange(
+    `${spec.spec.label} key saved.${synced ? " Matching provider routes were updated." : ""}`
+  );
+  refreshSidebar();
+  return { ok: true };
+}
+
+async function promptAndMaybeSaveProviderKey(provider) {
+  const spec = apiKeySecretForEnv(provider.apiKeyEnv);
+  if (!spec) {
+    return { ok: true, saved: false };
+  }
+  const value = await vscode.window.showInputBox({
+    title: `${spec.label} API Key`,
+    prompt: `Optional: paste ${spec.env} now, or leave blank if it is already in your environment.`,
+    password: true,
+    ignoreFocusOut: true
+  });
+  if (value === undefined) {
+    return { ok: false, cancelled: true };
+  }
+  if (!value.trim()) {
+    return { ok: true, saved: false };
+  }
+  if (!(await requestPermission({
+    category: "secret_edit",
+    description: `Agent Hub wants to save ${spec.label} API key in VS Code Secret Storage.`,
+    resource: spec.env,
+    risk: "high"
+  }))) {
+    return { ok: false, cancelled: true };
+  }
+  if (!extensionContext || !extensionContext.secrets) {
+    vscode.window.showErrorMessage("VS Code secret storage is unavailable.");
+    return { ok: false, cancelled: false };
+  }
+  await extensionContext.secrets.store(spec.secret, value.trim());
+  return { ok: true, saved: true };
+}
+
+function apiKeySecretForEnv(envName) {
+  const normalized = String(envName || "").trim().toUpperCase();
+  return API_KEY_SECRETS.find((item) => item.env.toUpperCase() === normalized) || null;
+}
+
+async function providerCostChoice(provider) {
+  const freeFirst = provider.defaultPaid !== true;
+  const options = [
+    {
+      label: freeFirst ? "Free / free-tier" : "Paid",
+      description: freeFirst ? "eligible in free-only routing" : "turns off free_only if needed",
+      paid: !freeFirst
+    },
+    {
+      label: freeFirst ? "Paid" : "Free / free-tier",
+      description: freeFirst ? "turns off free_only if needed" : "eligible in free-only routing",
+      paid: freeFirst
+    }
+  ];
+  return vscode.window.showQuickPick(options, {
+    title: "Provider Cost Class",
+    placeHolder: "How should Agent Hub classify this provider?"
+  });
+}
+
+async function runAgentHubConfigEditCommand(commandArgs, options = {}) {
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    vscode.window.showWarningMessage("Open a workspace folder before editing Agent Hub providers.");
+    return { ok: false, cancelled: true };
+  }
+  const config = settings();
+  const configPath = resolveConfigPath(config.configPath, workspace);
+  if (!(await requestPermission({
+    category: "config_edit",
+    description: options.description || "Agent Hub wants to update model/provider configuration.",
+    resource: configPath,
+    risk: "medium",
+    detail: options.detail || commandArgs.join(" ")
+  }))) {
+    return { ok: false, cancelled: true };
+  }
+  await ensureLocalConfig(config, workspace);
+  const launch = await serverLaunchEnvironment(workspace);
+  if (!(await ensurePythonBackend(config, workspace, launch))) {
+    return { ok: false, cancelled: false };
+  }
+  const args = [
+    ...launch.pythonArgs,
+    "-m",
+    "agent_hub",
+    "--config",
+    configPath,
+    ...commandArgs
+  ];
+  output.appendLine("");
+  output.appendLine(options.title || "Agent Hub provider config update");
+  output.appendLine(formatCliCommandForLog(launch.pythonCommand, args));
+  try {
+    const { stdout, stderr } = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: options.title || "Agent Hub: Updating providers",
+        cancellable: false
+      },
+      () => execFile(launch.pythonCommand, args, {
+        cwd: workspace,
+        env: launch.env,
+        timeout: 120000,
+        maxBuffer: 6 * 1024 * 1024
+      })
+    );
+    if (stderr && String(stderr).trim()) {
+      output.appendLine(String(stderr).trim());
+    }
+    if (stdout && String(stdout).trim()) {
+      output.appendLine(String(stdout).trim());
+    }
+    return { ok: true, stdout: String(stdout || ""), stderr: String(stderr || ""), configPath };
+  } catch (error) {
+    output.appendLine(`Provider config update failed: ${error.message}`);
+    if (error.stderr) {
+      output.appendLine(String(error.stderr));
+    }
+    output.show(true);
+    vscode.window.showErrorMessage(`Provider config update failed: ${error.message}`);
+    return { ok: false, cancelled: false, error };
+  }
+}
+
+async function openAgentHubConfigCommand() {
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    vscode.window.showWarningMessage("Open a workspace folder before opening Agent Hub config.");
+    return { ok: false, cancelled: true };
+  }
+  const config = settings();
+  const configPath = resolveConfigPath(config.configPath, workspace);
+  await ensureLocalConfig(config, workspace);
+  const document = await vscode.workspace.openTextDocument(vscode.Uri.file(configPath));
+  await vscode.window.showTextDocument(document, { preview: false });
+  return { ok: true, configPath };
+}
+
+async function offerRestartAfterProviderChange(message) {
+  const online = serverProcess || (await isServerOnline());
+  const actions = online ? ["Restart Agent Hub", "Open Config", "Close"] : ["Open Config", "Close"];
+  const choice = await vscode.window.showInformationMessage(
+    online ? `${message} Restart Agent Hub to use it.` : `${message} Start Agent Hub to use it.`,
+    ...actions
+  );
+  if (choice === "Restart Agent Hub") {
+    await restartServer();
+  } else if (choice === "Open Config") {
+    await openAgentHubConfigCommand();
+  }
+}
+
+function commandWebviewShim(label = "Agent Hub") {
+  return {
+    webview: {
+      postMessage(message) {
+        if (!message || typeof message !== "object" || !message.text) {
+          return;
+        }
+        const text = String(message.text);
+        output.appendLine(`[${label}] ${text}`);
+        if (message.running) {
+          vscode.window.setStatusBarMessage(text, 5000);
+        } else {
+          vscode.window.showInformationMessage(text);
+        }
+      }
+    }
+  };
+}
+
 async function checkHealth() {
   await showStatus();
   refreshSidebar();
@@ -14164,9 +14788,10 @@ async function runPersonalBenchmark(options = {}) {
     risk: "medium",
     detail: [
       `Route: ${route}.`,
-      `Tasks: ${PERSONAL_BENCHMARK_LIMIT}.`,
+      `Tasks: ${PERSONAL_BENCHMARK_LIMIT}; up to ${PERSONAL_BENCHMARK_LIMIT * 2} model calls because each task runs baseline plus Agent Hub routing.`,
+      "Large or slow providers can take 10-30+ minutes; the extension timeout is 60 minutes.",
       "This may call configured local or cloud providers and may consume quota or credits.",
-      "Reports are written locally as benchmark-report.json and benchmark-report.md."
+      `Reports are written as benchmark-report.json and benchmark-report.md in ${reportDir || "the Agent Hub benchmark_reports state folder"}.`
     ].join(" ")
   }))) {
     vscode.window.showWarningMessage("Personal benchmark cancelled.");
@@ -14205,13 +14830,17 @@ async function runPersonalBenchmark(options = {}) {
   }
   output.appendLine("");
   output.appendLine("Agent Hub personal benchmark");
+  output.appendLine(`Benchmark tasks: ${PERSONAL_BENCHMARK_LIMIT}; maximum provider calls: ${PERSONAL_BENCHMARK_LIMIT * 2}.`);
+  if (reportDir) {
+    output.appendLine(`Benchmark report directory: ${reportDir}`);
+  }
   output.appendLine(formatCliCommandForLog(launch.pythonCommand, args));
   const started = Date.now();
   try {
     const { stdout, stderr } = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: "Agent Hub: Running personal benchmark",
+        title: `Agent Hub: Running benchmark (${PERSONAL_BENCHMARK_LIMIT} tasks, up to ${PERSONAL_BENCHMARK_LIMIT * 2} calls)`,
         cancellable: false
       },
       () => execFile(launch.pythonCommand, args, {
@@ -14254,6 +14883,148 @@ async function runPersonalBenchmark(options = {}) {
     vscode.window.showErrorMessage(`Personal benchmark failed: ${error.message}`);
     return { ok: false, cancelled: false };
   }
+}
+
+async function openBenchmarkReportMenu() {
+  const status = personalBenchmarkReportStatus(settings(), workspaceRoot());
+  const reportState = status.exists
+    ? `latest ${status.updatedText}`
+    : "no finished report yet";
+  const folderState = status.reportDir || "open a workspace folder";
+  const choice = await vscode.window.showQuickPick(
+    [
+      {
+        label: "$(open-preview) Open latest Markdown report",
+        description: reportState,
+        detail: status.markdownPath || "Run a benchmark to create benchmark-report.md.",
+        action: "openMarkdown"
+      },
+      {
+        label: "$(json) Open latest JSON report",
+        description: reportState,
+        detail: status.jsonPath || "Run a benchmark to create benchmark-report.json.",
+        action: "openJson"
+      },
+      {
+        label: "$(folder-opened) Open reports folder",
+        description: status.reportDir ? "benchmark_reports" : "missing workspace",
+        detail: folderState,
+        action: "openFolder"
+      },
+      {
+        label: "$(dashboard) Open Benchmark Dashboard",
+        description: "browser",
+        detail: "Open the backend benchmark results dashboard.",
+        action: "dashboard"
+      },
+      {
+        label: "$(megaphone) Open Benchmark Share Card",
+        description: status.exists ? "latest report" : "needs report",
+        detail: "Open shareable local proof text from the latest benchmark report.",
+        action: "shareCard"
+      },
+      {
+        label: "$(copy) Copy report paths",
+        description: status.exists ? "Markdown + JSON" : "folder path",
+        detail: status.reportDir || "No benchmark report folder is available yet.",
+        action: "copyPaths"
+      },
+      {
+        label: "$(beaker) Run personal benchmark",
+        description: `${PERSONAL_BENCHMARK_LIMIT} tasks`,
+        detail: `Runs baseline plus Agent Hub routing, up to ${PERSONAL_BENCHMARK_LIMIT * 2} provider calls.`,
+        action: "run"
+      },
+      {
+        label: "$(book) Open README proof section",
+        description: "docs",
+        detail: "Open the public proof instructions.",
+        action: "readme"
+      },
+      {
+        label: "$(output) Open Agent Hub output",
+        description: "logs",
+        detail: "Open extension logs for benchmark progress and errors.",
+        action: "output"
+      }
+    ],
+    {
+      title: "Agent Hub Benchmark Reports",
+      placeHolder: status.exists
+        ? `Latest report: ${status.updatedText}`
+        : "No completed report yet. Run a benchmark or open the report folder."
+    }
+  );
+  if (!choice) {
+    return { ok: false, cancelled: true };
+  }
+
+  if (choice.action === "openMarkdown") {
+    return openLatestBenchmarkReportFile("markdown");
+  }
+  if (choice.action === "openJson") {
+    return openLatestBenchmarkReportFile("json");
+  }
+  if (choice.action === "openFolder") {
+    return openBenchmarkReportsFolder(status);
+  }
+  if (choice.action === "dashboard") {
+    await openAgentHubDashboard("/dashboard/benchmarks");
+    return { ok: true };
+  }
+  if (choice.action === "shareCard") {
+    await openLatestBenchmarkShareCard();
+    return { ok: true };
+  }
+  if (choice.action === "copyPaths") {
+    return copyBenchmarkReportPaths(status);
+  }
+  if (choice.action === "run") {
+    return runPersonalBenchmark({ source: "benchmark-menu" });
+  }
+  if (choice.action === "readme") {
+    await openReadmeProofSection();
+    return { ok: true };
+  }
+  if (choice.action === "output") {
+    output.show(true);
+    return { ok: true };
+  }
+  return { ok: false, cancelled: true };
+}
+
+async function openLatestBenchmarkReportFile(kind = "markdown") {
+  const status = personalBenchmarkReportStatus(settings(), workspaceRoot());
+  const targetPath = kind === "json" ? status.jsonPath : status.markdownPath;
+  if (!targetPath || !fs.existsSync(targetPath)) {
+    vscode.window.showWarningMessage("No benchmark report found yet. Run Agent Hub: Run Personal Benchmark first.");
+    return { ok: false, missing: true };
+  }
+  const document = await vscode.workspace.openTextDocument(vscode.Uri.file(targetPath));
+  await vscode.window.showTextDocument(document, { preview: false });
+  return { ok: true, path: targetPath };
+}
+
+async function openBenchmarkReportsFolder(status = personalBenchmarkReportStatus(settings(), workspaceRoot())) {
+  if (!status.reportDir) {
+    vscode.window.showWarningMessage("Open a workspace folder before opening benchmark reports.");
+    return { ok: false, missing: true };
+  }
+  fs.mkdirSync(status.reportDir, { recursive: true });
+  await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(status.reportDir));
+  return { ok: true, path: status.reportDir };
+}
+
+async function copyBenchmarkReportPaths(status = personalBenchmarkReportStatus(settings(), workspaceRoot())) {
+  const lines = [
+    status.reportDir ? `Report folder: ${status.reportDir}` : "",
+    status.markdownPath ? `Markdown: ${status.markdownPath}` : "",
+    status.jsonPath ? `JSON: ${status.jsonPath}` : "",
+    status.exists ? `Updated: ${status.updatedText}` : "No completed benchmark report yet."
+  ].filter(Boolean);
+  await vscode.env.clipboard.writeText(lines.join("\n"));
+  vscode.window.showInformationMessage("Benchmark report paths copied.");
+  return { ok: true };
 }
 
 async function openLatestBenchmarkShareCard() {

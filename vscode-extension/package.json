@@ -65,6 +65,7 @@
     "onCommand:agentHub.openDashboard",
     "onCommand:agentHub.openRuntimeKernel",
     "onCommand:agentHub.openSettings",
+    "onCommand:agentHub.configureModels",
     "onCommand:agentHub.runCheckup",
     "onCommand:agentHub.checkRequirements",
     "onCommand:agentHub.fixSafeConfig",
@@ -95,6 +96,7 @@
     "onCommand:agentHub.openModelLeaderboard",
     "onCommand:agentHub.openCostDashboard",
     "onCommand:agentHub.openBenchmarkResults",
+    "onCommand:agentHub.openBenchmarkReportMenu",
     "onCommand:agentHub.runPersonalBenchmark",
     "onCommand:agentHub.explainRoute",
     "onCommand:agentHub.openRouteLab",
@@ -190,6 +192,11 @@
       {
         "command": "agentHub.openSettings",
         "title": "Agent Hub: Open Settings"
+      },
+      {
+        "command": "agentHub.configureModels",
+        "title": "Agent Hub: Configure Models / Providers",
+        "icon": "$(server-process)"
       },
       {
         "command": "agentHub.runCheckup",
@@ -328,6 +335,11 @@
       {
         "command": "agentHub.openBenchmarkResults",
         "title": "Agent Hub: Open Benchmark Results"
+      },
+      {
+        "command": "agentHub.openBenchmarkReportMenu",
+        "title": "Agent Hub: Open Benchmark Report Menu",
+        "icon": "$(beaker)"
       },
       {
         "command": "agentHub.runPersonalBenchmark",
