@@ -14843,11 +14843,13 @@ async function runPersonalBenchmark(options = {}) {
         title: `Agent Hub: Running benchmark (${PERSONAL_BENCHMARK_LIMIT} tasks, up to ${PERSONAL_BENCHMARK_LIMIT * 2} calls)`,
         cancellable: false
       },
-      () => execFile(launch.pythonCommand, args, {
-        cwd: workspace,
-        env: launch.env,
-        timeout: 60 * 60 * 1000,
-        maxBuffer: 32 * 1024 * 1024
+      (progress) => execPersonalBenchmarkWithProgress({
+        launch,
+        args,
+        workspace,
+        reportDir,
+        started,
+        progress
       })
     );
     if (stderr && String(stderr).trim()) {
@@ -14883,6 +14885,173 @@ async function runPersonalBenchmark(options = {}) {
     vscode.window.showErrorMessage(`Personal benchmark failed: ${error.message}`);
     return { ok: false, cancelled: false };
   }
+}
+
+async function execPersonalBenchmarkWithProgress({ launch, args, workspace, reportDir, started, progress }) {
+  const tracker = createBenchmarkProgressTracker(progress, {
+    reportDir,
+    started,
+    totalTasks: PERSONAL_BENCHMARK_LIMIT,
+    totalCalls: PERSONAL_BENCHMARK_LIMIT * 2
+  });
+  try {
+    return await execFile(launch.pythonCommand, args, {
+      cwd: workspace,
+      env: launch.env,
+      timeout: 60 * 60 * 1000,
+      maxBuffer: 32 * 1024 * 1024
+    });
+  } finally {
+    tracker.finish();
+  }
+}
+
+function createBenchmarkProgressTracker(progress, options = {}) {
+  const started = Number(options.started || Date.now());
+  const totalTasks = Math.max(1, Number(options.totalTasks || PERSONAL_BENCHMARK_LIMIT));
+  const totalCalls = Math.max(totalTasks * 2, Number(options.totalCalls || totalTasks * 2));
+  const stateDir = benchmarkProgressStateDir(options.reportDir);
+  let lastPercent = 0;
+  let stopped = false;
+
+  const report = (percent, message) => {
+    if (stopped) {
+      return;
+    }
+    const nextPercent = Math.max(lastPercent, Math.min(99, Number(percent) || 0));
+    progress.report({
+      increment: Math.max(0, nextPercent - lastPercent),
+      message
+    });
+    lastPercent = nextPercent;
+  };
+
+  const tick = () => {
+    const snapshot = benchmarkProgressSnapshot({
+      stateDir,
+      started,
+      totalCalls,
+      totalTasks
+    });
+    report(snapshot.percent, snapshot.message);
+  };
+
+  progress.report({
+    increment: 0,
+    message: `Starting... 0/${totalTasks} tasks, ETA calculating`
+  });
+  const timer = setInterval(tick, 3000);
+  tick();
+
+  return {
+    finish() {
+      stopped = true;
+      clearInterval(timer);
+      progress.report({
+        increment: Math.max(0, 100 - lastPercent),
+        message: "Finalizing report..."
+      });
+    }
+  };
+}
+
+function benchmarkProgressStateDir(reportDir) {
+  const directory = String(reportDir || "").trim();
+  return directory ? path.dirname(directory) : "";
+}
+
+function benchmarkProgressSnapshot({ stateDir, started, totalCalls, totalTasks }) {
+  const startedSeconds = Math.max(0, started / 1000 - 5);
+  const elapsedMs = Math.max(0, Date.now() - started);
+  const sessions = new Set();
+  let baselineCalls = 0;
+  let agentHubCalls = 0;
+  let lastPreview = "";
+  if (stateDir) {
+    const routingPath = path.join(stateDir, "routing_decisions.jsonl");
+    for (const row of recentBenchmarkJsonlRows(routingPath, startedSeconds)) {
+      const sessionId = typeof row.session_id === "string" ? row.session_id : "";
+      if (!isPersonalBenchmarkSession(sessionId) || sessions.has(sessionId)) {
+        continue;
+      }
+      sessions.add(sessionId);
+      if (sessionId.startsWith("benchmark-baseline-")) {
+        baselineCalls += 1;
+      } else if (sessionId.startsWith("benchmark-agent_hub-")) {
+        agentHubCalls += 1;
+      }
+      if (typeof row.request_preview === "string" && row.request_preview.trim()) {
+        lastPreview = row.request_preview.trim();
+      }
+    }
+  }
+
+  const callsStarted = baselineCalls + agentHubCalls;
+  const completedCalls = Math.max(0, Math.min(totalCalls, callsStarted > 0 ? callsStarted - 1 : 0));
+  const completedTasks = Math.max(0, Math.min(totalTasks, Math.floor(completedCalls / 2)));
+  const percent = Math.max(0, Math.min(99, Math.round((completedCalls / Math.max(1, totalCalls)) * 100)));
+  const etaMs = completedCalls > 0
+    ? Math.max(0, (elapsedMs / completedCalls) * (totalCalls - completedCalls))
+    : null;
+  const etaText = etaMs === null ? "ETA calculating" : `ETA ${formatDuration(etaMs)}`;
+  const taskText = `${completedTasks}/${totalTasks} tasks`;
+  const callText = `${completedCalls}/${totalCalls} calls`;
+  const previewText = lastPreview ? ` - ${truncateProgressText(lastPreview, 58)}` : "";
+  return {
+    percent,
+    message: `${taskText}, ${callText}, ${etaText}${previewText}`
+  };
+}
+
+function recentBenchmarkJsonlRows(filePath, startedSeconds) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return [];
+  }
+  try {
+    const text = fs.readFileSync(filePath, "utf8");
+    const lines = text.split(/\r?\n/).filter((line) => line.includes("benchmark-"));
+    const rows = [];
+    for (const line of lines) {
+      try {
+        const row = JSON.parse(line);
+        if (Number(row.time || 0) >= startedSeconds) {
+          rows.push(row);
+        }
+      } catch (_error) {
+        // Ignore partially written JSONL lines while the benchmark is active.
+      }
+    }
+    return rows;
+  } catch (_error) {
+    return [];
+  }
+}
+
+function isPersonalBenchmarkSession(sessionId) {
+  return sessionId.startsWith("benchmark-baseline-") || sessionId.startsWith("benchmark-agent_hub-");
+}
+
+function truncateProgressText(text, limit) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (value.length <= limit) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, limit - 3)).trim()}...`;
+}
+
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
 }
 
 async function openBenchmarkReportMenu() {
