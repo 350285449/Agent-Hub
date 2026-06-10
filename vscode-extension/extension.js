@@ -2742,6 +2742,27 @@ function sidebarHtml(webview, logoPath) {
       gap: 8px;
     }
 
+    .advanced-shortcuts .actions {
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+      gap: 8px;
+    }
+
+    .advanced-shortcuts .action-with-help {
+      grid-template-columns: minmax(0, 1fr) 30px;
+    }
+
+    .advanced-shortcuts .action-help {
+      width: 30px;
+      min-width: 30px;
+      min-height: 44px;
+      border-radius: 8px;
+    }
+
+    .advanced-shortcuts .command-button {
+      min-height: 48px;
+      padding: 9px 10px;
+    }
+
     header {
       display: flex;
       align-items: center;
@@ -3211,12 +3232,12 @@ function sidebarHtml(webview, logoPath) {
 
     .model-board-grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+      grid-template-columns: minmax(0, 1fr);
       gap: 8px;
     }
 
     .model-board-grid.compact {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr);
     }
 
     .model-panel {
@@ -3282,9 +3303,10 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .model-router-row {
-      grid-template-columns: auto minmax(0, 1fr) auto;
-      align-items: center;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: start;
       column-gap: 7px;
+      row-gap: 4px;
     }
 
     .rank-pill {
@@ -3300,6 +3322,12 @@ function sidebarHtml(webview, logoPath) {
       background: color-mix(in srgb, var(--button) 18%, var(--card));
     }
 
+    .model-router-text {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
     .model-router-main,
     .mini-flow-main {
       min-width: 0;
@@ -3307,6 +3335,15 @@ function sidebarHtml(webview, logoPath) {
       font-size: 11px;
       line-height: 1.25;
       overflow-wrap: anywhere;
+    }
+
+    .model-router-main,
+    .model-router-meta {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      overflow-wrap: normal;
+      word-break: normal;
     }
 
     .model-router-meta,
@@ -3319,10 +3356,11 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .router-score {
+      grid-column: 2;
       color: var(--ok);
       font-size: 10px;
       line-height: 1.2;
-      text-align: right;
+      text-align: left;
       white-space: nowrap;
     }
 
@@ -4793,6 +4831,13 @@ function sidebarHtml(webview, logoPath) {
             ${sidebarActionHelp("Route Lab", "Score route candidates and explain model selection without calling a provider.")}
           </div>
           <div class="action-with-help">
+            <button class="command-button primary" id="quickStartBenchmark" type="button" title="Run the personal benchmark corpus and generate proof reports" data-icon="B">
+              <span class="button-main">Start Benchmarks</span>
+              <span class="button-meta">Local proof</span>
+            </button>
+            ${sidebarActionHelp("Start Benchmarks", "Run the shipped benchmark corpus against your configured baseline and routed models, then generate local proof reports.")}
+          </div>
+          <div class="action-with-help">
             <button class="command-button mode-toggle" id="quickTokenSafeMode" type="button" title="Save Codex tokens with adaptive compact fallback routing" data-icon="T">
               <span class="button-main">Save Codex Tokens</span>
               <span class="button-meta">Compact fallback</span>
@@ -5555,19 +5600,24 @@ function sidebarHtml(webview, logoPath) {
         text.className = "model-router-text";
         const main = document.createElement("div");
         main.className = "model-router-main";
-        main.textContent = [row.provider || row.agent || "provider", row.model || ""].filter(Boolean).join(" / ");
+        const modelLabel = [row.provider || row.agent || "provider", row.model || ""].filter(Boolean).join(" / ");
+        main.textContent = modelLabel;
+        main.title = modelLabel;
         const meta = document.createElement("div");
         meta.className = "model-router-meta";
-        meta.textContent = [
+        const metaLabel = [
           row.status || "baseline",
           row.samples ? row.samples + " sample(s)" : "",
           row.latencyMs ? Math.round(row.latencyMs) + " ms" : "",
           row.free ? "free" : ""
         ].filter(Boolean).join(" - ");
+        meta.textContent = metaLabel;
+        meta.title = metaLabel;
         text.append(main, meta);
         const score = document.createElement("div");
         score.className = "router-score";
         score.textContent = row.successRate ? row.successRate + "% ok" : row.score ? row.score + " score" : "--";
+        score.title = score.textContent;
         item.append(rank, text, score);
         modelRouterList.append(item);
       }
@@ -6718,6 +6768,7 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("openRuntimeKernel").addEventListener("click", (event) => postFromEvent("openRuntimeKernel", event));
     document.getElementById("quickCheckup").addEventListener("click", (event) => postFromEvent("runCheckup", event));
     document.getElementById("quickRouteLab").addEventListener("click", (event) => postFromEvent("openRouteLab", event));
+    document.getElementById("quickStartBenchmark").addEventListener("click", (event) => postFromEvent("runPersonalBenchmark", event));
     document.getElementById("quickSettings").addEventListener("click", (event) => postFromEvent("openSettings", event));
     document.getElementById("quickTokenSafeMode").addEventListener("click", (event) => postFromEvent("enableTokenSafeMode", event));
     document.getElementById("quickFreeOnlyMode").addEventListener("click", (event) => postFromEvent("enableFreeOnlyMode", event));

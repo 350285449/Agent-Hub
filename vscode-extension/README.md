@@ -1,140 +1,174 @@
-# Agent Hub - Adaptive AI Orchestration
+# Agent Hub — Adaptive AI Orchestration for Coding Agents
 
-Stop manually switching AI models.
+Reduce AI coding costs, improve reliability, and automatically route every task
+to the model most likely to succeed.
 
-Agent-Hub automatically routes coding tasks to the model most likely to
-succeed.
+Agent Hub sits between your coding agents and AI providers, continuously
+evaluating performance, latency, cost, context requirements, and repository
+characteristics to select the best route for each request.
 
-- Built-in benchmark corpus
-- Route explanations
-- Learning history
-- Reproducible proof reports
+Agent Hub is to coding agents what a load balancer is to servers: it
+continuously chooses the best route and explains every decision.
 
-Run `Agent Hub: Run Personal Benchmark` to generate your local savings report.
+Supports OpenAI, Claude, Gemini, Ollama, OpenRouter, Codex CLI, Cline, Roo Code,
+Continue, LM Studio, and local models through a single OpenAI-compatible
+endpoint.
 
-Use OpenAI, Claude, Gemini, Ollama, OpenRouter, local models, Cline, Roo Code,
-Continue, and coding agents through one local API with routing intelligence,
-workflow selection, failover, and local workspace safety.
+## Why Trust The Routing?
 
-Agent-Hub does not ask you to trust benchmark claims. It ships the benchmark
-corpus so you can verify routing, cost, latency, and success locally.
+Unlike most AI tools, Agent Hub includes a reproducible benchmark corpus.
 
-## Why Use Agent Hub?
+You can:
 
-- Route requests across local and cloud providers from one OpenAI-compatible API.
-- Fail over when a model is offline, out of quota, overloaded, or too small for the context.
-- Keep workspace tool use behind approvals, path limits, and command safety checks.
-- Preserve Cline, Roo Code, Continue, and Claude Code tool/context payloads.
-- Inspect provider health, token usage, routing decisions, limits, and logs in VS Code.
-- Open the browser dashboard from the sidebar for routing intelligence, costs,
-  benchmarks, and model leaderboard pages.
-- See the Routing Intelligence panel for selected model, selected workflow,
-  risk level, repository/context signal, routing reasons, and fallback options.
+- Run the benchmark locally
+- Verify routing decisions yourself
+- Replay historical decisions
+- Compare providers on your hardware
+- Generate shareable proof reports
 
-## Competitive Features
+No vendor benchmarks required.
 
-- Provider health dashboard with latency, quota, reliability, and cooldown state.
-- Routing Intelligence panel and logs so you can see why a model won or failed over.
-- Cost dashboard, model leaderboard, benchmark empty states, and latency
-  estimates for adaptive routing and workflow optimization.
-- Presets for Private, Fast, Cheap, and Best Coding routing modes.
-- Exportable debug bundle for Cline, provider, routing, and backend diagnostics.
+Run `Agent Hub: Run Personal Benchmark` to generate your local savings report,
+or use the CLI:
+
+```text
+agent-hub benchmark --dataset coding-100 --export results.json
+agent-hub benchmark verify results.json --dataset coding-100
+agent-hub benchmark compare results.json --dataset coding-100
+```
+
+## Explain Every Decision
+
+Route Replay records the evidence behind each model choice:
+
+- selected provider
+- rejected candidates
+- confidence score
+- routing signals
+- failover events
+- benchmark history
+
+Inspect exactly why a model was chosen and why alternatives were rejected with
+`Agent Hub: Explain Route` or `agent-hub replay-route <request-id>`.
+
+## What Agent Hub Optimizes
+
+**Cost**
+
+Route simple tasks to cheaper models.
+
+**Reliability**
+
+Automatically fail over when providers are unavailable.
+
+**Performance**
+
+Choose models based on repository characteristics and task complexity.
+
+**Transparency**
+
+Inspect routing decisions instead of trusting a black box.
+
+**Compatibility**
+
+Use multiple coding agents and AI providers through a single endpoint.
+
+## Competitive Differentiation
+
+| Capability | Agent Hub | Typical AI Extension |
+| --- | --- | --- |
+| Multi-provider routing | ✓ | Limited |
+| Route replay | ✓ | Rare |
+| Local benchmark corpus | ✓ | No |
+| Explainable decisions | ✓ | Rare |
+| Provider health monitoring | ✓ | Limited |
+| Cross-agent compatibility | ✓ | Rare |
+| Cost optimization | ✓ | Limited |
+| Reproducible proof reports | ✓ | No |
+
+## Screenshots
+
+**Benchmark Proof**
+
+Verify routing claims using a reproducible benchmark corpus.
+
+![Benchmark proof](media/benchmark-proof.png)
+
+**Route Replay**
+
+Inspect every routing decision and rejected alternative.
+
+![Route replay](media/route-replay.png)
+
+**Learning Dashboard**
+
+See how routing performance evolves over time.
+
+![Learning dashboard](media/learning-dashboard.png)
+
+**Provider Health**
+
+Monitor latency, availability, quotas, and failovers.
+
+![Provider health](media/provider-routing.png)
+
+**Agent Hub Dashboard**
+
+Unified control center for orchestration and optimization.
+
+![Agent Hub dashboard](media/dashboard.png)
+
+**Setup Screens**
+
+Connect coding agents after the value and proof are established.
+
+![Cline setup](media/cline-setup.png)
+
+## Common Use Cases
+
+**Cline + Multiple Providers**
+
+Automatically route requests between Claude, OpenAI, Gemini, and local models.
+
+**Cost Reduction**
+
+Use smaller models when they are likely to succeed and reserve premium models
+for difficult tasks.
+
+**Local-First Development**
+
+Prioritize Ollama or LM Studio and fall back to cloud providers when necessary.
+
+**Team Standardization**
+
+Expose a single endpoint while allowing multiple underlying providers.
+
+**AI Benchmarking**
+
+Measure model performance on your own tasks instead of relying on public
+leaderboards.
 
 ## Demo
 
 ![Agent Hub demo](media/demo.gif)
 
-If the Marketplace does not autoplay GIFs in your client, open the animation
-from the repository media folder or use the screenshots below.
-
-## Screenshots
-
-![Personal benchmark proof](media/benchmark-proof.png)
-
-![Route replay](media/route-replay.png)
-
-![Learning dashboard](media/learning-dashboard.png)
-
-![Agent Hub dashboard](media/dashboard.png)
-
-![Provider routing](media/provider-routing.png)
-
-![Cline setup](media/cline-setup.png)
+If the Marketplace does not autoplay GIFs in your client, open the screenshots
+above for the same workflows.
 
 ## Install
 
 1. Install the extension.
 2. Install Python 3.11 or newer.
 3. Open a project folder.
+4. Click the Agent Hub icon.
+5. Click `Start`.
 
 The Agent Hub backend is bundled with the VSIX.
 
-## Personal Proof
+## Connect A Coding Agent
 
-On first run, Agent Hub offers to run the shipped 50-task benchmark corpus
-against your configured baseline and routed models. The flow is:
-
-1. Run `Agent Hub: Run Personal Benchmark`.
-2. Review the generated `benchmark-report.md` savings report and share card.
-3. Copy Markdown, Reddit, X, or GitHub Discussion text from the share card.
-4. Run `Agent Hub: Explain Route` to see selected and rejected candidates.
-5. Replay a specific decision with `agent-hub replay-route <request-id>`.
-6. Open the README proof section for the reproducible CLI command.
-
-Benchmark execution may call configured providers and consume provider quota or
-credits, so the extension asks before running it.
-
-## Use
-
-1. Click the Agent Hub icon.
-2. Click `Start`.
-3. Type a task.
-4. Click `Send`.
-
-Click `Stop` when you are done.
-Click `Dashboard` to open `http://127.0.0.1:8787/dashboard` and jump to
-status, readiness, provider health, routing intelligence, optimization, costs,
-leaderboard, benchmarks, repository DNA, workspace memory, workflows, plugins,
-enterprise status, or night mode.
-
-Good first tasks:
-
-- `Explain this file`
-- `Find the bug`
-- `Fix the failing test`
-- `Add a small feature`
-
-Use `Save Codex Tokens` when you want confident free models to try safe work
-first while Codex CLI fallback gets an adaptive task-aware context digest,
-reduced tool and repo metadata, fewer agent steps, and shorter output caps. Use
-`Free Models Only` when you want to disable Codex CLI and non-free/API-key
-fallbacks entirely. Choose `Use Codex CLI` when you want Agent Hub to route
-directly through your existing `codex login` session without an `OPENAI_API_KEY`.
-
-## Models
-
-Pick one path:
-
-- Open `Settings` and save an OpenAI, Claude, Gemini, Groq, OpenRouter, or other API key.
-- Start Ollama or LM Studio locally and let Agent Hub route to the local endpoint.
-- Run `Agent Hub: Install Ollama Desktop` if the `ollama` command is not present, then choose a local model.
-- Run `Agent Hub: Install Codex CLI`, sign in, then use `Agent Hub: Use Signed-In Codex CLI`.
-- Run `Agent Hub: Use Free Models Only` to keep only free/local/free-tier routes eligible.
-- Connect Cline, Roo Code, Continue, Claude Code, or another OpenAI-compatible tool.
-
-## Comparison
-
-| Feature | Agent Hub | Single-provider extension |
-| --- | --- | --- |
-| Local and cloud models | Yes | Usually one provider |
-| Cline/OpenAI-compatible endpoint | Yes | Varies |
-| Provider fallback | Yes | Rare |
-| Approval-gated workspace tools | Yes | Varies |
-| Provider health and limit logs | Yes | Usually limited |
-
-## Cline Setup
-
-Choose `OpenAI Compatible` in Cline:
+Use Agent Hub as an OpenAI-compatible endpoint from Cline, Roo Code, Continue,
+Claude Code, or another coding agent:
 
 ```text
 Base URL: http://127.0.0.1:8787/v1
@@ -145,6 +179,16 @@ Model: agent-hub-coding
 Use `Agent Hub: Copy Cline Config` and `Agent Hub: Test Cline Connection` from
 the command palette to verify setup before a real task.
 
+## Provider Setup
+
+Pick one or more provider paths:
+
+- Save an OpenAI, Claude, Gemini, Groq, OpenRouter, or other API key in Settings.
+- Start Ollama or LM Studio locally and let Agent Hub route to the local endpoint.
+- Run `Agent Hub: Install Ollama Desktop` if the `ollama` command is not present.
+- Run `Agent Hub: Install Codex CLI`, sign in, then use `Agent Hub: Use Signed-In Codex CLI`.
+- Run `Agent Hub: Use Free Models Only` to keep only free, local, or free-tier routes eligible.
+
 ## Ollama Setup
 
 1. Install Ollama Desktop from `https://ollama.com/download`, or run `Agent Hub: Install Ollama Desktop`.
@@ -154,13 +198,6 @@ the command palette to verify setup before a real task.
 
 Local routes use `http://127.0.0.1:11434`. Hosted Ollama Cloud entries require
 `OLLAMA_API_KEY` and are treated like other cloud providers.
-
-## Provider Setup
-
-- Ollama: install Ollama, pull a model, then start Agent Hub. Local routes use `http://127.0.0.1:11434`.
-- LM Studio: start the local server, load a model, then use Settings to select the endpoint.
-- Codex CLI: run `Agent Hub: Install Codex CLI`, sign in, then choose `Use Codex CLI` in Agent Hub.
-- OpenAI, Claude, Gemini, Groq, OpenRouter: save the provider API key in Settings and keep `approval_mode` at `ask` or `auto` based on your workflow.
 
 ## Safety
 

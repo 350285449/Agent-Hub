@@ -1,5 +1,11 @@
 # Changelog
 
+## 9.6.6
+
+- Repositions the Marketplace README around evidence-driven coding-agent orchestration.
+- Improves narrow-sidebar model stats and advanced tool shortcuts.
+- Adds a Start Benchmarks shortcut for local proof reports.
+
 ## 9.6.5
 
 - Syncs extension and backend release metadata for the next package.

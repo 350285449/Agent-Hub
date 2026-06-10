@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-BASE_VERSION = "9.6.5"
+BASE_VERSION = "9.6.6"
 
 
 def backend_version() -> str:
