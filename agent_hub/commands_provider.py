@@ -4,10 +4,17 @@ import json
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from .adaptive import estimate_known_cost_usd
+from .anonymous_proof import (
+    format_anonymous_proof,
+    format_share_proof,
+    generate_anonymous_proof,
+    share_proof,
+)
 from .application import DiagnosticsApplicationService
 from .config import (
     _is_local_or_private_url,
@@ -21,11 +28,19 @@ from .config import (
     normalize_provider,
 )
 from .core.router import AgentRouter, RouterError
+from .demo import demo_report, format_demo_report
 from .discovery import fetch_openai_models
 from .evaluation import BenchmarkResult, BenchmarkRunner, ProviderScoreStore, _score_text, default_benchmark_tasks
+from .evaluation.benchmark_compare import benchmark_compare_body, format_benchmark_comparison
 from .evaluation.benchmark_suite import BenchmarkSuiteRunner
+from .evaluation.datasets import verify_benchmark_report
 from .evaluation.proof_benchmark import BenchmarkProofRunner
-from .explainability import explain_route_body, format_route_explanation
+from .explainability import (
+    explain_recorded_route_body,
+    explain_route_body,
+    format_recorded_route_explanation,
+    format_route_explanation,
+)
 from .learning_proof import format_route_history, route_history_body
 from .measurement import estimate_named_baselines
 from .payloads import request_from_payload
@@ -724,6 +739,7 @@ def _health_report(config: Any, *, route: str, include_history: bool) -> dict[st
         "route": route,
         "provider_health": health,
         "readiness": readiness,
+        "runtime_usability": readiness.get("runtime_usability"),
         "recommendations": recommendations,
         "routing_decisions": [
             {
@@ -760,6 +776,12 @@ def _print_health(report: dict[str, Any]) -> None:
         next_step = readiness.get("next_step") if isinstance(readiness.get("next_step"), dict) else {}
         if next_step:
             print(f"Next step: {next_step.get('label')} - {next_step.get('detail')}")
+    runtime = report.get("runtime_usability") if isinstance(report.get("runtime_usability"), dict) else {}
+    if not runtime and readiness:
+        runtime = readiness.get("runtime_usability") if isinstance(readiness.get("runtime_usability"), dict) else {}
+    if runtime:
+        state = str(runtime.get("state") or "unknown").replace("_", " ")
+        print(f"Runtime usability: {runtime.get('score', '?')}/100 ({state})")
     print()
     _print_table(
         _health_rows(report.get("provider_health", {})),
@@ -779,6 +801,9 @@ def _print_production_check(report: dict[str, Any]) -> None:
     print("Agent-Hub production check")
     print(f"Score: {report.get('score', '?')}/100 ({report.get('state', 'unknown')})")
     print(f"Rating: {report.get('rating', '?')}/10")
+    runtime = report.get("runtime_usability") if isinstance(report.get("runtime_usability"), dict) else {}
+    if runtime:
+        print(f"Runtime usability: {runtime.get('score', '?')}/100 ({runtime.get('state', 'unknown')})")
     failed = report.get("failed") if isinstance(report.get("failed"), list) else []
     warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
     if failed:
@@ -803,6 +828,11 @@ def _print_feature_scorecard(report: dict[str, Any]) -> None:
     print("Agent-Hub feature scorecard")
     print(f"Rating: {report.get('rating', '?')}/10 ({report.get('state', 'unknown')})")
     print(f"All local areas 10/10: {str(bool(report.get('all_local_areas_10'))).lower()}")
+    runtime = report.get("runtime_usability") if isinstance(report.get("runtime_usability"), dict) else {}
+    if runtime:
+        print(f"Runtime usability: {runtime.get('score', '?')}/100 ({runtime.get('state', 'unknown')})")
+    if report.get("honesty"):
+        print(f"Scope: {report.get('honesty')}")
     print()
     areas = report.get("areas") if isinstance(report.get("areas"), list) else []
     rows = [
@@ -862,6 +892,8 @@ def _print_metrics(report: dict[str, Any]) -> None:
 
 def _local_models_report(config: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    row_keys: list[tuple[dict[str, Any], tuple[Any, ...] | None]] = []
+    probes: dict[tuple[Any, ...], Any] = {}
     for agent in config.agents.values():
         if (
             normalize_provider(agent.provider) != "openai-compatible"
@@ -881,23 +913,64 @@ def _local_models_report(config: Any) -> list[dict[str, Any]]:
         if not agent.base_url:
             row["error"] = "missing base_url"
             rows.append(row)
+            row_keys.append((row, None))
             continue
-        try:
-            timeout = max(0.05, float(getattr(config, "local_model_probe_timeout_seconds", 3.0) or 3.0))
-            models = fetch_openai_models(
+        rows.append(row)
+        key = _local_model_probe_key(agent)
+        row_keys.append((row, key))
+        probes.setdefault(key, agent)
+
+    if not probes:
+        return rows
+
+    timeout = max(0.05, float(getattr(config, "local_model_probe_timeout_seconds", 3.0) or 3.0))
+    max_workers = max(1, min(4, len(probes)))
+    results: dict[tuple[Any, ...], tuple[list[str], str]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_key = {
+            executor.submit(_fetch_local_models_for_agent, agent, timeout): key
+            for key, agent in probes.items()
+        }
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            results[key] = future.result()
+
+    for row, key in row_keys:
+        if key is None:
+            continue
+        models, error = results.get(key, ([], "probe did not run"))
+        if error:
+            row["error"] = error
+            row["configured_model_available"] = False
+            continue
+        row["online"] = True
+        row["models"] = models
+        row["configured_model_available"] = row["configured_model"] in models
+    return rows
+
+
+def _local_model_probe_key(agent: Any) -> tuple[Any, ...]:
+    headers = tuple(sorted((getattr(agent, "headers", {}) or {}).items()))
+    return (
+        str(agent.base_url or ""),
+        str(agent.resolved_api_key or ""),
+        headers,
+    )
+
+
+def _fetch_local_models_for_agent(agent: Any, timeout: float) -> tuple[list[str], str]:
+    try:
+        return (
+            fetch_openai_models(
                 agent.base_url,
                 timeout=timeout,
                 api_key=agent.resolved_api_key,
                 headers=agent.headers,
-            )
-            row["online"] = True
-            row["models"] = models
-            row["configured_model_available"] = agent.model in models
-        except Exception as exc:
-            row["error"] = str(exc)
-            row["configured_model_available"] = False
-        rows.append(row)
-    return rows
+            ),
+            "",
+        )
+    except Exception as exc:
+        return [], str(exc)
 
 
 def _recommend(
@@ -1374,15 +1447,18 @@ def _benchmark_run(
     route: str,
     baseline: str,
     limit: int,
-    corpus: str,
-    output_dir: str,
-    as_json: bool,
+    dataset: str = "",
+    corpus: str = "",
+    output_dir: str = "",
+    export: str = "",
+    as_json: bool = False,
 ) -> int:
     try:
         report = BenchmarkProofRunner(config).run(
             route=route,
             baseline=baseline,
             limit=limit,
+            dataset=dataset,
             corpus_dir=corpus or None,
             output_dir=output_dir or None,
         )
@@ -1392,12 +1468,20 @@ def _benchmark_run(
         else:
             print(f"Benchmark failed: {exc}")
         return 1
+    if export:
+        target = Path(export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        report["export_path"] = str(target)
+        target.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     if as_json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:
         comparison = report.get("comparison", {}) if isinstance(report.get("comparison"), dict) else {}
         baseline_info = report.get("baseline", {}) if isinstance(report.get("baseline"), dict) else {}
+        dataset_info = report.get("dataset", {}) if isinstance(report.get("dataset"), dict) else {}
         print(f"Benchmark proof for route {route}")
+        print(f"Dataset: {dataset_info.get('name') or report.get('dataset_name') or 'local'}")
+        print(f"Dataset fingerprint: {dataset_info.get('fingerprint') or report.get('dataset_fingerprint') or 'unknown'}")
         print(
             "Baseline: "
             f"{baseline_info.get('agent')} ({baseline_info.get('provider')}) model={baseline_info.get('model')}"
@@ -1405,6 +1489,11 @@ def _benchmark_run(
         print(f"Tasks: {report.get('task_count')}")
         print(f"JSON report: {report.get('report_paths', {}).get('json')}")
         print(f"Markdown report: {report.get('report_paths', {}).get('markdown')}")
+        if export:
+            print(f"Export: {export}")
+        verification = report.get("verification") if isinstance(report.get("verification"), dict) else {}
+        if verification.get("verify_command"):
+            print(f"Verify: {verification['verify_command']}")
         print()
         _print_table(
             [
@@ -1420,6 +1509,83 @@ def _benchmark_run(
     return 0
 
 
+def _benchmark_verify(
+    config: HubConfig,
+    *,
+    dataset: str,
+    report_path: str,
+    corpus: str,
+    as_json: bool,
+) -> int:
+    report = verify_benchmark_report(
+        config,
+        report_path=report_path or None,
+        dataset=dataset,
+        corpus_dir=corpus or None,
+    )
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print("Benchmark verification")
+        print(f"Report: {report.get('report_path') or 'not found'}")
+        dataset_info = report.get("dataset") if isinstance(report.get("dataset"), dict) else {}
+        if dataset_info:
+            print(f"Dataset: {dataset_info.get('name')} ({dataset_info.get('fingerprint')})")
+        checks = report.get("checks") if isinstance(report.get("checks"), list) else []
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            status = "ok" if check.get("ok") else "fail"
+            print(f"- {check.get('name')}: {status} - {check.get('detail')}")
+        if report.get("rerun_command"):
+            print(f"Rerun: {report['rerun_command']}")
+    return 0 if report.get("ok") else 1
+
+
+def _benchmark_compare(
+    config: HubConfig,
+    *,
+    route: str,
+    baseline: str,
+    limit: int,
+    dataset: str,
+    corpus: str,
+    output_dir: str,
+    report_path: str,
+    export: str,
+    as_json: bool,
+) -> int:
+    try:
+        report = benchmark_compare_body(
+            config,
+            route=route,
+            baseline=baseline,
+            limit=limit,
+            dataset=dataset,
+            corpus=corpus,
+            output_dir=output_dir,
+            report_path=report_path,
+        )
+    except (RouterError, ValueError) as exc:
+        if isinstance(exc, RouterError):
+            _print_route_error(exc)
+        else:
+            print(f"Benchmark compare failed: {exc}")
+        return 1
+    if export:
+        target = Path(export)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        report["export_path"] = str(target)
+        target.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(format_benchmark_comparison(report), end="")
+        if export:
+            print(f"Export: {export}")
+    return 0 if report.get("verified") else 1
+
+
 def _explain_route(
     config: HubConfig,
     *,
@@ -1430,6 +1596,15 @@ def _explain_route(
     needs_tools: bool,
     as_json: bool,
 ) -> int:
+    request_id = prompt.strip()
+    if request_id and " " not in request_id:
+        recorded = explain_recorded_route_body(config, request_id)
+        if recorded.get("found"):
+            if as_json:
+                print(json.dumps(recorded, indent=2, ensure_ascii=False))
+            else:
+                print(format_recorded_route_explanation(recorded), end="")
+            return 0
     report = explain_route_body(
         config,
         route=route,
@@ -1442,6 +1617,53 @@ def _explain_route(
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:
         print(format_route_explanation(report), end="")
+    return 0
+
+
+def _generate_proof(
+    config: HubConfig,
+    *,
+    report_path: str,
+    output: str,
+    as_json: bool,
+) -> int:
+    report = generate_anonymous_proof(config, report_path=report_path or None)
+    text = json.dumps(report, indent=2, ensure_ascii=False) + "\n" if as_json else format_anonymous_proof(report)
+    if output:
+        target = Path(output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(text, end="")
+    return 0
+
+
+def _share_proof(
+    config: HubConfig,
+    *,
+    report_path: str,
+    targets: list[str],
+    open_links: bool,
+    as_json: bool,
+) -> int:
+    report = share_proof(
+        config,
+        report_path=report_path or None,
+        targets=targets,
+        open_links=open_links,
+    )
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(format_share_proof(report), end="")
+    return 0
+
+
+def _demo(config: HubConfig, *, route: str, as_json: bool) -> int:
+    report = demo_report(config, route=route)
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(format_demo_report(report), end="")
     return 0
 
 

@@ -23,8 +23,10 @@ from .commands_config import (
 )
 from .commands_doctor import (
     _backend_reachability,
+    _checkup_report,
     _doctor_fix_safe,
     _print_doctor,
+    _print_checkup,
 )
 from .commands_provider import (
     _add_free_presets,
@@ -32,6 +34,7 @@ from .commands_provider import (
     _agent_rows,
     _apply_routing_preset,
     _benchmark,
+    _benchmark_compare,
     _benchmark_run,
     _benchmark_suite,
     _enable_cloud_provider,
@@ -50,13 +53,17 @@ from .commands_provider import (
     _recommend,
     _benchmark_card,
     _benchmark_evolution,
+    _benchmark_verify,
     _calibrate_models,
+    _demo,
     _generate_case_study,
+    _generate_proof,
     _replay_route,
     _route_test,
     _route_diagnose,
     _route_history,
     _routing_preset_rows,
+    _share_proof,
 )
 from .commands_server import (
     _add_agent_runtime_flags,
@@ -102,6 +109,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Apply conservative config repairs such as removing unknown route agents.",
     )
+
+    checkup_parser = subparsers.add_parser(
+        "checkup",
+        help="Run one guided runtime-usability check with optional safe repair and route verification.",
+    )
+    checkup_parser.add_argument(
+        "--fix-safe",
+        action="store_true",
+        help="Create a backup and apply conservative free-first safe config repairs.",
+    )
+    checkup_parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Record local research and coding route smoke results when a verified provider is available.",
+    )
+    checkup_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     inspect_parser = subparsers.add_parser(
         "inspect-request",
@@ -312,14 +335,51 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     benchmark_parser = subparsers.add_parser("benchmark", help="Run route benchmarks and proof reports.")
-    benchmark_parser.add_argument("action", nargs="?", default="", help="Use 'run' for proof benchmarks.")
+    benchmark_parser.add_argument("action", nargs="?", default="", help="Use 'run', 'verify', or 'compare'.")
+    benchmark_parser.add_argument("target", nargs="?", default="", help="Report path for 'benchmark verify' or 'benchmark compare'.")
     benchmark_parser.add_argument("--route", default="cloud-agent")
     benchmark_parser.add_argument("--prompt", default="Reply with one short sentence.")
     benchmark_parser.add_argument("--baseline", default="", help="Baseline agent/model. Defaults to user default.")
-    benchmark_parser.add_argument("--limit", type=int, default=50, help="Maximum proof benchmark tasks.")
+    benchmark_parser.add_argument("--limit", type=int, default=0, help="Override maximum proof benchmark tasks.")
+    benchmark_parser.add_argument("--dataset", default="", help="Public benchmark dataset name, for example coding-100.")
     benchmark_parser.add_argument("--corpus", default="", help="Benchmark corpus directory.")
     benchmark_parser.add_argument("--output-dir", default="", help="Directory for benchmark-report files.")
+    benchmark_parser.add_argument("--export", default="", help="One-click JSON export path, for example results.json.")
+    benchmark_parser.add_argument(
+        "--verify",
+        nargs="?",
+        const="latest",
+        default="",
+        help="Verify a benchmark report against the current reproducible dataset.",
+    )
     benchmark_parser.add_argument("--json", action="store_true")
+
+    generate_proof_parser = subparsers.add_parser(
+        "generate-proof",
+        help="Generate anonymous local proof without sending data to a backend.",
+    )
+    generate_proof_parser.add_argument("--report", default="", help="Optional benchmark-report.json path.")
+    generate_proof_parser.add_argument("--output", default="", help="Optional proof JSON output path.")
+    generate_proof_parser.add_argument("--json", action="store_true", help="Print full proof JSON.")
+
+    share_proof_parser = subparsers.add_parser(
+        "share-proof",
+        help="Open share links for anonymous proof cards without using a backend.",
+    )
+    share_proof_parser.add_argument("--report", default="", help="Optional benchmark-report.json path.")
+    share_proof_parser.add_argument(
+        "--target",
+        action="append",
+        choices=["all", "github", "github_discussion", "reddit", "x"],
+        default=[],
+        help="Share destination. Repeat for multiple targets.",
+    )
+    share_proof_parser.add_argument("--no-open", action="store_true", help="Print URLs without opening a browser.")
+    share_proof_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    demo_parser = subparsers.add_parser("demo", help="Run the one-command Agent-Hub routing and savings demo.")
+    demo_parser.add_argument("--route", default="coding")
+    demo_parser.add_argument("--json", action="store_true")
 
     benchmark_suite_parser = subparsers.add_parser(
         "benchmark-suite",
@@ -546,6 +606,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             _print_doctor(report)
         return 0
+    if command == "checkup":
+        report = _checkup_report(
+            config,
+            args.config,
+            fix_safe=args.fix_safe,
+            verify=args.verify,
+        )
+        if args.json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            _print_checkup(report)
+        return 0
     if command == "health":
         report = _health_report(config, route=args.route, include_history=False)
         if args.json:
@@ -718,19 +790,71 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(response.to_native_dict(include_routing_details=True), indent=2, ensure_ascii=False))
         return 0
     if command == "benchmark":
+        if args.action == "verify" or args.verify:
+            return _benchmark_verify(
+                config,
+                dataset=args.dataset,
+                report_path=args.target or args.verify,
+                corpus=args.corpus,
+                as_json=args.json,
+            )
+        if args.action == "compare":
+            return _benchmark_compare(
+                config,
+                route=args.route,
+                baseline=args.baseline,
+                limit=args.limit,
+                dataset=args.dataset,
+                corpus=args.corpus,
+                output_dir=args.output_dir,
+                report_path=args.target,
+                export=args.export,
+                as_json=args.json,
+            )
         if args.action == "run":
             return _benchmark_run(
                 config,
                 route=args.route,
                 baseline=args.baseline,
                 limit=args.limit,
+                dataset=args.dataset,
                 corpus=args.corpus,
                 output_dir=args.output_dir,
+                export=args.export,
+                as_json=args.json,
+            )
+        if args.dataset or args.export:
+            return _benchmark_run(
+                config,
+                route=args.route,
+                baseline=args.baseline,
+                limit=args.limit,
+                dataset=args.dataset,
+                corpus=args.corpus,
+                output_dir=args.output_dir,
+                export=args.export,
                 as_json=args.json,
             )
         if args.action:
             parser.error(f"Unknown benchmark action {args.action!r}")
         return _benchmark(config, route=args.route, prompt=args.prompt, as_json=args.json)
+    if command == "generate-proof":
+        return _generate_proof(
+            config,
+            report_path=args.report,
+            output=args.output,
+            as_json=args.json,
+        )
+    if command == "share-proof":
+        return _share_proof(
+            config,
+            report_path=args.report,
+            targets=args.target,
+            open_links=not args.no_open,
+            as_json=args.json,
+        )
+    if command == "demo":
+        return _demo(config, route=args.route, as_json=args.json)
     if command == "benchmark-suite":
         return _benchmark_suite(
             config,

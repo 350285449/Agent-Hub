@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "repository": "benchmarks/",
+  "datasets": [
+    {
+      "name": "coding-100",
+      "description": "Deterministic 100-task coding proof set assembled from the bundled coding, debugging, refactoring, repository-analysis, and test-generation corpora.",
+      "route": "coding",
+      "task_count": 100,
+      "command": "agent-hub benchmark --dataset coding-100 --export results.json"
+    },
+    {
+      "name": "proof-50",
+      "description": "Default 50-task proof set spanning all bundled benchmark categories.",
+      "route": "cloud-agent",
+      "task_count": 50,
+      "command": "agent-hub benchmark --dataset proof-50 --export results.json"
+    }
+  ]
+}

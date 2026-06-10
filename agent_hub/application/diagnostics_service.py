@@ -16,6 +16,7 @@ from ..mcp import normalize_mcp_tools
 from ..models import HubRequest
 from ..plugins import discover_plugins
 from ..provider_presets import provider_metadata_rows
+from ..runtime_usability import runtime_usability_body
 from ..server_routes.middleware import api_token, public_bind_host
 from ..tool_compatibility import tool_emulation_enabled, universal_compatibility_enabled
 from ..version import backend_version, build_metadata, config_runtime_hash
@@ -513,6 +514,7 @@ class DiagnosticsApplicationService:
         provider_health: dict[str, dict[str, Any]] | None = None,
         setup_guidance: dict[str, Any] | None = None,
         plugins: dict[str, Any] | None = None,
+        runtime_usability: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         provider_health = provider_health if isinstance(provider_health, dict) else router.health_snapshot()
         setup_guidance = (
@@ -521,6 +523,11 @@ class DiagnosticsApplicationService:
             else _setup_guidance(self.config, provider_health)
         )
         plugins = plugins if isinstance(plugins, dict) else self.plugins_body()
+        runtime_usability = (
+            runtime_usability
+            if isinstance(runtime_usability, dict)
+            else runtime_usability_body(self.config, provider_health)
+        )
         leaderboard = self.model_leaderboard_body(router)
         benchmarks = self.benchmark_results_body()
         feature_status = _feature_status(
@@ -528,6 +535,7 @@ class DiagnosticsApplicationService:
             provider_health,
             setup_guidance,
             plugins,
+            runtime_usability=runtime_usability,
             leaderboard=leaderboard,
             benchmarks=benchmarks,
         )
@@ -536,22 +544,41 @@ class DiagnosticsApplicationService:
             provider_health,
             setup_guidance,
             plugins,
+            runtime_usability=runtime_usability,
             leaderboard=leaderboard,
             benchmarks=benchmarks,
         )
         total_weight = sum(_float(item.get("weight")) or 0.0 for item in items) or 1.0
         earned = sum(_float(item.get("earned")) or 0.0 for item in items)
         score = int(round((earned / total_weight) * 100))
+        contract_items = [item for item in items if item.get("id") != "runtime_usability"]
+        contract_total = sum(_float(item.get("weight")) or 0.0 for item in contract_items) or 1.0
+        contract_earned = sum(_float(item.get("earned")) or 0.0 for item in contract_items)
+        contract_score = int(round((contract_earned / contract_total) * 100))
+        contract_actions = [item for item in contract_items if item.get("status") == "action"]
         action_items = [item for item in items if item.get("status") == "action"]
         warning_items = [item for item in items if item.get("status") == "warn"]
+        runtime_state = str(runtime_usability.get("state") or "")
         if action_items:
             state = "needs_setup"
+        elif runtime_state == "degraded":
+            state = "solid_beta"
+        elif runtime_state and runtime_state != "ready":
+            state = "needs_attention"
         elif score >= 90:
             state = "production_ready"
         elif score >= 75:
             state = "solid_beta"
         else:
             state = "needs_attention"
+        if contract_actions:
+            contract_state = "needs_setup"
+        elif contract_score >= 90:
+            contract_state = "production_ready"
+        elif contract_score >= 75:
+            contract_state = "solid_beta"
+        else:
+            contract_state = "needs_attention"
         next_step = action_items[0] if action_items else (warning_items[0] if warning_items else None)
         return {
             "object": "agent_hub.readiness",
@@ -568,6 +595,13 @@ class DiagnosticsApplicationService:
             "next_step": next_step,
             "items": items,
             "feature_status": feature_status,
+            "runtime_usability": runtime_usability,
+            "contract_readiness": {
+                "score": contract_score,
+                "rating": round(contract_score / 10, 1),
+                "state": contract_state,
+                "scope": "local contracts, setup, safety, dashboards, and data surfaces without live runtime smoke",
+            },
         }
 
     def production_check_body(
@@ -579,11 +613,13 @@ class DiagnosticsApplicationService:
         provider_health = provider_health if isinstance(provider_health, dict) else router.health_snapshot()
         setup_guidance = _setup_guidance(self.config, provider_health)
         plugins = self.plugins_body()
+        runtime_usability = runtime_usability_body(self.config, provider_health)
         readiness = self.readiness_body(
             router,
             provider_health=provider_health,
             setup_guidance=setup_guidance,
             plugins=plugins,
+            runtime_usability=runtime_usability,
         )
         dashboards = {
             "cost": self.cost_dashboard_body({}),
@@ -598,6 +634,7 @@ class DiagnosticsApplicationService:
             plugins,
             readiness,
             dashboards,
+            runtime_usability=runtime_usability,
         )
         total_weight = sum(_float(check.get("weight")) or 0.0 for check in checks) or 1.0
         earned = sum(_float(check.get("earned")) or 0.0 for check in checks)
@@ -629,15 +666,18 @@ class DiagnosticsApplicationService:
             "warnings": warnings,
             "checks": checks,
             "readiness": readiness,
+            "runtime_usability": runtime_usability,
         }
 
     def feature_scorecard_body(self, router: Any) -> dict[str, Any]:
         provider_health = router.health_snapshot()
         plugins = self.plugins_body()
+        runtime_usability = runtime_usability_body(self.config, provider_health)
         readiness = self.readiness_body(
             router,
             provider_health=provider_health,
             plugins=plugins,
+            runtime_usability=runtime_usability,
         )
         production = self.production_check_body(router, provider_health=provider_health)
         extension = self.extension_contract_body()
@@ -672,11 +712,17 @@ class DiagnosticsApplicationService:
             "scope": "local implementation and runtime contract proof",
             "rating": overall,
             "state": "local_10_of_10" if not blockers and overall == 10.0 else "needs_attention",
+            "runtime_state": runtime_usability.get("state"),
             "all_local_areas_10": not blockers and overall == 10.0,
+            "contract_readiness": {
+                "rating": overall,
+                "state": "local_10_of_10" if not blockers and overall == 10.0 else "needs_attention",
+            },
+            "runtime_usability": runtime_usability,
             "honesty": (
                 "This scorecard proves local code paths, contracts, policies, and configured "
-                "runtime readiness. Live third-party provider quality still depends on user "
-                "credentials, provider uptime, network conditions, and real benchmark data."
+                "runtime foundations. The runtime_usability object reports whether this "
+                "machine has a verified provider path that can answer real tasks right now."
             ),
             "areas": areas,
             "blockers": blockers,
@@ -687,11 +733,13 @@ class DiagnosticsApplicationService:
         provider_health = router.health_snapshot()
         setup_guidance = _setup_guidance(config, provider_health)
         plugins = self.plugins_body()
+        runtime_usability = runtime_usability_body(config, provider_health)
         readiness = self.readiness_body(
             router,
             provider_health=provider_health,
             setup_guidance=setup_guidance,
             plugins=plugins,
+            runtime_usability=runtime_usability,
         )
         experience_summary = _experience_summary(
             config,
@@ -699,6 +747,7 @@ class DiagnosticsApplicationService:
             setup_guidance=setup_guidance,
             readiness=readiness,
             context_diagnostics=context_diagnostics,
+            runtime_usability=runtime_usability,
         )
         return {
             "status": "ok",
@@ -775,6 +824,7 @@ class DiagnosticsApplicationService:
             "context_diagnostics": context_diagnostics,
             "setup_guidance": setup_guidance,
             "readiness": readiness,
+            "runtime_usability": runtime_usability,
             "experience_summary": experience_summary,
             "feature_status": readiness["feature_status"],
             "streaming": {
@@ -1494,6 +1544,8 @@ def _production_checks(
     plugins: dict[str, Any],
     readiness: dict[str, Any],
     dashboards: dict[str, dict[str, Any]],
+    *,
+    runtime_usability: dict[str, Any],
 ) -> list[dict[str, Any]]:
     active_names = _active_names(config, provider_health)
     recommendations = router.recommend(
@@ -1523,6 +1575,18 @@ def _production_checks(
     readiness_warnings = int(_dict(readiness.get("summary")).get("warning_count", 0) or 0)
     compatibility_metadata_hidden = not config.expose_routing_details
     checks = [
+        _production_check(
+            "runtime_usability",
+            "Runtime usability is verified",
+            str(runtime_usability.get("state") or "") == "ready",
+            20,
+            severity="critical",
+            detail=(
+                f"Runtime usability {runtime_usability.get('score', 0)}/100 "
+                f"({runtime_usability.get('state', 'unknown')})."
+            ),
+            command=_dict(runtime_usability.get("next_step")).get("command"),
+        ),
         _production_check(
             "readiness_score",
             "Readiness score is production-grade",
@@ -1991,6 +2055,7 @@ def _readiness_items(
     provider_health: dict[str, dict[str, Any]],
     setup_guidance: dict[str, Any],
     plugins: dict[str, Any],
+    runtime_usability: dict[str, Any],
     *,
     leaderboard: dict[str, Any],
     benchmarks: dict[str, Any],
@@ -2029,6 +2094,7 @@ def _readiness_items(
             ),
             None if active_names else "python -m agent_hub doctor --providers",
         ),
+        _runtime_usability_readiness_item(runtime_usability),
         _security_readiness_item(config),
         _context_readiness_item(config),
         _observability_readiness_item(config, provider_health),
@@ -2041,6 +2107,33 @@ def _readiness_items(
         if route_item is not None and not route_item.get("command"):
             route_item["command"] = setup_guidance["next_step"].get("command")
     return items
+
+
+def _runtime_usability_readiness_item(runtime_usability: dict[str, Any]) -> dict[str, Any]:
+    state = str(runtime_usability.get("state") or "unknown")
+    score = int(_float(runtime_usability.get("score")) or 0)
+    next_step = _dict(runtime_usability.get("next_step"))
+    if state == "ready":
+        status = "ok"
+        earned = 20
+    elif state == "degraded":
+        status = "warn"
+        earned = 12
+    else:
+        status = "action"
+        earned = 0
+    return _readiness_item(
+        "runtime_usability",
+        "Runtime usability is verified",
+        status,
+        20,
+        earned,
+        (
+            f"Runtime usability {score}/100 ({state}). "
+            + str(runtime_usability.get("title") or "")
+        ).strip(),
+        next_step.get("command") or "agent-hub checkup --fix-safe --verify",
+    )
 
 
 def _security_readiness_item(config: HubConfig) -> dict[str, Any]:
@@ -2243,6 +2336,7 @@ def _feature_status(
     provider_health: dict[str, dict[str, Any]],
     setup_guidance: dict[str, Any],
     plugins: dict[str, Any],
+    runtime_usability: dict[str, Any],
     *,
     leaderboard: dict[str, Any],
     benchmarks: dict[str, Any],
@@ -2269,6 +2363,19 @@ def _feature_status(
             "active_count": len(active_names),
             "blocked_count": len(blocked),
             "blocked": blocked[:8],
+        },
+        "runtime_usability": {
+            "state": runtime_usability.get("state") or "unknown",
+            "score": runtime_usability.get("score", 0),
+            "rating": runtime_usability.get("rating", 0.0),
+            "ready": bool(runtime_usability.get("ready")),
+            "verified_coding_providers": runtime_usability.get("verified_coding_providers", []),
+            "next_step": runtime_usability.get("next_step"),
+            "detail": runtime_usability.get("title") or "Runtime usability has not been checked.",
+        },
+        "contract_readiness": {
+            "state": "ready",
+            "detail": "Local feature contracts, routes, adapters, dashboards, and policies are implemented.",
         },
         "universal_compatibility": {
             "state": "ready" if universal_compatibility_enabled(config) else "disabled",
@@ -2995,6 +3102,7 @@ def _experience_summary(
     setup_guidance: dict[str, Any],
     readiness: dict[str, Any],
     context_diagnostics: dict[str, Any],
+    runtime_usability: dict[str, Any],
 ) -> dict[str, Any]:
     active_names = _active_names(config, provider_health)
     readiness_state = str(readiness.get("state") or "")
@@ -3005,8 +3113,25 @@ def _experience_summary(
     suspicious_context = bool(context_diagnostics.get("suspiciously_empty"))
     action_count = int(setup_guidance.get("action_count") or 0)
     warning_count = int(setup_guidance.get("warning_count") or 0)
+    runtime_state = str(runtime_usability.get("state") or "")
+    runtime_next = _dict(runtime_usability.get("next_step"))
+    has_enabled_agents = any(agent.enabled for agent in config.agents.values())
 
-    if action_count or readiness_state == "needs_setup":
+    if runtime_state == "needs_server":
+        state = "needs_setup"
+        title = "Start Agent Hub"
+        detail = runtime_next.get("detail") or "Agent Hub must be running before real route checks can pass."
+        next_step = runtime_next or next_step
+    elif not config.agents or not has_enabled_agents:
+        state = "needs_setup"
+        title = "Finish setup"
+        detail = next_step.get("detail") or "Agent Hub needs a configured provider before it can verify real coding work."
+    elif runtime_state in {"needs_local_model", "needs_provider_approval"}:
+        state = runtime_state
+        title = str(runtime_usability.get("title") or "Finish runtime setup")
+        detail = runtime_next.get("detail") or "Connect or approve a coding-capable provider, then run checkup verification."
+        next_step = runtime_next or next_step
+    elif action_count or readiness_state == "needs_setup":
         state = "needs_setup"
         title = "Finish setup"
         detail = next_step.get("detail") or "Agent Hub needs one more setup step before it can route coding work reliably."
@@ -3033,10 +3158,11 @@ def _experience_summary(
                 "Send workspace context",
                 "Open a workspace file and retry from Cline or the Agent Hub sidebar.",
             )
-    elif warning_count or readiness_score < 90:
+    elif runtime_state == "degraded" or warning_count or readiness_score < 90:
         state = "ready_with_warnings"
         title = "Ready with notes"
-        detail = next_step.get("detail") or "Agent Hub can answer tasks, but one readiness note should be reviewed."
+        detail = runtime_next.get("detail") or next_step.get("detail") or "Agent Hub can answer tasks, but one readiness note should be reviewed."
+        next_step = runtime_next or next_step
     else:
         state = "ready"
         title = "Ready for coding tasks"
@@ -3081,6 +3207,12 @@ def _experience_summary(
             "route_ready_provider": bool(active_names),
             "safe_permissions": config.approval_mode != "auto",
             "context_healthy": not suspicious_context,
+            "runtime_ready": runtime_state == "ready",
+        },
+        "runtime_usability": {
+            "state": runtime_state,
+            "score": runtime_usability.get("score", 0),
+            "next_step": runtime_usability.get("next_step"),
         },
     }
 

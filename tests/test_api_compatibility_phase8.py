@@ -51,6 +51,58 @@ class ApiCompatibilityPhaseEightTests(unittest.TestCase):
         self.assertTrue(all(row["object"] == "model" for row in openai_rows))
         self.assertTrue(all("agent_hub" not in row for row in openai_rows))
 
+    def test_route_alias_stays_listed_while_provider_is_on_cooldown(self) -> None:
+        config = HubConfig(
+            default_route=["tooly"],
+            routes=[RouteRule(name="coding", agents=["tooly"])],
+            agents={
+                "tooly": AgentConfig(
+                    name="tooly",
+                    provider="openai-compatible",
+                    model="tool-model",
+                    base_url="http://127.0.0.1:9999",
+                    free=True,
+                    enabled=True,
+                    supports_tools=True,
+                )
+            },
+        )
+        router = AgentRouter(config)
+        router.cooldown_agent("tooly", 60)
+
+        rows = model_rows(config, router)
+        alias = next(row for row in rows if row["id"] == "agent-hub-coding")
+
+        self.assertTrue(alias["agent_hub"]["available"])
+        self.assertEqual(alias["agent_hub"]["recommended_agent"], "tooly")
+        self.assertIn("agent-hub-coding", available_model_ids(config, router))
+        self.assertIn("agent-hub-coding", {row["id"] for row in openai_model_rows(config, router)})
+
+    def test_coding_alias_stays_hidden_without_tool_capable_visible_agent(self) -> None:
+        config = HubConfig(
+            compatibility_mode={"emulate_tools": False},
+            default_route=["plain"],
+            routes=[RouteRule(name="coding", agents=["plain"])],
+            agents={
+                "plain": AgentConfig(
+                    name="plain",
+                    provider="openai-compatible",
+                    model="plain-model",
+                    base_url="http://127.0.0.1:9999",
+                    free=True,
+                    enabled=True,
+                )
+            },
+        )
+        router = AgentRouter(config)
+
+        rows = model_rows(config, router)
+        alias = next(row for row in rows if row["id"] == "agent-hub-coding")
+
+        self.assertFalse(alias["agent_hub"]["available"])
+        self.assertNotIn("agent-hub-coding", available_model_ids(config, router))
+        self.assertNotIn("agent-hub-coding", {row["id"] for row in openai_model_rows(config, router)})
+
     def test_response_headers_preserve_compatibility_and_context_metadata(self) -> None:
         response = HubResponse(
             request_id="hub-1",

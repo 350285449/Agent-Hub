@@ -65,7 +65,7 @@ class ProviderAttemptExecutor:
         continuation_text = ""
         continuation_reason = ""
 
-        for agent in candidates:
+        for index, agent in enumerate(candidates):
             if provider_attempts >= max_provider_attempts:
                 failover.append(
                     FailoverEvent(
@@ -78,7 +78,11 @@ class ProviderAttemptExecutor:
                     )
                 )
                 break
-            if router._is_on_cooldown(agent.name) and len(candidates) > 1:
+            if router._should_skip_cooldown_candidate(
+                candidates,
+                index,
+                effective_request,
+            ):
                 failover.append(
                     FailoverEvent(
                         agent=agent.name,

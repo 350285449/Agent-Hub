@@ -11,12 +11,15 @@ their own repository.
 1. Run a local benchmark:
 
    ```sh
-   agent-hub benchmark run --baseline claude-sonnet --route coding
+   agent-hub benchmark --dataset coding-100 --baseline claude-sonnet --route coding --export results.json
+   agent-hub benchmark verify results.json --dataset coding-100
    ```
 
 2. Generate a share card or case study:
 
    ```sh
+   agent-hub generate-proof
+   agent-hub share-proof
    agent-hub benchmark-card --variant markdown
    agent-hub generate-case-study --output docs/proofs/my-proof.md
    ```
@@ -38,5 +41,7 @@ their own repository.
 - Success-rate delta
 - One route replay example
 - Reproduction command
+- Dataset fingerprint
+- Verification command
 
 Use `proof-template.md` when writing a new proof by hand.

@@ -5,6 +5,8 @@
 [![packaging](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=packaging)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 [![fresh install](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=fresh%20install)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 
+The routing layer that reduces AI costs while preserving quality.
+
 Stop manually choosing AI models.
 
 Agent-Hub automatically routes coding tasks to the model most likely to succeed,
@@ -14,22 +16,55 @@ and why the winning model was selected.
 Agent-Hub does not ask you to trust benchmark claims. It ships the benchmark
 corpus so you can verify routing, cost, latency, and success locally.
 
+## Quick Start
+
+```sh
+pip install agent-hub
+agent-hub doctor
+agent-hub demo
+agent-hub benchmark --dataset coding-100 --export results.json
+agent-hub benchmark verify results.json --dataset coding-100
+agent-hub benchmark compare results.json --dataset coding-100
+```
+
+Example proof output:
+
+```text
+Without Agent-Hub: $100/month
+With Agent-Hub:    $66/month
+Savings:           34%
+```
+
+Route each request automatically, then inspect the local proof:
+
+```sh
+agent-hub generate-proof
+agent-hub share-proof
+agent-hub explain-route <request-id>
+agent-hub replay-route <request-id>
+```
+
 ## Proof You Can Run Locally
 
 Measured results are generated locally from your configured providers:
 
 ```sh
-agent-hub benchmark run --baseline claude-sonnet --route coding
+agent-hub benchmark --dataset coding-100 --baseline claude-sonnet --route coding --export results.json
+agent-hub benchmark compare --baseline claude-sonnet --dataset coding-100
 ```
 
 The command writes reproducible proof to
 `.agent-hub/state/benchmark_reports/benchmark-report.json` and
-`.agent-hub/state/benchmark_reports/benchmark-report.md` by default, including:
+`.agent-hub/state/benchmark_reports/benchmark-report.md` by default, and the
+`--export` target gives you a one-click JSON artifact to post or compare.
+Each report includes:
 
 - cost reduction versus your baseline model
 - latency reduction versus your baseline model
 - success-rate delta across the same task corpus
 - per-task selected model, cost, latency, and outcome
+- dataset name and fingerprint for verification
+- rerun and verify commands
 
 In VS Code, the first-run proof flow is:
 
@@ -44,10 +79,18 @@ Additional local proof commands:
 
 - `agent-hub replay-route <request-id>` shows the request, selected model,
   alternatives, expected quality deltas, cost deltas, and the routing reason.
+- `agent-hub explain-route <request-id>` explains a recorded decision with
+  selected and rejected candidates.
+- `agent-hub benchmark compare --baseline claude-sonnet --dataset coding-100`
+  prints a verified Agent-Hub-vs-baseline cost, latency, and quality summary.
 - `agent-hub benchmark-card --variant markdown` prints a shareable personal
   benchmark card.
 - `agent-hub benchmark-card --variant reddit`, `--variant x`, or
   `--variant github_discussion` formats the same benchmark for community posts.
+- `agent-hub generate-proof` emits anonymous local proof with version, route
+  count, estimated savings, and provider count.
+- `agent-hub share-proof` opens GitHub Discussion, Reddit, and X share links
+  prefilled from the anonymous proof. No backend is required.
 - `agent-hub generate-case-study --output docs/proofs/my-proof.md` turns local
   benchmark and routing history into a paste-ready case study.
 - `agent-hub benchmark-evolution --months 3` shows how route distribution

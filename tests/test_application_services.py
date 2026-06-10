@@ -11,6 +11,11 @@ from agent_hub.config import AgentConfig, HubConfig, MCPServerConfig, RouteRule
 from agent_hub.core.router import AgentRouter
 from agent_hub.evaluation import BenchmarkResult, ProviderScoreStore
 from agent_hub.models import HubRequest, ProviderResult
+from agent_hub.runtime_usability import (
+    runtime_route_smoke,
+    runtime_usability_body,
+    save_runtime_usability_record,
+)
 
 
 class ApplicationServiceTests(unittest.TestCase):
@@ -151,20 +156,81 @@ class ApplicationServiceTests(unittest.TestCase):
 
     def test_readiness_score_rewards_real_route_ready_health(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config = _config(Path(tmp))
+            config = _runtime_config(Path(tmp))
             router = AgentRouter(config, provider_factory=_Provider)
             service = DiagnosticsApplicationService(config)
+            provider_health = {"coder": {"available": True, "success_count": 1}}
+            runtime = runtime_usability_body(
+                config,
+                provider_health,
+                route_smoke=runtime_route_smoke(
+                    research_ok=True,
+                    coding_ok=True,
+                    coding_agent="coder",
+                ),
+            )
 
             readiness = service.readiness_body(
                 router,
-                provider_health={"coder": {"available": True}},
+                provider_health=provider_health,
+                runtime_usability=runtime,
             )
 
             self.assertEqual(readiness["object"], "agent_hub.readiness")
             self.assertGreaterEqual(readiness["rating"], 9.0)
             self.assertEqual(readiness["state"], "production_ready")
             self.assertEqual(readiness["feature_status"]["provider_routing"]["state"], "ready")
+            self.assertEqual(readiness["runtime_usability"]["state"], "ready")
             self.assertTrue(any(item["id"] == "security_guardrails" for item in readiness["items"]))
+
+    def test_runtime_usability_requires_verified_coding_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _runtime_config(Path(tmp))
+
+            runtime = runtime_usability_body(
+                config,
+                {"coder": {"available": False}},
+                route_smoke=runtime_route_smoke(research_ok=True, coding_ok=False),
+            )
+
+        self.assertEqual(runtime["state"], "needs_local_model")
+        self.assertFalse(runtime["ready"])
+        self.assertFalse(runtime["checks"][1]["ok"])
+
+    def test_runtime_usability_does_not_mask_failed_latest_smoke_with_old_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _runtime_config(Path(tmp))
+
+            runtime = runtime_usability_body(
+                config,
+                {"coder": {"available": True, "success_count": 3}},
+                route_smoke=runtime_route_smoke(
+                    research_ok=True,
+                    coding_ok=False,
+                    coding_error="Provider requires approval.",
+                ),
+            )
+
+        checks = {item["id"]: item for item in runtime["checks"]}
+        self.assertEqual(runtime["state"], "degraded")
+        self.assertTrue(checks["verified_coding_provider"]["ok"])
+        self.assertFalse(checks["route_smoke_recorded"]["ok"])
+        self.assertIn("did not verify", checks["route_smoke_recorded"]["detail"])
+
+    def test_readiness_does_not_claim_production_ready_without_runtime_smoke(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _runtime_config(Path(tmp))
+            router = AgentRouter(config, provider_factory=_Provider)
+            readiness = DiagnosticsApplicationService(config).readiness_body(
+                router,
+                provider_health={"coder": {"available": True, "success_count": 1}},
+            )
+
+        self.assertNotEqual(readiness["state"], "production_ready")
+        self.assertEqual(readiness["runtime_usability"]["state"], "degraded")
+        self.assertLess(readiness["runtime_usability"]["score"], 100)
+        self.assertEqual(readiness["contract_readiness"]["state"], "production_ready")
+        self.assertEqual(readiness["next_step"]["id"], "runtime_usability")
 
     def test_readiness_treats_cooling_down_provider_as_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -286,7 +352,7 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertTrue(body["all_local_areas_10"], body["blockers"])
         self.assertEqual(len(body["areas"]), 12)
         self.assertEqual({area["rating"] for area in body["areas"]}, {10.0})
-        self.assertIn("third-party provider quality", body["honesty"])
+        self.assertIn("runtime_usability", body["honesty"])
 
     def test_enterprise_status_summarizes_policy_and_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -316,15 +382,25 @@ class ApplicationServiceTests(unittest.TestCase):
 
     def test_production_check_passes_for_route_ready_guarded_install(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config = _config(Path(tmp))
+            config = _runtime_config(Path(tmp))
             config.agents["coder"].supports_tools = True
             config.agents["coder"].supports_function_calling = True
+            save_runtime_usability_record(
+                config,
+                {
+                    "route_smoke": runtime_route_smoke(
+                        research_ok=True,
+                        coding_ok=True,
+                        coding_agent="coder",
+                    )
+                },
+            )
             router = AgentRouter(config, provider_factory=_Provider)
             service = DiagnosticsApplicationService(config)
 
             report = service.production_check_body(
                 router,
-                provider_health={"coder": {"available": True}},
+                provider_health={"coder": {"available": True, "success_count": 1}},
             )
 
             self.assertEqual(report["object"], "agent_hub.production_check")
@@ -404,6 +480,34 @@ def _config(root: Path) -> HubConfig:
                 model="coder-test",
                 base_url="http://127.0.0.1:9999",
             )
+        },
+    )
+
+
+def _runtime_config(root: Path) -> HubConfig:
+    return HubConfig(
+        state_dir=root / "state",
+        repo_context_enabled=False,
+        default_route=["coder"],
+        routes=[
+            RouteRule(name="research", agents=["local-research"]),
+            RouteRule(name="coding", agents=["coder"]),
+            RouteRule(name="cloud-agent", agents=["coder"]),
+        ],
+        agents={
+            "coder": AgentConfig(
+                name="coder",
+                provider="openai-compatible",
+                model="coder-test",
+                base_url="http://127.0.0.1:9999",
+            ),
+            "local-research": AgentConfig(
+                name="local-research",
+                provider="local-research",
+                provider_type="local-research",
+                model="local-research",
+                free=True,
+            ),
         },
     )
 

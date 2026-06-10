@@ -427,8 +427,8 @@ class AgentRouter:
             candidates=[agent.name for agent in candidates],
         )
 
-        for agent in candidates:
-            if self._is_on_cooldown(agent.name) and len(candidates) > 1:
+        for index, agent in enumerate(candidates):
+            if self._should_skip_cooldown_candidate(candidates, index, effective_request):
                 failover.append(
                     FailoverEvent(
                         agent=agent.name,
@@ -2318,6 +2318,27 @@ class AgentRouter:
                 health.cooldown_deadline() if health else 0.0,
             )
 
+    def _should_skip_cooldown_candidate(
+        self,
+        candidates: list[AgentConfig],
+        index: int,
+        request: HubRequest | None = None,
+    ) -> bool:
+        agent = candidates[index]
+        if not self._is_on_cooldown(agent.name):
+            return False
+        for candidate in candidates[index + 1 :]:
+            if self._is_on_cooldown(candidate.name):
+                continue
+            if request is not None:
+                if self._preflight_skip_reason(candidate, request):
+                    continue
+                permission = self._provider_permission_decision(candidate, request)
+                if permission is not None and not permission.allowed:
+                    continue
+            return True
+        return False
+
     def cooldown_agent(self, agent_name: str, seconds: float | None = None) -> None:
         agent = self.config.agents.get(agent_name)
         duration = seconds if seconds is not None else (agent.cooldown_seconds if agent else 0)
@@ -2832,13 +2853,21 @@ class AgentRouter:
         with self._state_lock:
             health = self._health.setdefault(agent.name, ProviderHealth())
             now = time.time()
+            request_started_at = max(0.0, now - max(0.0, latency_seconds))
+            success_started_before_latest_failure = bool(
+                health.last_failure_at
+                and request_started_at <= health.last_failure_at
+                and health.cooldown_deadline() > now
+            )
+            previous_rate_limited = health.rate_limited
+            previous_quota_exhausted = health.quota_exhausted
             health.success_count += 1
             health.total_latency_seconds += max(0.0, latency_seconds)
             health.last_success_at = now
             health.last_checked_at = now
             health.last_request_source = request_source(request)
             health.last_route = request.route or ""
-            health.last_request_started_at = max(0.0, now - max(0.0, latency_seconds))
+            health.last_request_started_at = request_started_at
             health.last_first_token_latency_seconds = max(
                 0.0,
                 float(first_token_latency_seconds)
@@ -2848,8 +2877,9 @@ class AgentRouter:
             health.last_total_latency_seconds = max(0.0, latency_seconds)
             health.last_finish_reason = str(result.finish_reason or "")
             health.last_failover_attempts = max(0, int(failover_attempts))
-            health.rate_limited = False
-            health.quota_exhausted = False
+            if not success_started_before_latest_failure:
+                health.rate_limited = False
+                health.quota_exhausted = False
             tokens_in = _usage_int(result.usage, "prompt_tokens", "input_tokens")
             tokens_out = _usage_int(result.usage, "completion_tokens", "output_tokens")
             if tokens_out <= 0:
@@ -2871,6 +2901,9 @@ class AgentRouter:
                 _provider_metadata_from_raw(result.raw),
                 agent=agent,
             )
+            if success_started_before_latest_failure:
+                health.rate_limited = health.rate_limited or previous_rate_limited
+                health.quota_exhausted = health.quota_exhausted or previous_quota_exhausted
             health.last_context_compaction_usage = _context_usage(request)
             health.quota_state = _health_quota_state(health)
             self._save_provider_health()

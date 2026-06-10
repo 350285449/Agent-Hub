@@ -6,6 +6,8 @@
 - Tasks:
 - Repository Size:
 - Workflow:
+- Dataset:
+- Dataset Fingerprint:
 - Date:
 
 ## Results
@@ -31,7 +33,9 @@ Reason:
 ## Reproduction
 
 ```sh
-agent-hub benchmark run --baseline <baseline-model> --route coding
+agent-hub benchmark --dataset coding-100 --baseline <baseline-model> --route coding --export results.json
+agent-hub benchmark verify results.json --dataset coding-100
+agent-hub generate-proof
 agent-hub benchmark-card --variant markdown
 agent-hub generate-case-study --output docs/proofs/<proof-name>.md
 ```

@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from agent_hub.cli import main
 from agent_hub.models import HubResponse
+from agent_hub.observability import record_event
 
 
 class CliTests(unittest.TestCase):
@@ -179,6 +180,8 @@ class CliTests(unittest.TestCase):
             self.assertTrue(any(row["id"] == "vscode_extension_prepare_backend" for row in data["install_checks"]))
             self.assertTrue(any(row["id"] == "vscode_backend_gitignored" for row in data["install_checks"]))
             self.assertTrue(data["backend_reachable"]["ok"])
+            self.assertIn("runtime_usability", data)
+            self.assertIn("local_models", data)
             self.assertTrue(any("Cline:" in fix for fix in data["exact_fixes"]))
 
     def test_doctor_fix_safe_repairs_route_refs_and_shell_policy(self) -> None:
@@ -226,8 +229,98 @@ class CliTests(unittest.TestCase):
             report = json.loads(buffer.getvalue())
             fixed = json.loads(path.read_text(encoding="utf-8"))
             self.assertTrue(report["fix_safe"]["changed"])
+            self.assertTrue(report["fix_safe"]["backup_path"])
+            self.assertTrue(Path(report["fix_safe"]["backup_path"]).exists())
             self.assertEqual(fixed["default_route"], ["echo"])
             self.assertEqual(fixed["routes"][0]["agents"], ["echo"])
+            self.assertTrue(fixed["free_only"])
+            self.assertEqual(fixed["approval_mode"], "safe")
+            self.assertFalse(fixed["allow_shell_tools"])
+
+    def test_checkup_fix_safe_verify_json_reports_runtime_usability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "state_dir": str(Path(tmp) / "state"),
+                        "auto_detect_local_models": False,
+                        "free_only": False,
+                        "approval_mode": "ask",
+                        "allow_shell_tools": True,
+                        "default_route": ["coder"],
+                        "routes": [
+                            {"name": "research", "agents": ["local-research"]},
+                            {"name": "coding", "agents": ["coder"]},
+                            {"name": "cloud-agent", "agents": ["coder"]},
+                        ],
+                        "agents": [
+                            {
+                                "name": "coder",
+                                "provider": "openai-compatible",
+                                "model": "coder-test",
+                                "base_url": "http://127.0.0.1:9999/v1",
+                                "free": True,
+                            },
+                            {
+                                "name": "local-research",
+                                "provider": "local-research",
+                                "provider_type": "local-research",
+                                "model": "local-research",
+                                "free": True,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+            release_check = {
+                "id": "release_validation",
+                "category": "release",
+                "ok": True,
+                "detail": "passed",
+                "failures": [],
+            }
+            local_models = [
+                {
+                    "name": "coder",
+                    "online": True,
+                    "configured_model_available": True,
+                    "configured_model": "coder-test",
+                }
+            ]
+            smoke = {
+                "recorded_at": 1.0,
+                "research": {"ok": True, "agent": "local-research"},
+                "coding": {"ok": True, "agent": "coder"},
+            }
+
+            with (
+                patch("agent_hub.cli._backend_reachability") as backend,
+                patch("agent_hub.commands_doctor._backend_reachability") as doctor_backend,
+                patch("agent_hub.commands_doctor._local_models_report", return_value=local_models),
+                patch("agent_hub.commands_doctor._validate_backend_snapshot", return_value=[]),
+                patch("agent_hub.commands_doctor._release_validation_check", return_value=release_check),
+                patch("agent_hub.commands_doctor._run_checkup_route_smoke", return_value=smoke),
+                redirect_stdout(buffer),
+            ):
+                backend.return_value = {"ok": True, "url": "http://127.0.0.1:8787/health", "detail": "HTTP 200"}
+                doctor_backend.return_value = backend.return_value
+                code = main(["--config", str(path), "checkup", "--fix-safe", "--verify", "--json"])
+
+            self.assertEqual(code, 0)
+            report = json.loads(buffer.getvalue())
+            fixed = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(report["object"], "agent_hub.checkup")
+            self.assertTrue(report["fix_safe"]["changed"])
+            self.assertTrue(Path(report["fix_safe"]["backup_path"]).exists())
+            self.assertTrue(report["verify"])
+            self.assertEqual(report["route_smoke"]["coding"]["agent"], "coder")
+            self.assertEqual(report["runtime_usability"]["state"], "ready")
+            self.assertTrue(report["ok"])
+            self.assertTrue(fixed["free_only"])
+            self.assertEqual(fixed["approval_mode"], "safe")
             self.assertFalse(fixed["allow_shell_tools"])
 
     def test_doctor_does_not_warn_for_cline_cloud_auto_approval(self) -> None:
@@ -696,6 +789,254 @@ class CliTests(unittest.TestCase):
             self.assertIsNone(data["selected_model"])
             self.assertEqual(data["skipped_providers"][0]["agent"], "local")
             self.assertIn("local endpoint probe failed", data["skipped_providers"][0]["reason"])
+
+    def test_local_models_report_reuses_duplicate_base_url_probe(self) -> None:
+        from agent_hub.commands_provider import _local_models_report
+        from agent_hub.config import AgentConfig, HubConfig
+
+        config = HubConfig(
+            agents={
+                "local-a": AgentConfig(
+                    name="local-a",
+                    provider="openai-compatible",
+                    model="model-a",
+                    base_url="http://127.0.0.1:9999/v1",
+                    free=True,
+                ),
+                "local-b": AgentConfig(
+                    name="local-b",
+                    provider="openai-compatible",
+                    model="model-b",
+                    base_url="http://127.0.0.1:9999/v1",
+                    free=True,
+                ),
+            },
+        )
+        calls: list[str] = []
+
+        def fake_models(base_url: str, **_kwargs: object) -> list[str]:
+            calls.append(base_url)
+            return ["model-a", "model-b"]
+
+        with patch("agent_hub.commands_provider.fetch_openai_models", side_effect=fake_models):
+            rows = _local_models_report(config)
+
+        self.assertEqual(calls, ["http://127.0.0.1:9999/v1"])
+        self.assertEqual([row["configured_model_available"] for row in rows], [True, True])
+
+    def test_benchmark_dataset_export_and_verify_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+            export = Path(tmp) / "results.json"
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "benchmark",
+                        "--dataset",
+                        "proof-50",
+                        "--export",
+                        str(export),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(export.exists())
+            report = json.loads(export.read_text(encoding="utf-8"))
+            self.assertEqual(report["object"], "agent_hub.benchmark_proof")
+            self.assertEqual(report["dataset"]["name"], "proof-50")
+            self.assertIn("dataset_fingerprint", report)
+
+            verify_buffer = io.StringIO()
+            with redirect_stdout(verify_buffer):
+                verify_code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "benchmark",
+                        "verify",
+                        str(export),
+                        "--dataset",
+                        "proof-50",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(verify_code, 0)
+            verification = json.loads(verify_buffer.getvalue())
+            self.assertTrue(verification["ok"])
+
+    def test_benchmark_compare_cli_outputs_verified_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+            export = Path(tmp) / "compare.json"
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "benchmark",
+                        "compare",
+                        "--dataset",
+                        "proof-50",
+                        "--limit",
+                        "2",
+                        "--export",
+                        str(export),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(export.exists())
+            comparison = json.loads(buffer.getvalue())
+            self.assertEqual(comparison["object"], "agent_hub.benchmark_comparison")
+            self.assertTrue(comparison["verified"])
+            self.assertEqual(comparison["verified_tasks"], 2)
+            self.assertIn("quality_pct", comparison["summary"])
+            self.assertEqual(json.loads(export.read_text(encoding="utf-8"))["object"], "agent_hub.benchmark_comparison")
+
+            text_buffer = io.StringIO()
+            with redirect_stdout(text_buffer):
+                text_code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "benchmark",
+                        "compare",
+                        comparison["report_path"],
+                        "--dataset",
+                        "proof-50",
+                    ]
+                )
+
+            self.assertEqual(text_code, 0)
+            output = text_buffer.getvalue()
+            self.assertIn("Agent-Hub vs", output)
+            self.assertIn("Verified Tasks: 2", output)
+            self.assertIn("Quality:", output)
+
+    def test_generate_and_share_proof_cli_without_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+            config_state = Path(tmp) / "state"
+            config_state.mkdir(parents=True, exist_ok=True)
+            record_event(
+                config_state,
+                "routing",
+                {"type": "routing_decision", "request_id": "r1", "provider": "echo", "model": "local-echo"},
+            )
+            report_dir = config_state / "benchmark_reports"
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / "benchmark-report.json").write_text(
+                json.dumps(
+                    {
+                        "object": "agent_hub.benchmark_proof",
+                        "task_count": 50,
+                        "dataset": {"name": "proof-50", "fingerprint": "abc"},
+                        "comparison": {
+                            "cost_reduction": 34.0,
+                            "latency_reduction": 18.0,
+                            "success_delta": 2.0,
+                        },
+                        "results": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            proof_buffer = io.StringIO()
+            with redirect_stdout(proof_buffer):
+                code = main(["--config", str(path), "generate-proof"])
+
+            self.assertEqual(code, 0)
+            proof = json.loads(proof_buffer.getvalue())
+            self.assertEqual(proof["routes"], 1)
+            self.assertEqual(proof["estimated_savings"], 34.0)
+            self.assertEqual(proof["providers_used"], 1)
+
+            share_buffer = io.StringIO()
+            with patch("agent_hub.anonymous_proof.webbrowser.open", return_value=True), redirect_stdout(share_buffer):
+                share_code = main(["--config", str(path), "share-proof", "--no-open", "--target", "x"])
+
+            self.assertEqual(share_code, 0)
+            share_output = share_buffer.getvalue()
+            self.assertIn("Agent-Hub Benchmark", share_output)
+            self.assertIn("twitter.com/intent/tweet", share_output)
+
+    def test_explain_route_accepts_recorded_request_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+            state = Path(tmp) / "state"
+            state.mkdir(parents=True, exist_ok=True)
+            record_event(
+                state,
+                "routing",
+                {
+                    "type": "routing_decision",
+                    "request_id": "abc123",
+                    "agent": "echo",
+                    "provider": "echo",
+                    "model": "local-echo",
+                    "routing_decision": {
+                        "selected_agent": "echo",
+                        "selected_provider": "echo",
+                        "selected_model": "local-echo",
+                        "reason": "lowest estimated cost",
+                        "candidate_scores": [
+                            {
+                                "agent": "echo",
+                                "provider": "echo",
+                                "model": "local-echo",
+                                "final_routing_score": 90,
+                                "estimated_cost_usd": 0.0,
+                            },
+                            {
+                                "agent": "paid",
+                                "provider": "openai",
+                                "model": "gpt-test",
+                                "final_routing_score": 88,
+                                "estimated_cost_usd": 0.01,
+                            },
+                        ],
+                    },
+                },
+            )
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(["--config", str(path), "explain-route", "abc123"])
+
+            self.assertEqual(code, 0)
+            output = buffer.getvalue()
+            self.assertIn("Selected:", output)
+            self.assertIn("Reasons:", output)
+            self.assertIn("Rejected:", output)
+
+    def test_demo_cli_runs_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(["--config", str(path), "demo"])
+
+            self.assertEqual(code, 0)
+            output = buffer.getvalue()
+            self.assertIn("Agent-Hub Demo", output)
+            self.assertIn("Savings Report", output)
+            self.assertIn("agent-hub benchmark --dataset coding-100 --export results.json", output)
 
     def test_debug_bundle_exports_zip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

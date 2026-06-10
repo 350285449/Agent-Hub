@@ -2766,6 +2766,97 @@ class AgentRunnerTests(unittest.TestCase):
             ]
             self.assertEqual(len(duplicates), 3)
 
+    def test_read_file_auto_caps_context_by_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "big.txt").write_text("x" * 50_000, encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                context_mode="minimal",
+                agent_max_steps=2,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return ProviderResult(
+                            text='{"action":"tool","tool":"read_file","args":{"path":"big.txt"}}',
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(text='{"action":"final","answer":"Done."}', model=self.agent.model)
+
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(session_id="agent", messages=[{"role": "user", "content": "Read big.txt"}])
+            )
+
+            result = response.raw["agent_hub"]["steps"][0]["result"]["result"]
+            self.assertEqual(response.text, "Done.")
+            self.assertEqual(result["chars"], 12_000)
+            self.assertTrue(result["truncated"])
+
+    def test_read_file_explicit_max_chars_overrides_auto_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "big.txt").write_text("x" * 50_000, encoding="utf-8")
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                context_mode="minimal",
+                agent_max_steps=2,
+                default_route=["local"],
+                agents={
+                    "local": AgentConfig(
+                        name="local",
+                        provider="openai-compatible",
+                        model="local-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            calls = 0
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return ProviderResult(
+                            text=(
+                                '{"action":"tool","tool":"read_file",'
+                                '"args":{"path":"big.txt","max_chars":30000}}'
+                            ),
+                            model=self.agent.model,
+                        )
+                    return ProviderResult(text='{"action":"final","answer":"Done."}', model=self.agent.model)
+
+            response = AgentRunner(config, AgentRouter(config, provider_factory=Provider)).run(
+                HubRequest(session_id="agent", messages=[{"role": "user", "content": "Read big.txt"}])
+            )
+
+            result = response.raw["agent_hub"]["steps"][0]["result"]["result"]
+            self.assertEqual(response.text, "Done.")
+            self.assertEqual(result["chars"], 30_000)
+            self.assertTrue(result["truncated"])
+
     def test_repeated_repo_map_uses_compact_references(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

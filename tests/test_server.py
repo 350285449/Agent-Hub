@@ -107,6 +107,8 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(experience["primary_action"]["id"], "configure_agents")
             self.assertEqual(experience["coding_tool"]["provider"], "openai-compatible")
             self.assertEqual(experience["coding_tool"]["model"], "agent-hub-coding")
+            self.assertEqual(data["runtime_usability"]["object"], "agent_hub.runtime_usability")
+            self.assertEqual(data["runtime_usability"]["state"], "needs_local_model")
             self.assertEqual(data["feature_status"]["provider_routing"]["state"], "needs_setup")
 
     def test_health_uses_short_lived_diagnostics_cache(self) -> None:
@@ -958,6 +960,7 @@ class ServerCompatibilityTests(unittest.TestCase):
             try:
                 base = f"http://127.0.0.1:{server.server_address[1]}"
                 readiness = _get_json(f"{base}/v1/readiness")
+                status = _get_json(f"{base}/v1/status")
                 production = _get_json(f"{base}/v1/production-check")
                 feature_scorecard = _get_json(f"{base}/v1/feature-scorecard")
                 dashboard = _get_text(f"{base}/dashboard")
@@ -968,6 +971,7 @@ class ServerCompatibilityTests(unittest.TestCase):
 
             self.assertEqual(readiness["object"], "agent_hub.readiness")
             self.assertIn("score", readiness)
+            self.assertIn("runtime_usability", readiness)
             self.assertTrue(any(item["id"] == "route_ready_provider" for item in readiness["items"]))
             self.assertEqual(readiness["feature_status"]["external_mcp_bridge"]["state"], "execution_disabled")
             self.assertEqual(readiness["feature_status"]["universal_compatibility"]["state"], "ready")
@@ -976,10 +980,13 @@ class ServerCompatibilityTests(unittest.TestCase):
             )
             self.assertEqual(production["object"], "agent_hub.production_check")
             self.assertIn("checks", production)
+            self.assertIn("runtime_usability", production)
             self.assertTrue(any(check["id"] == "vscode_backend_contract" for check in production["checks"]))
+            self.assertEqual(status["runtime_usability"]["object"], "agent_hub.runtime_usability")
             self.assertEqual(feature_scorecard["object"], "agent_hub.feature_scorecard")
             self.assertEqual(feature_scorecard["rating"], 10.0)
             self.assertTrue(feature_scorecard["all_local_areas_10"], feature_scorecard["blockers"])
+            self.assertIn("runtime_usability", feature_scorecard)
             self.assertIn("readiness", dashboard.lower())
             self.assertIn("/dashboard/readiness", dashboard)
             self.assertIn("/dashboard/feature-scorecard", dashboard)
@@ -988,8 +995,10 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("/dashboard/production-check", dashboard)
             self.assertIn("Raw APIs:", dashboard)
             self.assertIn("Agent Hub Readiness", readiness_dashboard)
+            self.assertIn("Runtime Usability", readiness_dashboard)
             self.assertIn("Readiness Scorecard", readiness_dashboard)
             self.assertIn("Agent Hub Feature Scorecard", feature_dashboard)
+            self.assertIn("Runtime usability is scored separately", feature_dashboard)
             self.assertIn("Area Ratings", feature_dashboard)
 
     def test_health_exposes_capability_graph_and_token_budget(self) -> None:

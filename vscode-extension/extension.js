@@ -857,9 +857,12 @@ async function sidebarDashboardState() {
     contextDiagnostics: {},
     statistics: sidebarStatistics(null, null, null, null, [], [], null),
     readiness: null,
+    runtimeUsability: null,
     optimization: null,
     routingIntelligence: null,
     routingExplanation: null,
+    routeVisualization: sidebarRouteVisualization(null, []),
+    liveSavings: sidebarLiveSavings(null, {}, null),
     experience: null,
     runtimeKernel: sidebarRuntimeKernel(null),
     modelStats: sidebarModelStats(null, null, null, null),
@@ -952,6 +955,7 @@ async function sidebarDashboardState() {
     dashboard.statusText = `Running at ${config.serverUrl}`;
     dashboard.health = health;
     dashboard.readiness = health && health.readiness && typeof health.readiness === "object" ? health.readiness : null;
+    dashboard.runtimeUsability = health && health.runtime_usability && typeof health.runtime_usability === "object" ? health.runtime_usability : null;
     dashboard.experience = health && health.experience_summary && typeof health.experience_summary === "object" ? health.experience_summary : null;
     dashboard.activeModel = sidebarActiveModel(health, limits);
     dashboard.providers = sidebarProviderRows(health, limits);
@@ -968,7 +972,7 @@ async function sidebarDashboardState() {
     if (metrics && dashboard.optimization) {
       metrics.optimization = dashboard.optimization;
     }
-    dashboard.statistics = sidebarStatistics(health, usage, metrics, permissions, dashboard.providers, dashboard.limits, debugContext, dashboard.optimization, dashboard.readiness);
+    dashboard.statistics = sidebarStatistics(health, usage, metrics, permissions, dashboard.providers, dashboard.limits, debugContext, dashboard.optimization, dashboard.readiness, dashboard.runtimeUsability);
     dashboard.modelStats = sidebarModelStats(dashboard, modelLeaderboard, benchmarks, costDashboard);
     dashboard.insights = sidebarInsightRows(dashboard, metrics);
     dashboard.onboarding = await sidebarOnboardingState(config, health);
@@ -978,6 +982,8 @@ async function sidebarDashboardState() {
     dashboard.trustControls = sidebarTrustControls(config, permissions, dashboard.tools);
     dashboard.activity = sidebarActivityRows(usage, metrics, dashboard.failedModels);
     dashboard.routingChain = sidebarRoutingChain(health, limits);
+    dashboard.liveSavings = sidebarLiveSavings(costDashboard, dashboard.statistics, dashboard.routingExplanation);
+    dashboard.routeVisualization = sidebarRouteVisualization(dashboard.routingExplanation, dashboard.routingChain);
     dashboard.logs = "Open the Agent Hub output for live server logs.";
     return dashboard;
   } catch (error) {
@@ -1095,7 +1101,7 @@ function sidebarTokenUsage(usage, limits) {
   };
 }
 
-function sidebarStatistics(health, usage, metrics, permissions, providers, limits, debugContext, optimization, readiness) {
+function sidebarStatistics(health, usage, metrics, permissions, providers, limits, debugContext, optimization, readiness, runtimeUsability) {
   const providerRows = Array.isArray(providers) && providers.length ? providers : sidebarProviderRows(health, limits);
   const counters = metrics && metrics.counters && typeof metrics.counters === "object" ? metrics.counters : {};
   const metricUsage = metrics && metrics.usage && typeof metrics.usage === "object" ? metrics.usage : {};
@@ -1172,6 +1178,18 @@ function sidebarStatistics(health, usage, metrics, permissions, providers, limit
   const readinessNextStep = readiness && readiness.next_step && typeof readiness.next_step === "object"
     ? readiness.next_step
     : null;
+  const runtime = runtimeUsability && typeof runtimeUsability === "object"
+    ? runtimeUsability
+    : health && health.runtime_usability && typeof health.runtime_usability === "object"
+      ? health.runtime_usability
+      : null;
+  const runtimeUsabilityScore = runtime && Number.isFinite(Number(runtime.score))
+    ? Math.max(0, Math.min(100, Math.round(Number(runtime.score))))
+    : null;
+  const runtimeUsabilityState = runtime && runtime.state ? String(runtime.state).replace(/_/g, " ") : "";
+  const runtimeUsabilityNextStep = runtime && runtime.next_step && typeof runtime.next_step === "object"
+    ? runtime.next_step
+    : null;
 
   return {
     providersTotal: totalProviders,
@@ -1211,6 +1229,11 @@ function sidebarStatistics(health, usage, metrics, permissions, providers, limit
     readinessState,
     readinessNextStepLabel: readinessNextStep && readinessNextStep.label ? readinessNextStep.label : "",
     readinessNextStepDetail: readinessNextStep && readinessNextStep.detail ? readinessNextStep.detail : "",
+    runtimeUsabilityScore,
+    runtimeUsabilityState,
+    runtimeUsabilityReady: !!(runtime && runtime.ready),
+    runtimeUsabilityNextStepLabel: runtimeUsabilityNextStep && runtimeUsabilityNextStep.label ? runtimeUsabilityNextStep.label : "",
+    runtimeUsabilityNextStepDetail: runtimeUsabilityNextStep && runtimeUsabilityNextStep.detail ? runtimeUsabilityNextStep.detail : "",
     bestWorkflow: bestWorkflow.label || bestWorkflow.workflow_pattern || "",
     bestWorkflowAttempts: Number(bestWorkflow.attempts || 0),
     bestWorkflowSuccessRate: Math.round(Number(bestWorkflow.success_rate || 0) * 100),
@@ -1612,6 +1635,17 @@ function moneySummaryText(knownCost, averageKnownCost) {
   return `$${Number(value || 0).toFixed(value < 0.01 ? 4 : 2)}`;
 }
 
+function compactMoneyText(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  if (Math.abs(number) >= 1000) {
+    return `$${(number / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  return `$${number.toFixed(number < 0.01 ? 4 : 2)}`;
+}
+
 function sidebarInsightRows(dashboard, metrics) {
   const stats = dashboard.statistics || {};
   const insights = [];
@@ -1625,6 +1659,19 @@ function sidebarInsightRows(dashboard, metrics) {
       main: experience.title,
       meta: experience.detail || "Agent Hub summarized the next useful step."
     });
+  }
+  if (dashboard.status === "Running" && stats.runtimeUsabilityScore !== null && stats.runtimeUsabilityScore !== undefined) {
+    if (stats.runtimeUsabilityReady) {
+      insights.push({ tone: "ok", main: `Runtime ${stats.runtimeUsabilityScore}/100`, meta: stats.runtimeUsabilityState || "ready for real coding tasks" });
+    } else {
+      insights.push({
+        tone: stats.runtimeUsabilityState === "degraded" ? "warn" : "error",
+        main: `Runtime ${stats.runtimeUsabilityScore}/100`,
+        meta: stats.runtimeUsabilityNextStepLabel
+          ? `${stats.runtimeUsabilityNextStepLabel}: ${stats.runtimeUsabilityNextStepDetail || "run checkup"}`
+          : (stats.runtimeUsabilityState || "runtime verification needed")
+      });
+    }
   }
   if (dashboard.status === "Running" && stats.readinessScore !== null && stats.readinessScore !== undefined) {
     if (stats.readinessScore >= 90) {
@@ -1849,6 +1896,125 @@ function sidebarRoutingExplanation(intelligence, health, limits) {
     rejected: rejected.slice(0, 4),
     fallbackOptions
   };
+}
+
+function sidebarLiveSavings(costDashboard, stats, routing) {
+  const summary = objectValue(costDashboard && costDashboard.summary);
+  const body = objectValue(costDashboard);
+  const costSavedPercent = firstNumber(
+    summary.cost_reduction,
+    summary.cost_reduction_percent,
+    summary.savings_rate_percent
+  );
+  const routeSavings = firstNumber(routing && routing.costSavings);
+  const savedToday = firstNumber(
+    routing && routing.savedToday,
+    summary.saved_today_usd,
+    body.saved_today_usd
+  );
+  const savedMonth = firstNumber(
+    routing && routing.savedMonth,
+    summary.saved_this_month_usd,
+    body.saved_this_month_usd
+  );
+  const requests = numberOrZero(stats && (stats.requests || stats.totalCalls || stats.successfulCalls));
+  const fallbacksPrevented = numberOrZero(
+    stats && (stats.failedRequestsRecovered || stats.routingFallbacks)
+  );
+  const displaySavings = firstNumber(savedMonth, savedToday, routeSavings);
+  const hasSavingsSignal = costSavedPercent !== null || displaySavings !== null;
+  const savingsDetail = displaySavings === null
+    ? "waiting for priced routes"
+    : `${compactMoneyText(displaySavings)} ${savedMonth !== null || savedToday !== null ? "tracked" : "latest route estimate"}`;
+  return {
+    title: "This week",
+    tiles: [
+      {
+        label: "Cost Saved",
+        value: costSavedPercent === null ? compactMoneyText(displaySavings) : Math.round(costSavedPercent) + "%",
+        detail: savingsDetail,
+        tone: hasSavingsSignal ? "ok" : "warn"
+      },
+      {
+        label: "Requests",
+        value: compactStatValue(requests),
+        detail: "routed locally",
+        tone: requests ? "info" : "warn"
+      },
+      {
+        label: "Fallbacks Prevented",
+        value: compactStatValue(fallbacksPrevented),
+        detail: "health-aware reroutes",
+        tone: fallbacksPrevented ? "ok" : "info"
+      }
+    ]
+  };
+}
+
+function sidebarRouteVisualization(routing, chain) {
+  const row = routing && typeof routing === "object" ? routing : {};
+  const selectedLabel = [row.selectedProvider || row.selectedAgent || "", row.selectedModel || ""]
+    .filter(Boolean)
+    .join(" / ");
+  const rows = [];
+  if (selectedLabel) {
+    rows.push({
+      label: selectedLabel,
+      state: "Selected",
+      tone: "ok",
+      reasons: routeVisualizationReasons(row)
+    });
+  }
+  const rejected = Array.isArray(row.rejected) && row.rejected.length
+    ? row.rejected
+    : Array.isArray(row.fallbackOptions)
+      ? row.fallbackOptions
+      : Array.isArray(chain)
+        ? chain.slice(1)
+        : [];
+  for (const item of rejected.slice(0, 4)) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    rows.push({
+      label: [item.provider || item.agent || "provider", item.model || ""].filter(Boolean).join(" / "),
+      state: "Rejected",
+      tone: item.available ? "warn" : "error",
+      reasons: [item.reason || item.why || "Ranked behind selected route"]
+    });
+  }
+  return {
+    rows,
+    summary: row.summary || ""
+  };
+}
+
+function routeVisualizationReasons(row) {
+  const reasons = [];
+  const raw = Array.isArray(row.reasons) ? row.reasons : [];
+  for (const item of raw) {
+    const label = item && typeof item === "object" ? String(item.label || item.detail || "") : String(item || "");
+    const lower = label.toLowerCase();
+    if (lower.includes("cost") && !reasons.includes("Cost")) {
+      reasons.push("Cost");
+    }
+    if ((lower.includes("context") || lower.includes("repo")) && !reasons.includes("Context fit")) {
+      reasons.push("Context fit");
+    }
+    if ((lower.includes("health") || lower.includes("success") || lower.includes("reliability")) && !reasons.includes("Reliability")) {
+      reasons.push("Reliability");
+    }
+  }
+  if (row.costEstimate !== null && row.costEstimate !== undefined && !reasons.includes("Cost")) {
+    reasons.push("Cost");
+  }
+  if (row.contextTokens && !reasons.includes("Context fit")) {
+    reasons.push("Context fit");
+  }
+  if (row.successChance !== null && row.successChance !== undefined && !reasons.includes("Reliability")) {
+    reasons.push("Reliability");
+  }
+  return reasons.length ? reasons.slice(0, 3) : ["Cost", "Context fit", "Reliability"];
 }
 
 function firstNumber(...values) {
@@ -3229,6 +3395,126 @@ function sidebarHtml(webview, logoPath) {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
       margin-bottom: 10px;
+    }
+
+    .live-savings-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 7px;
+      margin: 0 0 10px;
+    }
+
+    .live-savings-tile {
+      min-width: 0;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 8px;
+      background: color-mix(in srgb, var(--card) 86%, transparent);
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 8%, transparent);
+    }
+
+    .live-savings-tile[data-tone="ok"] {
+      border-color: color-mix(in srgb, var(--ok) 40%, var(--subtle-border));
+      background: color-mix(in srgb, var(--ok) 9%, var(--card));
+    }
+
+    .live-savings-tile[data-tone="warn"] {
+      border-color: color-mix(in srgb, var(--warn) 40%, var(--subtle-border));
+      background: color-mix(in srgb, var(--warn) 9%, var(--card));
+    }
+
+    .live-savings-tile span,
+    .live-savings-tile strong,
+    .live-savings-tile small {
+      display: block;
+      overflow-wrap: anywhere;
+    }
+
+    .live-savings-tile span {
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.25;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .live-savings-tile strong {
+      margin-top: 3px;
+      font-size: 14px;
+      line-height: 1.2;
+    }
+
+    .live-savings-tile small {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.25;
+    }
+
+    .route-visual-list {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+
+    .route-visual-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: start;
+      min-width: 0;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 8px;
+      background: color-mix(in srgb, var(--card) 86%, transparent);
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 8%, transparent);
+    }
+
+    .route-visual-row[data-tone="ok"] {
+      border-color: color-mix(in srgb, var(--ok) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--ok) 9%, var(--card));
+    }
+
+    .route-visual-row[data-tone="error"] {
+      border-color: color-mix(in srgb, var(--error) 42%, var(--subtle-border));
+      background: color-mix(in srgb, var(--error) 8%, var(--card));
+    }
+
+    .route-visual-main,
+    .route-visual-reasons {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .route-visual-main {
+      color: var(--app-fg);
+      font-size: 11px;
+      line-height: 1.3;
+      font-weight: 600;
+    }
+
+    .route-visual-reasons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 5px;
+    }
+
+    .route-reason-chip {
+      border: 1px solid var(--subtle-border);
+      border-radius: 999px;
+      padding: 2px 6px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.25;
+      background: color-mix(in srgb, var(--panel-soft) 86%, transparent);
+    }
+
+    .route-visual-state {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.2;
+      white-space: nowrap;
     }
 
     .routing-summary-item {
@@ -4697,6 +4983,16 @@ function sidebarHtml(webview, logoPath) {
       <summary class="section-head">
         <h2>Routing Intelligence</h2>
       </summary>
+      <div class="section-head">
+        <h2>Live Savings</h2>
+        <span class="status" id="liveSavingsWindow">This week</span>
+      </div>
+      <div class="live-savings-grid" id="liveSavingsGrid"></div>
+      <div class="section-head">
+        <h2>Route Decision</h2>
+        <span class="status">Explainable</span>
+      </div>
+      <div class="route-visual-list" id="routeVisualization"></div>
       <div class="routing-summary-grid" id="routingSummaryGrid"></div>
       <div class="detail" id="routingExplanation">No routing decision yet</div>
       <ul class="list" id="routingReasonList"></ul>
@@ -4827,6 +5123,9 @@ function sidebarHtml(webview, logoPath) {
     const activeModel = document.getElementById("activeModel");
     const routingChain = document.getElementById("routingChain");
     const providerList = document.getElementById("providerList");
+    const liveSavingsWindow = document.getElementById("liveSavingsWindow");
+    const liveSavingsGrid = document.getElementById("liveSavingsGrid");
+    const routeVisualization = document.getElementById("routeVisualization");
     const routingSummaryGrid = document.getElementById("routingSummaryGrid");
     const routingExplanation = document.getElementById("routingExplanation");
     const routingReasonList = document.getElementById("routingReasonList");
@@ -4946,6 +5245,8 @@ function sidebarHtml(webview, logoPath) {
       setText(activeModel, activeModelText(dashboard.activeModel));
       renderRoutingChain(dashboard.routingChain || []);
       renderProviderRows(dashboard.providers || []);
+      renderLiveSavings(dashboard.liveSavings || {});
+      renderRouteVisualization(dashboard.routeVisualization || {});
       renderRoutingIntelligence(dashboard.routingExplanation || {});
       renderPermissions(dashboard.permissions || {}, dashboard.trustControls || {});
       renderLimitRows(dashboard.limits || []);
@@ -5024,6 +5325,7 @@ function sidebarHtml(webview, logoPath) {
 
     function renderSetupSummary(dashboard) {
       const readiness = dashboard.readiness && typeof dashboard.readiness === "object" ? dashboard.readiness : null;
+      const runtime = dashboard.runtimeUsability && typeof dashboard.runtimeUsability === "object" ? dashboard.runtimeUsability : null;
       const experience = dashboard.experience && typeof dashboard.experience === "object" ? dashboard.experience : null;
       const experienceAction = experience && experience.primary_action && typeof experience.primary_action === "object"
         ? experience.primary_action
@@ -5044,8 +5346,16 @@ function sidebarHtml(webview, logoPath) {
       const readinessStep = readiness && readiness.next_step && typeof readiness.next_step === "object"
         ? readiness.next_step
         : null;
+      const runtimeStep = runtime && runtime.next_step && typeof runtime.next_step === "object"
+        ? runtime.next_step
+        : null;
       const nextSetup = setupRows.find((row) => row && !row.ok);
       const nextAction = rows.find((row) => row && row.action === true && !row.ok);
+      if (dashboard.status === "Running" && runtime && runtime.state && runtime.state !== "ready" && runtimeStep) {
+        nextStepTitle.textContent = (runtime.state === "degraded" ? "Review: " : "Next: ") + runtimeStep.label;
+        nextStepDetail.textContent = runtimeStep.detail || runtime.honesty || runtimeStep.command || "Run Checkup to verify a real coding route.";
+        return;
+      }
       if (dashboard.status === "Running" && experienceAction && experience && experience.state !== "ready") {
         nextStepTitle.textContent = (experience.state === "ready_with_warnings" ? "Review: " : "Next: ") + experienceAction.label;
         nextStepDetail.textContent = experienceAction.detail || experience.detail || experienceAction.command || "Review Agent Hub readiness.";
@@ -5430,6 +5740,16 @@ function sidebarHtml(webview, logoPath) {
           percent: stats.readinessScore === null || stats.readinessScore === undefined ? 0 : Number(stats.readinessScore)
         },
         {
+          value: status === "Running" && stats.runtimeUsabilityScore !== null && stats.runtimeUsabilityScore !== undefined
+            ? String(stats.runtimeUsabilityScore)
+            : "--",
+          label: "runtime usability",
+          caption: stats.runtimeUsabilityNextStepLabel
+            ? stats.runtimeUsabilityState + " / " + stats.runtimeUsabilityNextStepLabel
+            : stats.runtimeUsabilityState || "waiting for live route evidence",
+          percent: stats.runtimeUsabilityScore === null || stats.runtimeUsabilityScore === undefined ? 0 : Number(stats.runtimeUsabilityScore)
+        },
+        {
           value: Number(stats.providersAvailable || 0) + "/" + Number(stats.providersTotal || 0),
           label: "providers available",
           caption: compactNumber(stats.providersUnavailable || 0) + " unavailable, " + compactNumber(stats.providersDegraded || 0) + " degraded",
@@ -5675,6 +5995,74 @@ function sidebarHtml(webview, logoPath) {
           [row.available ? "active candidate" : "fallback candidate", row.reason || ""].filter(Boolean).join(" - "),
           { tone: row.available ? "ok" : "warn", badge: row.available ? "active" : "fallback" }
         ));
+      }
+    }
+
+    function renderLiveSavings(state) {
+      liveSavingsWindow.textContent = state.title || "This week";
+      liveSavingsGrid.textContent = "";
+      const tiles = Array.isArray(state.tiles) ? state.tiles : [];
+      if (!tiles.length) {
+        liveSavingsGrid.append(liveSavingsTile({
+          label: "Cost Saved",
+          value: "--",
+          detail: "waiting for priced routes",
+          tone: "warn"
+        }));
+        return;
+      }
+      for (const tile of tiles.slice(0, 3)) {
+        liveSavingsGrid.append(liveSavingsTile(tile));
+      }
+    }
+
+    function liveSavingsTile(tile) {
+      const item = document.createElement("div");
+      item.className = "live-savings-tile";
+      item.dataset.tone = tile.tone || "info";
+      const label = document.createElement("span");
+      label.textContent = tile.label || "Metric";
+      const value = document.createElement("strong");
+      value.textContent = tile.value || "--";
+      const detail = document.createElement("small");
+      detail.textContent = tile.detail || "";
+      item.append(label, value, detail);
+      return item;
+    }
+
+    function renderRouteVisualization(state) {
+      routeVisualization.textContent = "";
+      const rows = Array.isArray(state.rows) ? state.rows : [];
+      if (!rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "Send a request to see selected and rejected routes";
+        routeVisualization.append(empty);
+        return;
+      }
+      for (const row of rows.slice(0, 5)) {
+        const item = document.createElement("div");
+        item.className = "route-visual-row";
+        item.dataset.tone = row.tone || "info";
+        const body = document.createElement("div");
+        const main = document.createElement("div");
+        main.className = "route-visual-main";
+        main.textContent = row.label || "provider";
+        const reasons = document.createElement("div");
+        reasons.className = "route-visual-reasons";
+        const reasonList = Array.isArray(row.reasons) ? row.reasons : [];
+        for (const reason of reasonList.slice(0, 3)) {
+          const chip = document.createElement("span");
+          chip.className = "route-reason-chip";
+          chip.textContent = reason;
+          reasons.append(chip);
+        }
+        body.append(main, reasons);
+        const stateLabel = document.createElement("div");
+        stateLabel.className = "route-visual-state";
+        stateLabel.textContent = row.state || "";
+        item.append(body, stateLabel);
+        routeVisualization.append(item);
       }
     }
 
@@ -7393,6 +7781,21 @@ async function runCheckupCommand(options = {}) {
     }
   }
 
+  let runtimeCheck = null;
+  if (online) {
+    const runtime = await fetchRuntimeUsabilityForCheckup();
+    runtimeCheck = await guideRuntimeUsabilityForCheckup(runtime);
+    if (runtimeCheck && runtimeCheck.continue === false) {
+      return {
+        ok: false,
+        requirements,
+        repair,
+        backendOnline: online,
+        runtimeCheck
+      };
+    }
+  }
+
   const routeLab = await openRouteLabCommand({ prompt: PERSONAL_BENCHMARK_PROMPT });
   if (routeLab.ok) {
     vscode.window.showInformationMessage("Agent Hub Checkup complete. Route Lab is open with the current model decision.");
@@ -7402,7 +7805,97 @@ async function runCheckupCommand(options = {}) {
     requirements,
     repair,
     backendOnline: online,
+    runtimeCheck,
     routeLab
+  };
+}
+
+async function fetchRuntimeUsabilityForCheckup() {
+  try {
+    const health = await requestJson("GET", "/health");
+    const runtime = health && health.runtime_usability && typeof health.runtime_usability === "object"
+      ? health.runtime_usability
+      : null;
+    if (runtime) {
+      output.appendLine(`Runtime usability: ${runtime.score || 0}/100 (${runtime.state || "unknown"})`);
+    }
+    return runtime;
+  } catch (error) {
+    output.appendLine(`Runtime usability check failed: ${error.message}`);
+    return null;
+  }
+}
+
+async function guideRuntimeUsabilityForCheckup(runtime) {
+  if (!runtime || typeof runtime !== "object") {
+    return { ok: true, continue: true, runtime: null };
+  }
+  if (runtime.state === "ready") {
+    return { ok: true, continue: true, runtime };
+  }
+  const nextStep = runtime.next_step && typeof runtime.next_step === "object" ? runtime.next_step : {};
+  const detail = nextStep.detail || runtime.honesty || "Agent Hub needs one more live runtime check before it can claim real coding usability.";
+  const message = `Agent Hub runtime is ${runtime.score || 0}/100 (${String(runtime.state || "unknown").replace(/_/g, " ")}). ${detail}`;
+  let primary = "";
+  if (runtime.state === "needs_local_model") {
+    const ollama = await ollamaDesktopStatus();
+    primary = ollama.installed ? "Choose Local Model" : "Install Ollama";
+  } else if (runtime.state === "needs_provider_approval") {
+    primary = "Open Settings";
+  } else if (runtime.state === "needs_server") {
+    primary = "Start Backend";
+  }
+  const choices = [primary, "Route Lab Anyway", "Open Logs", "Close"].filter(Boolean);
+  const choice = await vscode.window.showWarningMessage(message, ...choices);
+  if (choice === "Choose Local Model") {
+    await chooseLocalModel(checkupWebviewShim());
+    await restartServer();
+    await waitForServer(7000);
+    const refreshed = await fetchRuntimeUsabilityForCheckup();
+    return {
+      ok: !!(refreshed && refreshed.state === "ready"),
+      continue: !!(refreshed && refreshed.state === "ready"),
+      runtime: refreshed || runtime,
+      action: choice
+    };
+  }
+  if (choice === "Install Ollama") {
+    const result = await installOllamaDesktopCommand({ showAlreadyInstalled: false });
+    return { ok: false, continue: false, runtime, action: choice, result };
+  }
+  if (choice === "Open Settings") {
+    await openAgentHubSettings();
+    return { ok: false, continue: false, runtime, action: choice };
+  }
+  if (choice === "Start Backend") {
+    await startServer();
+    await waitForServer(7000);
+    const refreshed = await fetchRuntimeUsabilityForCheckup();
+    return {
+      ok: !!(refreshed && refreshed.state === "ready"),
+      continue: !!(refreshed && refreshed.state === "ready"),
+      runtime: refreshed || runtime,
+      action: choice
+    };
+  }
+  if (choice === "Route Lab Anyway") {
+    return { ok: false, continue: true, runtime, action: choice };
+  }
+  if (choice === "Open Logs") {
+    output.show(true);
+  }
+  return { ok: false, continue: false, runtime, action: choice || "Close" };
+}
+
+function checkupWebviewShim() {
+  return {
+    webview: {
+      postMessage(message) {
+        if (message && message.text) {
+          output.appendLine(String(message.text));
+        }
+      }
+    }
   };
 }
 
@@ -9983,6 +10476,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
 
       .header-actions {
         width: 100%;
+        flex-direction: column;
         justify-content: space-between;
         align-items: stretch;
       }
@@ -13906,7 +14400,7 @@ function benchmarkShareCardHtml(card) {
 <body>
   <main class="card">
     <h1>My Agent-Hub Benchmark</h1>
-    <div class="meta">Baseline: ${escapeHtml(card.baseline)} · Tasks: ${escapeHtml(card.tasks)}</div>
+    <div class="meta">Baseline: ${escapeHtml(card.baseline)} &middot; Tasks: ${escapeHtml(card.tasks)}</div>
     <section class="metrics">
       <div class="metric"><span>Cost Reduction</span><strong>${escapeHtml(card.metrics.cost)}</strong></div>
       <div class="metric"><span>Latency Reduction</span><strong>${escapeHtml(card.metrics.latency)}</strong></div>

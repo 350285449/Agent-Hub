@@ -337,6 +337,7 @@ def model_rows(config: HubConfig, router: Any) -> list[dict[str, Any]]:
     for model_id, route_name in ROUTE_MODEL_ALIASES.items():
         if route_name not in {route.name for route in config.routes}:
             continue
+        needs_tools = route_name in {"coding", "local-agent"}
         recommendation = router.recommend(
             HubRequest(
                 session_id="models",
@@ -345,7 +346,8 @@ def model_rows(config: HubConfig, router: Any) -> list[dict[str, Any]]:
                 record_session=False,
             ),
             limit=1,
-            needs_tools=route_name in {"coding", "local-agent"},
+            needs_tools=needs_tools,
+            include_unavailable=True,
         )
         row = {
             "id": model_id,
@@ -357,8 +359,11 @@ def model_rows(config: HubConfig, router: Any) -> list[dict[str, Any]]:
                 "route": route_name,
                 "recommended_agent": recommendation[0]["agent"] if recommendation else None,
                 "recommended_model": recommendation[0]["model"] if recommendation else None,
-                "available": bool(recommendation)
-                and route_has_visible_agent(config, route_name),
+                "available": route_has_visible_agent(
+                    config,
+                    route_name,
+                    needs_tools=needs_tools,
+                ),
                 "recommended_health": (
                     health.get(recommendation[0]["agent"], {}) if recommendation else {}
                 ),
@@ -418,12 +423,22 @@ def model_rows(config: HubConfig, router: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def route_has_visible_agent(config: HubConfig, route_name: str) -> bool:
+def route_has_visible_agent(
+    config: HubConfig,
+    route_name: str,
+    *,
+    needs_tools: bool = False,
+) -> bool:
     route = next((item for item in config.routes if item.name == route_name), None)
     if route is None:
         return False
     return any(
         agent_visible_in_models(config, config.agents[name])
+        and (
+            not needs_tools
+            or bool(config.agents[name].supports_tools or config.agents[name].supports_function_calling)
+            or tool_compatibility_mode(config, config.agents[name]) in {"native", "emulated"}
+        )
         for name in route.agents
         if name in config.agents
     )

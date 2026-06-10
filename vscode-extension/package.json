@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub Local AI Router",
   "description": "Start a local Agent Hub server, send coding tasks to the best available model, and recover setup issues from one simple sidebar.",
-  "version": "9.6.3",
+  "version": "9.6.4",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",

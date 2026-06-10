@@ -17,6 +17,9 @@ static config scores.
 ```sh
 python -m agent_hub eval --route coding --json
 python -m agent_hub benchmark-suite --route coding --limit 24 --json
+agent-hub benchmark --dataset coding-100 --export results.json
+agent-hub benchmark verify results.json --dataset coding-100
+agent-hub benchmark compare --baseline claude-sonnet --dataset coding-100
 ```
 
 Scores are written to `.agent-hub/state/provider_scores.json`. The router adds
@@ -29,6 +32,38 @@ effectiveness, and a winner, then writes a JSON report under
 
 The built-in suite contains 24 coding, reasoning, summarization, tool-calling,
 long-context, and latency tasks. Up to 50 custom tasks can be run in one suite.
+
+## Public Benchmark Datasets
+
+Reproducible datasets live under `benchmarks/` with a manifest at
+`benchmarks/manifest.json`.
+
+- `coding-100` is the high-signal public proof dataset for coding workflows.
+- `proof-50` is the default mixed proof dataset.
+
+One-click export:
+
+```sh
+agent-hub benchmark --dataset coding-100 --baseline claude-sonnet --route coding --export results.json
+```
+
+Shareable comparison:
+
+```sh
+agent-hub benchmark compare --baseline claude-sonnet --dataset coding-100
+agent-hub benchmark compare results.json --dataset coding-100
+```
+
+Verification mode reruns the dataset fingerprint checks against the current
+public corpus and the exported report:
+
+```sh
+agent-hub benchmark verify results.json --dataset coding-100
+```
+
+Every proof report includes the dataset name, task count, fingerprint, rerun
+command, and verify command so results can be compared without trusting a
+server.
 
 ## API
 

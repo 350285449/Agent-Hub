@@ -5,6 +5,7 @@ from typing import Any
 from .config import HubConfig
 from .core.router import AgentRouter
 from .models import HubRequest
+from .proof_artifacts import replay_route_body
 
 
 def explain_route_body(
@@ -84,6 +85,58 @@ def format_route_explanation(report: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def explain_recorded_route_body(config: HubConfig, request_id: str) -> dict[str, Any]:
+    replay = replay_route_body(config, request_id)
+    selected = replay.get("selected") if isinstance(replay.get("selected"), dict) else {}
+    alternatives = replay.get("alternatives") if isinstance(replay.get("alternatives"), list) else []
+    return {
+        "object": "agent_hub.recorded_route_explanation",
+        "request_id": request_id,
+        "found": bool(replay.get("found")),
+        "selected": selected,
+        "selected_agent": selected.get("agent"),
+        "selected_provider": selected.get("provider"),
+        "selected_model": selected.get("model"),
+        "reasons": _recorded_reasons(replay, selected),
+        "rejected": [
+            {
+                "agent": item.get("agent"),
+                "provider": item.get("provider"),
+                "model": item.get("model"),
+                "reason": item.get("reason") or "Ranked behind selected model.",
+            }
+            for item in alternatives
+            if isinstance(item, dict)
+        ],
+        "replay": replay,
+    }
+
+
+def format_recorded_route_explanation(report: dict[str, Any]) -> str:
+    if not report.get("found"):
+        return f"No route decision found for request id {report.get('request_id')!s}.\n"
+    selected = report.get("selected") if isinstance(report.get("selected"), dict) else {}
+    lines = [
+        f"Selected: {_label(selected) or report.get('selected_model') or 'none'}",
+        "",
+        "Reasons:",
+    ]
+    reasons = report.get("reasons") if isinstance(report.get("reasons"), list) else []
+    for reason in reasons[:8]:
+        lines.append(f"+ {reason}")
+    if not reasons:
+        lines.append("+ Highest-ranked compatible candidate")
+    rejected = report.get("rejected") if isinstance(report.get("rejected"), list) else []
+    if rejected:
+        lines.extend(["", "Rejected:"])
+        for item in rejected[:8]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(_label(item) or str(item.get("agent") or "unknown"))
+            lines.append(f"  - {item.get('reason') or 'Ranked behind selected model.'}")
+    return "\n".join(lines).strip() + "\n"
+
+
 def _candidate_rows(value: Any) -> list[dict[str, Any]]:
     rows = value if isinstance(value, list) else []
     result: list[dict[str, Any]] = []
@@ -117,6 +170,20 @@ def _label(row: dict[str, Any]) -> str:
     return model or provider or str(row.get("agent") or "")
 
 
+def _recorded_reasons(replay: dict[str, Any], selected: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    reason = str(replay.get("reason") or "").strip()
+    if reason:
+        reasons.append(reason)
+    if selected.get("estimated_cost_usd") is not None:
+        reasons.append("Lowest eligible estimated cost among recorded candidates")
+    if selected.get("score") is not None:
+        reasons.append("Strong routing score for the task")
+    if not reasons:
+        reasons.append("Healthy provider and compatible context fit")
+    return reasons
+
+
 def _score(value: Any) -> str:
     try:
         return str(round(float(value), 2))
@@ -144,4 +211,9 @@ def _int(value: Any) -> int:
         return 0
 
 
-__all__ = ["explain_route_body", "format_route_explanation"]
+__all__ = [
+    "explain_recorded_route_body",
+    "explain_route_body",
+    "format_recorded_route_explanation",
+    "format_route_explanation",
+]

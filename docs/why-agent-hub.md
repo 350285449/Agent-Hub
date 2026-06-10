@@ -8,9 +8,13 @@ improve future routing.
 
 ## Positioning
 
+Agent-Hub is the routing layer for reducing AI costs while preserving quality.
+It routes each request automatically, then lets you verify the routing decision
+locally.
+
 Most AI gateways optimize the transport layer: keys, quotas, retries, logging,
 and provider abstraction. Agent-Hub includes those gateway responsibilities, but
-its differentiator is Adaptive Workspace Intelligence™.
+its differentiator is Adaptive Workspace Intelligence.
 
 Agent-Hub answers:
 
@@ -21,6 +25,24 @@ Agent-Hub answers:
 - Which provider/model is best for this task right now?
 - Why were the other candidates rejected?
 - What did prior outcomes teach the router?
+
+## Local Proof In 30 Seconds
+
+```text
+Without Agent-Hub: $100/month
+With Agent-Hub:    $66/month
+Savings:           34%
+```
+
+Run the proof yourself:
+
+```sh
+agent-hub demo
+agent-hub benchmark --dataset coding-100 --export results.json
+agent-hub benchmark verify results.json --dataset coding-100
+agent-hub benchmark compare results.json --dataset coding-100
+agent-hub generate-proof
+```
 
 ## Competitive Comparison
 

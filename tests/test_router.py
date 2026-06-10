@@ -83,6 +83,140 @@ class RouterTests(unittest.TestCase):
 
             self.assertEqual(calls, ["claude", "openai", "openai"])
 
+    def test_all_cooldown_candidates_are_still_usable_as_last_resort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = _config(Path(tmp))
+            router = AgentRouter(
+                config,
+                provider_factory=lambda agent: _FakeProvider(agent, calls),
+            )
+            request = HubRequest(
+                session_id="abc",
+                route="coding",
+                messages=[{"role": "user", "content": "code a parser"}],
+            )
+            router.cooldown_agent("claude", 60)
+            router.cooldown_agent("openai", 60)
+
+            response = router.route(request)
+
+            self.assertEqual(calls, ["claude", "openai"])
+            self.assertEqual(response.agent, "openai")
+            self.assertEqual(response.failover[0].agent, "claude")
+            self.assertIn("quota", response.failover[0].reason)
+
+    def test_cooldown_candidate_is_used_after_ready_fallback_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
+                automatic_escalation_enabled=False,
+                default_route=["cooled-first", "fresh", "cooled-last"],
+                agents={
+                    "cooled-first": AgentConfig(
+                        name="cooled-first",
+                        provider="openai-compatible",
+                        model="cooled-first-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                    "fresh": AgentConfig(
+                        name="fresh",
+                        provider="openai-compatible",
+                        model="fresh-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                    "cooled-last": AgentConfig(
+                        name="cooled-last",
+                        provider="openai-compatible",
+                        model="cooled-last-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                },
+            )
+
+            class LastResortProvider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    if self.agent.name == "fresh":
+                        raise ProviderError(
+                            "fresh provider failed",
+                            retryable=True,
+                            error_type="provider_unavailable",
+                        )
+                    return ProviderResult(text="done", model=self.agent.model, finish_reason="stop")
+
+            router = AgentRouter(config, provider_factory=LastResortProvider)
+            router.cooldown_agent("cooled-first", 60)
+            router.cooldown_agent("cooled-last", 60)
+
+            response = router.route(
+                HubRequest(
+                    session_id="abc",
+                    preferred_agent="cooled-first",
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+            )
+
+            self.assertEqual(calls, ["fresh", "cooled-last"])
+            self.assertEqual(response.agent, "cooled-last")
+            self.assertEqual(response.failover[0].agent, "cooled-first")
+            self.assertIn("temporary cooldown", response.failover[0].reason)
+            self.assertEqual(response.failover[1].agent, "fresh")
+
+    def test_cooldown_candidate_is_not_skipped_for_unusable_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            key_name = "AGENT_HUB_MISSING_FALLBACK_KEY"
+            config = HubConfig(
+                state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
+                automatic_escalation_enabled=False,
+                default_route=["cooled", "missing-key"],
+                agents={
+                    "cooled": AgentConfig(
+                        name="cooled",
+                        provider="openai-compatible",
+                        model="cooled-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                    "missing-key": AgentConfig(
+                        name="missing-key",
+                        provider="openai",
+                        model="missing-key-test",
+                        api_key_env=key_name,
+                    ),
+                },
+            )
+
+            class CooledProvider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    return ProviderResult(text="done", model=self.agent.model, finish_reason="stop")
+
+            router = AgentRouter(config, provider_factory=CooledProvider)
+            router.cooldown_agent("cooled", 60)
+
+            with patch.dict("os.environ", {key_name: ""}, clear=False):
+                response = router.route(
+                    HubRequest(
+                        session_id="abc",
+                        preferred_agent="cooled",
+                        messages=[{"role": "user", "content": "hello"}],
+                    )
+                )
+
+            self.assertEqual(calls, ["cooled"])
+            self.assertEqual(response.agent, "cooled")
+            self.assertEqual(response.failover, [])
+
     def test_quota_failures_mark_agent_temporarily_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             calls: list[str] = []
@@ -106,6 +240,47 @@ class RouterTests(unittest.TestCase):
             health = router.health_snapshot()
             self.assertEqual(health["claude"]["last_error_type"], "quota_exhausted")
             self.assertGreater(health["claude"]["unavailable_until"], 0)
+
+    def test_stale_success_does_not_clear_newer_quota_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
+                default_route=["provider"],
+                agents={
+                    "provider": AgentConfig(
+                        name="provider",
+                        provider="openai-compatible",
+                        model="provider-test",
+                        base_url="http://127.0.0.1:9999",
+                    )
+                },
+            )
+            router = AgentRouter(config, provider_factory=lambda agent: _FakeProvider(agent, []))
+            agent = config.agents["provider"]
+            request = HubRequest(
+                session_id="abc",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+            router._record_failure(
+                agent,
+                error_type="quota_exhausted",
+                message="quota exhausted",
+                unavailable_until=time.time() + 60,
+                request=request,
+            )
+
+            router._record_success(
+                agent,
+                latency_seconds=30,
+                result=ProviderResult(text="late success", model=agent.model),
+                request=request,
+            )
+
+            health = router.health_snapshot()
+            self.assertTrue(health["provider"]["quota_exhausted"])
+            self.assertFalse(health["provider"]["available"])
+            self.assertIn("quota", router._preflight_skip_reason(agent, request) or "")
 
     def test_slow_provider_fails_over_and_records_health_dimensions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

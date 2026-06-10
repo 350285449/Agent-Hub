@@ -8,6 +8,7 @@ from ..application import BACKEND_FEATURES, BACKEND_VERSION, DiagnosticsApplicat
 from ..config import HubConfig
 from ..models import HubRequest
 from ..observability import recent_events, usage_snapshot
+from ..runtime_usability import runtime_usability_body
 from ..core.router import AgentRouter
 
 def _record_debug_request(server: AgentHubHTTPServer, entry: dict[str, Any]) -> None:
@@ -107,6 +108,7 @@ def _status_body(
     workflows = recent_events(config.state_dir, "workflows", limit=50)
     latest = routing[-1] if routing else {}
     latest_decision = latest.get("routing_decision") if isinstance(latest.get("routing_decision"), dict) else {}
+    runtime_usability = runtime_usability_body(config, health)
     return {
         "object": "agent_hub.status",
         "status": "running",
@@ -117,6 +119,7 @@ def _status_body(
         "active_providers": _active_provider_names(config, router),
         "providers": router.provider_status(),
         "provider_health": health,
+        "runtime_usability": runtime_usability,
         "provider_scores": provider_scores if provider_scores is not None else dict(router.provider_scores),
         "selected_model": latest.get("model") or latest.get("selected_model"),
         "selected_provider": latest.get("provider") or latest_decision.get("selected_provider"),
@@ -313,7 +316,7 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
     .card span {{ display: block; margin-top: 3px; color: #5f6368; font-size: 13px; }}
     table {{
       width: 100%;
-      min-width: 680px;
+      min-width: 860px;
       border-collapse: collapse;
       background: #fff;
       border: 1px solid #d8dde6;
@@ -321,13 +324,16 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
       overflow: hidden;
     }}
     th, td {{
+      min-width: 110px;
       padding: 9px 10px;
       border-bottom: 1px solid #e7eaf0;
       text-align: left;
       font-size: 13px;
       vertical-align: top;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
+      word-break: normal;
     }}
+    th:first-child, td:first-child {{ min-width: 72px; }}
     th {{ color: #374151; background: #eef2f7; font-weight: 650; }}
     tr:last-child td {{ border-bottom: 0; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }}
@@ -338,7 +344,6 @@ def _optimization_dashboard_html(optimization: dict[str, Any]) -> str:
       body {{ padding: 16px; }}
       h1 {{ font-size: 24px; }}
       .cards {{ grid-template-columns: 1fr; }}
-      table {{ min-width: 100%; }}
     }}
   </style>
 </head>
@@ -481,7 +486,7 @@ def _routing_intelligence_dashboard_html(intelligence: dict[str, Any]) -> str:
     .grid > * {{ min-width: 0; overflow-x: auto; }}
     table {{
       width: 100%;
-      min-width: 680px;
+      min-width: 860px;
       border-collapse: collapse;
       background: #fff;
       border: 1px solid #d8dde6;
@@ -489,13 +494,16 @@ def _routing_intelligence_dashboard_html(intelligence: dict[str, Any]) -> str:
       overflow: hidden;
     }}
     th, td {{
+      min-width: 110px;
       padding: 9px 10px;
       border-bottom: 1px solid #e7eaf0;
       text-align: left;
       font-size: 13px;
       vertical-align: top;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
+      word-break: normal;
     }}
+    th:first-child, td:first-child {{ min-width: 72px; }}
     th {{ color: #374151; background: #eef2f7; font-weight: 650; }}
     tr:last-child td {{ border-bottom: 0; }}
     .note {{ color: #5f6368; font-size: 13px; margin-top: 8px; }}
@@ -504,7 +512,6 @@ def _routing_intelligence_dashboard_html(intelligence: dict[str, Any]) -> str:
       body {{ padding: 16px; }}
       h1 {{ font-size: 24px; }}
       .cards {{ grid-template-columns: 1fr; }}
-      table {{ min-width: 100%; }}
     }}
   </style>
 </head>

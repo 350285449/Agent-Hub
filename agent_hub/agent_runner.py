@@ -14,6 +14,7 @@ from typing import Any
 
 from .agent_tools import (
     AgentToolbox,
+    MAX_FILE_CHARS,
     ShellPermissionCallback,
     agent_tool_definitions,
     restore_workspace_checkpoint,
@@ -52,6 +53,11 @@ FULL_REPAIR_TOOL_RESULT_HISTORY = 2
 CONTEXT_BUDGET_MARGIN_TOKENS = 128
 MAX_FULL_TOOL_RESULT_CHARS = 16_000
 LARGE_READ_FILE_FULL_ONCE_CHARS = 8_000
+READ_FILE_AUTO_MAX_CHARS_BY_CONTEXT = {
+    "minimal": 12_000,
+    "balanced": 24_000,
+    "deep": MAX_FILE_CHARS,
+}
 MAX_MEMORY_SUMMARY_TOOL_RESULTS = 10
 MAX_COMPACT_SESSION_MESSAGES = 4
 REPOSITORY_ROOT_FILE_NAMES = {
@@ -541,6 +547,7 @@ class AgentRunner:
                 consecutive_invalid_responses = 0
                 tool_name = str(command["tool"])
                 args = command.get("args") if isinstance(command.get("args"), dict) else {}
+                args = _token_optimized_tool_args(request, self.config, tool_name, args)
                 _emit(
                     event_sink,
                     "tool_started",
@@ -2438,6 +2445,26 @@ def _agent_context_compaction_enabled(request: HubRequest, config: HubConfig) ->
         "agent_context_compaction_enabled",
         getattr(config, "agent_context_compaction_enabled", True),
     )
+
+
+def _token_optimized_tool_args(
+    request: HubRequest,
+    config: HubConfig,
+    tool_name: str,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    if tool_name != "read_file" or "max_chars" in args:
+        return args
+    mode = TokenBudgetManager.from_request(
+        request,
+        getattr(config, "context_mode", "balanced"),
+    ).mode
+    cap = READ_FILE_AUTO_MAX_CHARS_BY_CONTEXT.get(mode, READ_FILE_AUTO_MAX_CHARS_BY_CONTEXT["balanced"])
+    if cap >= MAX_FILE_CHARS:
+        return args
+    optimized = dict(args)
+    optimized["max_chars"] = cap
+    return optimized
 
 
 def _agent_output_budget(request: HubRequest, agent: Any) -> int:

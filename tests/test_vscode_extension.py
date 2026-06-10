@@ -369,6 +369,25 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('postFromEvent("openRouteLab"', sidebar)
         self.assertIn("/dashboard/routing-intelligence", source)
 
+    def test_sidebar_shows_route_visualization_and_live_savings(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        sidebar_start = source.index("function sidebarHtml")
+        sidebar_end = source.index("function registerChatParticipant", sidebar_start)
+        sidebar = source[sidebar_start:sidebar_end]
+
+        self.assertIn("function sidebarLiveSavings", source)
+        self.assertIn("function sidebarRouteVisualization", source)
+        self.assertIn("function renderLiveSavings", sidebar)
+        self.assertIn("function renderRouteVisualization", sidebar)
+        self.assertIn('id="liveSavingsGrid"', sidebar)
+        self.assertIn('id="routeVisualization"', sidebar)
+        self.assertIn("Live Savings", sidebar)
+        self.assertIn("Route Decision", sidebar)
+        self.assertIn("Cost Saved", source)
+        self.assertIn("Fallbacks Prevented", source)
+        self.assertIn("Context fit", source)
+        self.assertIn("Reliability", source)
+
     def test_checkup_is_visible_from_sidebar_and_command_palette(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
         package = json.loads((EXTENSION_DIR / "package.json").read_text(encoding="utf-8"))
@@ -384,6 +403,19 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('id="quickCheckup"', sidebar)
         self.assertIn('id="runCheckup"', sidebar)
         self.assertIn('postFromEvent("runCheckup"', sidebar)
+
+    def test_sidebar_and_checkup_surface_runtime_usability(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertIn("dashboard.runtimeUsability", source)
+        self.assertIn("health.runtime_usability", source)
+        self.assertIn("runtimeUsabilityScore", source)
+        self.assertIn("runtime usability", source)
+        self.assertIn("fetchRuntimeUsabilityForCheckup", source)
+        self.assertIn("guideRuntimeUsabilityForCheckup", source)
+        self.assertIn('"Choose Local Model"', source)
+        self.assertIn('installOllamaDesktopCommand({ showAlreadyInstalled: false })', source)
+        self.assertIn("await restartServer()", source)
 
     def test_safe_config_repair_is_visible_from_sidebar_and_command_palette(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")

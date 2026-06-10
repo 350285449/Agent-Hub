@@ -177,14 +177,13 @@ details, and a pass/fail `ok` field. The matching CLI command is
 `agent-hub production-check`; it exits nonzero until the install reaches at
 least 90/100 with no major or critical failures.
 
-`/v1/feature-scorecard` returns `agent_hub.feature_scorecard`: a local 10/10
+`/v1/feature-scorecard` returns `agent_hub.feature_scorecard`: a local contract
 proof matrix for model routing, provider support, API compatibility, workspace
 agents, context intelligence, safety/security, dashboards/control plane, the VS
 Code extension, config/install/release, inbox/workflows, plugins/MCP/enterprise,
 and evaluation/proof/cost infrastructure. The matching CLI command is
-`agent-hub feature-scorecard`. Live third-party provider quality, credentials,
-network uptime, and real benchmark measurements remain environment-dependent and
-are called out separately from local implementation proof.
+`agent-hub feature-scorecard`. The response also includes `runtime_usability`,
+which reports whether this machine has live evidence for real route execution.
 
 `/dashboard` renders the same core provider status in lightweight HTML.
 `/dashboard/routing-intelligence` renders selected model, selected workflow,

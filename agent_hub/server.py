@@ -1057,6 +1057,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         readiness = self.server.diagnostics_service.readiness_body(self.server.router)
         readiness_label = f"{int(readiness.get('score', 0))}/100"
         readiness_state = str(readiness.get("state") or "unknown").replace("_", " ")
+        runtime_usability = readiness.get("runtime_usability") if isinstance(readiness.get("runtime_usability"), dict) else {}
+        runtime_label = f"{int(runtime_usability.get('score', 0))}/100" if runtime_usability else "unknown"
+        runtime_state = str(runtime_usability.get("state") or "unknown").replace("_", " ")
         next_step = readiness.get("next_step") if isinstance(readiness.get("next_step"), dict) else {}
         next_step_label = str(next_step.get("label") or "No immediate action")
         workflow_rate = optimization.get("workflow_success_rate", {})
@@ -1281,10 +1284,17 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       display: grid;
       grid-template-columns: 236px minmax(0, 1fr);
       min-height: 100vh;
+      overflow-x: hidden;
+    }}
+    .app > * {{
+      min-width: 0;
     }}
     .rail {{
       position: sticky;
       top: 0;
+      width: 100%;
+      min-width: 0;
+      max-width: 100vw;
       height: 100vh;
       padding: 16px 14px;
       border-right: 1px solid var(--soft-line);
@@ -1332,6 +1342,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       color: #b8c4d8;
       text-decoration: none;
       font-size: 13px;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }}
     .rail a:first-child,
     .rail a:hover {{
@@ -1710,6 +1722,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         </div>
         <div class="metrics">
           <div class="metric"><span>Readiness</span><strong>{_html(readiness_label)}</strong><small>{_html(readiness_state)}</small></div>
+          <div class="metric"><span>Runtime</span><strong>{_html(runtime_label)}</strong><small>{_html(runtime_state)}</small></div>
           <div class="metric"><span>Model Samples</span><strong>{_html(measured_samples)}</strong><small>{_html(measured_agents)} measured agent(s)</small></div>
           <div class="metric"><span>Benchmarks</span><strong>{_html(benchmark_reports)}</strong><small>{_html(coverage_summary.get('average_readiness_score') or '--')} avg readiness</small></div>
           <div class="metric"><span>Cost Signal</span><strong>{_html(known_cost_label)}</strong><small>{pricing_coverage:.0f}% pricing coverage</small></div>

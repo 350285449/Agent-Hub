@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +16,13 @@ from .dependency_audit import dependency_install_checks
 from .payloads import request_from_payload
 from .permissions import TRUSTED_CLOUD, provider_trust_level
 from .version import backend_version
-from .commands_provider import _agent_rows, _health_rows
+from .commands_provider import _agent_rows, _health_rows, _local_models_report
 from .output import _print_table
+from .runtime_usability import (
+    runtime_route_smoke,
+    runtime_usability_body,
+    save_runtime_usability_record,
+)
 
 
 LOCAL_URL_PREFIXES = (
@@ -26,10 +33,17 @@ LOCAL_URL_PREFIXES = (
     "http://[::1]",
     "https://[::1]",
 )
-BACKEND_HEALTH_TIMEOUT_SECONDS = 5.0
+BACKEND_HEALTH_TIMEOUT_SECONDS = 0.75
 
 
-def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
+def _doctor_report(
+    config: Any,
+    config_path: str,
+    *,
+    backend_status: dict[str, Any] | None = None,
+    local_servers: list[dict[str, Any]] | None = None,
+    local_model_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     rows = _agent_rows(config)
     router = AgentRouter(config)
     provider_health = router.health_snapshot()
@@ -89,8 +103,45 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
                 f"{row['name']}: config looks usable; first request will confirm {row['base_url']} is running."
             )
 
-    backend_status = _backend_reachability(config)
-    local_servers = _local_endpoint_status()
+    if (
+        isinstance(backend_status, dict)
+        and isinstance(local_servers, list)
+        and isinstance(local_model_rows, list)
+    ):
+        pass
+    else:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            backend_future = (
+                None
+                if isinstance(backend_status, dict)
+                else executor.submit(_backend_reachability, config)
+            )
+            servers_future = (
+                None
+                if isinstance(local_servers, list)
+                else executor.submit(_local_endpoint_status)
+            )
+            models_future = (
+                None
+                if isinstance(local_model_rows, list)
+                else executor.submit(_local_models_report, config)
+            )
+            if backend_future is not None:
+                backend_status = backend_future.result()
+            if servers_future is not None:
+                local_servers = servers_future.result()
+            if models_future is not None:
+                local_model_rows = models_future.result()
+    backend_status = backend_status if isinstance(backend_status, dict) else {}
+    local_servers = local_servers if isinstance(local_servers, list) else []
+    local_model_rows = local_model_rows if isinstance(local_model_rows, list) else []
+    runtime_usability = runtime_usability_body(
+        config,
+        provider_health,
+        backend_reachable=backend_status,
+        local_servers=local_servers,
+        local_model_rows=local_model_rows,
+    )
     install_checks = _doctor_install_checks(
         config,
         config_path,
@@ -130,6 +181,8 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
         "release_checks": [row for row in install_checks if row.get("category") == "release"],
         "version_checks": [row for row in install_checks if row.get("category") == "version"],
         "local_servers": local_servers,
+        "local_models": local_model_rows,
+        "runtime_usability": runtime_usability,
         "provider_health": provider_health,
         "recommendations": recommendations,
         "context_diagnostics": {
@@ -144,7 +197,152 @@ def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
     }
 
 
-def _doctor_fix_safe(config_path: str) -> dict[str, Any]:
+def _checkup_report(
+    config: Any,
+    config_path: str,
+    *,
+    fix_safe: bool,
+    verify: bool,
+) -> dict[str, Any]:
+    local_models = _local_models_report(config) if fix_safe else []
+    fix_report = None
+    if fix_safe:
+        fix_report = _doctor_fix_safe(config_path, local_model_rows=local_models)
+        if fix_report.get("changed"):
+            from .config import load_config
+
+            config = load_config(config_path)
+            config.ensure_dirs()
+            local_models = _local_models_report(config)
+
+    route_smoke = {}
+    if verify:
+        route_smoke = _run_checkup_route_smoke(config)
+
+    doctor = _doctor_report(
+        config,
+        config_path,
+        local_model_rows=local_models if fix_safe else None,
+    )
+    if isinstance(doctor.get("local_models"), list):
+        local_models = doctor["local_models"]
+    provider_health = doctor.get("provider_health") if isinstance(doctor.get("provider_health"), dict) else {}
+    runtime_usability = runtime_usability_body(
+        config,
+        provider_health,
+        backend_reachable=doctor.get("backend_reachable") if isinstance(doctor.get("backend_reachable"), dict) else None,
+        local_servers=doctor.get("local_servers") if isinstance(doctor.get("local_servers"), list) else [],
+        local_model_rows=local_models,
+        route_smoke=route_smoke if route_smoke else None,
+    )
+    if verify:
+        save_runtime_usability_record(
+            config,
+            {
+                "object": "agent_hub.runtime_usability_record",
+                "recorded_at": time.time(),
+                "route_smoke": route_smoke,
+                "runtime_usability": runtime_usability,
+            },
+        )
+    return {
+        "object": "agent_hub.checkup",
+        "ok": runtime_usability.get("state") == "ready",
+        "fix_safe": fix_report,
+        "verify": bool(verify),
+        "doctor": doctor,
+        "local_models": local_models,
+        "route_smoke": route_smoke,
+        "runtime_usability": runtime_usability,
+        "next_step": runtime_usability.get("next_step"),
+    }
+
+
+def _run_checkup_route_smoke(config: Any) -> dict[str, Any]:
+    router = AgentRouter(config)
+    research_ok = False
+    coding_ok = False
+    research_agent = "local-research"
+    coding_agent = ""
+    coding_error = ""
+    try:
+        research_response = router.route(
+            request_from_payload(
+                {
+                    "session_id": f"checkup-research-{uuid.uuid4().hex}",
+                    "route": "research",
+                    "preferred_agent": "local-research",
+                    "messages": [{"role": "user", "content": ""}],
+                    "max_tokens": 32,
+                    "use_session_history": False,
+                    "record_session": False,
+                }
+            )
+        )
+        research_ok = bool(research_response.text)
+        research_agent = research_response.agent or research_agent
+    except Exception:
+        research_ok = False
+
+    health = router.health_snapshot()
+    runtime_before_coding = runtime_usability_body(
+        config,
+        health,
+        local_servers=_local_endpoint_status(),
+        local_model_rows=_local_models_report(config),
+    )
+    verified = runtime_before_coding.get("verified_coding_providers")
+    if isinstance(verified, list) and verified:
+        try:
+            coding_response = router.route(
+                request_from_payload(
+                    {
+                        "session_id": f"checkup-coding-{uuid.uuid4().hex}",
+                        "route": "coding",
+                        "messages": [{"role": "user", "content": "Reply with OK."}],
+                        "max_tokens": 16,
+                        "use_session_history": False,
+                        "record_session": False,
+                    }
+                )
+            )
+            coding_ok = bool(coding_response.text)
+            coding_agent = coding_response.agent
+        except Exception as exc:
+            coding_error = str(exc)
+    else:
+        coding_error = "No verified coding-capable provider is available for a safe route smoke."
+    return runtime_route_smoke(
+        research_ok=research_ok,
+        coding_ok=coding_ok,
+        research_agent=research_agent,
+        coding_agent=coding_agent,
+        coding_error=coding_error,
+    )
+
+
+def _print_checkup(report: dict[str, Any]) -> None:
+    runtime = report.get("runtime_usability") if isinstance(report.get("runtime_usability"), dict) else {}
+    print("Agent-Hub checkup")
+    print(f"ok: {report.get('ok')}")
+    print(f"runtime_usability: {runtime.get('score', 0)}/100 ({runtime.get('state', 'unknown')})")
+    next_step = runtime.get("next_step") if isinstance(runtime.get("next_step"), dict) else {}
+    if next_step:
+        print(f"next_step: {next_step.get('label')} - {next_step.get('detail')}")
+        if next_step.get("command"):
+            print(f"command: {next_step.get('command')}")
+    fix = report.get("fix_safe") if isinstance(report.get("fix_safe"), dict) else {}
+    if fix:
+        print(f"fix_safe_changed: {fix.get('changed')}")
+        if fix.get("backup_path"):
+            print(f"backup: {fix.get('backup_path')}")
+    smoke = report.get("route_smoke") if isinstance(report.get("route_smoke"), dict) else {}
+    if smoke:
+        print(f"research_smoke: {_dict(smoke.get('research')).get('ok')}")
+        print(f"coding_smoke: {_dict(smoke.get('coding')).get('ok')}")
+
+
+def _doctor_fix_safe(config_path: str, *, local_model_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     path = Path(config_path)
     if not path.is_absolute():
         path = Path.cwd() / path
@@ -216,12 +414,41 @@ def _doctor_fix_safe(config_path: str) -> dict[str, Any]:
         data["allow_shell_tools"] = False
         changes.append("Set allow_shell_tools=false because shell_command_policy=deny.")
 
+    if data.get("free_only") is not True:
+        data["free_only"] = True
+        changes.append("Set free_only=true for free-first routing.")
+    if str(data.get("approval_mode") or "").lower() != "safe":
+        data["approval_mode"] = "safe"
+        changes.append("Set approval_mode=safe for guarded default execution.")
+    if data.get("allow_shell_tools") is not False:
+        data["allow_shell_tools"] = False
+        changes.append("Set allow_shell_tools=false for safe default execution.")
+
+    routes = data.get("routes")
+    if isinstance(routes, list) and agent_names:
+        _ensure_route_prefix(routes, "research", ["local-research"], agent_names, changes)
+        _ensure_route_contains(routes, "local-agent", ["ollama-local", "lm-studio"], agent_names, changes)
+        _ensure_route_order(
+            routes,
+            "cloud-agent",
+            ["codex-cli", "ollama-kimi-cloud", "ollama-glm-cloud", "ollama-qwen-cloud", "ollama-nemotron-cloud", "ollama-gemma-cloud"],
+            agent_names,
+            changes,
+        )
+
+    if local_model_rows:
+        _apply_detected_local_models(data, local_model_rows, changes)
+
     if changes and not errors:
+        backup_path = _backup_config(path)
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    else:
+        backup_path = None
     return {
         "object": "agent_hub.doctor_fix_safe",
         "ok": not errors,
         "path": str(path),
+        "backup_path": str(backup_path) if backup_path else None,
         "changed": bool(changes and not errors),
         "changes": changes,
         "errors": errors,
@@ -235,6 +462,121 @@ def _known_route_agents(names: list[Any], agent_names: set[str]) -> list[str]:
         if text and text in agent_names and text not in cleaned:
             cleaned.append(text)
     return cleaned
+
+
+def _backup_config(path: Path) -> Path:
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    backup = path.with_name(f"{path.name}.{stamp}.bak")
+    index = 1
+    while backup.exists():
+        backup = path.with_name(f"{path.name}.{stamp}.{index}.bak")
+        index += 1
+    backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    return backup
+
+
+def _route_by_name(routes: list[Any], name: str) -> dict[str, Any] | None:
+    return next((route for route in routes if isinstance(route, dict) and route.get("name") == name), None)
+
+
+def _ensure_route_prefix(
+    routes: list[Any],
+    route_name: str,
+    desired: list[str],
+    agent_names: set[str],
+    changes: list[str],
+) -> None:
+    route = _route_by_name(routes, route_name)
+    if route is None:
+        present = [name for name in desired if name in agent_names]
+        if present:
+            routes.append({"name": route_name, "keywords": [], "agents": present})
+            changes.append(f"Created route {route_name}.")
+        return
+    agents = route.get("agents")
+    if not isinstance(agents, list):
+        agents = []
+    prefix = [name for name in desired if name in agent_names]
+    next_agents = [*prefix, *[name for name in agents if name not in prefix]]
+    if next_agents != agents:
+        route["agents"] = next_agents
+        changes.append(f"Moved {', '.join(prefix)} to the front of route {route_name}.")
+
+
+def _ensure_route_contains(
+    routes: list[Any],
+    route_name: str,
+    desired: list[str],
+    agent_names: set[str],
+    changes: list[str],
+) -> None:
+    route = _route_by_name(routes, route_name)
+    present = [name for name in desired if name in agent_names]
+    if route is None:
+        if present:
+            routes.append({"name": route_name, "keywords": [], "agents": present})
+            changes.append(f"Created route {route_name}.")
+        return
+    agents = route.get("agents")
+    if not isinstance(agents, list):
+        agents = []
+    next_agents = list(agents)
+    for name in present:
+        if name not in next_agents:
+            next_agents.append(name)
+    if next_agents != agents:
+        route["agents"] = next_agents
+        changes.append(f"Added local model providers to route {route_name}.")
+
+
+def _ensure_route_order(
+    routes: list[Any],
+    route_name: str,
+    desired_order: list[str],
+    agent_names: set[str],
+    changes: list[str],
+) -> None:
+    route = _route_by_name(routes, route_name)
+    if route is None:
+        present = [name for name in desired_order if name in agent_names]
+        if present:
+            routes.append({"name": route_name, "keywords": [], "agents": present})
+            changes.append(f"Created route {route_name}.")
+        return
+    agents = route.get("agents")
+    if not isinstance(agents, list):
+        agents = []
+    ordered = [name for name in desired_order if name in agent_names and name in agents]
+    remaining = [name for name in agents if name not in ordered]
+    next_agents = [*ordered, *remaining]
+    if next_agents != agents:
+        route["agents"] = next_agents
+        changes.append(f"Normalized free-first hybrid order for route {route_name}.")
+
+
+def _apply_detected_local_models(
+    data: dict[str, Any],
+    local_model_rows: list[dict[str, Any]],
+    changes: list[str],
+) -> None:
+    agents = data.get("agents")
+    if not isinstance(agents, list):
+        return
+    detected = {
+        str(row.get("name")): str((row.get("models") or [""])[0] or "")
+        for row in local_model_rows
+        if row.get("online") and isinstance(row.get("models"), list) and row.get("models")
+    }
+    if not detected:
+        return
+    for agent in agents:
+        if not isinstance(agent, dict):
+            continue
+        name = str(agent.get("name") or "")
+        model = detected.get(name)
+        if model and agent.get("model") != model:
+            agent["model"] = model
+            changes.append(f"Updated {name} model to detected local model {model}.")
 
 
 def _missing_api_key_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -258,18 +600,20 @@ def _local_endpoint_status() -> list[dict[str, Any]]:
         ("Ollama", "http://127.0.0.1:11434/api/tags"),
         ("LM Studio", "http://127.0.0.1:1234/v1/models"),
     ]
-    rows: list[dict[str, Any]] = []
-    for name, url in endpoints:
-        ok = False
-        detail = ""
-        try:
-            with urllib.request.urlopen(url, timeout=0.6) as response:
-                ok = 200 <= int(response.status) < 300
-                detail = f"HTTP {response.status}"
-        except Exception as exc:
-            detail = str(exc)
-        rows.append({"name": name, "url": url, "running": ok, "detail": detail})
-    return rows
+    with ThreadPoolExecutor(max_workers=len(endpoints)) as executor:
+        return list(executor.map(lambda item: _local_endpoint_row(*item), endpoints))
+
+
+def _local_endpoint_row(name: str, url: str) -> dict[str, Any]:
+    ok = False
+    detail = ""
+    try:
+        with urllib.request.urlopen(url, timeout=0.6) as response:
+            ok = 200 <= int(response.status) < 300
+            detail = f"HTTP {response.status}"
+    except Exception as exc:
+        detail = str(exc)
+    return {"name": name, "url": url, "running": ok, "detail": detail}
 
 
 def _doctor_install_checks(
@@ -312,12 +656,16 @@ def _doctor_install_checks(
             "detail": f"{backend_status.get('url', '')}: {backend_status.get('detail', '')}",
         },
     ]
-    checks.extend(_dependency_checks(root))
-    checks.append(_dependencies_installed_check(checks))
-    checks.extend(_vscode_extension_setup_checks(root))
-    checks.append(_backend_snapshot_check(root))
-    checks.append(_version_alignment_check(root))
-    checks.append(_release_validation_check(root))
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        dependency_future = executor.submit(_dependency_checks, root)
+        snapshot_future = executor.submit(_backend_snapshot_check, root)
+        release_future = executor.submit(_release_validation_check, root)
+        checks.extend(dependency_future.result())
+        checks.append(_dependencies_installed_check(checks))
+        checks.extend(_vscode_extension_setup_checks(root))
+        checks.append(snapshot_future.result())
+        checks.append(_version_alignment_check(root))
+        checks.append(release_future.result())
     checks.append(
         {
             "id": "vscode_extension_connected",
@@ -588,7 +936,19 @@ def _normalize_release_version(value: Any) -> str | None:
 
 def _release_validation_check(root: Path) -> dict[str, Any]:
     try:
-        from scripts.validate_release import validate_release
+        from scripts.validate_release import (
+            read_backend_base_version,
+            read_json,
+            read_toml,
+            read_toml_version,
+            validate_backend_generation_documented,
+            validate_backend_snapshot_generation,
+            validate_extension_packaging_scripts,
+            validate_pyproject_metadata,
+            validate_release_docs,
+            validate_release_metadata,
+            validate_version_consistency,
+        )
     except Exception as exc:
         return {
             "id": "release_validation",
@@ -597,7 +957,26 @@ def _release_validation_check(root: Path) -> dict[str, Any]:
             "optional": True,
             "detail": f"release validation unavailable: {exc}",
         }
-    failures = validate_release(root, require_vsix=False)
+    release = read_json(root / "release.json")
+    package = read_json(root / "vscode-extension" / "package.json")
+    lock = read_json(root / "vscode-extension" / "package-lock.json")
+    pyproject = read_toml(root / "pyproject.toml")
+    failures: list[str] = []
+    failures.extend(validate_release_metadata(release))
+    failures.extend(validate_pyproject_metadata(pyproject))
+    failures.extend(validate_extension_packaging_scripts(package))
+    failures.extend(validate_backend_generation_documented(root))
+    failures.extend(validate_backend_snapshot_generation(root))
+    failures.extend(
+        validate_version_consistency(
+            release=release,
+            package=package,
+            lock=lock,
+            pyproject_version=read_toml_version(root / "pyproject.toml"),
+            backend_base_version=read_backend_base_version(root / "agent_hub" / "version.py"),
+        )
+    )
+    failures.extend(validate_release_docs(root))
     return {
         "id": "release_validation",
         "category": "release",
@@ -777,6 +1156,12 @@ def _print_doctor(report: dict[str, Any]) -> None:
     print(f"default_route: {', '.join(report['default_route'])}")
     backend = report.get("backend_reachable") or {}
     print(f"backend_reachable: {backend.get('ok')} ({backend.get('url', '')})")
+    runtime = report.get("runtime_usability") if isinstance(report.get("runtime_usability"), dict) else {}
+    if runtime:
+        print(
+            "runtime_usability: "
+            f"{runtime.get('score', 0)}/100 ({runtime.get('state', 'unknown')})"
+        )
     print()
     install_checks = report.get("install_checks")
     if isinstance(install_checks, list) and install_checks:

@@ -782,6 +782,7 @@ def _feature_scorecard_dashboard_html(body: dict[str, Any]) -> str:
     if not rows:
         rows = "<tr><td colspan=\"5\" class=\"muted\">No feature scorecard rows were reported.</td></tr>"
     blockers = body.get("blockers") if isinstance(body.get("blockers"), list) else []
+    runtime = _dict(body.get("runtime_usability"))
     content = f"""
 <section class="panel">
   <h2>Area Ratings</h2>
@@ -797,12 +798,13 @@ def _feature_scorecard_dashboard_html(body: dict[str, Any]) -> str:
     cards = [
         ("Rating", f"{_number(body.get('rating'))}/10"),
         ("State", body.get("state", "unknown")),
+        ("Runtime", f"{runtime.get('score', 0)}/100 {runtime.get('state', 'unknown')}" if runtime else "unknown"),
         ("All local 10s", str(bool(body.get("all_local_areas_10"))).lower()),
         ("Blockers", len(blockers)),
     ]
     return _dashboard_page(
         "Agent Hub Feature Scorecard",
-        "Local 10/10 proof across routing, providers, APIs, agents, safety, dashboards, extension, workflows, plugins, and evaluation.",
+        "Contract and foundation proof across routing, providers, APIs, agents, safety, dashboards, extension, workflows, plugins, and evaluation. Runtime usability is scored separately.",
         cards,
         content,
         body,
@@ -1237,6 +1239,8 @@ def _learning_dashboard_html(body: dict[str, Any]) -> str:
 def _readiness_dashboard_html(body: dict[str, Any]) -> str:
     items = body.get("items") if isinstance(body.get("items"), list) else []
     feature_status = _dict(body.get("feature_status"))
+    runtime = _dict(body.get("runtime_usability"))
+    contract = _dict(body.get("contract_readiness"))
     item_rows = "".join(_readiness_item_row_html(row) for row in items if isinstance(row, dict))
     if not item_rows:
         item_rows = "<tr><td colspan=\"6\" class=\"muted\">No readiness items were reported.</td></tr>"
@@ -1248,6 +1252,17 @@ def _readiness_dashboard_html(body: dict[str, Any]) -> str:
     if not feature_rows:
         feature_rows = "<tr><td colspan=\"4\" class=\"muted\">No feature states were reported.</td></tr>"
     content = f"""
+<section class="panel">
+  <h2>Runtime Usability</h2>
+  <p>{_html(runtime.get('honesty') or 'Runtime usability reports whether this machine has live evidence for real route execution.')}</p>
+  <table>
+    <tbody>
+      <tr><td>State</td><td>{_html(runtime.get('state', 'unknown'))}</td></tr>
+      <tr><td>Score</td><td>{_html(runtime.get('score', 0))}/100</td></tr>
+      <tr><td>Next step</td><td>{_html(_dict(runtime.get('next_step')).get('label') or 'none')}</td></tr>
+    </tbody>
+  </table>
+</section>
 <section class="panel">
   <h2>Readiness Scorecard</h2>
   <table>
@@ -1265,13 +1280,15 @@ def _readiness_dashboard_html(body: dict[str, Any]) -> str:
     next_step = _dict(body.get("next_step"))
     cards = [
         ("Score", body.get("score", "unknown")),
+        ("Contract", f"{contract.get('score', 'unknown')}/100 {contract.get('state', '')}" if contract else "unknown"),
         ("Rating", body.get("rating", "unknown")),
         ("State", body.get("state", "unknown")),
+        ("Runtime", f"{runtime.get('score', 0)}/100 {runtime.get('state', 'unknown')}" if runtime else "unknown"),
         ("Next step", next_step.get("label") or "none"),
     ]
     return _dashboard_page(
         "Agent Hub Readiness",
-        "Setup score, route readiness, and feature maturity for this install.",
+        "Contract readiness, setup score, route maturity, and the separate live runtime usability state for this install.",
         cards,
         content,
         body,
@@ -1475,10 +1492,11 @@ p{{color:#cbd5e1;overflow-wrap:break-word}} a{{color:#67e8f9}} code,pre{{font-fa
 .link-card strong,.link-card span{{display:block}} .link-card span{{color:#94a3b8;margin-top:4px}}
 .link-card:hover{{border-color:#67e8f9;background:#172033}}
 .panel{{margin:16px 0;overflow-x:auto}} .empty{{border-color:#475569;background:#172033}}
-table{{width:100%;min-width:680px;border-collapse:collapse}} th,td{{padding:10px;border-bottom:1px solid #334155;text-align:left;vertical-align:top;overflow-wrap:anywhere}}
+table{{width:100%;min-width:860px;border-collapse:collapse}} th,td{{min-width:110px;padding:10px;border-bottom:1px solid #334155;text-align:left;vertical-align:top;overflow-wrap:break-word;word-break:normal}}
+th:first-child,td:first-child{{min-width:72px}}
 th{{color:#93c5fd;font-size:12px;text-transform:uppercase;letter-spacing:0}}
 details{{margin-top:18px}} summary{{cursor:pointer;color:#67e8f9}} pre{{white-space:pre-wrap;word-break:break-word;background:#020617;padding:14px;border-radius:8px;overflow:auto}}
-@media(max-width:640px){{header,main{{padding:16px}}h1{{font-size:24px}}.cards,.link-grid{{grid-template-columns:1fr}}table{{min-width:100%}}}}
+@media(max-width:640px){{header,main{{padding:16px}}h1{{font-size:24px}}.cards,.link-grid{{grid-template-columns:1fr}}}}
 </style></head><body>
 <header><h1>{_html(title)}</h1><p>{_html(subtitle)}</p></header>
 <main>

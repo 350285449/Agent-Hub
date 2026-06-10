@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -13,10 +13,17 @@ from ..core.router import AgentRouter
 from ..models import HubRequest, HubResponse
 from ..token_budget import estimate_messages_tokens
 from . import BenchmarkTask, _score_text, default_benchmark_tasks
+from .datasets import (
+    MAX_BENCHMARK_TASKS,
+    benchmark_dataset_fingerprint,
+    load_benchmark_corpus as _load_benchmark_corpus,
+    resolve_benchmark_dataset,
+    resolve_corpus_path,
+    state_path,
+)
 
 
 DEFAULT_REPORT_DIR = "benchmark_reports"
-DEFAULT_CORPUS_DIR = "benchmarks"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,20 +44,31 @@ class BenchmarkProofRunner:
         *,
         route: str = "cloud-agent",
         baseline: str = "",
-        limit: int = 50,
+        limit: int = 0,
+        dataset: str = "",
         corpus_dir: str | Path | None = None,
         output_dir: str | Path | None = None,
     ) -> dict[str, Any]:
         baseline_agent = _resolve_baseline_agent(self.config, baseline)
-        corpus_path = _resolve_corpus_path(self.config, corpus_dir)
-        tasks = load_benchmark_corpus(
-            corpus_path,
+        resolved_dataset = resolve_benchmark_dataset(
+            self.config,
+            dataset=dataset,
             route=route,
             limit=limit,
+            corpus_dir=corpus_dir,
         )
+        task_limit = len(resolved_dataset.tasks) if dataset else max(1, min(MAX_BENCHMARK_TASKS, int(limit or 50)))
+        tasks = list(resolved_dataset.tasks)[:task_limit]
         if not tasks:
-            tasks = default_benchmark_tasks(route=route)[: max(1, min(50, int(limit or 50)))]
-        baseline_router = self._router()
+            tasks = default_benchmark_tasks(route=route)[: max(1, min(MAX_BENCHMARK_TASKS, int(limit or 50)))]
+        dataset_info = resolved_dataset.to_dict()
+        dataset_info.update(
+            {
+                "task_count": len(tasks),
+                "fingerprint": benchmark_dataset_fingerprint(tasks),
+            }
+        )
+        baseline_router = self._router(only_agent=baseline_agent.name)
         routed_router = self._router()
         pairs = [
             _run_task_pair(
@@ -60,65 +78,36 @@ class BenchmarkProofRunner:
                 baseline_agent=baseline_agent,
                 route=route,
             )
-            for task in tasks[: max(1, min(50, int(limit or 50)))]
+            for task in tasks
         ]
         report = _report(
             route=route,
             baseline_agent=baseline_agent,
             pairs=pairs,
-            corpus_dir=corpus_path,
+            dataset=dataset_info,
         )
         paths = write_benchmark_report(
             report,
-            output_dir=output_dir or _state_path(self.config, DEFAULT_REPORT_DIR),
+            output_dir=output_dir or state_path(self.config, DEFAULT_REPORT_DIR),
         )
         report["report_paths"] = {"json": str(paths.json), "markdown": str(paths.markdown)}
         return report
 
-    def _router(self) -> AgentRouter:
+    def _router(self, *, only_agent: str = "") -> AgentRouter:
+        config = replace(self.config, repo_context_enabled=False, repository_dna_enabled=False)
+        if only_agent:
+            config = replace(
+                config,
+                default_route=[only_agent],
+                routes=[replace(route, agents=[only_agent]) for route in config.routes],
+            )
         if self.provider_factory is None:
-            return AgentRouter(self.config)
-        return AgentRouter(self.config, provider_factory=self.provider_factory)
+            return AgentRouter(config)
+        return AgentRouter(config, provider_factory=self.provider_factory)
 
 
 def load_benchmark_corpus(path: str | Path, *, route: str, limit: int = 50) -> list[BenchmarkTask]:
-    root = Path(path)
-    if not root.exists():
-        return []
-    tasks: list[BenchmarkTask] = []
-    for file_path in sorted(root.glob("**/*.jsonl")):
-        category = file_path.parent.name
-        for line in file_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            prompt = str(payload.get("prompt") or "").strip()
-            if not prompt:
-                continue
-            keywords = payload.get("expected_keywords")
-            task_type = str(payload.get("type") or category or "general")
-            tasks.append(
-                BenchmarkTask(
-                    task_type,
-                    prompt,
-                    [
-                        str(item)
-                        for item in keywords
-                        if isinstance(keywords, list) and str(item).strip()
-                    ]
-                    if isinstance(keywords, list)
-                    else [],
-                    str(payload.get("route") or route),
-                    bool(payload.get("needs_tools")),
-                )
-            )
-            if len(tasks) >= max(1, min(50, int(limit or 50))):
-                return tasks
-    return tasks
+    return _load_benchmark_corpus(path, route=route, limit=limit)
 
 
 def write_benchmark_report(report: dict[str, Any], *, output_dir: str | Path) -> BenchmarkReportPaths:
@@ -140,17 +129,18 @@ def _run_task_pair(
     baseline_agent: AgentConfig,
     route: str,
 ) -> dict[str, Any]:
+    task_route = task.route or route
     baseline = _run_one(
         baseline_router,
         task,
-        route=route,
+        route=task_route,
         preferred_agent=baseline_agent.name,
         strategy="baseline",
     )
     routed = _run_one(
         routed_router,
         task,
-        route=route,
+        route=task_route,
         preferred_agent="",
         strategy="agent_hub",
     )
@@ -158,6 +148,8 @@ def _run_task_pair(
         "task_type": task.type,
         "prompt": task.prompt,
         "expected_keywords": list(task.expected_keywords),
+        "route": task_route,
+        "needs_tools": bool(task.needs_tools),
         "baseline": baseline,
         "agent_hub": routed,
         "comparison": _pair_comparison(baseline, routed),
@@ -180,9 +172,11 @@ def _run_one(
         max_tokens=256,
         record_session=False,
         raw={
+            "needs_tools": bool(task.needs_tools),
             "agent_hub": {
                 "benchmark_task_type": task.type,
                 "benchmark_strategy": strategy,
+                "needs_tools": bool(task.needs_tools),
             }
         },
     )
@@ -242,7 +236,7 @@ def _report(
     route: str,
     baseline_agent: AgentConfig,
     pairs: list[dict[str, Any]],
-    corpus_dir: str | Path,
+    dataset: dict[str, Any],
 ) -> dict[str, Any]:
     baseline_rows = [row["baseline"] for row in pairs]
     routed_rows = [row["agent_hub"] for row in pairs]
@@ -259,7 +253,11 @@ def _report(
             "model": baseline_agent.model,
         },
         "task_count": len(pairs),
-        "corpus_dir": str(corpus_dir),
+        "corpus_dir": str(dataset.get("source") or ""),
+        "dataset": dict(dataset),
+        "dataset_name": dataset.get("name"),
+        "dataset_fingerprint": dataset.get("fingerprint"),
+        "public_benchmark_repository": "benchmarks/",
         "baseline_summary": baseline_summary,
         "agent_hub_summary": routed_summary,
         "comparison": comparison,
@@ -267,6 +265,15 @@ def _report(
         "latency_reduction": comparison.get("latency_reduction"),
         "success_delta": comparison.get("success_delta"),
         "results": pairs,
+        "verification": {
+            "dataset": dataset.get("name"),
+            "fingerprint": dataset.get("fingerprint"),
+            "rerun_command": (
+                f"agent-hub benchmark --dataset {dataset.get('name')} --route {route} "
+                f"--baseline {baseline_agent.name} --export results.json"
+            ),
+            "verify_command": f"agent-hub benchmark verify results.json --dataset {dataset.get('name')}",
+        },
     }
 
 
@@ -334,30 +341,8 @@ def _resolve_baseline_agent(config: HubConfig, baseline: str) -> AgentConfig:
     raise ValueError("No enabled baseline agent is configured.")
 
 
-def _workspace_path(config: HubConfig, name: str) -> Path:
-    root = Path(config.workspace_dir)
-    if not root.is_absolute():
-        root = Path.cwd() / root
-    return root / name
-
-
-def _state_path(config: HubConfig, name: str) -> Path:
-    root = Path(config.state_dir)
-    if not root.is_absolute():
-        root = _workspace_path(config, str(root))
-    return root / name
-
-
 def _resolve_corpus_path(config: HubConfig, corpus_dir: str | Path | None) -> Path:
-    if corpus_dir:
-        return Path(corpus_dir)
-    workspace_corpus = _workspace_path(config, DEFAULT_CORPUS_DIR)
-    if workspace_corpus.exists():
-        return workspace_corpus
-    bundled_corpus = Path(__file__).resolve().parents[2] / DEFAULT_CORPUS_DIR
-    if bundled_corpus.exists():
-        return bundled_corpus
-    return workspace_corpus
+    return resolve_corpus_path(config, corpus_dir)
 
 
 def _response_explanation(response: HubResponse) -> dict[str, Any]:

@@ -5,6 +5,7 @@ import os
 import socket
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .config import (
@@ -227,24 +228,32 @@ def _route_priority(agent: AgentConfig) -> float:
 
 
 def _detect_local_models(config: HubConfig, report: dict[str, Any]) -> None:
-    seen_base_urls: dict[str, list[str]] = {}
     timeout = max(0.05, float(config.local_model_probe_timeout_seconds or 0.35))
+    probe_agents: dict[str, AgentConfig] = {}
     for agent in config.agents.values():
         if not _should_probe_local_agent(agent):
             continue
         assert agent.base_url is not None
-        try:
-            models = seen_base_urls.get(agent.base_url)
-            if models is None:
-                models = fetch_openai_models(
-                    agent.base_url,
-                    timeout=timeout,
-                    api_key=agent.resolved_api_key,
-                    headers=agent.headers,
-                )
-                seen_base_urls[agent.base_url] = models
-        except (OSError, TimeoutError, socket.timeout, urllib.error.URLError, json.JSONDecodeError) as exc:
-            report["probe_errors"][agent.name] = _short_error(exc)
+        probe_agents.setdefault(agent.base_url, agent)
+
+    probe_results: dict[str, tuple[list[str], str]] = {}
+    if probe_agents:
+        max_workers = max(1, min(4, len(probe_agents)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_url = {
+                executor.submit(_probe_local_models, agent, timeout): base_url
+                for base_url, agent in probe_agents.items()
+            }
+            for future in as_completed(future_to_url):
+                probe_results[future_to_url[future]] = future.result()
+
+    for agent in config.agents.values():
+        if not _should_probe_local_agent(agent):
+            continue
+        assert agent.base_url is not None
+        models, error = probe_results.get(agent.base_url, ([], "probe did not run"))
+        if error:
+            report["probe_errors"][agent.name] = error
             continue
 
         report["detected_local_models"][agent.name] = models
@@ -255,6 +264,21 @@ def _detect_local_models(config: HubConfig, report: dict[str, Any]) -> None:
             agent.model = selected
             report["selected_local_models"][agent.name] = selected
         agent.enabled = True
+
+
+def _probe_local_models(agent: AgentConfig, timeout: float) -> tuple[list[str], str]:
+    try:
+        return (
+            fetch_openai_models(
+                agent.base_url,
+                timeout=timeout,
+                api_key=agent.resolved_api_key,
+                headers=agent.headers,
+            ),
+            "",
+        )
+    except (OSError, TimeoutError, socket.timeout, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return [], _short_error(exc)
 
 
 def _should_probe_local_agent(agent: AgentConfig) -> bool:
