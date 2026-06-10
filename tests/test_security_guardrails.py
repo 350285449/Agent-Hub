@@ -145,6 +145,47 @@ class SecurityGuardrailTests(unittest.TestCase):
         self.assertFalse(path_only.has_secret_findings)
         self.assertTrue(path_only.has_sensitive_file_references)
 
+    def test_secret_scanner_ignores_uuid_like_operational_ids(self) -> None:
+        identifier = "019e9a93-2ca8-7f30-9ef0-30e01dfef9a5"
+        scan = scan_and_redact_context_text(
+            "Cline session id: "
+            f"{identifier}\n"
+            "Config path: C:\\Users\\Vlad\\AppData\\Roaming\\Code\\User\\globalStorage\\"
+            f"agent-hub.agent-hub-vscode\\workspaces\\{identifier}\\agent-hub.config.json\n"
+            f"Config uri: C:/Users/Vlad/AppData/Roaming/Code/User/globalStorage/"
+            f"agent-hub.agent-hub-vscode/workspaces/{identifier}/agent-hub.config.json\n"
+            "Tool call: call_abc123-def456-ghi789-jkl012-mno345-pqr678\n"
+            "Request id: request_id=hub-0f4e5204a2624b0b881bc1ac812a5d6d"
+        )
+        credential = scan_and_redact_context_text(f"token={identifier}")
+
+        self.assertFalse(scan.has_secret_findings)
+        self.assertIn(identifier, scan.text)
+        self.assertIn("call_abc123-def456", scan.text)
+        self.assertIn("request_id=hub-", scan.text)
+        self.assertTrue(credential.has_secret_findings)
+        self.assertNotIn(identifier, credential.text)
+
+    def test_secret_scanner_ignores_routes_urls_and_model_ids(self) -> None:
+        scan = scan_and_redact_context_text(
+            "\n".join(
+                [
+                    "https://github.com/350285449/Agent-Hub/blob/main/docs/CLINE.md",
+                    "github.com/org/repo/commit/abc123-def456-ghi789-jkl012-mno345-pqr678",
+                    "nvidia/llama-3.1-nemotron-70b-instruct",
+                    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+                    "file C:/Users/Vlad/Documents/GitHub/Agent-Hub/docs/architecture-modernization-phase15.md",
+                ]
+            )
+        )
+        token = scan_and_redact_context_text("Authorization: Bearer abc123-def456-ghi789-jkl012-mno345-pqr678")
+
+        self.assertFalse(scan.has_secret_findings)
+        self.assertIn("github.com/350285449", scan.text)
+        self.assertIn("nvidia/llama-3.1", scan.text)
+        self.assertTrue(token.has_secret_findings)
+        self.assertIn("[REDACTED]", token.text)
+
     def test_provider_privacy_blocks_unredacted_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             agent = AgentConfig(
@@ -202,6 +243,53 @@ class SecurityGuardrailTests(unittest.TestCase):
                 HubRequest(
                     session_id="s",
                     messages=[{"role": "user", "content": "Current file: .env\nNo values shown."}],
+                )
+            )
+
+        self.assertEqual(response.text, "ok")
+        self.assertEqual(calls, ["cloud"])
+
+    def test_auto_mode_allows_cline_uuid_context_without_secret_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            root = Path(tmp)
+            identifier = "019e9a93-2ca8-7f30-9ef0-30e01dfef9a5"
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                approval_mode="auto",
+                cline_compatibility_mode=True,
+                free_only=False,
+                default_route=["cloud"],
+                agents={
+                    "cloud": AgentConfig(
+                        name="cloud",
+                        provider="openai-compatible",
+                        provider_type="ollama-cloud",
+                        model="qwen3.5:cloud",
+                        base_url="http://127.0.0.1:11434",
+                        free=True,
+                    )
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    return ProviderResult(text="ok", model=self.agent.model, finish_reason="stop")
+
+            response = AgentRouter(config, provider_factory=Provider).route(
+                HubRequest(
+                    session_id="s",
+                    messages=[
+                        {"role": "system", "content": f"Cline session id: {identifier}"},
+                        {"role": "user", "content": "hi"},
+                    ],
+                    raw={"model": "agent-hub-coding"},
+                    metadata={"source": "cline", "user_agent": "Cline/3.0"},
                 )
             )
 

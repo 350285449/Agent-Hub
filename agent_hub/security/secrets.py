@@ -43,6 +43,12 @@ SECRET_VALUE_PATTERNS = (
         r"\b(?=[A-Za-z0-9._~+/=-]{36,}\b)(?=[A-Za-z0-9._~+/=-]*[A-Za-z])(?=[A-Za-z0-9._~+/=-]*\d)(?=[A-Za-z0-9._~+/=-]*[._~+/=-])[A-Za-z0-9._~+/=-]{36,}\b"
     ),
 )
+LONG_SECRET_PATTERN_INDEX = len(SECRET_VALUE_PATTERNS) - 1
+SAFE_OPERATIONAL_IDENTIFIER_PATTERNS = (
+    re.compile(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"),
+    re.compile(r"(?i)^(?:hub|resp|chatcmpl|msg|toolu|call|thread|run|task|session|conversation|trace|request)[_-][A-Za-z0-9][A-Za-z0-9_.-]{16,}$"),
+    re.compile(r"(?i)^(?:session|conversation|thread|request|trace|tool(?:_use)?|call|message|msg|run|task|workflow|checkpoint)_?id=[A-Za-z0-9][A-Za-z0-9_.:-]{16,}$"),
+)
 PROMPT_INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("ignore_instructions", re.compile(r"(?i)\bignore (?:all )?(?:previous|prior|system|developer) instructions\b")),
     ("override_rules", re.compile(r"(?i)\b(?:override|bypass|disable) (?:the )?(?:system|developer|tool|safety|security) (?:rules|instructions|policy)\b")),
@@ -123,8 +129,8 @@ def redact_secrets(value: Any) -> Any:
 
 def redact_secret_like_text(value: str) -> str:
     text = value
-    for pattern in SECRET_VALUE_PATTERNS:
-        text = pattern.sub(_redacted_match, text)
+    for index, pattern in enumerate(SECRET_VALUE_PATTERNS):
+        text = pattern.sub(lambda match, index=index: _redacted_match(match, index=index), text)
     return text
 
 
@@ -201,7 +207,9 @@ def _redact(value: Any, key: str = "") -> Any:
     return value
 
 
-def _redacted_match(match: re.Match[str]) -> str:
+def _redacted_match(match: re.Match[str], *, index: int) -> str:
+    if index == LONG_SECRET_PATTERN_INDEX and _safe_long_secret_candidate(match.group(0)):
+        return match.group(0)
     if match.lastindex and match.lastindex >= 2:
         return f"{match.group(1)}=[REDACTED]"
     if match.lastindex == 1:
@@ -218,6 +226,8 @@ def _secret_findings(text: str, *, source: str = "") -> list[dict[str, Any]]:
     line_starts = _line_starts(text)
     for index, pattern in enumerate(SECRET_VALUE_PATTERNS):
         for match in pattern.finditer(text):
+            if index == LONG_SECRET_PATTERN_INDEX and _safe_long_secret_candidate(match.group(0)):
+                continue
             findings.append(
                 {
                     "kind": _secret_kind(index, match.group(0)),
@@ -229,6 +239,22 @@ def _secret_findings(text: str, *, source: str = "") -> list[dict[str, Any]]:
             if len(findings) >= 20:
                 return findings
     return findings
+
+
+def _safe_long_secret_candidate(value: str) -> bool:
+    text = str(value or "").strip()
+    if any(pattern.fullmatch(text) for pattern in SAFE_OPERATIONAL_IDENTIFIER_PATTERNS):
+        return True
+    return _looks_like_path_or_model_identifier(text)
+
+
+def _looks_like_path_or_model_identifier(value: str) -> bool:
+    if "/" not in value or any(marker in value for marker in ("+", "=")):
+        return False
+    segments = [segment for segment in value.split("/") if segment]
+    if len(segments) < 2:
+        return False
+    return "." in value or "-" in value or "_" in value or len(segments) >= 3
 
 
 def _prompt_injection_findings(text: str, *, source: str = "") -> list[dict[str, Any]]:
