@@ -7802,6 +7802,20 @@ async function finishModeCommand(result, options = {}) {
   return result;
 }
 
+async function syncRunningBackendBoostMode(mode) {
+  const boostMode = normalizeBoostMode(mode);
+  if (!boostMode || !(await isServerOnline())) {
+    return false;
+  }
+  try {
+    await requestJson("POST", "/v1/boost-mode", { boost_mode: boostMode });
+    return true;
+  } catch (error) {
+    output.appendLine(`Could not sync Agent Hub Boost Mode to running backend: ${error.message}`);
+    return false;
+  }
+}
+
 async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
   const modes = modeToggleState(settings());
   const result = modes.tokenSafeMode
@@ -8554,15 +8568,17 @@ async function applyCodexCliModeSettings(rawSettings) {
         storageDir: generatedConfigStorageDir(next.workspaceSettings.configPath, workspace)
       })
       : false;
+    const boostSynced = await syncRunningBackendBoostMode("balanced");
     const restartNote = serverProcess || (await isServerOnline())
       ? " Restart Agent Hub to use the Codex CLI route."
       : "";
     const configNote = configChanged ? " Updated Agent Hub routing and Codex token budgets." : "";
+    const boostSyncNote = boostSynced ? " Synced Boost Mode to the running backend." : "";
     const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
     return {
       ok: true,
       cancelled: false,
-      message: `Use Codex CLI is on: codex-cli first, no OpenAI API key fallback, compact context.${migrationNote}${configNote}${restartNote}`
+      message: `Use Codex CLI is on: codex-cli first, no OpenAI API key fallback, compact context.${migrationNote}${configNote}${boostSyncNote}${restartNote}`
     };
   } catch (error) {
     return {
@@ -8651,15 +8667,17 @@ async function applyFreeOnlyModeSettings(rawSettings) {
         storageDir: generatedConfigStorageDir(next.workspaceSettings.configPath, workspace)
       })
       : false;
+    const boostSynced = await syncRunningBackendBoostMode("balanced");
     const restartNote = serverProcess || (await isServerOnline())
       ? " Restart Agent Hub to apply strict free routing."
       : "";
     const configNote = configChanged ? " Updated Agent Hub routing and disabled non-free agents." : "";
+    const boostSyncNote = boostSynced ? " Synced Boost Mode to the running backend." : "";
     const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
     return {
       ok: true,
       cancelled: false,
-      message: `Free Models Only is on: Codex CLI and non-free/API-key fallbacks are disabled.${migrationNote}${configNote}${restartNote}`
+      message: `Free Models Only is on: Codex CLI and non-free/API-key fallbacks are disabled.${migrationNote}${configNote}${boostSyncNote}${restartNote}`
     };
   } catch (error) {
     return {
@@ -8747,15 +8765,17 @@ async function applyTokenSafeModeSettings(rawSettings) {
         storageDir: generatedConfigStorageDir(next.workspaceSettings.configPath, workspace)
       })
       : false;
+    const boostSynced = await syncRunningBackendBoostMode("save_tokens");
     const restartNote = serverProcess || (await isServerOnline())
       ? " Restart Agent Hub to use the updated config defaults."
       : "";
     const configNote = configChanged ? " Updated Agent Hub routing and token budgets." : "";
+    const boostSyncNote = boostSynced ? " Synced Boost Mode to the running backend." : "";
     const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
     return {
       ok: true,
       cancelled: false,
-      message: `Save Codex Tokens is on: free models first, Codex fallback now uses adaptive compact digests (${CODEX_CLI_MICRO_CONTEXT_BUDGET}-${CODEX_CLI_RESCUE_CONTEXT_BUDGET} context tokens, ${CODEX_CLI_MICRO_AGENT_STEPS}-${CODEX_CLI_RESCUE_AGENT_STEPS} agent steps, ${CODEX_CLI_MICRO_OUTPUT_TOKENS}-${CODEX_CLI_RESCUE_OUTPUT_TOKENS} output tokens).${migrationNote}${configNote}${restartNote}`
+      message: `Save Codex Tokens is on: free models first, Codex fallback now uses adaptive compact digests (${CODEX_CLI_MICRO_CONTEXT_BUDGET}-${CODEX_CLI_RESCUE_CONTEXT_BUDGET} context tokens, ${CODEX_CLI_MICRO_AGENT_STEPS}-${CODEX_CLI_RESCUE_AGENT_STEPS} agent steps, ${CODEX_CLI_MICRO_OUTPUT_TOKENS}-${CODEX_CLI_RESCUE_OUTPUT_TOKENS} output tokens).${migrationNote}${configNote}${boostSyncNote}${restartNote}`
     };
   } catch (error) {
     return {
@@ -8844,15 +8864,17 @@ async function applyStandardCloudModeSettings(rawSettings, modeName = "mode") {
         storageDir: generatedConfigStorageDir(next.workspaceSettings.configPath, workspace)
       })
       : false;
+    const boostSynced = await syncRunningBackendBoostMode("balanced");
     const restartNote = serverProcess || (await isServerOnline())
       ? " Restart Agent Hub to use normal routing."
       : "";
     const configNote = configChanged ? " Updated Agent Hub routing and cleared mode-specific token settings." : "";
+    const boostSyncNote = boostSynced ? " Synced Boost Mode to the running backend." : "";
     const migrationNote = clearedWorkspaceSettings ? " Moved Agent Hub settings out of workspace settings." : "";
     return {
       ok: true,
       cancelled: false,
-      message: `${modeName} is off: normal cloud routing is restored.${migrationNote}${configNote}${restartNote}`
+      message: `${modeName} is off: normal cloud routing is restored.${migrationNote}${configNote}${boostSyncNote}${restartNote}`
     };
   } catch (error) {
     return {
@@ -9051,9 +9073,25 @@ function readResolvedAgentHubConfig(config) {
   }
 }
 
+function activeRequestBoostMode(config) {
+  const raw = readResolvedAgentHubConfig(config);
+  const explicitMode = normalizeBoostMode(raw && raw.boost_mode);
+  if (explicitMode && explicitMode !== "balanced") {
+    return explicitMode;
+  }
+  if (isFreeCloudSavingsMode(config)) {
+    return "save_tokens";
+  }
+  return "";
+}
+
 function agentHubRequestOptions(config, extra = {}) {
   const options = { ...(extra && typeof extra === "object" ? extra : {}) };
   const cloudSettings = cloudModelSettingsPayload(config);
+  const boostMode = activeRequestBoostMode(config);
+  if (boostMode && typeof options.boost_mode !== "string") {
+    options.boost_mode = boostMode;
+  }
   if (cloudSettings.freeOnly !== false && cloudSettings.disableNonFreeModels === true) {
     options.free_only = true;
     options.disable_non_free_models = true;
@@ -9061,6 +9099,9 @@ function agentHubRequestOptions(config, extra = {}) {
   }
   if (isFreeCloudSavingsMode(config)) {
     const plan = tokenSafeRequestPlan(config, extra);
+    if (!options.boost_mode) {
+      options.boost_mode = "save_tokens";
+    }
     options.free_cloud_offload = true;
     options.prefer_free_cloud = true;
     options.allow_cloud_exploration = true;
@@ -9193,6 +9234,33 @@ function normalizeCloudRouteMode(value) {
     return "ollama-cloud";
   }
   return ["ollama-cloud", "api-key", "codex-cli"].includes(mode) ? mode : "ollama-cloud";
+}
+
+function normalizeBoostMode(value) {
+  const text = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const aliases = {
+    balanced: "balanced",
+    balance: "balanced",
+    default: "balanced",
+    auto: "balanced",
+    save: "save_tokens",
+    spend_less: "save_tokens",
+    save_tokens: "save_tokens",
+    token_saver: "save_tokens",
+    best: "best_code",
+    best_result: "best_code",
+    best_code: "best_code",
+    quality: "best_code",
+    fast: "fast_fix",
+    fast_fix: "fast_fix",
+    bug_fix: "fast_fix",
+    big: "big_refactor",
+    big_refactor: "big_refactor",
+    refactor: "big_refactor",
+    local: "local_first",
+    local_first: "local_first"
+  };
+  return aliases[text] || "";
 }
 
 function cloudModelSettingsPayload(config) {
@@ -12833,6 +12901,7 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
 }
 
 function clearModeOptimizationFromConfig(data) {
+  data.boost_mode = "balanced";
   data.agent_context_budget_tokens = DEFAULT_AGENT_CONTEXT_BUDGET;
   data.agent_context_compaction_enabled = true;
   data.context_mode = "balanced";
@@ -12864,6 +12933,7 @@ function applyMaxTokenSaveModeToConfig(data, settings = {}) {
     800,
     200000
   );
+  data.boost_mode = "save_tokens";
   data.agent_context_budget_tokens = budget;
   data.agent_context_compaction_enabled = true;
   data.context_mode = "minimal";
@@ -12905,6 +12975,7 @@ function applyCodexCliModeToConfig(data, settings = {}) {
     800,
     200000
   );
+  data.boost_mode = "balanced";
   data.agent_context_budget_tokens = budget;
   data.agent_context_compaction_enabled = true;
   data.context_mode = "minimal";
@@ -12936,6 +13007,7 @@ function applyCodexCliModeToConfig(data, settings = {}) {
 }
 
 function applyStrictFreeOnlyModeToConfig(data) {
+  data.boost_mode = "balanced";
   data.free_only = true;
   data.disable_non_free_models = true;
   data.enable_load_balancing = true;
@@ -13336,6 +13408,7 @@ function localConfigForLocalModels(sources, options = {}) {
   return {
     host: "127.0.0.1",
     port: 8787,
+    boost_mode: options.cloudSettings?.maxTokenSaveMode ? "save_tokens" : "balanced",
     state_dir: storagePaths.stateDir,
     inbox_dir: storagePaths.inboxDir,
     outbox_dir: storagePaths.outboxDir,

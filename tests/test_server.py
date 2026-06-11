@@ -14,8 +14,10 @@ from agent_hub.core.router import AgentRouter
 from agent_hub.server import (
     BACKEND_FEATURES,
     BACKEND_VERSION,
+    _CLINE_PERMISSION_GUIDANCE_CACHE,
     AgentHubHTTPServer,
     _apply_model_routing,
+    _cline_permission_guidance_repeated,
     _model_rows,
 )
 
@@ -1182,6 +1184,97 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("--config", content)
             self.assertIn("Agent Hub: Restart Server", content)
             self.assertIn("Prompt Cline to make the config edit", content)
+
+    def test_cline_secret_permission_error_includes_redacted_finding_summary(self) -> None:
+        _CLINE_PERMISSION_GUIDANCE_CACHE.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                workspace_dir=Path(tmp),
+                approval_mode="auto",
+                cline_compatibility_mode=True,
+                free_only=False,
+                default_route=["paid"],
+                agents={
+                    "paid": AgentConfig(
+                        name="paid",
+                        provider="openai",
+                        model="paid-model",
+                        api_key="secret",
+                        safe_for_secrets=True,
+                    )
+                },
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                body = _post_json(
+                    f"{base}/v1/chat/completions",
+                    {
+                        "model": "agent-hub-coding",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "Current file: app.py\nAPI_KEY=super-secret-token-123",
+                            }
+                        ],
+                    },
+                    headers={"User-Agent": "Cline/3.0"},
+                )
+            finally:
+                _stop(server, thread)
+
+            content = body["choices"][0]["message"]["content"]
+            self.assertIn("This request needs explicit approval because secret-like content was detected.", content)
+            self.assertIn("Detected (redacted):", content)
+            self.assertIn("secret_assignment", content)
+            self.assertIn("line 2", content)
+            self.assertIn("[REDACTED]", content)
+            self.assertNotIn("super-secret-token-123", content)
+
+    def test_cline_permission_guidance_dedupe_ignores_evolving_prompt_text(self) -> None:
+        _CLINE_PERMISSION_GUIDANCE_CACHE.clear()
+        error = {
+            "message": "Provider request requires explicit approval because the request content triggered a security rule."
+        }
+        summary = {"findings": [{"kind": "long_secret", "source": "message:0", "line": 1}]}
+        first = HubRequest(
+            session_id="generated-session-a",
+            messages=[{"role": "user", "content": "hi"}],
+            raw={"model": "agent-hub-coding"},
+            metadata={"source": "cline"},
+        )
+        retry = HubRequest(
+            session_id="generated-session-b",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "hi\nAgent Hub blocked this Cline request before sending workspace context.",
+                }
+            ],
+            raw={"model": "agent-hub-coding"},
+            metadata={"source": "cline"},
+        )
+
+        self.assertFalse(
+            _cline_permission_guidance_repeated(
+                request=first,
+                provider="paid",
+                model="paid-model",
+                error=error,
+                security_summary=summary,
+            )
+        )
+        self.assertTrue(
+            _cline_permission_guidance_repeated(
+                request=retry,
+                provider="paid",
+                model="paid-model",
+                error=error,
+                security_summary=summary,
+            )
+        )
 
     def test_debug_request_preserves_cline_structured_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

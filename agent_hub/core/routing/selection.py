@@ -2104,10 +2104,76 @@ class AgentRouter:
     ) -> dict[str, Any]:
         """Score the new goal: best expected outcome per token/cost unit."""
 
-        health = self._health.get(agent.name)
         mode_name = boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
         plan = self._optimization_plan_for_request(request, classification)
         mode_name = plan.boost_mode or mode_name
+        metrics = self._route_efficiency_metrics(agent, request, classification, plan, mode_name=mode_name)
+        reference = self._route_efficiency_reference_agent(request, current=agent)
+        comparison: dict[str, Any] = {}
+        if reference is not None:
+            reference_metrics = self._route_efficiency_metrics(
+                reference,
+                request,
+                classification,
+                plan,
+                mode_name=mode_name,
+            )
+            comparison = self._base_model_efficiency_comparison(
+                candidate=agent,
+                candidate_metrics=metrics,
+                reference=reference,
+                reference_metrics=reference_metrics,
+                plan=plan,
+            )
+
+        normalized = float(metrics["score"])
+        adjustment = _bounded_float(normalized, 0.0, 24.0) * 0.35
+        comparison_adjustment = float(comparison.get("routing_adjustment", 0.0) or 0.0)
+        adjustment = _bounded_float(adjustment + comparison_adjustment, -8.0, 12.0)
+        summary = (
+            str(comparison.get("summary") or "")
+            if comparison
+            else (
+                f"Efficiency {normalized:.2f}: {plan.model_policy} under "
+                f"{plan.task_type} token/cost pressure."
+            )
+        )
+        return {
+            "object": "agent_hub.route_efficiency",
+            "formula": "weighted_quality * weighted_success * speed / weighted_token_cost",
+            "quality": metrics["quality"],
+            "quality_weight": plan.quality_weight,
+            "success_probability": metrics["success_probability"],
+            "risk_weight": plan.risk_weight,
+            "cost_weight": plan.cost_weight,
+            "speed_weight": plan.speed_weight,
+            "estimated_input_tokens": metrics["estimated_input_tokens"],
+            "estimated_output_tokens": metrics["estimated_output_tokens"],
+            "estimated_total_tokens": metrics["estimated_total_tokens"],
+            "estimated_cost_usd": metrics["estimated_cost_usd"],
+            "quality_per_1k_tokens": metrics["quality_per_1k_tokens"],
+            "expected_success_per_1k_tokens": metrics["expected_success_per_1k_tokens"],
+            "boost_target_context_ratio": plan.target_context_ratio,
+            "estimated_context_reduction_percent": round((1.0 - float(plan.target_context_ratio)) * 100.0, 2),
+            "base_model_comparison": comparison,
+            "boost_plan": plan.to_dict(),
+            "score": round(normalized, 4),
+            "routing_adjustment": round(adjustment, 3),
+            "base_model_routing_adjustment": round(comparison_adjustment, 3),
+            "samples": metrics["samples"],
+            "summary": summary,
+        }
+
+    def _route_efficiency_metrics(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        classification: Any,
+        plan: Any,
+        *,
+        mode_name: str,
+    ) -> dict[str, Any]:
+        health = self._health.get(agent.name)
         outcome_score, samples = self._model_efficiency_score(agent, request, classification)
         quality = outcome_score
         if quality is None:
@@ -2150,27 +2216,141 @@ class AgentRouter:
             normalized += 1.0 + max(0.0, plan.cost_weight - 1.0)
         if mode_name == "best_code":
             normalized += min(2.0, float(agent.coding_score or 0.0) * 2.0)
-        adjustment = _bounded_float(normalized, 0.0, 24.0) * 0.35
         return {
-            "object": "agent_hub.route_efficiency",
-            "formula": "weighted_quality * weighted_success * speed / weighted_token_cost",
             "quality": round(float(quality), 4),
-            "quality_weight": plan.quality_weight,
             "success_probability": round(success_probability, 4),
-            "risk_weight": plan.risk_weight,
-            "cost_weight": plan.cost_weight,
-            "speed_weight": plan.speed_weight,
             "estimated_input_tokens": input_tokens,
             "estimated_output_tokens": output_tokens,
+            "estimated_total_tokens": input_tokens + output_tokens,
             "estimated_cost_usd": cost,
-            "boost_plan": plan.to_dict(),
-            "score": round(normalized, 4),
-            "routing_adjustment": round(adjustment, 3),
-            "samples": samples,
-            "summary": (
-                f"Efficiency {normalized:.2f}: {plan.model_policy} under "
-                f"{plan.task_type} token/cost pressure."
+            "quality_per_1k_tokens": round((float(quality) / token_cost_units), 4),
+            "expected_success_per_1k_tokens": round(
+                (float(quality) * float(success_probability)) / token_cost_units,
+                4,
             ),
+            "score": round(normalized, 4),
+            "samples": samples,
+            "raw_efficiency": round(raw_efficiency, 6),
+        }
+
+    def _route_efficiency_reference_agent(
+        self,
+        request: HubRequest,
+        *,
+        current: AgentConfig,
+    ) -> AgentConfig | None:
+        candidates = [
+            self.config.agents[name]
+            for name in self._route_names(request)
+            if name in self.config.agents
+            and self.config.agents[name].enabled
+            and self.config.agents[name].name != current.name
+        ]
+        if not candidates:
+            return None
+        reference = _codex_efficiency_reference_agent(candidates)
+        if reference is not None:
+            return reference
+        candidates = [agent for agent in candidates if not _is_echo_agent(agent)]
+        if not candidates:
+            return None
+        return sorted(
+            candidates,
+            key=lambda item: (
+                0.0 if is_free_agent(item) else 1.0,
+                float(item.coding_score or 0.0) + float(item.reasoning_score or 0.0),
+                float(item.context_window or 0),
+            ),
+            reverse=True,
+        )[0]
+
+    def _base_model_efficiency_comparison(
+        self,
+        *,
+        candidate: AgentConfig,
+        candidate_metrics: dict[str, Any],
+        reference: AgentConfig,
+        reference_metrics: dict[str, Any],
+        plan: Any,
+    ) -> dict[str, Any]:
+        candidate_quality = float(candidate_metrics.get("quality", 0.0) or 0.0) * float(
+            candidate_metrics.get("success_probability", 0.0) or 0.0
+        )
+        reference_quality = float(reference_metrics.get("quality", 0.0) or 0.0) * float(
+            reference_metrics.get("success_probability", 0.0) or 0.0
+        )
+        quality_delta = candidate_quality - reference_quality
+        tolerance = 0.08 if plan.boost_mode == "save_tokens" else 0.05
+        if plan.risk_weight > 1.08:
+            tolerance = max(0.02, tolerance - 0.03)
+        candidate_tokens = int(candidate_metrics.get("estimated_total_tokens", 0) or 0)
+        reference_tokens = int(reference_metrics.get("estimated_total_tokens", 0) or 0)
+        token_savings = max(0, reference_tokens - candidate_tokens)
+        token_savings_pct = token_savings / max(1, reference_tokens)
+        candidate_cost = _optional_float(candidate_metrics.get("estimated_cost_usd"))
+        reference_cost = _optional_float(reference_metrics.get("estimated_cost_usd"))
+        cost_savings = None
+        cost_savings_pct = None
+        if candidate_cost is not None and reference_cost is not None:
+            cost_savings = float(reference_cost) - float(candidate_cost)
+            cost_savings_pct = cost_savings / max(0.000001, float(reference_cost)) if reference_cost > 0 else 0.0
+        free_savings = is_free_agent(candidate) and not is_free_agent(reference)
+        less_tokens = token_savings > 0 or float(plan.target_context_ratio or 1.0) < 0.96
+        materially_cheaper = (
+            token_savings_pct >= 0.08
+            or (cost_savings_pct is not None and cost_savings_pct >= 0.10)
+            or free_savings
+        )
+        quality_close_enough = quality_delta >= -tolerance
+        score_delta = float(candidate_metrics.get("score", 0.0) or 0.0) - float(
+            reference_metrics.get("score", 0.0) or 0.0
+        )
+        beats_base = quality_close_enough and less_tokens and (score_delta >= 0.0 or materially_cheaper)
+        if beats_base:
+            routing_adjustment = min(
+                3.0,
+                max(0.0, score_delta) * 0.2
+                + token_savings_pct * 3.0
+                + (max(0.0, cost_savings_pct or 0.0) * 2.0)
+                + (0.7 if free_savings else 0.0),
+            )
+            summary = (
+                f"Expected quality is within {tolerance:.0%} of base model {reference.name} "
+                f"while using fewer planned tokens or lower cost."
+            )
+        elif quality_delta < -tolerance:
+            routing_adjustment = -min(5.0, (abs(quality_delta) - tolerance) * 18.0)
+            summary = (
+                f"Base model {reference.name} is protected because expected quality drops "
+                f"{abs(quality_delta):.2f}, beyond {tolerance:.0%} tolerance."
+            )
+        else:
+            routing_adjustment = 0.0
+            summary = (
+                f"Candidate is close to base model {reference.name}, but token/cost savings "
+                "are not strong enough for an efficiency boost."
+            )
+        return {
+            "object": "agent_hub.base_model_efficiency_comparison",
+            "baseline_agent": reference.name,
+            "baseline_provider": reference.provider,
+            "baseline_model": reference.model,
+            "candidate_agent": candidate.name,
+            "quality_delta": round(quality_delta, 4),
+            "quality_tolerance": round(tolerance, 4),
+            "score_delta": round(score_delta, 4),
+            "estimated_token_savings": token_savings,
+            "estimated_token_savings_percent": round(token_savings_pct * 100.0, 2),
+            "estimated_cost_savings_usd": round(cost_savings, 8) if cost_savings is not None else None,
+            "estimated_cost_savings_percent": round(cost_savings_pct * 100.0, 2)
+            if cost_savings_pct is not None
+            else None,
+            "planned_context_reduction_percent": round((1.0 - float(plan.target_context_ratio)) * 100.0, 2),
+            "less_tokens": less_tokens,
+            "materially_cheaper": materially_cheaper,
+            "beats_base_model_for_less_tokens": beats_base,
+            "routing_adjustment": round(routing_adjustment, 3),
+            "summary": summary,
         }
 
     def _tournament_plan(

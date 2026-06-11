@@ -16,6 +16,7 @@ from agent_hub.optimizer import (
     trace_from_plan,
 )
 from agent_hub.output_validator import validate_output
+from agent_hub.payloads import request_from_openai_chat
 from agent_hub.repository import RepositoryIndexer, RepoContextSelector
 from agent_hub.token_optimizer import ContextCache, TokenOptimizer
 
@@ -509,6 +510,97 @@ index 867a3ee..b77d49d 100644
         self.assertIn("anchored_bug_context", decision.boost_plan["algorithms"])
         self.assertIn("route_efficiency", decision.candidate_scores[0])
         self.assertIn("task_policy", decision.to_dict())
+
+    def test_compatible_chat_inherits_config_boost_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / "state",
+                free_only=False,
+                repo_context_enabled=False,
+                boost_mode="save_tokens",
+                default_route=["cheap"],
+                agents={
+                    "cheap": AgentConfig(
+                        name="cheap",
+                        provider="openai-compatible",
+                        model="cheap-model",
+                        base_url="http://127.0.0.1:9999",
+                        free=True,
+                        context_window=32_000,
+                    ),
+                },
+            )
+            request = request_from_openai_chat(
+                {
+                    "model": "agent-hub-coding",
+                    "messages": [{"role": "user", "content": "Summarize this file."}],
+                }
+            )
+            request.route = None
+            decision = AgentRouter(config, provider_factory=_OkProvider).decide(request)
+
+        self.assertEqual(request.api_shape, "openai-chat")
+        self.assertEqual(decision.boost_mode, "save_tokens")
+        self.assertEqual(decision.routing_mode, "cheapest")
+
+    def test_efficiency_routing_beats_base_model_with_less_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / "state",
+                free_only=False,
+                repo_context_enabled=False,
+                boost_mode="save_tokens",
+                default_route=["base-codex", "efficient-free"],
+                agents={
+                    "base-codex": AgentConfig(
+                        name="base-codex",
+                        provider="openai",
+                        model="codex-base",
+                        free=False,
+                        coding_score=0.92,
+                        reasoning_score=0.92,
+                        speed_score=0.45,
+                        context_window=128_000,
+                        max_tokens=1_200,
+                        cost_per_million_input=5.0,
+                        cost_per_million_output=15.0,
+                    ),
+                    "efficient-free": AgentConfig(
+                        name="efficient-free",
+                        provider="openai-compatible",
+                        provider_type="groq",
+                        model="qwen-free",
+                        base_url="https://example.invalid/v1",
+                        free=True,
+                        coding_score=0.88,
+                        reasoning_score=0.88,
+                        speed_score=0.9,
+                        context_window=64_000,
+                        max_tokens=320,
+                        cost_per_million_input=0.0,
+                        cost_per_million_output=0.0,
+                    ),
+                },
+            )
+            decision = AgentRouter(config, provider_factory=_OkProvider).decide(
+                HubRequest(
+                    session_id="s",
+                    messages=[{"role": "user", "content": "Explain this helper and suggest one small cleanup."}],
+                )
+            )
+
+        self.assertEqual(decision.selected_agent, "efficient-free")
+        selected = decision.candidate_scores[0]
+        comparison = selected["route_efficiency"]["base_model_comparison"]
+        self.assertEqual(comparison["baseline_agent"], "base-codex")
+        self.assertTrue(comparison["beats_base_model_for_less_tokens"])
+        self.assertGreater(comparison["estimated_token_savings"], 0)
+        self.assertGreater(comparison["routing_adjustment"], 0)
+        self.assertLess(selected["estimated_output_tokens"], 1_200)
 
     def test_router_applies_boost_plan_target_to_provider_context(self) -> None:
         _CaptureProvider.last_request = None

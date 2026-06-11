@@ -679,8 +679,13 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('config.update("contextMode", "minimal"', token_safe_source)
         self.assertIn("freeCloudSavingsMode: true", token_safe_source)
         self.assertIn("codexCliTokenOptimized: true", token_safe_source)
+        self.assertIn('syncRunningBackendBoostMode("save_tokens")', token_safe_source)
+        self.assertIn('syncRunningBackendBoostMode("balanced")', token_safe_source)
         self.assertIn("function applyTokenSafeRequestPlan", source)
         self.assertIn("function tokenSafeRequestPlan", source)
+        self.assertIn("function activeRequestBoostMode", source)
+        self.assertIn("function normalizeBoostMode", source)
+        self.assertIn("function syncRunningBackendBoostMode", source)
         self.assertIn("context_chars: String(context || \"\").length", source)
 
         request_options_start = source.index("function agentHubRequestOptions")
@@ -690,6 +695,9 @@ class VscodeExtensionContributionTests(unittest.TestCase):
             request_options_source.index("if (isFreeCloudSavingsMode(config))"):
             request_options_source.index("if (isCodexCliTokenOptimizedMode(config))")
         ]
+        self.assertIn("const boostMode = activeRequestBoostMode(config)", request_options_source)
+        self.assertIn("options.boost_mode = boostMode", request_options_source)
+        self.assertIn('options.boost_mode = "save_tokens"', free_branch)
         self.assertIn('options.routing_mode = "cheapest"', free_branch)
         self.assertIn("options.free_cloud_offload = true", free_branch)
         self.assertIn("options.context_mode = \"minimal\"", free_branch)
@@ -707,12 +715,15 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         config_start = source.index("function applyMaxTokenSaveModeToConfig")
         config_end = source.index("function applyCodexCliModeToConfig", config_start)
         config_source = source[config_start:config_end]
+        self.assertIn('data.boost_mode = "save_tokens"', config_source)
         self.assertIn('data.context_mode = "minimal"', config_source)
         self.assertIn("data.max_context_tokens = budget", config_source)
         self.assertIn("free_cloud_savings_mode: true", config_source)
         self.assertIn('max_tokens_mode: "explicit"', config_source)
         self.assertIn("minimal_tool_schema: true", config_source)
         self.assertIn("codex_cli_prompt_optimized: true", config_source)
+        self.assertIn('data.boost_mode = "balanced"', source[source.index("function clearModeOptimizationFromConfig"):config_start])
+        self.assertIn('boost_mode: options.cloudSettings?.maxTokenSaveMode ? "save_tokens" : "balanced"', source)
 
         cloud_sources_start = source.index("function cloudModelSources")
         cloud_sources_end = source.index("function freeCloudPresetSources", cloud_sources_start)

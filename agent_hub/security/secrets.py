@@ -49,6 +49,11 @@ SAFE_OPERATIONAL_IDENTIFIER_PATTERNS = (
     re.compile(r"(?i)^(?:hub|resp|chatcmpl|msg|toolu|call|thread|run|task|session|conversation|trace|request)[_-][A-Za-z0-9][A-Za-z0-9_.-]{16,}$"),
     re.compile(r"(?i)^(?:session|conversation|thread|request|trace|tool(?:_use)?|call|message|msg|run|task|workflow|checkpoint)_?id=[A-Za-z0-9][A-Za-z0-9_.:-]{16,}$"),
 )
+SAFE_OPERATIONAL_LABEL_PREFIX = re.compile(
+    r"(?i)(?:^|[\s`'\"([{])"
+    r"(?:checkpoint|session|conversation|thread|request|trace|tool(?:\s+use)?|call|message|msg|run|task|workflow)"
+    r"(?:[_\s-]?id)?\s*[:=]\s*$"
+)
 PROMPT_INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("ignore_instructions", re.compile(r"(?i)\bignore (?:all )?(?:previous|prior|system|developer) instructions\b")),
     ("override_rules", re.compile(r"(?i)\b(?:override|bypass|disable) (?:the )?(?:system|developer|tool|safety|security) (?:rules|instructions|policy)\b")),
@@ -208,7 +213,7 @@ def _redact(value: Any, key: str = "") -> Any:
 
 
 def _redacted_match(match: re.Match[str], *, index: int) -> str:
-    if index == LONG_SECRET_PATTERN_INDEX and _safe_long_secret_candidate(match.group(0)):
+    if index == LONG_SECRET_PATTERN_INDEX and _safe_long_secret_match(match):
         return match.group(0)
     if match.lastindex and match.lastindex >= 2:
         return f"{match.group(1)}=[REDACTED]"
@@ -226,7 +231,7 @@ def _secret_findings(text: str, *, source: str = "") -> list[dict[str, Any]]:
     line_starts = _line_starts(text)
     for index, pattern in enumerate(SECRET_VALUE_PATTERNS):
         for match in pattern.finditer(text):
-            if index == LONG_SECRET_PATTERN_INDEX and _safe_long_secret_candidate(match.group(0)):
+            if index == LONG_SECRET_PATTERN_INDEX and _safe_long_secret_match(match):
                 continue
             findings.append(
                 {
@@ -239,6 +244,13 @@ def _secret_findings(text: str, *, source: str = "") -> list[dict[str, Any]]:
             if len(findings) >= 20:
                 return findings
     return findings
+
+
+def _safe_long_secret_match(match: re.Match[str]) -> bool:
+    if _safe_long_secret_candidate(match.group(0)):
+        return True
+    prefix = match.string[max(0, match.start() - 80) : match.start()]
+    return bool(SAFE_OPERATIONAL_LABEL_PREFIX.search(prefix))
 
 
 def _safe_long_secret_candidate(value: str) -> bool:

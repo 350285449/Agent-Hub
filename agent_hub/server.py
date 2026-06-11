@@ -2198,11 +2198,13 @@ def _cline_permission_guidance_response(
     provider = str(getattr(permission_event, "agent", "") or error.get("provider") or "selected-provider")
     provider_name = str(getattr(permission_event, "provider", "") or provider)
     model = str(getattr(permission_event, "model", "") or public_model)
+    security_summary = _cline_permission_security_summary(permission_event)
     repeated = _cline_permission_guidance_repeated(
         request=request,
         provider=provider,
         model=model,
         error=error,
+        security_summary=security_summary,
     )
     text = _cline_permission_guidance_text(
         config=config,
@@ -2214,6 +2216,7 @@ def _cline_permission_guidance_response(
         security_blocked=security_blocked,
         explicit_security_approval=explicit_security_approval,
         unknown_external=unknown_external,
+        security_summary=security_summary,
         repeated=repeated,
     )
     completion_tokens = max(1, len(text) // 4)
@@ -2239,11 +2242,105 @@ def _cline_permission_guidance_response(
                 "permission_error": error,
                 "trust_level": trust_level,
                 "security_blocked": security_blocked,
+                "security_summary": security_summary,
                 "deduplicated": repeated,
                 "approval_mode": config.approval_mode,
             }
         },
     )
+
+
+def _cline_permission_security_summary(permission_event: Any) -> dict[str, Any]:
+    metadata = getattr(permission_event, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    permission = metadata.get("permission")
+    permission = permission if isinstance(permission, dict) else {}
+    details = permission.get("details")
+    details = details if isinstance(details, dict) else {}
+    security = details.get("security")
+    security = security if isinstance(security, dict) else {}
+    cloud = details.get("cloud_transparency")
+    cloud = cloud if isinstance(cloud, dict) else {}
+    prepared = details.get("prepared_security_context")
+    prepared = prepared if isinstance(prepared, dict) else {}
+    security_metadata = security.get("metadata")
+    security_metadata = security_metadata if isinstance(security_metadata, dict) else {}
+    return {
+        "findings": _cline_unique_findings(
+            security.get("findings"),
+            cloud.get("secret_findings"),
+            prepared.get("secret_findings"),
+            limit=6,
+        ),
+        "sensitive_files": _cline_unique_strings(
+            security_metadata.get("sensitive_files"),
+            prepared.get("sensitive_files"),
+            limit=5,
+        ),
+        "prompt_injection_findings": _cline_unique_findings(
+            security_metadata.get("prompt_injection_findings"),
+            prepared.get("injection_findings"),
+            limit=4,
+        ),
+    }
+
+
+def _cline_unique_findings(*groups: Any, limit: int) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            finding = _cline_safe_finding(item)
+            key = (
+                str(finding.get("kind") or ""),
+                str(finding.get("source") or ""),
+                str(finding.get("line") or ""),
+                str(finding.get("preview") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(finding)
+            if len(findings) >= limit:
+                return findings
+    return findings
+
+
+def _cline_safe_finding(item: dict[str, Any]) -> dict[str, Any]:
+    finding: dict[str, Any] = {"kind": str(item.get("kind") or "security_finding")[:80]}
+    source = item.get("source")
+    if source is not None:
+        finding["source"] = str(source)[:80]
+    line = item.get("line")
+    if isinstance(line, int):
+        finding["line"] = line
+    elif isinstance(line, str) and line.isdigit():
+        finding["line"] = int(line)
+    preview = " ".join(str(item.get("preview") or "").split())[:120]
+    if preview and ("[REDACTED]" in preview or "..." in preview):
+        finding["preview"] = preview
+    return finding
+
+
+def _cline_unique_strings(*groups: Any, limit: int) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            value = str(item or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            values.append(value[:160])
+            if len(values) >= limit:
+                return values
+    return values
 
 
 def _cline_permission_guidance_text(
@@ -2257,13 +2354,14 @@ def _cline_permission_guidance_text(
     security_blocked: bool,
     explicit_security_approval: bool,
     unknown_external: bool,
+    security_summary: dict[str, Any] | None = None,
     repeated: bool = False,
 ) -> str:
     message = str(error.get("message") or "Provider approval is required.")
     if repeated:
         return "\n".join(
             [
-                "Agent Hub already reported this Cline provider approval block for this session.",
+                "Agent Hub already reported this Cline provider approval block recently.",
                 "",
                 f"Provider: {provider} ({provider_name}, model {model})",
                 f"Reason: {message}",
@@ -2283,6 +2381,7 @@ def _cline_permission_guidance_text(
         lines.extend(
             [
                 "This request was blocked by the provider privacy policy.",
+                *_cline_security_summary_text(security_summary),
                 "",
                 "What to do:",
                 "1. Remove the sensitive content from the prompt/context, or route the task to a local provider.",
@@ -2294,6 +2393,7 @@ def _cline_permission_guidance_text(
         lines.extend(
             [
                 "This request needs explicit approval because secret-like content was detected.",
+                *_cline_security_summary_text(security_summary),
                 "",
                 "What to do:",
                 "1. Remove the secret value from the prompt/context, then retry.",
@@ -2337,12 +2437,86 @@ def _cline_permission_guidance_text(
     return "\n".join(lines)
 
 
+def _cline_security_summary_text(security_summary: dict[str, Any] | None) -> list[str]:
+    if not isinstance(security_summary, dict):
+        return []
+    findings = security_summary.get("findings")
+    findings = findings if isinstance(findings, list) else []
+    sensitive_files = security_summary.get("sensitive_files")
+    sensitive_files = sensitive_files if isinstance(sensitive_files, list) else []
+    injection_findings = security_summary.get("prompt_injection_findings")
+    injection_findings = injection_findings if isinstance(injection_findings, list) else []
+    if not findings and not sensitive_files and not injection_findings:
+        return []
+    lines = ["", "Detected (redacted):"]
+    for finding in findings[:6]:
+        if isinstance(finding, dict):
+            lines.append(f"- {_cline_format_security_finding(finding)}")
+    for path in sensitive_files[:5]:
+        value = str(path or "").strip()
+        if value:
+            lines.append(f"- sensitive_file_reference at {value[:160]}")
+    for finding in injection_findings[:4]:
+        if isinstance(finding, dict):
+            lines.append(f"- prompt_injection: {_cline_format_security_finding(finding)}")
+    return lines
+
+
+def _cline_format_security_finding(finding: dict[str, Any]) -> str:
+    parts = [str(finding.get("kind") or "security_finding")]
+    source = str(finding.get("source") or "").strip()
+    line = finding.get("line")
+    if source and line:
+        parts.append(f"at {source} line {line}")
+    elif source:
+        parts.append(f"at {source}")
+    elif line:
+        parts.append(f"line {line}")
+    preview = str(finding.get("preview") or "").strip()
+    if preview:
+        parts.append(f"preview {preview}")
+    return ", ".join(parts)
+
+
+def _cline_security_signature(security_summary: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(security_summary, dict):
+        return {}
+    signature: dict[str, Any] = {}
+    findings = security_summary.get("findings")
+    if isinstance(findings, list) and findings:
+        signature["findings"] = [
+            {
+                "kind": str(finding.get("kind") or ""),
+                "source": str(finding.get("source") or ""),
+                "line": finding.get("line"),
+            }
+            for finding in findings[:6]
+            if isinstance(finding, dict)
+        ]
+    sensitive_files = security_summary.get("sensitive_files")
+    if isinstance(sensitive_files, list) and sensitive_files:
+        signature["sensitive_files"] = [str(path)[:160] for path in sensitive_files[:5]]
+    injection_findings = security_summary.get("prompt_injection_findings")
+    if isinstance(injection_findings, list) and injection_findings:
+        signature["prompt_injection_findings"] = [
+            {
+                "kind": str(finding.get("kind") or ""),
+                "source": str(finding.get("source") or ""),
+                "line": finding.get("line"),
+            }
+            for finding in injection_findings[:4]
+            if isinstance(finding, dict)
+        ]
+    return signature
+
+
 def _cline_permission_guidance_repeated(
     *,
     request: HubRequest,
     provider: str,
     model: str,
     error: dict[str, Any],
+    security_summary: dict[str, Any] | None = None,
 ) -> bool:
     now = time.time()
     stale = [
@@ -2361,6 +2535,7 @@ def _cline_permission_guidance_repeated(
         provider=provider,
         model=model,
         message=str(error.get("message") or ""),
+        security_signature=_cline_security_signature(security_summary),
     )
     repeated = fingerprint in _CLINE_PERMISSION_GUIDANCE_CACHE
     _CLINE_PERMISSION_GUIDANCE_CACHE[fingerprint] = now
@@ -2373,24 +2548,22 @@ def _cline_permission_guidance_fingerprint(
     provider: str,
     model: str,
     message: str,
+    security_signature: dict[str, Any] | None = None,
 ) -> str:
-    text = "\n".join(
-        str(message_item.get("content") or "")[:800]
-        for message_item in (request.messages or [])[:6]
-        if isinstance(message_item, dict)
-    )
     raw_model = ""
     raw = request.raw if isinstance(request.raw, dict) else {}
     if isinstance(raw.get("model"), str):
         raw_model = raw["model"]
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    client = str(metadata.get("client") or metadata.get("source") or metadata.get("user_agent") or "")[:120]
     payload = json.dumps(
         {
-            "session_id": request.session_id,
+            "client": client,
             "provider": provider,
             "model": model,
             "public_model": raw_model,
             "message": message,
-            "text": text,
+            "security_signature": security_signature or {},
         },
         sort_keys=True,
         ensure_ascii=False,

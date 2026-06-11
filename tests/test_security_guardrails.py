@@ -166,6 +166,16 @@ class SecurityGuardrailTests(unittest.TestCase):
         self.assertTrue(credential.has_secret_findings)
         self.assertNotIn(identifier, credential.text)
 
+    def test_secret_scanner_ignores_checkpoint_labeled_operational_ids(self) -> None:
+        identifier = "abc123-def456-ghi789-jkl012-mno345-pqr678"
+        checkpoint = scan_and_redact_context_text(f"Checkpoint: {identifier}")
+        credential = scan_and_redact_context_text(f"token: {identifier}")
+
+        self.assertFalse(checkpoint.has_secret_findings)
+        self.assertIn(identifier, checkpoint.text)
+        self.assertTrue(credential.has_secret_findings)
+        self.assertNotIn(identifier, credential.text)
+
     def test_secret_scanner_ignores_routes_urls_and_model_ids(self) -> None:
         scan = scan_and_redact_context_text(
             "\n".join(
