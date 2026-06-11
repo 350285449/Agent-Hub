@@ -11,7 +11,6 @@ from threading import RLock
 from typing import Any
 
 from ...adaptive import AdaptiveLearningStore, estimate_known_cost_usd
-from ...boost import build_boost_plan, boost_mode_from_request, boost_policy
 from ...capabilities import agent_capabilities
 from ...config import AgentConfig, HubConfig, agent_allowed_by_cost_policy, is_free_agent, normalize_provider
 from ...context import estimate_message_tokens, is_protected_context_message
@@ -28,6 +27,14 @@ from ...events import (
 from ...evaluation import ProviderScoreStore
 from ...mcp import MCPServerRegistry
 from ...models import FailoverEvent, HubRequest, HubResponse, ProviderResult, StructuredError
+from ...optimizer import (
+    apply_retry_to_plan,
+    build_plan_for_request,
+    boost_mode_from_request,
+    boost_policy,
+    optimization_plan_from_dict,
+    trace_from_mapping,
+)
 from ...output_validator import build_task_explanation, validate_output
 from ...measurement import record_completed_request
 from ...payloads import content_to_text, request_text
@@ -893,10 +900,22 @@ class AgentRouter:
         )
         raw = dict(prepared.raw or {})
         hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
+        plan_obj = optimization_plan_from_dict(decision.boost_plan)
+        if plan_obj is not None:
+            plan_obj = plan_obj.with_context_usage(usage)
+            decision.boost_plan = plan_obj.to_dict()
         hub["context_usage"] = usage
         hub["boost_mode"] = decision.boost_mode
         hub["boost_policy"] = dict(decision.boost_policy)
         hub["boost_plan"] = dict(decision.boost_plan)
+        hub["optimization_plan"] = dict(decision.boost_plan)
+        hub["optimization_trace"] = trace_from_mapping(
+            decision.boost_plan,
+            route=agent.name,
+            validation="pending",
+            retry_count=len(hub.get("retry_history") or []),
+            context_usage=usage,
+        ).to_dict()
         hub["task_policy"] = dict(decision.task_policy)
         hub.setdefault("auto_retry", _routing_bool(self.config, "auto_retry", True))
         hub.setdefault("auto_failover", _routing_bool(self.config, "auto_failover", True))
@@ -926,6 +945,87 @@ class AgentRouter:
                 warnings=usage.get("warnings"),
             )
         return replace(prepared, metadata=metadata, raw=raw)
+
+    def _request_with_retry_plan(
+        self,
+        *,
+        request: HubRequest,
+        decision: RoutingDecision,
+        retry_reason: str,
+        retry_strategy: str = "",
+        attempt: int = 1,
+        current_agent: str = "",
+        next_agent: str = "",
+    ) -> HubRequest:
+        raw = dict(request.raw) if isinstance(request.raw, dict) else {}
+        hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
+        plan = optimization_plan_from_dict(
+            hub.get("optimization_plan") if isinstance(hub.get("optimization_plan"), dict) else decision.boost_plan
+        )
+        if plan is None:
+            return request
+        next_plan = apply_retry_to_plan(
+            plan,
+            reason=retry_reason,
+            strategy=retry_strategy,
+            attempt=attempt,
+        )
+        plan_diff = _optimization_plan_diff(
+            plan.to_dict(),
+            next_plan.to_dict(),
+            reason=retry_reason,
+            current_agent=current_agent,
+            next_agent=next_agent,
+            attempt=attempt,
+        )
+        retry_record = {
+            "attempt": attempt,
+            "reason": retry_reason,
+            "strategy": retry_strategy or next_plan.retry_policy.strategy_for(retry_reason),
+            "from_agent": current_agent,
+            "next_agent": next_agent,
+            "repo_max_files": next_plan.repo_max_files,
+            "repo_max_chars": next_plan.repo_max_chars,
+            "context_policy": next_plan.context_policy,
+            "model_policy": next_plan.model_policy,
+            "plan_diff": plan_diff,
+        }
+        history = list(hub.get("retry_history") or [])
+        history.append(retry_record)
+        hub["retry_history"] = history[-8:]
+        hub["boost_plan"] = next_plan.to_dict()
+        hub["optimization_plan"] = next_plan.to_dict()
+        hub["optimization_plan"]["plan_diff"] = plan_diff
+        hub["task_policy"] = next_plan.task_policy_dict()
+        hub["optimization_trace"] = trace_from_mapping(
+            next_plan.to_dict(),
+            validation="retry",
+            retry_count=len(history),
+            context_usage=hub.get("context_usage") if isinstance(hub.get("context_usage"), dict) else {},
+            plan_diff=plan_diff,
+        ).to_dict()
+        raw["agent_hub"] = hub
+        decision.boost_plan = next_plan.to_dict()
+        decision.task_policy = next_plan.task_policy_dict()
+        next_request = replace(request, raw=raw)
+        if next_plan.context_policy in {
+            "expanded_context",
+            "fuller_target_files",
+            "tests_and_failure_output",
+            "restricted_file_list",
+        }:
+            messages = [
+                message
+                for message in next_request.messages
+                if not (isinstance(message, dict) and message.get("agent_hub_repo_context"))
+            ]
+            hub.pop("repo_context", None)
+            hub.pop("context_plan", None)
+            raw["agent_hub"] = hub
+            next_request = replace(next_request, messages=messages, raw=raw)
+            next_request = self.context_preparation.with_repo_context(next_request)
+            next_request = self.context_preparation.with_security_sanitization(next_request)
+        return next_request
 
     def _apply_model_output_limit(
         self,
@@ -1052,10 +1152,18 @@ class AgentRouter:
             selected_files=[str(path) for path in selected_files],
             token_usage=usage,
             validation_policy=str(policy or self.config.validation_mode or "basic_quality_checks"),
+            task_type=str(decision.task_policy.get("task_type") or ""),
         )
         result_raw = dict(result.raw) if isinstance(result.raw, dict) else {}
         result_hub = dict(result_raw.get("agent_hub")) if isinstance(result_raw.get("agent_hub"), dict) else {}
         result_hub["quality_check"] = quality.to_dict()
+        result_hub["optimization_trace"] = trace_from_mapping(
+            hub.get("optimization_plan") if isinstance(hub.get("optimization_plan"), dict) else decision.boost_plan,
+            route=agent.name,
+            validation="passed" if quality.passed else "failed",
+            retry_count=len(hub.get("retry_history") or []),
+            context_usage=usage,
+        ).to_dict()
         result_raw["agent_hub"] = result_hub
         result.raw = result_raw
         return quality
@@ -1248,17 +1356,9 @@ class AgentRouter:
 
         classification = self._classify_request(request)
         mode_name = boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
+        boost_plan = self._optimization_plan_for_request(request, classification)
+        mode_name = boost_plan.boost_mode or mode_name
         mode_policy = boost_policy(mode_name)
-        boost_plan = build_boost_plan(
-            task_type=classification.task_type,
-            task_category=classification.task_category,
-            text=request_text(request),
-            boost_mode=mode_name,
-            estimated_input_tokens=classification.estimated_input_tokens,
-            repo_size_bucket=classification.repo_size_bucket,
-            risk_level=classification.risk_level,
-            file_count=len(classification.files_involved),
-        )
         task_policy = boost_plan.task_policy_dict()
         mode = self._routing_mode(request)
         task_type = classification.task_type
@@ -1501,6 +1601,13 @@ class AgentRouter:
             repository_testing=dna.testing,
             repository_risk_areas=list(dna.risk_areas),
             reasons=reasons[:12],
+        )
+
+    def _optimization_plan_for_request(self, request: HubRequest, classification: Any | None = None):
+        return build_plan_for_request(
+            request,
+            classification or self._classify_request(request),
+            default_boost_mode=getattr(self.config, "boost_mode", "balanced"),
         )
 
     def _repository_dna(self) -> RepositoryDNA | None:
@@ -1999,16 +2106,8 @@ class AgentRouter:
 
         health = self._health.get(agent.name)
         mode_name = boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
-        plan = build_boost_plan(
-            task_type=getattr(classification, "task_type", "general"),
-            task_category=getattr(classification, "task_category", ""),
-            text=request_text(request),
-            boost_mode=mode_name,
-            estimated_input_tokens=getattr(classification, "estimated_input_tokens", 0),
-            repo_size_bucket=getattr(classification, "repo_size_bucket", ""),
-            risk_level=getattr(classification, "risk_level", ""),
-            file_count=len(getattr(classification, "files_involved", []) or []),
-        )
+        plan = self._optimization_plan_for_request(request, classification)
+        mode_name = plan.boost_mode or mode_name
         outcome_score, samples = self._model_efficiency_score(agent, request, classification)
         quality = outcome_score
         if quality is None:
@@ -2190,16 +2289,8 @@ class AgentRouter:
     ) -> list[dict[str, Any]]:
         classification = self._classify_request(request)
         mode_name = boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
-        boost_plan = build_boost_plan(
-            task_type=classification.task_type,
-            task_category=classification.task_category,
-            text=request_text(request),
-            boost_mode=mode_name,
-            estimated_input_tokens=classification.estimated_input_tokens,
-            repo_size_bucket=classification.repo_size_bucket,
-            risk_level=classification.risk_level,
-            file_count=len(classification.files_involved),
-        )
+        boost_plan = self._optimization_plan_for_request(request, classification)
+        mode_name = boost_plan.boost_mode or mode_name
         task_type = classification.task_type
         workflow_pattern = _request_workflow_pattern(request)
         workflow_role = _request_workflow_role(request)
@@ -2400,6 +2491,54 @@ class AgentRouter:
             )
             if isinstance(context_usage, dict) and context_usage:
                 agent_metadata["context_usage"] = dict(context_usage)
+            retry_history = (
+                (request.raw.get("agent_hub") or {}).get("retry_history")
+                if isinstance(request.raw, dict) and isinstance(request.raw.get("agent_hub"), dict)
+                else []
+            )
+            plan_diff = (
+                retry_history[-1].get("plan_diff")
+                if isinstance(retry_history, list)
+                and retry_history
+                and isinstance(retry_history[-1], dict)
+                and isinstance(retry_history[-1].get("plan_diff"), dict)
+                else None
+            )
+            estimated_input = _usage_int(
+                context_usage if isinstance(context_usage, dict) else {},
+                "optimized_context_tokens",
+                "estimated_input_tokens",
+            )
+            raw_input = _usage_int(
+                context_usage if isinstance(context_usage, dict) else {},
+                "original_input_tokens",
+                "original_context_tokens",
+            )
+            actual_input = _usage_int(result.usage, "prompt_tokens", "input_tokens")
+            output_tokens = _result_output_tokens(result)
+            agent_metadata["optimization_trace"] = trace_from_mapping(
+                decision.boost_plan,
+                route=agent.name,
+                validation="passed" if quality.passed else "failed",
+                retry_count=len(retry_history) if isinstance(retry_history, list) else 0,
+                context_usage=context_usage if isinstance(context_usage, dict) else {},
+                actual_usage=result.usage,
+                estimated_cost_saved_usd=_known_cost_saved_usd(
+                    agent,
+                    raw_input_tokens=raw_input,
+                    optimized_input_tokens=estimated_input,
+                    output_tokens=output_tokens,
+                ),
+                actual_cost_saved_usd=_known_cost_saved_usd(
+                    agent,
+                    raw_input_tokens=raw_input,
+                    optimized_input_tokens=actual_input,
+                    output_tokens=output_tokens,
+                )
+                if actual_input > 0
+                else None,
+                plan_diff=plan_diff,
+            ).to_dict()
             agent_metadata["boost_explanation"] = build_task_explanation(
                 decision=decision,
                 agent=agent,
@@ -2408,6 +2547,8 @@ class AgentRouter:
                 quality=quality,
                 usage=context_usage if isinstance(context_usage, dict) else {},
             )
+            if isinstance(agent_metadata.get("boost_explanation"), dict):
+                agent_metadata["boost_explanation"]["optimization_trace"] = dict(agent_metadata["optimization_trace"])
             raw["agent_hub"] = agent_metadata
         if self.config.expose_routing_details and isinstance(raw, dict):
             raw = dict(raw)
@@ -4415,6 +4556,8 @@ def _token_limit_finish_reason(reason: str | None) -> bool:
 
 def _usage_int(usage: dict[str, object], *keys: str) -> int:
     for key in keys:
+        if key not in usage or usage.get(key) is None:
+            continue
         try:
             return max(0, int(usage.get(key, 0)))
         except (TypeError, ValueError):
@@ -5090,6 +5233,7 @@ def _request_context_optimization(request: HubRequest) -> dict[str, Any]:
     repo = hub.get("repo_context") if isinstance(hub.get("repo_context"), dict) else {}
     usage = hub.get("context_usage") if isinstance(hub.get("context_usage"), dict) else {}
     plan = hub.get("boost_plan") if isinstance(hub.get("boost_plan"), dict) else {}
+    trace = hub.get("optimization_trace") if isinstance(hub.get("optimization_trace"), dict) else {}
     result: dict[str, Any] = {}
     if repo:
         result.update(
@@ -5127,7 +5271,97 @@ def _request_context_optimization(request: HubRequest) -> dict[str, Any]:
                 "boost_validation_policy": plan.get("validation_policy"),
             }
         )
+    if trace:
+        result["optimization_trace"] = dict(trace)
     return {key: value for key, value in result.items() if value not in (None, [], {})}
+
+
+def _optimization_plan_diff(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    reason: str,
+    current_agent: str = "",
+    next_agent: str = "",
+    attempt: int = 1,
+) -> dict[str, Any]:
+    before_summary = _optimization_plan_summary(before, agent=current_agent)
+    after_summary = _optimization_plan_summary(after, agent=next_agent)
+    changed: dict[str, dict[str, Any]] = {}
+    for key in (
+        "repo_max_files",
+        "repo_max_chars",
+        "full_files",
+        "compressed_files",
+        "map_files",
+        "target_context_ratio",
+        "context_policy",
+        "model_policy",
+        "validation_policy",
+        "prefer_premium",
+    ):
+        if before.get(key) != after.get(key):
+            changed[key] = {"from": before.get(key), "to": after.get(key)}
+    return {
+        "object": "agent_hub.optimization_plan_diff",
+        "attempt": attempt,
+        "from_attempt": max(1, int(attempt or 1)),
+        "to_attempt": max(1, int(attempt or 1)) + 1,
+        "reason": reason,
+        "before": before_summary,
+        "after": after_summary,
+        "changed": changed,
+        "summary": (
+            f"Attempt {max(1, int(attempt or 1))}: "
+            f"{before_summary['files']} files, {before_summary['tokens']} tokens, "
+            f"{before_summary['agent'] or 'current model'} -> Attempt {max(1, int(attempt or 1)) + 1}: "
+            f"{after_summary['files']} files, {after_summary['tokens']} tokens, "
+            f"{after_summary['agent'] or 'next model'}. Reason: {reason or 'retry policy'}."
+        ),
+    }
+
+
+def _optimization_plan_summary(plan: dict[str, Any], *, agent: str = "") -> dict[str, Any]:
+    selected = plan.get("selected_files") if isinstance(plan.get("selected_files"), list) else []
+    token_budget = plan.get("token_budget") if isinstance(plan.get("token_budget"), dict) else {}
+    tokens = _optional_int(token_budget.get("optimized_context_tokens"))
+    if tokens is None or tokens <= 0:
+        tokens = _optional_int(token_budget.get("target_context_tokens"))
+    if tokens is None or tokens <= 0:
+        tokens = _optional_int(plan.get("repo_max_chars"))
+        tokens = int(tokens / 4) if tokens else 0
+    return {
+        "agent": agent,
+        "files": len(selected) if selected else _optional_int(plan.get("repo_max_files")) or 0,
+        "tokens": int(tokens or 0),
+        "context_policy": plan.get("context_policy"),
+        "model_policy": plan.get("model_policy"),
+        "validation_policy": plan.get("validation_policy"),
+    }
+
+
+def _known_cost_saved_usd(
+    agent: AgentConfig,
+    *,
+    raw_input_tokens: int,
+    optimized_input_tokens: int,
+    output_tokens: int,
+) -> float | None:
+    if raw_input_tokens <= 0 or optimized_input_tokens <= 0:
+        return None
+    raw_cost = estimate_known_cost_usd(
+        agent,
+        input_tokens=raw_input_tokens,
+        output_tokens=output_tokens,
+    )
+    optimized_cost = estimate_known_cost_usd(
+        agent,
+        input_tokens=optimized_input_tokens,
+        output_tokens=output_tokens,
+    )
+    if raw_cost is None or optimized_cost is None:
+        return None
+    return round(max(0.0, float(raw_cost) - float(optimized_cost)), 8)
 
 
 def _fallback_rejections(candidate_scores: list[dict[str, Any]]) -> list[dict[str, Any]]:

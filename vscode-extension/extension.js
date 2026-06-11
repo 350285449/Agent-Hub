@@ -9786,6 +9786,7 @@ async function sendChatTurn(panel, message) {
     }
     const reply = responseText(response);
     output.appendLine(reply || "(empty response)");
+    appendBoostTrace(response);
     appendAgentTrace(response);
     appendResearchMetadata(response);
     panel.webview.postMessage({
@@ -11219,6 +11220,9 @@ ${apiKeyFieldsHtml()}
       if (options.routingDetails && options.routingDetails.length) {
         item.append(detailsBlock("Routing", options.routingDetails));
       }
+      if (options.boostDetails && options.boostDetails.length) {
+        item.append(detailsBlock("Boost Result", options.boostDetails));
+      }
       messageList.append(item);
       transcript.scrollTop = transcript.scrollHeight;
       return item;
@@ -11267,6 +11271,9 @@ ${apiKeyFieldsHtml()}
       }
       if (options.routingDetails && options.routingDetails.length) {
         turn.item.append(detailsBlock("Routing", options.routingDetails));
+      }
+      if (options.boostDetails && options.boostDetails.length) {
+        turn.item.append(detailsBlock("Boost Result", options.boostDetails));
       }
       if (options.feedbackRequestId && !options.error) {
         turn.item.append(feedbackControls(options.feedbackRequestId));
@@ -11420,6 +11427,54 @@ ${apiKeyFieldsHtml()}
         }
       } else {
         lines.push("fallback attempts: 0");
+      }
+      return lines;
+    }
+
+    function boostDetailsLines(response) {
+      const payload = response && typeof response === "object" ? response : {};
+      const metadata = payload.agent_hub && typeof payload.agent_hub === "object" ? payload.agent_hub : {};
+      const trace = metadata.optimization_trace && typeof metadata.optimization_trace === "object"
+        ? metadata.optimization_trace
+        : {};
+      const quality = metadata.quality_check && typeof metadata.quality_check === "object" ? metadata.quality_check : {};
+      if (!Object.keys(trace).length && !Object.keys(quality).length) {
+        return [];
+      }
+      const lines = [];
+      const selected = numberValue(trace.selected_files);
+      const omitted = numberValue(trace.omitted_files);
+      if (selected !== null) {
+        const total = omitted !== null ? selected + omitted : null;
+        lines.push("files used: " + selected + (total !== null ? " of " + total : ""));
+      }
+      const actualSaved = numberValue(trace.actual_input_tokens_saved_percent);
+      const estimatedSaved = numberValue(trace.estimated_tokens_saved_percent, trace.tokens_saved_percent);
+      if (actualSaved !== null) {
+        lines.push("tokens saved: actual " + actualSaved.toFixed(0) + "%");
+      } else if (estimatedSaved !== null) {
+        lines.push("tokens saved: estimated " + estimatedSaved.toFixed(0) + "%");
+      }
+      const checks = quality.checks && typeof quality.checks === "object" ? quality.checks : {};
+      const gates = Array.isArray(checks.quality_gates) ? checks.quality_gates : [];
+      if (gates.length) {
+        const passed = gates.filter((gate) => gate && gate.passed === true).length;
+        lines.push("quality gates: " + passed + "/" + gates.length + " passed");
+      } else if (quality.score !== undefined && quality.total !== undefined) {
+        lines.push("quality checks: " + quality.score + "/" + quality.total);
+      }
+      const retryCount = numberValue(trace.retry_count);
+      lines.push("retry: " + (retryCount && retryCount > 0 ? String(retryCount) : "none"));
+      if (payload.model || trace.route) {
+        lines.push("model: " + (payload.model || trace.route));
+      }
+      if (metadata.boost_explanation && typeof metadata.boost_explanation.reason === "string" && metadata.boost_explanation.reason.trim()) {
+        lines.push("reason: " + metadata.boost_explanation.reason.trim());
+      } else if (trace.task_type) {
+        lines.push("reason: best success-per-token for " + trace.task_type);
+      }
+      if (trace.plan_diff && typeof trace.plan_diff.summary === "string") {
+        lines.push("plan diff: " + trace.plan_diff.summary);
       }
       return lines;
     }
@@ -11973,6 +12028,7 @@ ${apiKeyFieldsHtml()}
           tools: message.tools || [],
           sources: message.sources || [],
           routingDetails: routingDetailsLines(message.response),
+          boostDetails: boostDetailsLines(message.response),
           feedbackRequestId: message.response && (message.response.id || message.response.request_id),
           autoFeedbackEnabled: !!message.autoFeedbackEnabled
         });
@@ -17187,6 +17243,7 @@ async function sendAgentRequest({ task, context, route, routingText, agentMode =
     const text = responseText(response);
     output.appendLine("");
     output.appendLine(text || "(empty response)");
+    appendBoostTrace(response);
     appendAgentTrace(response);
     appendResearchMetadata(response);
     output.appendLine("");
@@ -17737,6 +17794,51 @@ function appendAgentTrace(response) {
     if (result.ok === false && result.error) {
       output.appendLine(`  ${result.error}`);
     }
+  }
+}
+
+function appendBoostTrace(response) {
+  const metadata = response && response.agent_hub;
+  if (!metadata || typeof metadata !== "object") {
+    return;
+  }
+  const trace = metadata.optimization_trace && typeof metadata.optimization_trace === "object"
+    ? metadata.optimization_trace
+    : {};
+  const quality = metadata.quality_check && typeof metadata.quality_check === "object"
+    ? metadata.quality_check
+    : {};
+  if (!Object.keys(trace).length && !Object.keys(quality).length) {
+    return;
+  }
+  output.appendLine("");
+  output.appendLine("Boost Result:");
+  if (trace.selected_files !== undefined) {
+    const total = Number(trace.selected_files || 0) + Number(trace.omitted_files || 0);
+    output.appendLine(`- Files used: ${trace.selected_files}${total ? ` of ${total}` : ""}`);
+  }
+  if (trace.actual_input_tokens_saved_percent !== undefined && trace.actual_input_tokens_saved_percent !== null) {
+    output.appendLine(`- Tokens saved: actual ${Number(trace.actual_input_tokens_saved_percent).toFixed(0)}%`);
+  } else if (trace.estimated_tokens_saved_percent !== undefined || trace.tokens_saved_percent !== undefined) {
+    const percent = Number(trace.estimated_tokens_saved_percent ?? trace.tokens_saved_percent);
+    if (Number.isFinite(percent)) {
+      output.appendLine(`- Tokens saved: estimated ${percent.toFixed(0)}%`);
+    }
+  }
+  const checks = quality.checks && typeof quality.checks === "object" ? quality.checks : {};
+  const gates = Array.isArray(checks.quality_gates) ? checks.quality_gates : [];
+  if (gates.length) {
+    const passed = gates.filter((gate) => gate && gate.passed === true).length;
+    output.appendLine(`- Quality gates: ${passed}/${gates.length} passed`);
+  } else if (quality.score !== undefined && quality.total !== undefined) {
+    output.appendLine(`- Quality checks: ${quality.score}/${quality.total}`);
+  }
+  output.appendLine(`- Retry: ${Number(trace.retry_count || 0) > 0 ? trace.retry_count : "none"}`);
+  if (response.model || trace.route) {
+    output.appendLine(`- Model: ${response.model || trace.route}`);
+  }
+  if (trace.plan_diff && typeof trace.plan_diff.summary === "string") {
+    output.appendLine(`- Plan diff: ${trace.plan_diff.summary}`);
   }
 }
 

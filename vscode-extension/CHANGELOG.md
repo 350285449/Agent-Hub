@@ -1,5 +1,11 @@
 # Changelog
 
+## 9.6.8
+
+- Moves Boost into a dedicated optimizer pipeline with shared OptimizationPlan and trace output.
+- Adds retry plan diffs, actual token accounting, and temp-workspace patch validation.
+- Shows a trace-based Boost Result card in the dashboard and VS Code chat surfaces.
+
 ## 9.6.7
 
 - Adds a benchmark report menu for opening reports, folders, dashboard views, share cards, and reruns.

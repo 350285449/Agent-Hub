@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .optimizer import ContextPlanner, FileRanker
 from .payloads import request_text
 from .models import HubRequest
 
@@ -119,6 +120,8 @@ class RepoContextSelection:
     saved_percent: float = 0.0
     cache_hits: int = 0
     total_files: int = 0
+    context_files: list[dict[str, Any]] = field(default_factory=list)
+    level_counts: dict[str, int] = field(default_factory=dict)
 
     def to_message(self) -> dict[str, Any] | None:
         if not self.files:
@@ -175,6 +178,9 @@ class RepoContextSelection:
             "saved_percent": self.saved_percent,
             "cache_hits": self.cache_hits,
             "total_files": self.total_files,
+            "context_files": list(self.context_files),
+            "context_level_counts": dict(self.level_counts),
+            "level_counts": dict(self.level_counts),
         }
 
 
@@ -246,34 +252,10 @@ class RepoContextSelector:
         self.index = index
 
     def rank_files(self, task: str, *, limit: int = 80) -> list[FileRelevance]:
-        terms = set(_terms(task))
-        mentioned = set(_referenced_paths(task))
-        stack_paths = set(_stack_trace_paths(task))
-        diff_paths = set(_git_diff_files(self.index.root))
-        scored: list[FileRelevance] = []
-        for file in self.index.files:
-            if _is_generated_file(file.path):
-                continue
-            score, signals = _score_file(
-                file,
-                terms,
-                mentioned_paths=mentioned,
-                stack_paths=stack_paths,
-                diff_paths=diff_paths,
-            )
-            if score > 0:
-                scored.append(FileRelevance(file=file, score=score, signals=signals))
-        if not scored:
-            for file in self.index.files:
-                if _is_generated_file(file.path):
-                    continue
-                if file.important or file.changed:
-                    signals = ["important file"] if file.important else []
-                    if file.changed:
-                        signals.append("recent edit")
-                    scored.append(FileRelevance(file=file, score=2.0 if file.important else 1.0, signals=signals))
-        ranked = sorted(scored, key=lambda item: (-item.score, item.file.path))
-        return ranked[: max(1, limit)]
+        return [
+            FileRelevance(file=item.file, score=item.score, signals=list(item.signals))
+            for item in FileRanker(self.index).rank_files(task, limit=limit)
+        ]
 
     def select(
         self,
@@ -286,15 +268,20 @@ class RepoContextSelector:
         map_files: int = 6,
         compression_aggression: float = 0.55,
     ) -> RepoContextSelection:
-        ranked = self.rank_files(task, limit=max(80, max_files * 6))
-        selected_relevance = _select_diverse_relevance(ranked, max_files=max(1, max_files), task=task)
-        selected = [item.file for item in selected_relevance]
-        levels = _assign_context_levels(
-            selected,
+        context_plan = ContextPlanner(self.index).plan(
+            task,
+            max_files=max_files,
             full_files=full_files,
             compressed_files=compressed_files,
             map_files=map_files,
+            compression_aggression=compression_aggression,
         )
+        selected_relevance = [
+            FileRelevance(file=item.file, score=item.score, signals=list(item.signals))
+            for item in context_plan.selected_ranked_files
+        ]
+        selected = [item.file for item in selected_relevance]
+        levels = context_plan.legacy_levels()
         focus_terms = set(_terms(task))
         summaries: dict[str, str] = {}
         used = 0
@@ -327,13 +314,12 @@ class RepoContextSelector:
             if len(text) > len(body) and level != "Full":
                 truncated = True
         selected_paths = [file.path for file in selected]
-        selected_set = set(selected_paths)
-        excluded = [item.file.path for item in ranked if item.file.path not in selected_set][:40]
+        excluded = context_plan.omitted_files[:40]
         warnings = _context_warnings(task, self.index, set(selected_paths))
         original_tokens = max(1, original_chars // 4)
         optimized_tokens = max(1, optimized_chars // 4)
         tokens_saved = max(0, original_tokens - optimized_tokens)
-        reason = _selection_reason(selected_relevance)
+        reason = context_plan.reason
         return RepoContextSelection(
             files=selected,
             summaries=summaries,
@@ -349,7 +335,9 @@ class RepoContextSelector:
             tokens_saved=tokens_saved,
             saved_percent=round((tokens_saved / max(1, original_tokens)) * 100, 1),
             cache_hits=cache_hits,
-            total_files=len([file for file in self.index.files if not _is_generated_file(file.path)]),
+            total_files=context_plan.total_files,
+            context_files=[file.to_dict() for file in context_plan.context_files],
+            level_counts=context_plan.level_counts(),
         )
 
 

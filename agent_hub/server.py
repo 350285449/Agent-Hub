@@ -194,8 +194,12 @@ def _latest_boost_explanation(events: list[dict[str, Any]]) -> dict[str, Any]:
     for event in reversed(events):
         if not isinstance(event, dict):
             continue
+        trace = event.get("optimization_trace") if isinstance(event.get("optimization_trace"), dict) else {}
         boost = event.get("boost_explanation") if isinstance(event.get("boost_explanation"), dict) else {}
         if boost:
+            if trace and "optimization_trace" not in boost:
+                boost = dict(boost)
+                boost["optimization_trace"] = trace
             return boost
         decision = event.get("routing_decision") if isinstance(event.get("routing_decision"), dict) else {}
         explanation = decision.get("explanation") if isinstance(decision.get("explanation"), dict) else {}
@@ -205,14 +209,15 @@ def _latest_boost_explanation(events: list[dict[str, Any]]) -> dict[str, Any]:
         if context or selected:
             return {
                 "tokens_saved": context.get("tokens_saved"),
-                "tokens_saved_percent": context.get("saved_percent"),
+                "tokens_saved_percent": trace.get("tokens_saved_percent", context.get("saved_percent")),
                 "files_selected": {
-                    "selected": len(context.get("selected_files") or []),
+                    "selected": trace.get("selected_files", len(context.get("selected_files") or [])),
                     "total": context.get("total_files"),
                     "paths": context.get("selected_files") or [],
                 },
                 "model_selected": selected.get("model") or event.get("model"),
                 "quality_check": quality,
+                "optimization_trace": trace,
             }
     return {}
 
@@ -1133,6 +1138,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         latest_boost = _latest_boost_explanation(routing_events)
         latest_quality = latest_boost.get("quality_check") if isinstance(latest_boost.get("quality_check"), dict) else {}
         latest_files = latest_boost.get("files_selected") if isinstance(latest_boost.get("files_selected"), dict) else {}
+        latest_trace = latest_boost.get("optimization_trace") if isinstance(latest_boost.get("optimization_trace"), dict) else {}
         tokens_saved = int(latest_boost.get("tokens_saved") or 0)
         monthly_tokens_saved = int(token_usage.get("estimated_tokens_saved") or token_usage.get("tokens_saved") or tokens_saved or 0)
         monthly_cost_saved = float((optimization.get("cost_optimizer") or {}).get("saved_this_month_usd") or 0.0)
@@ -1147,7 +1153,44 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             else "--"
         )
         boost_saved_percent = latest_boost.get("tokens_saved_percent")
-        boost_saved_label = f"{float(boost_saved_percent):.0f}%" if boost_saved_percent is not None else "38%"
+        boost_saved_label = f"{float(boost_saved_percent):.0f}%" if boost_saved_percent is not None else "--"
+        boost_result_files_total = (
+            latest_files.get("total")
+            or int(latest_trace.get("selected_files") or 0) + int(latest_trace.get("omitted_files") or 0)
+            or None
+        )
+        boost_result_files = (
+            f"{int(latest_trace.get('selected_files') or latest_files.get('selected') or 0)}"
+            + (f" of {boost_result_files_total}" if boost_result_files_total else "")
+        )
+        actual_saved_percent = latest_trace.get("actual_input_tokens_saved_percent")
+        estimated_saved_percent = latest_trace.get("estimated_tokens_saved_percent", latest_trace.get("tokens_saved_percent"))
+        if actual_saved_percent is not None:
+            boost_result_tokens = f"actual {float(actual_saved_percent):.0f}%"
+        elif estimated_saved_percent is not None:
+            boost_result_tokens = f"estimated {float(estimated_saved_percent):.0f}%"
+        else:
+            boost_result_tokens = boost_saved_label
+        quality_gates = []
+        if isinstance(latest_quality.get("checks"), dict) and isinstance(latest_quality["checks"].get("quality_gates"), list):
+            quality_gates = latest_quality["checks"]["quality_gates"]
+        gates_passed = sum(1 for gate in quality_gates if isinstance(gate, dict) and gate.get("passed") is True)
+        if quality_gates:
+            boost_result_quality = f"{gates_passed}/{len(quality_gates)} passed"
+        elif latest_quality.get("score") is not None and latest_quality.get("total") is not None:
+            boost_result_quality = f"{int(latest_quality.get('score') or 0)}/{int(latest_quality.get('total') or 0)} passed"
+        else:
+            boost_result_quality = quality_label
+        retry_count = int(latest_trace.get("retry_count") or 0)
+        boost_result_retry = "none" if retry_count <= 0 else str(retry_count)
+        boost_result_model = latest_boost.get("model_selected") or latest_trace.get("route") or "pending"
+        plan_diff = latest_trace.get("plan_diff") if isinstance(latest_trace.get("plan_diff"), dict) else {}
+        boost_result_reason = (
+            plan_diff.get("reason")
+            or latest_boost.get("reason")
+            or f"best success-per-token for {latest_trace.get('task_type') or boost_mode}"
+        )
+        boost_plan_diff_line = plan_diff.get("summary") if isinstance(plan_diff.get("summary"), str) else ""
         fallback_history = status.get("fallback_history") if isinstance(status.get("fallback_history"), list) else []
         permission_blocked = status.get("permission_blocked_actions") if isinstance(status.get("permission_blocked_actions"), list) else []
         workflow_progress = status.get("workflow_progress") if isinstance(status.get("workflow_progress"), list) else []
@@ -1589,6 +1632,37 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       color: var(--muted);
       font-size: 12px;
     }}
+    .boost-result {{
+      grid-column: 1 / -1;
+      min-height: 0;
+    }}
+    .boost-result h2 {{
+      margin: 0 0 10px;
+      font-size: 15px;
+    }}
+    .boost-result dl {{
+      display: grid;
+      grid-template-columns: minmax(88px, .55fr) minmax(0, 1fr);
+      gap: 7px 10px;
+      margin: 0;
+    }}
+    .boost-result dt {{
+      color: var(--muted);
+      font-size: 11px;
+    }}
+    .boost-result dd {{
+      margin: 0;
+      overflow-wrap: anywhere;
+      font-size: 12px;
+      color: var(--text);
+    }}
+    .boost-result .diff {{
+      grid-column: 1 / -1;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }}
     .control-grid {{
       display: grid;
       grid-template-columns: minmax(0, 1.15fr) minmax(260px, .85fr);
@@ -1817,6 +1891,18 @@ class AgentHubHandler(BaseHTTPRequestHandler):
           </div>
         </div>
         <div class="metrics">
+          <div class="metric boost-result">
+            <h2>Boost Result</h2>
+            <dl>
+              <dt>Files used</dt><dd>{_html(boost_result_files)}</dd>
+              <dt>Tokens saved</dt><dd>{_html(boost_result_tokens)}</dd>
+              <dt>Quality gates</dt><dd>{_html(boost_result_quality)}</dd>
+              <dt>Retry</dt><dd>{_html(boost_result_retry)}</dd>
+              <dt>Model</dt><dd>{_html(boost_result_model)}</dd>
+              <dt>Reason</dt><dd>{_html(boost_result_reason)}</dd>
+            </dl>
+            {f'<div class="diff">{_html(boost_plan_diff_line)}</div>' if boost_plan_diff_line else ''}
+          </div>
           <div class="metric"><span>This Month</span><strong>{_html(_compact_number(monthly_tokens_saved))}</strong><small>tokens saved</small></div>
           <div class="metric"><span>Cost Saved</span><strong>{_html(_money_label(monthly_cost_saved))}</strong><small>estimated this month</small></div>
           <div class="metric"><span>Tasks Improved</span><strong>{_html(token_usage.get("successful_provider_calls") or 0)}</strong><small>completed through Agent Hub</small></div>

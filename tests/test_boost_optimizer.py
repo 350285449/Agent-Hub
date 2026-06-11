@@ -9,6 +9,12 @@ from agent_hub.config import AgentConfig, HubConfig, config_from_dict, config_to
 from agent_hub.core.router import AgentRouter
 from agent_hub.core.task_classifier import TaskClassifier
 from agent_hub.models import HubRequest, ProviderResult
+from agent_hub.optimizer import (
+    ContextLevel,
+    ContextPlanner,
+    apply_retry_to_plan,
+    trace_from_plan,
+)
 from agent_hub.output_validator import validate_output
 from agent_hub.repository import RepositoryIndexer, RepoContextSelector
 from agent_hub.token_optimizer import ContextCache, TokenOptimizer
@@ -56,6 +62,42 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertIn("token_pressure_scaling", plan.algorithms)
         self.assertGreater(risky.quality_weight, risky.cost_weight)
         self.assertIn("risk_guarded_escalation", risky.algorithms)
+
+    def test_boost_plan_exposes_optimizer_contract(self) -> None:
+        plan = build_boost_plan(
+            task_type="debug",
+            task_category="debugging",
+            text="Fix src/app.py failing test",
+            boost_mode="fast_fix",
+            file_count=1,
+        )
+        payload = plan.to_dict()
+
+        self.assertEqual(payload["object"], "agent_hub.optimization_plan")
+        self.assertEqual(payload["boost_mode"], "fast_fix")
+        self.assertIn("token_budget", payload)
+        self.assertIn("retry_policy", payload)
+        self.assertIn("validation_gates", payload)
+        self.assertIn("free", payload["preferred_models"])
+
+    def test_retry_policy_modifies_existing_plan(self) -> None:
+        plan = build_boost_plan(
+            task_type="debug",
+            task_category="debugging",
+            text="Fix src/app.py with missing context",
+            boost_mode="save_tokens",
+        )
+
+        retry = apply_retry_to_plan(
+            plan,
+            reason="missing context for referenced helper",
+            attempt=1,
+        )
+
+        self.assertGreater(retry.repo_max_files, plan.repo_max_files)
+        self.assertGreater(retry.target_context_ratio, plan.target_context_ratio)
+        self.assertIn("plan_based_retry", retry.algorithms)
+        self.assertEqual(retry.context_policy, "expanded_context")
 
     def test_task_classifier_exposes_optimizer_policy_without_breaking_route_type(self) -> None:
         classification = TaskClassifier().classify(
@@ -224,6 +266,70 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertEqual(payload["context_levels"]["src/router.py"], "Full")
         self.assertGreaterEqual(payload["tokens_saved"], 0)
         self.assertIn("Matched", payload["reason"])
+        self.assertIn("context_files", payload)
+        self.assertIn("FULL", payload["context_level_counts"])
+
+    def test_context_planner_creates_first_class_context_files_and_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "tests").mkdir()
+            (root / "src" / "app.py").write_text("def fix_me():\n    return 1\n", encoding="utf-8")
+            (root / "tests" / "test_app.py").write_text(
+                "from src.app import fix_me\n\ndef test_fix_me():\n    assert fix_me() == 2\n",
+                encoding="utf-8",
+            )
+            (root / "README.md").write_text("project docs\n", encoding="utf-8")
+            index = RepositoryIndexer(root).index()
+
+            context_plan = ContextPlanner(index).plan(
+                "Fix src/app.py and related tests",
+                max_files=2,
+                full_files=1,
+                compressed_files=0,
+                map_files=1,
+            )
+            plan = build_boost_plan(
+                task_type="debug",
+                task_category="debugging",
+                text="Fix src/app.py and related tests",
+                boost_mode="balanced",
+            ).with_context_plan(context_plan)
+            trace = trace_from_plan(plan)
+
+        levels = {item.path: item.level for item in context_plan.context_files}
+        self.assertEqual(levels["src/app.py"], ContextLevel.FULL)
+        self.assertIn("tests/test_app.py", context_plan.selected_files)
+        self.assertIn("OMITTED", context_plan.level_counts())
+        self.assertIn("src/app.py", plan.selected_files)
+        self.assertEqual(trace.selected_files, len(plan.selected_files))
+
+    def test_trace_distinguishes_estimated_and_actual_token_savings(self) -> None:
+        plan = build_boost_plan(
+            task_type="debug",
+            task_category="debugging",
+            text="Fix src/app.py",
+            boost_mode="balanced",
+        )
+        trace = trace_from_plan(
+            plan,
+            context_usage={
+                "original_input_tokens": 10_000,
+                "optimized_context_tokens": 4_000,
+            },
+            actual_usage={"prompt_tokens": 4_500, "completion_tokens": 100},
+            estimated_cost_saved_usd=0.0123,
+            actual_cost_saved_usd=0.011,
+            plan_diff={"summary": "Attempt 1 -> Attempt 2"},
+        )
+        payload = trace.to_dict()
+
+        self.assertEqual(payload["estimated_tokens_saved"], 6_000)
+        self.assertEqual(payload["actual_provider_input_tokens"], 4_500)
+        self.assertEqual(payload["actual_input_tokens_saved"], 5_500)
+        self.assertEqual(payload["token_accounting_source"], "actual_provider_usage")
+        self.assertEqual(payload["actual_cost_saved_usd"], 0.011)
+        self.assertEqual(payload["plan_diff"]["summary"], "Attempt 1 -> Attempt 2")
 
     def test_repository_context_diversifies_and_focuses_compressed_summaries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -287,6 +393,74 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertTrue(result.should_retry)
         self.assertEqual(result.retry_strategy, "compress_prompt")
         self.assertEqual(result.checks["token_budget"], "exceeded")
+
+    def test_output_validator_applies_patch_in_temp_workspace_and_checks_syntax(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            patch = """```diff
+diff --git a/src/app.py b/src/app.py
+index 35d163b..03c7151 100644
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1 @@
+-VALUE = 1
++VALUE = 2
+```"""
+
+            result = validate_output(
+                request=HubRequest(
+                    session_id="s",
+                    messages=[{"role": "user", "content": "Fix src/app.py"}],
+                ),
+                response_text=patch,
+                workspace_dir=root,
+                selected_files=["src/app.py"],
+                validation_policy="strict_quality_checks",
+                task_type="bug_fix",
+            )
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.checks["patch_applies"], "yes")
+        self.assertEqual(result.checks["workspace_patch_validation"]["status"], "passed")
+        self.assertEqual(result.checks["workspace_patch_validation"]["patch_applies"], "yes")
+        self.assertEqual(result.checks["syntax_valid"], "passed")
+
+    def test_output_validator_rejects_patch_with_syntax_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "app.py").write_text("def ok():\n    return 1\n", encoding="utf-8")
+            patch = """```diff
+diff --git a/src/app.py b/src/app.py
+index 867a3ee..b77d49d 100644
+--- a/src/app.py
++++ b/src/app.py
+@@ -1,2 +1,2 @@
+-def ok():
+-    return 1
++def broken(:
++    return 1
+```"""
+
+            result = validate_output(
+                request=HubRequest(
+                    session_id="s",
+                    messages=[{"role": "user", "content": "Fix src/app.py"}],
+                ),
+                response_text=patch,
+                workspace_dir=root,
+                selected_files=["src/app.py"],
+                validation_policy="strict_quality_checks",
+                task_type="bug_fix",
+            )
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.checks["workspace_patch_validation"]["status"], "failed")
+        self.assertEqual(result.checks["workspace_patch_validation"]["patch_applies"], "yes")
+        self.assertEqual(result.checks["syntax_valid"], "failed")
+        self.assertTrue(any("syntax check failed" in issue for issue in result.issues))
 
     def test_router_boost_mode_and_efficiency_scorecards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -375,11 +549,16 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertIsNotNone(_CaptureProvider.last_request)
         raw = _CaptureProvider.last_request.raw if _CaptureProvider.last_request is not None else {}
         usage = raw["agent_hub"]["context_usage"]
+        self.assertEqual(raw["agent_hub"]["optimization_plan"]["object"], "agent_hub.optimization_plan")
+        self.assertEqual(raw["agent_hub"]["optimization_trace"]["object"], "agent_hub.optimization_trace")
+        self.assertIn("retry_policy", raw["agent_hub"]["optimization_plan"])
         self.assertLess(usage["target_context_tokens"], usage["max_context_tokens"])
         self.assertTrue(usage["target_context_reached"])
         self.assertLessEqual(usage["estimated_input_tokens"], usage["target_context_tokens"])
         self.assertGreaterEqual(usage["saved_percent"], 40.0)
         self.assertIn("semantic_delta_compaction", " ".join(usage["warnings"]))
+        self.assertEqual(response.raw["agent_hub"]["optimization_trace"]["actual_provider_input_tokens"], 600)
+        self.assertEqual(response.raw["agent_hub"]["optimization_trace"]["token_accounting_source"], "actual_provider_usage")
 
 
 class _OkProvider:
@@ -398,7 +577,7 @@ class _CaptureProvider:
 
     def complete(self, request: HubRequest) -> ProviderResult:
         type(self).last_request = request
-        return ProviderResult(text="ok", model=self.agent.model)
+        return ProviderResult(text="ok", model=self.agent.model, usage={"prompt_tokens": 600, "completion_tokens": 10})
 
 
 if __name__ == "__main__":

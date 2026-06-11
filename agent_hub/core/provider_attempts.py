@@ -360,6 +360,17 @@ class ProviderAttemptExecutor:
                         next_agent=helpers.next_candidate_name(candidates, agent),
                         routing_mode=decision.routing_mode,
                     )
+                    retry_planner = getattr(router, "_request_with_retry_plan", None)
+                    if callable(retry_planner):
+                        effective_request = retry_planner(
+                            request=effective_request,
+                            decision=decision,
+                            retry_reason="low confidence response",
+                            retry_strategy="add_full_files",
+                            attempt=len(failover),
+                            current_agent=agent.name,
+                            next_agent=helpers.next_candidate_name(candidates, agent) or "",
+                        )
                     continue
 
                 quality = router._validate_provider_output(
@@ -411,6 +422,17 @@ class ProviderAttemptExecutor:
                         next_agent=helpers.next_candidate_name(candidates, agent),
                         routing_mode=decision.routing_mode,
                     )
+                    retry_planner = getattr(router, "_request_with_retry_plan", None)
+                    if callable(retry_planner):
+                        effective_request = retry_planner(
+                            request=effective_request,
+                            decision=decision,
+                            retry_reason=quality.retry_reason,
+                            retry_strategy=quality.retry_strategy,
+                            attempt=len(failover),
+                            current_agent=agent.name,
+                            next_agent=helpers.next_candidate_name(candidates, agent) or "",
+                        )
                     continue
 
                 router._record_success(
@@ -453,6 +475,11 @@ class ProviderAttemptExecutor:
                     ),
                     quality_check=(
                         response.raw.get("agent_hub", {}).get("quality_check")
+                        if isinstance(response.raw, dict) and isinstance(response.raw.get("agent_hub"), dict)
+                        else {}
+                    ),
+                    optimization_trace=(
+                        response.raw.get("agent_hub", {}).get("optimization_trace")
                         if isinstance(response.raw, dict) and isinstance(response.raw.get("agent_hub"), dict)
                         else {}
                     ),

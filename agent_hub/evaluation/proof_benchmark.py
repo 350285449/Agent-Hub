@@ -218,6 +218,7 @@ def _run_one(
 def _response_row(config: HubConfig, response: HubResponse, task: BenchmarkTask, *, latency_ms: float) -> dict[str, Any]:
     agent = config.agents.get(response.agent)
     context_usage = _response_context_usage(response)
+    optimization_trace = _response_optimization_trace(response)
     request_input_tokens = _positive_int(
         context_usage.get("optimized_context_tokens"),
         context_usage.get("estimated_input_tokens"),
@@ -264,6 +265,7 @@ def _response_row(config: HubConfig, response: HubResponse, task: BenchmarkTask,
         ),
         "failover_count": len(response.failover),
         "routing_explanation": _response_explanation(response),
+        "optimization_trace": optimization_trace,
     }
 
 
@@ -479,6 +481,13 @@ def _response_context_usage(response: HubResponse) -> dict[str, Any]:
     hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
     usage = hub.get("context_usage") if isinstance(hub.get("context_usage"), dict) else {}
     return dict(usage)
+
+
+def _response_optimization_trace(response: HubResponse) -> dict[str, Any]:
+    raw = response.raw if isinstance(response.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    trace = hub.get("optimization_trace") if isinstance(hub.get("optimization_trace"), dict) else {}
+    return dict(trace)
 
 
 def _token_accounting(

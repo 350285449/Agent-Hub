@@ -4,10 +4,16 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
-from ..boost import build_boost_plan, boost_mode_from_request, boost_policy
 from ..capabilities import agent_supports_tools
 from ..config import AgentConfig, HubConfig
 from ..models import HubRequest
+from ..optimizer import (
+    build_boost_plan,
+    boost_mode_from_request,
+    boost_policy,
+    optimization_plan_from_request,
+    trace_from_plan,
+)
 from ..payloads import request_text
 from ..repository import repo_context_for_request
 from ..security.secrets import redact_secrets, scan_and_redact_context_text
@@ -60,9 +66,14 @@ class ContextPreparationService:
             return request
         max_files = self.config.repo_context_max_files
         max_chars = self.config.repo_context_max_chars
-        mode = boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
+        existing_plan = optimization_plan_from_request(request)
+        mode = (
+            existing_plan.boost_mode
+            if existing_plan is not None
+            else boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
+        )
         policy = boost_policy(mode)
-        plan = build_boost_plan(
+        plan = existing_plan or build_boost_plan(
             task_type=classification.task_type,
             task_category=classification.task_category,
             text=request_text(request),
@@ -98,13 +109,23 @@ class ContextPreparationService:
         message = selection.to_message()
         if message is None:
             return request
+        plan = plan.with_context_plan(selection.to_dict())
         raw = dict(request.raw) if isinstance(request.raw, dict) else {}
         hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
         hub["repo_context"] = selection.to_dict()
+        hub["context_plan"] = {
+            "selected_files": list(plan.selected_files),
+            "omitted_files": list(plan.omitted_files),
+            "context_levels": dict(plan.context_levels),
+            "context_files": [file.to_dict() for file in plan.context_files],
+            "level_counts": dict(plan.context_level_counts),
+        }
         hub["context_strategy"] = classification.context_strategy
         hub["boost_mode"] = mode
         hub["boost_policy"] = policy.to_dict()
         hub["boost_plan"] = plan.to_dict()
+        hub["optimization_plan"] = plan.to_dict()
+        hub["optimization_trace"] = trace_from_plan(plan).to_dict()
         hub["task_policy"] = plan.task_policy_dict()
         raw["agent_hub"] = hub
         return replace(request, messages=[message, *request.messages], raw=raw)
