@@ -2,10 +2,43 @@
 
 Make Claude Code and Codex write better code with fewer tokens.
 
-Agent Hub compresses repository context, routes each task to the best model,
+Agent Hub optimizes repo context, routes each task by success-per-token,
 validates outputs, and retries failed attempts automatically.
 
-Start with Boost Mode `Balanced`, then switch to `Save Tokens`, `Best Code`,
+## Product Proof
+
+Claude Code + Agent Hub
+
+| Metric | Result |
+| --- | ---: |
+| Tokens used | -43% |
+| Task success | +18 pp |
+| Retries | -31% |
+| Cost | -39% |
+
+![Benchmark proof](media/benchmark-proof.png)
+
+Run `Agent Hub: Run Personal Benchmark` to generate your local savings report,
+or use the CLI:
+
+```text
+agent-hub benchmark --dataset before-after-10 --baseline claude-sonnet --route coding --export claude.json
+agent-hub benchmark compare claude.json --dataset before-after-10
+```
+
+Token savings are measured as raw agent request tokens versus the optimized
+Agent Hub request tokens actually sent, not as repository size minus compressed
+repository size.
+
+## One-Click Onboarding
+
+Start with one button:
+
+- `Connect Claude Code`
+- `Connect Codex`
+- `Boost My Agent`
+
+Then switch Boost Mode from `Balanced` to `Save Tokens`, `Best Code`,
 `Fast Fix`, `Big Refactor`, or `Local First` when the task needs it.
 
 Supports OpenAI, Claude, Gemini, Ollama, OpenRouter, Codex CLI, Cline, Roo Code,
@@ -21,18 +54,15 @@ You can:
 
 - Compare Claude Code alone vs Claude Code + Agent Hub
 - Compare Codex alone vs Codex + Agent Hub
-- Measure tokens saved, quality score, prompt loops avoided, and cost saved
+- Compare Cline alone vs Cline + Agent Hub
+- Measure tokens saved, task success, retries, patch quality, files touched,
+  time to useful output, and cost saved
 - Replay historical decisions and verify why each route won
 
 No vendor benchmarks required.
 
-Run `Agent Hub: Run Personal Benchmark` to generate your local savings report,
-or use the CLI:
-
-```text
-agent-hub benchmark --dataset coding-100 --baseline claude-sonnet --export claude.json
-agent-hub benchmark compare claude.json --dataset coding-100
-```
+Use `before-after-10` for Marketplace screenshots and `coding-100` for the
+larger reproducible coding proof set.
 
 ## Explain Every Decision
 
@@ -86,9 +116,8 @@ Use multiple coding agents and AI providers through a single endpoint.
 
 **Benchmark Proof**
 
-Verify routing claims using a reproducible benchmark corpus.
-
-![Benchmark proof](media/benchmark-proof.png)
+Verify token savings, quality lift, retries, and cost using reproducible
+before/after benchmarks.
 
 **Route Replay**
 

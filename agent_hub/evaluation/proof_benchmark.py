@@ -153,6 +153,7 @@ def _run_task_pair(
         "baseline": baseline,
         "agent_hub": routed,
         "comparison": _pair_comparison(baseline, routed),
+        "request_token_comparison": _request_token_comparison(baseline, routed),
     }
 
 
@@ -186,6 +187,7 @@ def _run_one(
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
         return _response_row(router.config, response, task, latency_ms=latency_ms)
     except Exception as exc:
+        request_tokens = estimate_messages_tokens(request.messages)
         return {
             "strategy": strategy,
             "agent": preferred_agent,
@@ -197,6 +199,17 @@ def _run_one(
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
             "cost_usd": None,
             "usage": {},
+            "request_input_tokens": request_tokens,
+            "raw_request_input_tokens": request_tokens,
+            "optimized_request_input_tokens": request_tokens,
+            "token_accounting": _token_accounting(
+                request_input_tokens=request_tokens,
+                raw_request_input_tokens=request_tokens,
+                provider_input_tokens=0,
+                provider_output_tokens=0,
+                input_tokens_used=request_tokens,
+                output_tokens_used=0,
+            ),
             "failover_count": 0,
             "error": str(exc),
         }
@@ -204,10 +217,19 @@ def _run_one(
 
 def _response_row(config: HubConfig, response: HubResponse, task: BenchmarkTask, *, latency_ms: float) -> dict[str, Any]:
     agent = config.agents.get(response.agent)
-    input_tokens = _usage_int(response.usage, "prompt_tokens", "input_tokens")
-    output_tokens = _usage_int(response.usage, "completion_tokens", "output_tokens")
-    if input_tokens <= 0:
-        input_tokens = estimate_messages_tokens([{"role": "user", "content": task.prompt}])
+    context_usage = _response_context_usage(response)
+    request_input_tokens = _positive_int(
+        context_usage.get("optimized_context_tokens"),
+        context_usage.get("estimated_input_tokens"),
+    ) or estimate_messages_tokens([{"role": "user", "content": task.prompt}])
+    raw_request_input_tokens = _positive_int(
+        context_usage.get("original_input_tokens"),
+        context_usage.get("original_context_tokens"),
+    ) or request_input_tokens
+    provider_input_tokens = _usage_int(response.usage, "prompt_tokens", "input_tokens")
+    provider_output_tokens = _usage_int(response.usage, "completion_tokens", "output_tokens")
+    input_tokens = provider_input_tokens or request_input_tokens
+    output_tokens = provider_output_tokens
     if output_tokens <= 0:
         output_tokens = max(1, len(response.text or "") // 4)
     cost = (
@@ -226,9 +248,20 @@ def _response_row(config: HubConfig, response: HubResponse, task: BenchmarkTask,
         "latency_ms": latency_ms,
         "cost_usd": cost,
         "usage": dict(response.usage),
+        "request_input_tokens": request_input_tokens,
+        "raw_request_input_tokens": raw_request_input_tokens,
+        "optimized_request_input_tokens": request_input_tokens,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
+        "token_accounting": _token_accounting(
+            request_input_tokens=request_input_tokens,
+            raw_request_input_tokens=raw_request_input_tokens,
+            provider_input_tokens=provider_input_tokens,
+            provider_output_tokens=provider_output_tokens,
+            input_tokens_used=input_tokens,
+            output_tokens_used=output_tokens,
+        ),
         "failover_count": len(response.failover),
         "routing_explanation": _response_explanation(response),
     }
@@ -266,6 +299,7 @@ def _report(
         "agent_hub_summary": routed_summary,
         "comparison": comparison,
         "outcome_metrics": outcome_metrics,
+        "token_savings_proof": _token_savings_proof(baseline_summary, routed_summary, pairs),
         "agent_hub_vs_raw_agent": {
             "raw_agent": baseline_summary,
             "raw_agent_label": _raw_agent_label(baseline_agent),
@@ -296,6 +330,9 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     latencies = [_float(row.get("latency_ms")) for row in rows]
     scores = [_float(row.get("score")) for row in rows]
     tokens = [_float(row.get("total_tokens")) for row in rows]
+    request_tokens = [_float(row.get("request_input_tokens")) for row in rows]
+    raw_request_tokens = [_float(row.get("raw_request_input_tokens")) for row in rows]
+    provider_reported = sum(1 for row in rows if _dict(row.get("token_accounting")).get("provider_reported_input_tokens"))
     return {
         "task_count": total,
         "tasks_completed": successes,
@@ -308,6 +345,9 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "time_to_working_solution_ms": round(sum(latencies) / max(1, successes), 2) if successes else 0.0,
         "total_tokens": int(sum(tokens)) if tokens else 0,
         "average_tokens": round(sum(tokens) / max(1, len(tokens)), 2) if tokens else 0.0,
+        "total_request_input_tokens": int(sum(request_tokens)) if request_tokens else 0,
+        "total_raw_request_input_tokens": int(sum(raw_request_tokens)) if raw_request_tokens else 0,
+        "provider_reported_input_token_tasks": provider_reported,
         "total_cost_usd": round(sum(costs), 8) if costs else None,
         "average_cost_usd": round(sum(costs) / len(costs), 8) if costs else None,
         "priced_task_count": len(costs),
@@ -320,6 +360,11 @@ def _comparison(baseline: dict[str, Any], routed: dict[str, Any]) -> dict[str, A
     return {
         "cost_reduction": _percent_reduction(routed.get("total_cost_usd"), baseline.get("total_cost_usd")),
         "token_reduction": _percent_reduction(routed.get("total_tokens"), baseline.get("total_tokens")),
+        "request_token_reduction": _percent_reduction(
+            routed.get("total_request_input_tokens"),
+            baseline.get("total_request_input_tokens"),
+        ),
+        "retry_reduction": _percent_reduction(routed.get("prompt_loops"), baseline.get("prompt_loops")),
         "latency_reduction": _percent_reduction(routed.get("average_latency_ms"), baseline.get("average_latency_ms")),
         "success_delta": round(
             (_float(routed.get("success_rate")) - _float(baseline.get("success_rate"))) * 100,
@@ -338,6 +383,10 @@ def _pair_comparison(baseline: dict[str, Any], routed: dict[str, Any]) -> dict[s
     return {
         "cost_reduction": _percent_reduction(routed.get("cost_usd"), baseline.get("cost_usd")),
         "token_reduction": _percent_reduction(routed.get("total_tokens"), baseline.get("total_tokens")),
+        "request_token_reduction": _percent_reduction(
+            routed.get("request_input_tokens"),
+            baseline.get("request_input_tokens"),
+        ),
         "latency_reduction": _percent_reduction(routed.get("latency_ms"), baseline.get("latency_ms")),
         "success_delta": int(bool(routed.get("success"))) - int(bool(baseline.get("success"))),
         "score_delta": round(_float(routed.get("score")) - _float(baseline.get("score")), 4),
@@ -351,10 +400,19 @@ def _outcome_metrics(
 ) -> dict[str, Any]:
     cost_delta = comparison.get("total_cost_delta_usd")
     tokens_delta = comparison.get("total_tokens_delta")
+    request_tokens_delta = _delta(
+        routed.get("total_request_input_tokens"),
+        baseline.get("total_request_input_tokens"),
+    )
     return {
         "tasks_completed": int(routed.get("tasks_completed") or 0),
         "tokens_saved": int(abs(tokens_delta)) if tokens_delta is not None and float(tokens_delta) < 0 else 0,
         "tokens_saved_percent": comparison.get("token_reduction"),
+        "request_tokens_saved": int(abs(request_tokens_delta))
+        if request_tokens_delta is not None and float(request_tokens_delta) < 0
+        else 0,
+        "request_tokens_saved_percent": comparison.get("request_token_reduction"),
+        "token_savings_basis": _summary_token_savings_basis(baseline, routed),
         "prompt_loops_avoided": comparison.get("prompt_loops_avoided", 0),
         "cost_saved_usd": round(abs(float(cost_delta)), 8)
         if cost_delta is not None and float(cost_delta) < 0
@@ -416,6 +474,85 @@ def _response_explanation(response: HubResponse) -> dict[str, Any]:
     }
 
 
+def _response_context_usage(response: HubResponse) -> dict[str, Any]:
+    raw = response.raw if isinstance(response.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    usage = hub.get("context_usage") if isinstance(hub.get("context_usage"), dict) else {}
+    return dict(usage)
+
+
+def _token_accounting(
+    *,
+    request_input_tokens: int,
+    raw_request_input_tokens: int,
+    provider_input_tokens: int,
+    provider_output_tokens: int,
+    input_tokens_used: int,
+    output_tokens_used: int,
+) -> dict[str, Any]:
+    provider_reported = provider_input_tokens > 0
+    return {
+        "raw_request_input_tokens": max(0, int(raw_request_input_tokens or 0)),
+        "optimized_request_input_tokens": max(0, int(request_input_tokens or 0)),
+        "actual_request_input_tokens": max(0, int(request_input_tokens or 0)),
+        "provider_reported_input_tokens": int(provider_input_tokens) if provider_reported else None,
+        "provider_reported_output_tokens": int(provider_output_tokens) if provider_output_tokens > 0 else None,
+        "input_tokens_used_for_cost": max(0, int(input_tokens_used or 0)),
+        "output_tokens_used_for_cost": max(0, int(output_tokens_used or 0)),
+        "input_token_source": "provider_reported_usage" if provider_reported else "actual_prepared_request_estimate",
+        "token_savings_basis": "provider_reported_usage" if provider_reported else "actual_request_payload_estimate",
+        "not_repo_size_delta": True,
+    }
+
+
+def _request_token_comparison(baseline: dict[str, Any], routed: dict[str, Any]) -> dict[str, Any]:
+    raw_tokens = _optional_int(baseline.get("request_input_tokens")) or 0
+    optimized_tokens = _optional_int(routed.get("request_input_tokens")) or 0
+    saved = max(0, raw_tokens - optimized_tokens)
+    return {
+        "raw_agent_request_input_tokens": raw_tokens,
+        "agent_hub_optimized_request_input_tokens": optimized_tokens,
+        "request_tokens_saved": saved,
+        "request_token_reduction": _percent_reduction(optimized_tokens, raw_tokens),
+        "basis": _row_token_savings_basis(baseline, routed),
+        "not_repo_size_delta": True,
+    }
+
+
+def _token_savings_proof(
+    baseline: dict[str, Any],
+    routed: dict[str, Any],
+    pairs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    raw_tokens = int(baseline.get("total_request_input_tokens") or 0)
+    optimized_tokens = int(routed.get("total_request_input_tokens") or 0)
+    return {
+        "raw_agent_request_input_tokens": raw_tokens,
+        "agent_hub_optimized_request_input_tokens": optimized_tokens,
+        "request_tokens_saved": max(0, raw_tokens - optimized_tokens),
+        "request_token_reduction": _percent_reduction(optimized_tokens, raw_tokens),
+        "tokens_used_reduction": _percent_reduction(routed.get("total_tokens"), baseline.get("total_tokens")),
+        "basis": _summary_token_savings_basis(baseline, routed),
+        "definition": "raw agent request tokens vs Agent Hub optimized request tokens actually sent",
+        "not_repo_size_delta": True,
+        "sample_task_count": len(pairs),
+    }
+
+
+def _summary_token_savings_basis(baseline: dict[str, Any], routed: dict[str, Any]) -> str:
+    if baseline.get("provider_reported_input_token_tasks") and routed.get("provider_reported_input_token_tasks"):
+        return "provider_reported_usage"
+    return "actual_request_payload_estimate"
+
+
+def _row_token_savings_basis(baseline: dict[str, Any], routed: dict[str, Any]) -> str:
+    baseline_accounting = _dict(baseline.get("token_accounting"))
+    routed_accounting = _dict(routed.get("token_accounting"))
+    if baseline_accounting.get("provider_reported_input_tokens") and routed_accounting.get("provider_reported_input_tokens"):
+        return "provider_reported_usage"
+    return "actual_request_payload_estimate"
+
+
 def _markdown_report(report: dict[str, Any]) -> str:
     comparison = report.get("comparison") if isinstance(report.get("comparison"), dict) else {}
     outcomes = report.get("outcome_metrics") if isinstance(report.get("outcome_metrics"), dict) else {}
@@ -437,7 +574,10 @@ def _markdown_report(report: dict[str, Any]) -> str:
         "| --- | ---: |",
         f"| Tasks completed | {outcomes.get('tasks_completed', routed_summary.get('tasks_completed', 0))} |",
         f"| Tokens used | {_metric(_negative_percent(comparison.get('token_reduction')), '%')} |",
+        f"| Request tokens actually sent | {_metric(_negative_percent(comparison.get('request_token_reduction')), '%')} |",
+        f"| Token savings basis | {_md(outcomes.get('token_savings_basis'))} |",
         f"| Tokens saved | {_metric(outcomes.get('tokens_saved'), ' tokens')} |",
+        f"| Request tokens saved | {_metric(outcomes.get('request_tokens_saved'), ' tokens')} |",
         f"| Prompt loops avoided | {outcomes.get('prompt_loops_avoided', 0)} |",
         f"| Cost reduction | {_metric(comparison.get('cost_reduction'), '%')} |",
         f"| Cost saved | {_money(outcomes.get('cost_saved_usd'))} |",
@@ -535,6 +675,14 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _positive_int(*values: Any) -> int | None:
+    for value in values:
+        parsed = _optional_int(value)
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
 def _float(value: Any) -> float:
     try:
         return float(value or 0.0)
@@ -549,6 +697,10 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def _metric(value: Any, suffix: str) -> str:

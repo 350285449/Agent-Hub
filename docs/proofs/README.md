@@ -35,6 +35,7 @@ their own repository.
 - Baseline model
 - Task count
 - Repository size
+- Token savings basis from `token_savings_proof`
 - Primary workflow
 - Cost reduction
 - Latency reduction

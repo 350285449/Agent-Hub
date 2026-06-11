@@ -69,6 +69,91 @@ class ProofInfrastructureTests(unittest.TestCase):
             saved = json.loads(Path(report["report_paths"]["json"]).read_text(encoding="utf-8"))
             self.assertEqual(saved["object"], "agent_hub.benchmark_proof")
             self.assertIn("dataset_fingerprint", saved)
+            self.assertTrue(saved["token_savings_proof"]["not_repo_size_delta"])
+            self.assertIn("request tokens", saved["token_savings_proof"]["definition"])
+
+    def test_benchmark_token_savings_compare_actual_requests_not_repo_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "long-context.jsonl"
+            corpus.write_text(
+                json.dumps(
+                    {
+                        "type": "coding",
+                        "route": "coding",
+                        "prompt": "Fix the billing retry path. " + ("full repository context " * 1200),
+                        "expected_keywords": ["ok"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=Path.cwd(),
+                approval_mode="auto",
+                free_only=False,
+                default_route=["routed", "baseline"],
+                routes=[RouteRule(name="coding", agents=["routed", "baseline"])],
+                agents={
+                    "routed": AgentConfig(
+                        name="routed",
+                        provider="openai-compatible",
+                        model="routed-model",
+                        base_url="http://127.0.0.1:9999",
+                        context_window=1100,
+                        cost_per_million_input=1.0,
+                        cost_per_million_output=2.0,
+                        supports_tools=True,
+                        coding_score=1.0,
+                    ),
+                    "baseline": AgentConfig(
+                        name="baseline",
+                        provider="anthropic",
+                        model="claude-sonnet-baseline",
+                        context_window=12000,
+                        cost_per_million_input=10.0,
+                        cost_per_million_output=20.0,
+                        supports_tools=True,
+                        coding_score=0.5,
+                    ),
+                },
+            )
+
+            class Provider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    return ProviderResult(
+                        text="ok",
+                        model=self.agent.model,
+                        usage={},
+                        finish_reason="stop",
+                    )
+
+            report = BenchmarkProofRunner(config, provider_factory=Provider).run(
+                route="coding",
+                baseline="baseline",
+                dataset=str(corpus),
+                output_dir=root / "reports",
+            )
+
+            proof = report["token_savings_proof"]
+            task_proof = report["results"][0]["request_token_comparison"]
+
+            self.assertEqual(proof["basis"], "actual_request_payload_estimate")
+            self.assertTrue(proof["not_repo_size_delta"])
+            self.assertTrue(task_proof["not_repo_size_delta"])
+            self.assertGreater(
+                proof["raw_agent_request_input_tokens"],
+                proof["agent_hub_optimized_request_input_tokens"],
+            )
+            self.assertGreater(task_proof["request_tokens_saved"], 0)
+            self.assertEqual(
+                report["outcome_metrics"]["token_savings_basis"],
+                "actual_request_payload_estimate",
+            )
 
     def test_public_dataset_alias_exports_and_verifies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

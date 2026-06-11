@@ -90,9 +90,11 @@ def benchmark_share_card_body(config: HubConfig, report_path: str | Path | None 
     task_count = int(report.get("task_count") or len(report.get("results", [])) or 0)
     baseline_label = _baseline_label(baseline)
     metrics = {
+        "token_reduction": comparison.get("token_reduction"),
         "cost_reduction": comparison.get("cost_reduction"),
         "latency_reduction": comparison.get("latency_reduction"),
         "success_delta": comparison.get("success_delta"),
+        "prompt_loops_avoided": comparison.get("prompt_loops_avoided"),
     }
     variants = _share_variants(baseline_label=baseline_label, task_count=task_count, metrics=metrics)
     return {
@@ -403,9 +405,10 @@ def _comparison(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def _share_variants(*, baseline_label: str, task_count: int, metrics: dict[str, Any]) -> dict[str, str]:
-    cost = _percent(metrics.get("cost_reduction"))
-    latency = _percent(metrics.get("latency_reduction"))
+    tokens = _negative_percent(metrics.get("token_reduction"), empty="unavailable")
+    cost = _negative_percent(metrics.get("cost_reduction"), empty="unpriced")
     success = _signed_points(metrics.get("success_delta"))
+    retries = _retry_metric(metrics.get("prompt_loops_avoided"))
     markdown = "\n".join(
         [
             "# My Agent-Hub Benchmark",
@@ -413,11 +416,12 @@ def _share_variants(*, baseline_label: str, task_count: int, metrics: dict[str, 
             f"Baseline: {baseline_label}",
             f"Tasks: {task_count}",
             "",
-            f"Cost Reduction: {cost}",
-            f"Latency Reduction: {latency}",
-            f"Success Rate: {success}",
+            f"Tokens Used: {tokens}",
+            f"Task Success: {success}",
+            f"Retries: {retries}",
+            f"Cost: {cost}",
             "",
-            "Agent-Hub ships the benchmark corpus so I can verify routing, cost, latency, and success locally.",
+            "Agent-Hub ships the benchmark corpus so I can verify tokens, cost, retries, and success locally.",
         ]
     )
     reddit = "\n".join(
@@ -426,16 +430,17 @@ def _share_variants(*, baseline_label: str, task_count: int, metrics: dict[str, 
             "",
             f"Baseline: {baseline_label}",
             f"Tasks: {task_count}",
-            f"Cost Reduction: {cost}",
-            f"Latency Reduction: {latency}",
-            f"Success Rate: {success}",
+            f"Tokens Used: {tokens}",
+            f"Task Success: {success}",
+            f"Retries: {retries}",
+            f"Cost: {cost}",
             "",
             "The useful part: the benchmark corpus and reports are local/reproducible, not just vendor claims.",
         ]
     )
     x = (
         f"I ran Agent-Hub's local benchmark corpus vs {baseline_label}: "
-        f"{cost} cost, {latency} latency, {success} success across {task_count} tasks. "
+        f"{tokens} tokens, {success} success, {retries} retries, {cost} cost across {task_count} tasks. "
         "Reproducible proof reports ship with the tool."
     )
     github = "\n".join(
@@ -444,9 +449,10 @@ def _share_variants(*, baseline_label: str, task_count: int, metrics: dict[str, 
             "",
             f"- Baseline: {baseline_label}",
             f"- Tasks: {task_count}",
-            f"- Cost Reduction: {cost}",
-            f"- Latency Reduction: {latency}",
-            f"- Success Rate: {success}",
+            f"- Tokens Used: {tokens}",
+            f"- Task Success: {success}",
+            f"- Retries: {retries}",
+            f"- Cost: {cost}",
             "",
             "The report was generated locally from the bundled benchmark corpus.",
         ]
@@ -544,11 +550,25 @@ def _percent(value: Any) -> str:
     return "unpriced" if number is None else f"{number:.0f}%"
 
 
+def _negative_percent(value: Any, *, empty: str) -> str:
+    number = _float_or_none(value)
+    return empty if number is None else f"-{abs(number):.0f}%"
+
+
 def _signed_points(value: Any) -> str:
     number = _float_or_none(value)
     if number is None:
         return "unknown"
-    return f"{number:+.0f}%"
+    return f"{number:+.0f} pp"
+
+
+def _retry_metric(value: Any) -> str:
+    number = _float_or_none(value)
+    if number is None:
+        return "unknown"
+    if number < 0:
+        return f"{number:.0f}"
+    return f"-{number:.0f}"
 
 
 def _float(value: Any) -> float:

@@ -193,7 +193,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
 
         headings = [
             "<h2>What do you need?</h2>",
-            "<h2>Use With Coding Tools</h2>",
+            "<h2>Boost Your Coding Agent</h2>",
             "<h2>Setup</h2>",
             "<h2>Advanced</h2>",
             "<h2>Tools</h2>",
@@ -263,6 +263,15 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("Provider: OpenAI Compatible", source)
         self.assertIn("async function setupCodingTool", source)
         self.assertIn("async function setupCline", source)
+        self.assertIn('id="connectClaudeCode"', source)
+        self.assertIn("Connect Claude Code", source)
+        self.assertIn('id="connectCodex"', source)
+        self.assertIn("Connect Codex", source)
+        self.assertIn('id="boostMyAgent"', source)
+        self.assertIn("Boost My Agent", source)
+        self.assertIn('postFromEvent("copyClaudeCodeConfig"', source)
+        self.assertIn('postFromEvent("enableCodexCliMode"', source)
+        self.assertIn('postFromEvent("enableTokenSafeMode"', source)
         self.assertIn('postFromEvent("autoSetupCline"', source)
         self.assertIn('postFromEvent("setupCodingTool"', source)
         self.assertNotIn("Gateway Control Plane", source)

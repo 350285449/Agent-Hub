@@ -2321,17 +2321,20 @@ class AgentRouter:
             )
             raw = dict(result.raw) if isinstance(result.raw, dict) else {}
             agent_metadata = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
+            context_usage = (
+                (request.raw.get("agent_hub") or {}).get("context_usage")
+                if isinstance(request.raw, dict) and isinstance(request.raw.get("agent_hub"), dict)
+                else {}
+            )
+            if isinstance(context_usage, dict) and context_usage:
+                agent_metadata["context_usage"] = dict(context_usage)
             agent_metadata["boost_explanation"] = build_task_explanation(
                 decision=decision,
                 agent=agent,
                 model=result.model or agent.model,
                 request=request,
                 quality=quality,
-                usage=(
-                    (request.raw.get("agent_hub") or {}).get("context_usage")
-                    if isinstance(request.raw, dict) and isinstance(request.raw.get("agent_hub"), dict)
-                    else {}
-                ),
+                usage=context_usage if isinstance(context_usage, dict) else {},
             )
             raw["agent_hub"] = agent_metadata
         if self.config.expose_routing_details and isinstance(raw, dict):

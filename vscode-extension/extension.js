@@ -4859,16 +4859,19 @@ function sidebarHtml(webview, logoPath) {
     </section>
     <section class="tool-path">
       <div class="section-head">
-        <h2>Use With Coding Tools</h2>
-        <span class="status" id="toolReadyStatus">OpenAI Compatible</span>
+        <h2>Boost Your Coding Agent</h2>
+        <span class="status" id="toolReadyStatus">One click</span>
       </div>
       <div class="tool-summary">
-        <strong>Set up Cline automatically, or copy values for Roo Code, Continue, and similar tools</strong>
+        <strong>Connect Claude Code, connect Codex, or boost the agent you already use</strong>
         <span>Provider: OpenAI Compatible</span>
         <span>Base URL: ${escapeHtml(settings().serverUrl.replace(/\/+$/, ""))}/v1</span>
         <span>Model: agent-hub-coding</span>
       </div>
       <div class="actions tool-actions">
+        <button class="primary" id="connectClaudeCode" type="button">Connect Claude Code</button>
+        <button id="connectCodex" type="button">Connect Codex</button>
+        <button id="boostMyAgent" type="button">Boost My Agent</button>
         <button class="primary" id="autoSetupCline" type="button">Auto-Configure Cline</button>
         <button id="setupCodingTool" type="button">Copy + Test Tool</button>
         <button id="copyCodingToolConfigQuick" type="button">Copy Values</button>
@@ -6918,6 +6921,9 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("freeOnlyMode").addEventListener("click", (event) => postFromEvent("enableFreeOnlyMode", event));
     document.getElementById("openOutput").addEventListener("click", (event) => postFromEvent("openOutput", event));
     document.getElementById("openSettings").addEventListener("click", (event) => postFromEvent("openSettings", event));
+    document.getElementById("connectClaudeCode").addEventListener("click", (event) => postFromEvent("copyClaudeCodeConfig", event));
+    document.getElementById("connectCodex").addEventListener("click", (event) => postFromEvent("enableCodexCliMode", event));
+    document.getElementById("boostMyAgent").addEventListener("click", (event) => postFromEvent("enableTokenSafeMode", event));
     document.getElementById("autoSetupCline").addEventListener("click", (event) => postFromEvent("autoSetupCline", event));
     document.getElementById("setupCodingTool").addEventListener("click", (event) => postFromEvent("setupCodingTool", event));
     document.getElementById("copyCodingToolConfigQuick").addEventListener("click", (event) => postFromEvent("copyClineConfig", event));
@@ -15251,9 +15257,10 @@ function benchmarkShareCard(report) {
   const baselineLabel = baseline.model || baseline.agent || baseline.provider || "User default";
   const tasks = Number(report && report.task_count) || (Array.isArray(report && report.results) ? report.results.length : 0);
   const metrics = {
-    cost: formatPercentMetric(comparison.cost_reduction),
-    latency: formatPercentMetric(comparison.latency_reduction),
-    success: formatSignedPointMetric(comparison.success_delta)
+    tokens: formatNegativePercentMetric(comparison.token_reduction, "unavailable"),
+    success: formatSignedPointMetric(comparison.success_delta),
+    retries: formatRetryMetric(comparison.retry_reduction ?? comparison.prompt_loops_avoided),
+    cost: formatNegativePercentMetric(comparison.cost_reduction, "unpriced")
   };
   const markdown = [
     "# My Agent-Hub Benchmark",
@@ -15261,26 +15268,28 @@ function benchmarkShareCard(report) {
     `Baseline: ${baselineLabel}`,
     `Tasks: ${tasks}`,
     "",
-    `Cost Reduction: ${metrics.cost}`,
-    `Latency Reduction: ${metrics.latency}`,
-    `Success Rate: ${metrics.success}`,
+    `Tokens Used: ${metrics.tokens}`,
+    `Task Success: ${metrics.success}`,
+    `Retries: ${metrics.retries}`,
+    `Cost: ${metrics.cost}`,
     "",
-    "Agent-Hub ships the benchmark corpus so I can verify routing, cost, latency, and success locally."
+    "Agent-Hub ships the benchmark corpus so I can verify tokens, cost, retries, and success locally."
   ].join("\n");
   const reddit = [
     "I ran Agent-Hub's local benchmark corpus.",
     "",
     `Baseline: ${baselineLabel}`,
     `Tasks: ${tasks}`,
-    `Cost Reduction: ${metrics.cost}`,
-    `Latency Reduction: ${metrics.latency}`,
-    `Success Rate: ${metrics.success}`,
+    `Tokens Used: ${metrics.tokens}`,
+    `Task Success: ${metrics.success}`,
+    `Retries: ${metrics.retries}`,
+    `Cost: ${metrics.cost}`,
     "",
     "The useful part: the benchmark corpus and reports are local/reproducible, not just vendor claims."
   ].join("\n");
   const x = (
     `I ran Agent-Hub's local benchmark corpus vs ${baselineLabel}: ` +
-    `${metrics.cost} cost, ${metrics.latency} latency, ${metrics.success} success across ${tasks} tasks. ` +
+    `${metrics.tokens} tokens, ${metrics.success} success, ${metrics.retries} retries, ${metrics.cost} cost across ${tasks} tasks. ` +
     "Reproducible proof reports ship with the tool."
   ).slice(0, 280);
   const github = [
@@ -15288,9 +15297,10 @@ function benchmarkShareCard(report) {
     "",
     `- Baseline: ${baselineLabel}`,
     `- Tasks: ${tasks}`,
-    `- Cost Reduction: ${metrics.cost}`,
-    `- Latency Reduction: ${metrics.latency}`,
-    `- Success Rate: ${metrics.success}`,
+    `- Tokens Used: ${metrics.tokens}`,
+    `- Task Success: ${metrics.success}`,
+    `- Retries: ${metrics.retries}`,
+    `- Cost: ${metrics.cost}`,
     "",
     "The report was generated locally from the bundled benchmark corpus."
   ].join("\n");
@@ -15342,7 +15352,7 @@ function benchmarkShareCardHtml(card) {
     }
     .metrics {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 10px;
       margin-bottom: 18px;
     }
@@ -15393,9 +15403,10 @@ function benchmarkShareCardHtml(card) {
     <h1>My Agent-Hub Benchmark</h1>
     <div class="meta">Baseline: ${escapeHtml(card.baseline)} &middot; Tasks: ${escapeHtml(card.tasks)}</div>
     <section class="metrics">
-      <div class="metric"><span>Cost Reduction</span><strong>${escapeHtml(card.metrics.cost)}</strong></div>
-      <div class="metric"><span>Latency Reduction</span><strong>${escapeHtml(card.metrics.latency)}</strong></div>
-      <div class="metric"><span>Success Rate</span><strong>${escapeHtml(card.metrics.success)}</strong></div>
+      <div class="metric"><span>Tokens Used</span><strong>${escapeHtml(card.metrics.tokens)}</strong></div>
+      <div class="metric"><span>Task Success</span><strong>${escapeHtml(card.metrics.success)}</strong></div>
+      <div class="metric"><span>Retries</span><strong>${escapeHtml(card.metrics.retries)}</strong></div>
+      <div class="metric"><span>Cost</span><strong>${escapeHtml(card.metrics.cost)}</strong></div>
     </section>
     <div class="buttons">
       <button data-copy="markdown">Copy Markdown</button>
@@ -16067,12 +16078,34 @@ function formatPercentMetric(value) {
   return `${number.toFixed(1)}%`;
 }
 
+function formatNegativePercentMetric(value, empty = "unavailable") {
+  if (value === null || value === undefined || value === "") {
+    return empty;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return empty;
+  }
+  return `-${Math.abs(number).toFixed(1)}%`;
+}
+
 function formatSignedPointMetric(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) {
     return "0.0 pp";
   }
   return `${number >= 0 ? "+" : ""}${number.toFixed(1)} pp`;
+}
+
+function formatRetryMetric(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "unknown";
+  }
+  if (Math.abs(number) < 1 && number !== 0) {
+    return `${number < 0 ? "" : "-"}${Math.abs(number).toFixed(1)}`;
+  }
+  return `-${Math.abs(number).toFixed(0)}`;
 }
 
 function parseJsonObjectFromText(value) {

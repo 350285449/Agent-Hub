@@ -57,6 +57,8 @@ agent-hub benchmark --dataset coding-100 --baseline claude-sonnet --route coding
 agent-hub benchmark compare claude.json --dataset coding-100
 agent-hub benchmark --dataset coding-100 --baseline codex --route coding --export codex.json
 agent-hub benchmark compare codex.json --dataset coding-100
+agent-hub benchmark --dataset before-after-10 --baseline codex-cli --route coding --export codex-before-after.json
+agent-hub benchmark compare codex-before-after.json --dataset before-after-10
 ```
 
 The command writes reproducible proof to
@@ -66,13 +68,21 @@ The command writes reproducible proof to
 Each report includes:
 
 - Claude Code alone vs Claude Code + Agent Hub, or Codex alone vs Codex + Agent Hub
-- tokens saved versus your raw agent baseline
+- Cline alone vs Cline + Agent Hub on the same before/after tasks, measured
+  through the Cline client or a configured `cline` baseline agent
+- tokens saved versus your raw agent baseline, measured as raw request tokens
+  versus optimized request tokens actually sent
 - tasks completed, quality score, and success-rate delta
 - prompt loops avoided and time to working solution
 - cost saved versus your baseline model
 - per-task selected model, cost, latency, and outcome
 - dataset name and fingerprint for verification
 - rerun and verify commands
+
+The report explicitly marks `token_savings_proof.not_repo_size_delta: true`.
+Do not treat "tokens saved" as original repository size minus compressed
+repository size; publish the raw-agent-request versus Agent-Hub-request numbers
+from `token_savings_proof`.
 
 In VS Code, the first-run proof flow is:
 

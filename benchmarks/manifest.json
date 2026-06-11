@@ -15,6 +15,13 @@
       "route": "cloud-agent",
       "task_count": 50,
       "command": "agent-hub benchmark --dataset proof-50 --export results.json"
+    },
+    {
+      "name": "before-after-10",
+      "description": "Ten Marketplace proof tasks for raw-agent vs Agent Hub comparisons, covering large refactors, cross-file bugs, missing context recovery, UI plus backend work, test generation, and vague app repair requests.",
+      "route": "coding",
+      "task_count": 10,
+      "command": "agent-hub benchmark --dataset before-after-10 --route coding --export results.json"
     }
   ]
 }

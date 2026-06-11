@@ -1,7 +1,7 @@
 {
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub Workspace",
-  "description": "Make Claude Code and Codex write better code with fewer tokens through context compression, routing, validation, and retries.",
+  "description": "Agent Hub optimizes repo context, routes each task by success-per-token, validates outputs, and retries failed attempts automatically.",
   "version": "9.6.7",
   "publisher": "agent-hub",
   "license": "MIT",
