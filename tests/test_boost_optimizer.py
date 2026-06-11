@@ -4,13 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_hub.boost import boost_policy, normalize_boost_mode
+from agent_hub.boost import build_boost_plan, boost_policy, normalize_boost_mode
 from agent_hub.config import AgentConfig, HubConfig, config_from_dict, config_to_dict
 from agent_hub.core.router import AgentRouter
 from agent_hub.core.task_classifier import TaskClassifier
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.output_validator import validate_output
 from agent_hub.repository import RepositoryIndexer, RepoContextSelector
+from agent_hub.token_optimizer import ContextCache, TokenOptimizer
 
 
 class BoostOptimizerTests(unittest.TestCase):
@@ -30,6 +31,32 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertEqual(config.set_boost_mode("Save Tokens"), "save_tokens")
         self.assertEqual(config.boost_mode_label, "Save Tokens")
 
+    def test_adaptive_boost_plan_tightens_context_under_token_pressure(self) -> None:
+        plan = build_boost_plan(
+            task_type="documentation",
+            task_category="documentation",
+            text="Update docs and explain the API briefly.",
+            boost_mode="save_tokens",
+            estimated_input_tokens=22_000,
+            repo_size_bucket="large",
+        )
+        risky = build_boost_plan(
+            task_type="security_sensitive_change",
+            task_category="security_sensitive_operation",
+            text="Fix auth token validation in middleware.",
+            boost_mode="best_code",
+            risk_level="high",
+            file_count=2,
+        )
+
+        self.assertLess(plan.repo_max_chars, boost_policy("save_tokens").repo_max_chars)
+        self.assertLessEqual(plan.repo_max_files, 6)
+        self.assertLess(plan.target_context_ratio, 0.4)
+        self.assertGreater(plan.cost_weight, plan.quality_weight)
+        self.assertIn("token_pressure_scaling", plan.algorithms)
+        self.assertGreater(risky.quality_weight, risky.cost_weight)
+        self.assertIn("risk_guarded_escalation", risky.algorithms)
+
     def test_task_classifier_exposes_optimizer_policy_without_breaking_route_type(self) -> None:
         classification = TaskClassifier().classify(
             HubRequest(
@@ -44,6 +71,120 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertEqual(data["context_policy"], "focused_files")
         self.assertEqual(data["model_policy"], "cheap_first")
         self.assertEqual(data["validation_policy"], "run_tests")
+
+    def test_token_optimizer_deduplicates_and_extractively_compacts_messages(self) -> None:
+        repeated = "same diagnostic line\n" * 120
+        noisy = "\n".join(["INFO repeated repeated repeated"] * 180 + ["ERROR auth token failed"])
+        messages = [
+            {"role": "user", "content": repeated},
+            {"role": "assistant", "content": noisy},
+            {"role": "user", "content": repeated},
+            {"role": "user", "content": "Fix the auth token failure."},
+        ]
+
+        result = TokenOptimizer().optimize(messages, max_context_tokens=1_000)
+        warning_text = " ".join(result.warnings)
+
+        self.assertLess(result.final_tokens, result.original_tokens)
+        self.assertIn("deduplicated_messages", warning_text)
+        self.assertIn("extractive_message_compaction", warning_text)
+        self.assertIn("ERROR auth token failed", "\n".join(str(message.get("content")) for message in result.messages))
+
+    def test_token_optimizer_targets_semantic_duplicates_before_hard_limit(self) -> None:
+        base_log = "\n".join(
+            f"WARNING: src/auth.py:{line}: token cache lookup repeated stale result"
+            for line in range(180)
+        )
+        messages = [
+            {"role": "assistant", "content": f"Tool result run {run}\n{base_log}\nINFO run={run}"}
+            for run in range(6)
+        ]
+        messages.append({"role": "user", "content": "Fix src/auth.py and preserve ERROR auth token failed."})
+
+        result = TokenOptimizer().optimize(
+            messages,
+            max_context_tokens=20_000,
+            target_context_tokens=1_600,
+        )
+        warning_text = " ".join(result.warnings)
+
+        self.assertTrue(result.target_reached)
+        self.assertLessEqual(result.final_tokens, 1_600)
+        self.assertLess(result.final_tokens, result.original_tokens * 0.35)
+        self.assertIn("semantic_delta_compaction", warning_text)
+        self.assertIn("extractive_message_compaction", warning_text)
+        self.assertIn("ERROR auth token failed", "\n".join(str(message.get("content")) for message in result.messages))
+
+    def test_token_optimizer_reuses_cached_compacted_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = ContextCache(Path(tmp) / "context-cache.json", enabled=True, max_entries=4)
+            repeated = "\n".join(
+                f"WARNING: src/cache.py:{line}: repeated token budget warning"
+                for line in range(220)
+            )
+            messages = [
+                {"role": "assistant", "content": f"Tool result run {run}\n{repeated}\nINFO run={run}"}
+                for run in range(5)
+            ]
+            messages.append({"role": "user", "content": "Fix src/cache.py token budget warnings."})
+            optimizer = TokenOptimizer(cache=cache)
+
+            first = optimizer.optimize(messages, max_context_tokens=20_000, target_context_tokens=1_200)
+            second = optimizer.optimize(messages, max_context_tokens=20_000, target_context_tokens=1_200)
+
+        self.assertFalse(first.cache_hit)
+        self.assertTrue(second.cache_hit)
+        self.assertEqual(second.final_tokens, first.final_tokens)
+        self.assertEqual(second.messages, first.messages)
+        self.assertIn("context_cache_reused", second.warnings)
+
+    def test_token_optimizer_mmr_budget_preserves_query_evidence(self) -> None:
+        unrelated_template = "\n".join(
+            f"analytics ledger shard row {row} metric={row * 17} unrelated payment status ok"
+            for row in range(180)
+        )
+        relevant = "\n".join(
+            [
+                "src/auth.py validate_token tenant scoped feature flags",
+                "token cache lookup returns stale tenant result",
+                "assert tenant_flags.token_cache_enabled is True",
+            ]
+            * 70
+        )
+        messages = [
+            {"role": "assistant", "content": unrelated_template.replace("ledger", f"ledger_{run}")}
+            for run in range(8)
+        ]
+        messages.insert(2, {"role": "assistant", "content": relevant})
+        messages.extend(
+            [
+                {"role": "assistant", "content": "Latest state: auth tests are the active validation target."},
+                {"role": "assistant", "content": "Next action should stay scoped to token cache handling."},
+                {
+                    "role": "user",
+                    "content": (
+                        "Fix src/auth.py token cache stale tenant scoped feature flags. "
+                        "Preserve the validation assertion."
+                    ),
+                },
+            ]
+        )
+
+        result = TokenOptimizer().optimize(
+            messages,
+            max_context_tokens=24_000,
+            target_context_tokens=900,
+        )
+        text = "\n".join(str(message.get("content")) for message in result.messages)
+        warning_text = " ".join(result.warnings)
+
+        self.assertTrue(result.target_reached)
+        self.assertLessEqual(result.final_tokens, 900)
+        self.assertGreaterEqual(result.saved_percent, 85.0)
+        self.assertIn("budgeted_relevance_mmr", warning_text)
+        self.assertIn("src/auth.py", text)
+        self.assertIn("tenant scoped feature flags", text)
+        self.assertNotIn("ledger_7", text)
 
     def test_repository_context_ranks_files_and_assigns_context_levels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -83,6 +224,47 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertEqual(payload["context_levels"]["src/router.py"], "Full")
         self.assertGreaterEqual(payload["tokens_saved"], 0)
         self.assertIn("Matched", payload["reason"])
+
+    def test_repository_context_diversifies_and_focuses_compressed_summaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "tests").mkdir()
+            (root / "src" / "auth.py").write_text(
+                "\n".join(
+                    [
+                        "class AuthService:",
+                        "    def login(self, token):",
+                        "        # login failure happens when token cache expires",
+                        "        return token == 'ok'",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (root / "src" / "auth_cache.py").write_text(
+                "class AuthCache:\n    def get(self):\n        return None\n",
+                encoding="utf-8",
+            )
+            (root / "tests" / "test_auth.py").write_text(
+                "from src.auth import AuthService\n\ndef test_login_failure():\n    assert AuthService().login('bad') is False\n",
+                encoding="utf-8",
+            )
+            index = RepositoryIndexer(root).index()
+
+            selection = RepoContextSelector(index).select(
+                "Fix login failure in src/auth.py and preserve auth tests.",
+                max_files=3,
+                max_chars=1_800,
+                full_files=0,
+                compressed_files=3,
+                map_files=0,
+                compression_aggression=0.7,
+            )
+            payload = selection.to_dict()
+
+        self.assertIn("tests/test_auth.py", payload["selected_files"])
+        summaries = "\n".join(payload["summaries"].values())
+        self.assertIn("login failure", summaries)
 
     def test_output_validator_reports_quality_and_retry_strategy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,8 +331,55 @@ class BoostOptimizerTests(unittest.TestCase):
 
         self.assertEqual(decision.boost_mode, "fast_fix")
         self.assertEqual(decision.routing_mode, "fastest")
+        self.assertIn("boost_plan", decision.to_dict())
+        self.assertIn("anchored_bug_context", decision.boost_plan["algorithms"])
         self.assertIn("route_efficiency", decision.candidate_scores[0])
         self.assertIn("task_policy", decision.to_dict())
+
+    def test_router_applies_boost_plan_target_to_provider_context(self) -> None:
+        _CaptureProvider.last_request = None
+        base_log = "\n".join(
+            f"WARNING: src/cache.py:{line}: repeated cache miss while resolving token budget"
+            for line in range(180)
+        )
+        messages = [
+            {"role": "assistant", "content": f"Tool result run {run}\n{base_log}\nINFO run={run}"}
+            for run in range(8)
+        ]
+        messages.append({"role": "user", "content": "Fix token budget routing in src/cache.py."})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / "state",
+                free_only=False,
+                repo_context_enabled=False,
+                boost_mode="save_tokens",
+                default_route=["cheap"],
+                agents={
+                    "cheap": AgentConfig(
+                        name="cheap",
+                        provider="openai-compatible",
+                        model="cheap",
+                        base_url="http://127.0.0.1:9999",
+                        free=True,
+                        context_window=40_000,
+                    ),
+                },
+            )
+            response = AgentRouter(config, provider_factory=_CaptureProvider).route(
+                HubRequest(session_id="s", messages=messages)
+            )
+
+        self.assertEqual(response.agent, "cheap")
+        self.assertIsNotNone(_CaptureProvider.last_request)
+        raw = _CaptureProvider.last_request.raw if _CaptureProvider.last_request is not None else {}
+        usage = raw["agent_hub"]["context_usage"]
+        self.assertLess(usage["target_context_tokens"], usage["max_context_tokens"])
+        self.assertTrue(usage["target_context_reached"])
+        self.assertLessEqual(usage["estimated_input_tokens"], usage["target_context_tokens"])
+        self.assertGreaterEqual(usage["saved_percent"], 40.0)
+        self.assertIn("semantic_delta_compaction", " ".join(usage["warnings"]))
 
 
 class _OkProvider:
@@ -158,6 +387,17 @@ class _OkProvider:
         self.agent = agent
 
     def complete(self, request: HubRequest) -> ProviderResult:
+        return ProviderResult(text="ok", model=self.agent.model)
+
+
+class _CaptureProvider:
+    last_request: HubRequest | None = None
+
+    def __init__(self, agent: AgentConfig) -> None:
+        self.agent = agent
+
+    def complete(self, request: HubRequest) -> ProviderResult:
+        type(self).last_request = request
         return ProviderResult(text="ok", model=self.agent.model)
 
 

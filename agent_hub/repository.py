@@ -287,7 +287,7 @@ class RepoContextSelector:
         compression_aggression: float = 0.55,
     ) -> RepoContextSelection:
         ranked = self.rank_files(task, limit=max(80, max_files * 6))
-        selected_relevance = ranked[: max(1, max_files)]
+        selected_relevance = _select_diverse_relevance(ranked, max_files=max(1, max_files), task=task)
         selected = [item.file for item in selected_relevance]
         levels = _assign_context_levels(
             selected,
@@ -295,6 +295,7 @@ class RepoContextSelector:
             compressed_files=compressed_files,
             map_files=map_files,
         )
+        focus_terms = set(_terms(task))
         summaries: dict[str, str] = {}
         used = 0
         original_chars = 0
@@ -317,6 +318,7 @@ class RepoContextSelector:
                 level=level,
                 maximum=min(remaining, _level_char_budget(level, max_chars, compression_aggression)),
                 compression_aggression=compression_aggression,
+                focus_terms=focus_terms,
             )
             cache_hits += 1 if cache_hit else 0
             used += len(body)
@@ -325,7 +327,8 @@ class RepoContextSelector:
             if len(text) > len(body) and level != "Full":
                 truncated = True
         selected_paths = [file.path for file in selected]
-        excluded = [item.file.path for item in ranked[max_files : max_files + 40]]
+        selected_set = set(selected_paths)
+        excluded = [item.file.path for item in ranked if item.file.path not in selected_set][:40]
         warnings = _context_warnings(task, self.index, set(selected_paths))
         original_tokens = max(1, original_chars // 4)
         optimized_tokens = max(1, optimized_chars // 4)
@@ -573,6 +576,82 @@ def _score_file(
     return score, _dedupe(signals)
 
 
+def _select_diverse_relevance(
+    ranked: list[FileRelevance],
+    *,
+    max_files: int,
+    task: str,
+) -> list[FileRelevance]:
+    if len(ranked) <= max_files:
+        return list(ranked)
+    selected = [ranked[0]]
+    remaining = list(ranked[1:])
+    terms = set(_terms(task))
+    while remaining and len(selected) < max_files:
+        best = max(
+            remaining,
+            key=lambda item: _diverse_relevance_score(item, selected, terms=terms),
+        )
+        selected.append(best)
+        remaining.remove(best)
+    return selected
+
+
+def _diverse_relevance_score(
+    item: FileRelevance,
+    selected: list[FileRelevance],
+    *,
+    terms: set[str],
+) -> float:
+    selected_files = [entry.file for entry in selected]
+    selected_paths = {file.path for file in selected_files}
+    selected_dirs = {str(Path(file.path).parent).replace("\\", "/") for file in selected_files}
+    selected_languages = {file.language for file in selected_files}
+    path = item.file.path
+    directory = str(Path(path).parent).replace("\\", "/")
+    score = item.score
+    if directory not in selected_dirs:
+        score += 4.0
+    elif len(selected_dirs) > 1:
+        score -= 2.0
+    if item.file.language not in selected_languages:
+        score += 3.0
+    if _looks_like_test_file(path) and any(not _looks_like_test_file(file.path) for file in selected_files):
+        score += 8.0
+    if not _looks_like_test_file(path) and any(_looks_like_test_file(file.path) for file in selected_files):
+        score += 3.0
+    score += _source_test_pair_bonus(path, selected_paths)
+    if item.file.important and terms & {"config", "dependency", "build", "install", "package"}:
+        score += 5.0
+    if item.file.changed:
+        score += 4.0
+    return score
+
+
+def _source_test_pair_bonus(path: str, selected_paths: set[str]) -> float:
+    stem = _normalized_file_stem(path)
+    if not stem:
+        return 0.0
+    for selected in selected_paths:
+        other = _normalized_file_stem(selected)
+        if not other or other != stem:
+            continue
+        if _looks_like_test_file(path) != _looks_like_test_file(selected):
+            return 18.0
+    return 0.0
+
+
+def _normalized_file_stem(path: str) -> str:
+    stem = Path(path).stem.lower()
+    for prefix in ("test_", "spec_"):
+        if stem.startswith(prefix):
+            stem = stem[len(prefix) :]
+    for suffix in ("_test", ".test", "_spec", ".spec"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+    return stem
+
+
 _SUMMARY_CACHE: dict[str, str] = {}
 
 
@@ -606,6 +685,7 @@ def _context_for_file(
     level: str,
     maximum: int,
     compression_aggression: float,
+    focus_terms: set[str] | None = None,
 ) -> tuple[str, bool]:
     if maximum <= 0 or level == "Omitted":
         return "", False
@@ -614,7 +694,14 @@ def _context_for_file(
         if len(text) > len(body):
             body = body.rstrip() + "\n[File truncated to fit optimized context]"
         return _format_context_block(file, level, body), False
-    cache_key = _summary_cache_key(file, text, level=level, maximum=maximum, compression_aggression=compression_aggression)
+    cache_key = _summary_cache_key(
+        file,
+        text,
+        level=level,
+        maximum=maximum,
+        compression_aggression=compression_aggression,
+        focus_terms=focus_terms,
+    )
     cached = _SUMMARY_CACHE.get(cache_key)
     if cached is not None:
         return cached, True
@@ -626,6 +713,7 @@ def _context_for_file(
             text,
             maximum=maximum,
             compression_aggression=compression_aggression,
+            focus_terms=focus_terms,
         )
     _SUMMARY_CACHE[cache_key] = body
     if len(_SUMMARY_CACHE) > 512:
@@ -640,10 +728,14 @@ def _compressed_file_summary(
     *,
     maximum: int,
     compression_aggression: float,
+    focus_terms: set[str] | None = None,
 ) -> str:
+    focused_snippets = _focused_snippets(text, focus_terms=focus_terms)
     stripped = _strip_comments(text, file.language) if compression_aggression >= 0.45 else text
     stripped = _dedupe_repeated_lines(stripped)
-    snippets = _key_snippets(stripped, file.language)
+    snippets = _key_snippets(stripped, file.language, focus_terms=focus_terms)
+    if focused_snippets:
+        snippets = _dedupe([*focused_snippets, *snippets])
     intro = [
         f"Summary for {file.path}:",
         f"Language: {file.language}. Size: {file.size} bytes.",
@@ -656,6 +748,26 @@ def _compressed_file_summary(
     if len(content) < min(maximum, 600):
         content = "\n".join([content, "", _summarize_file(stripped, maximum=max(0, maximum - len(content) - 2))])
     return _fit(content, maximum)
+
+
+def _focused_snippets(text: str, *, focus_terms: set[str] | None = None) -> list[str]:
+    focus = {term for term in (focus_terms or set()) if len(term) >= 3}
+    if not focus:
+        return []
+    lines = text.splitlines()
+    snippets: list[str] = []
+    for index, line in enumerate(lines):
+        lowered = line.lower()
+        if not any(term in lowered for term in focus):
+            continue
+        start = max(0, index - 2)
+        end = min(len(lines), index + 5)
+        block = [value.rstrip()[:220] for value in lines[start:end] if value.strip()]
+        if block:
+            snippets.append("\n".join(block))
+        if len(snippets) >= 5:
+            break
+    return _dedupe(snippets)
 
 
 def _file_map(file: FileInfo, *, maximum: int) -> str:
@@ -689,9 +801,38 @@ def _summarize_file(text: str, *, maximum: int) -> str:
     return _fit("\n".join(selected), maximum)
 
 
-def _key_snippets(text: str, language: str) -> list[str]:
+def _key_snippets(text: str, language: str, *, focus_terms: set[str] | None = None) -> list[str]:
     lines = text.splitlines()
     selected: list[str] = []
+    focus = {term for term in (focus_terms or set()) if len(term) >= 3}
+    focus_blocks: list[str] = []
+    for index, line in enumerate(lines):
+        lowered = line.lower()
+        if not (
+            any(term in lowered for term in focus)
+            or any(
+                marker in lowered
+                for marker in (
+                    "traceback",
+                    "exception",
+                    "error",
+                    "assert ",
+                    "raise ",
+                    "except ",
+                    "todo",
+                    "fixme",
+                )
+            )
+        ):
+            continue
+        start = max(0, index - 2)
+        end = min(len(lines), index + 5)
+        block = [value.rstrip()[:220] for value in lines[start:end] if value.strip()]
+        if block:
+            focus_blocks.append("\n".join(block))
+        if len(focus_blocks) >= 5:
+            break
+    selected.extend(_dedupe(focus_blocks))
     patterns = [
         r"^\s*(?:async\s+def|def|class)\s+",
         r"^\s*(?:export\s+)?(?:function|class|const|let)\s+",
@@ -777,9 +918,12 @@ def _summary_cache_key(
     level: str,
     maximum: int,
     compression_aggression: float,
+    focus_terms: set[str] | None = None,
 ) -> str:
     digest = hashlib.sha256(text[:120_000].encode("utf-8", errors="replace")).hexdigest()[:20]
-    return f"{file.path}:{file.size}:{level}:{maximum}:{compression_aggression:.2f}:{digest}"
+    focus = ",".join(sorted(focus_terms or set())[:24])
+    focus_digest = hashlib.sha256(focus.encode("utf-8", errors="replace")).hexdigest()[:10] if focus else "none"
+    return f"{file.path}:{file.size}:{level}:{maximum}:{compression_aggression:.2f}:{focus_digest}:{digest}"
 
 
 def _selection_reason(items: list[FileRelevance]) -> str:

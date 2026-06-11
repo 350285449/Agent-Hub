@@ -17,6 +17,17 @@ context is retained more aggressively:
 - MCP/tool state
 - latest reasoning and assistant actions
 
+Boost plans now add a soft target below the provider hard limit. When a request
+is above that target, Agent Hub applies deterministic local algorithms before
+sending the provider payload:
+
+- semantic delta compaction collapses older near-duplicate tool results and logs
+  while keeping the newest copy and unique high-signal lines
+- extractive compaction turns noisy traceback, warning, diff, and repeated-output
+  messages into short evidence digests
+- budgeted context knapsack ranks older unprotected messages by utility per token
+  and trims the lowest-value context first
+
 Diagnostics expose incoming, compacted, protected, and dropped token counts via
 `/debug/context`, `/debug/request`, and `agent-hub inspect-request`.
 

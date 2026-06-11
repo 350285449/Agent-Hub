@@ -11,7 +11,7 @@ from threading import RLock
 from typing import Any
 
 from ...adaptive import AdaptiveLearningStore, estimate_known_cost_usd
-from ...boost import boost_mode_from_request, boost_policy, task_optimization_policy
+from ...boost import build_boost_plan, boost_mode_from_request, boost_policy
 from ...capabilities import agent_capabilities
 from ...config import AgentConfig, HubConfig, agent_allowed_by_cost_policy, is_free_agent, normalize_provider
 from ...context import estimate_message_tokens, is_protected_context_message
@@ -154,6 +154,7 @@ class RoutingDecision:
     selected_workflow: str = ""
     boost_mode: str = "balanced"
     boost_policy: dict[str, Any] = field(default_factory=dict)
+    boost_plan: dict[str, Any] = field(default_factory=dict)
     task_policy: dict[str, Any] = field(default_factory=dict)
     permission_requirements: list[str] = field(default_factory=list)
     routing_reasons: list[str] = field(default_factory=list)
@@ -183,6 +184,7 @@ class RoutingDecision:
             "selected_workflow": self.selected_workflow,
             "boost_mode": self.boost_mode,
             "boost_policy": dict(self.boost_policy),
+            "boost_plan": dict(self.boost_plan),
             "task_policy": dict(self.task_policy),
             "reason": self.reason,
             "routing_reasons": list(self.routing_reasons),
@@ -859,7 +861,7 @@ class AgentRouter:
         stream: bool = False,
     ) -> HubRequest:
         request = prepare_tool_compatibility_request(self.config, agent, request)
-        prepared, usage = self._apply_context_safety_cap(agent, request)
+        prepared, usage = self._apply_context_safety_cap(agent, request, boost_plan=decision.boost_plan)
         prepared, limit_usage = self._apply_model_output_limit(agent, prepared, usage)
         if limit_usage.get("output_tokens_adjusted"):
             adjusted_source = replace(
@@ -868,7 +870,11 @@ class AgentRouter:
                 raw=prepared.raw,
                 metadata=prepared.metadata,
             )
-            prepared, usage = self._apply_context_safety_cap(agent, adjusted_source)
+            prepared, usage = self._apply_context_safety_cap(
+                agent,
+                adjusted_source,
+                boost_plan=decision.boost_plan,
+            )
         usage.update(limit_usage)
         metadata = dict(prepared.metadata)
         output_tokens = expected_output_tokens(prepared, agent)
@@ -890,6 +896,7 @@ class AgentRouter:
         hub["context_usage"] = usage
         hub["boost_mode"] = decision.boost_mode
         hub["boost_policy"] = dict(decision.boost_policy)
+        hub["boost_plan"] = dict(decision.boost_plan)
         hub["task_policy"] = dict(decision.task_policy)
         hub.setdefault("auto_retry", _routing_bool(self.config, "auto_retry", True))
         hub.setdefault("auto_failover", _routing_bool(self.config, "auto_failover", True))
@@ -1118,6 +1125,8 @@ class AgentRouter:
         self,
         agent: AgentConfig,
         request: HubRequest,
+        *,
+        boost_plan: dict[str, Any] | None = None,
     ) -> tuple[HubRequest, dict[str, Any]]:
         original_messages = [dict(message) for message in request.messages]
         original_tokens = estimate_message_tokens(original_messages)
@@ -1136,18 +1145,29 @@ class AgentRouter:
             cache=self.context_cache,
             summarization_enabled=getattr(self.config, "context_summarization_enabled", False),
         )
-        optimized = optimizer.optimize(messages, max_context_tokens=effective_cap)
+        target_context_tokens = _boost_target_context_tokens(
+            request,
+            max_context_tokens=effective_cap,
+            boost_plan=boost_plan,
+        )
+        optimized = optimizer.optimize(
+            messages,
+            max_context_tokens=effective_cap,
+            target_context_tokens=target_context_tokens,
+        )
         messages = optimized.messages
         warnings.extend(optimized.warnings)
         final_tokens = optimized.final_tokens
         ratio = round(final_tokens / original_tokens, 4) if original_tokens else 1.0
-        tokens_saved = optimized.tokens_saved
+        tokens_saved = max(0, original_tokens - final_tokens)
         usage = {
             "estimated_input_tokens": final_tokens,
             "optimized_context_tokens": final_tokens,
             "estimated_output_tokens": int(output_tokens),
             "provider_limit": provider_limit,
             "max_context_tokens": effective_cap,
+            "target_context_tokens": optimized.target_context_tokens,
+            "target_context_reached": optimized.target_reached,
             "original_input_tokens": original_tokens,
             "original_context_tokens": original_tokens,
             "compression_ratio": ratio,
@@ -1229,11 +1249,17 @@ class AgentRouter:
         classification = self._classify_request(request)
         mode_name = boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
         mode_policy = boost_policy(mode_name)
-        task_policy = task_optimization_policy(
+        boost_plan = build_boost_plan(
             task_type=classification.task_type,
             task_category=classification.task_category,
+            text=request_text(request),
             boost_mode=mode_name,
+            estimated_input_tokens=classification.estimated_input_tokens,
+            repo_size_bucket=classification.repo_size_bucket,
+            risk_level=classification.risk_level,
+            file_count=len(classification.files_involved),
         )
+        task_policy = boost_plan.task_policy_dict()
         mode = self._routing_mode(request)
         task_type = classification.task_type
         agents = self._candidate_agent_pool(request, mode=mode)
@@ -1266,6 +1292,12 @@ class AgentRouter:
             "Task policy: "
             f"{task_policy['task_type']} / {task_policy['context_policy']} / "
             f"{task_policy['model_policy']} / {task_policy['validation_policy']}."
+        )
+        routing_reasons.append(
+            "Boost plan: "
+            f"{boost_plan.repo_max_files} files, {boost_plan.repo_max_chars} chars, "
+            f"{boost_plan.target_context_ratio:.0%} target context, "
+            f"algorithms {', '.join(boost_plan.algorithms[:4])}."
         )
         if memory_reason:
             routing_reasons.append(memory_reason)
@@ -1307,6 +1339,7 @@ class AgentRouter:
             selected_workflow=selected_workflow,
             boost_mode=mode_name,
             boost_policy=mode_policy.to_dict(),
+            boost_plan=boost_plan.to_dict(),
             task_policy=task_policy,
             reason=reason,
             routing_reasons=routing_reasons,
@@ -1965,6 +1998,17 @@ class AgentRouter:
         """Score the new goal: best expected outcome per token/cost unit."""
 
         health = self._health.get(agent.name)
+        mode_name = boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
+        plan = build_boost_plan(
+            task_type=getattr(classification, "task_type", "general"),
+            task_category=getattr(classification, "task_category", ""),
+            text=request_text(request),
+            boost_mode=mode_name,
+            estimated_input_tokens=getattr(classification, "estimated_input_tokens", 0),
+            repo_size_bucket=getattr(classification, "repo_size_bucket", ""),
+            risk_level=getattr(classification, "risk_level", ""),
+            file_count=len(getattr(classification, "files_involved", []) or []),
+        )
         outcome_score, samples = self._model_efficiency_score(agent, request, classification)
         quality = outcome_score
         if quality is None:
@@ -1990,27 +2034,43 @@ class AgentRouter:
         cost = estimate_known_cost_usd(agent, input_tokens=input_tokens, output_tokens=output_tokens)
         token_cost_units = max(1.0, (input_tokens + output_tokens) / 1000.0)
         dollar_cost_units = 1.0 if cost is None else max(0.01, float(cost) * 1000.0)
-        raw_efficiency = (quality * success_probability) / (token_cost_units * dollar_cost_units)
+        token_pressure = token_cost_units ** plan.cost_weight
+        dollar_pressure = dollar_cost_units ** max(0.35, plan.cost_weight * 0.75)
+        speed_multiplier = 1.0
+        if health and health.average_latency_seconds and plan.speed_weight > 1.0:
+            speed_multiplier += min(0.18, plan.speed_weight / max(6.0, health.average_latency_seconds + 1.0))
+        elif plan.speed_weight > 1.0:
+            speed_multiplier += min(0.08, (plan.speed_weight - 1.0) * 0.2)
+        weighted_quality = _bounded_float(quality * plan.quality_weight, 0.01, 1.35)
+        weighted_success = _bounded_float(success_probability * plan.risk_weight, 0.01, 1.25)
+        raw_efficiency = (weighted_quality * weighted_success * speed_multiplier) / (
+            token_pressure * dollar_pressure
+        )
         normalized = _bounded_float(raw_efficiency * 100.0, 0.0, 20.0)
         if is_free_agent(agent):
-            normalized += 1.0
-        if boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced")) == "best_code":
+            normalized += 1.0 + max(0.0, plan.cost_weight - 1.0)
+        if mode_name == "best_code":
             normalized += min(2.0, float(agent.coding_score or 0.0) * 2.0)
         adjustment = _bounded_float(normalized, 0.0, 24.0) * 0.35
         return {
             "object": "agent_hub.route_efficiency",
-            "formula": "quality * success_probability / token_cost",
+            "formula": "weighted_quality * weighted_success * speed / weighted_token_cost",
             "quality": round(float(quality), 4),
+            "quality_weight": plan.quality_weight,
             "success_probability": round(success_probability, 4),
+            "risk_weight": plan.risk_weight,
+            "cost_weight": plan.cost_weight,
+            "speed_weight": plan.speed_weight,
             "estimated_input_tokens": input_tokens,
             "estimated_output_tokens": output_tokens,
             "estimated_cost_usd": cost,
+            "boost_plan": plan.to_dict(),
             "score": round(normalized, 4),
             "routing_adjustment": round(adjustment, 3),
             "samples": samples,
             "summary": (
-                f"Efficiency {normalized:.2f}: expected success per token/cost for "
-                f"{getattr(classification, 'task_type', 'task')}."
+                f"Efficiency {normalized:.2f}: {plan.model_policy} under "
+                f"{plan.task_type} token/cost pressure."
             ),
         }
 
@@ -2129,6 +2189,17 @@ class AgentRouter:
         agents: list[AgentConfig],
     ) -> list[dict[str, Any]]:
         classification = self._classify_request(request)
+        mode_name = boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
+        boost_plan = build_boost_plan(
+            task_type=classification.task_type,
+            task_category=classification.task_category,
+            text=request_text(request),
+            boost_mode=mode_name,
+            estimated_input_tokens=classification.estimated_input_tokens,
+            repo_size_bucket=classification.repo_size_bucket,
+            risk_level=classification.risk_level,
+            file_count=len(classification.files_involved),
+        )
         task_type = classification.task_type
         workflow_pattern = _request_workflow_pattern(request)
         workflow_role = _request_workflow_role(request)
@@ -2205,6 +2276,7 @@ class AgentRouter:
                     "routing_score": round(final_routing_score, 3),
                     "why": _recommendation_reason(agent, text=request_text(request), prefer=None, index=rank - 1),
                     "task_classification": classification.to_dict(),
+                    "boost_plan": boost_plan.to_dict(),
                     "estimated_input_tokens": estimated_input,
                     "estimated_output_tokens": int(output_budget.effective),
                     "estimated_cost_usd": estimate_known_cost_usd(
@@ -3772,6 +3844,27 @@ def _context_cap(config: HubConfig, request: HubRequest, agent: AgentConfig) -> 
     return max(1_000, int(agent.context_window or config.agent_context_budget_tokens))
 
 
+def _boost_target_context_tokens(
+    request: HubRequest,
+    *,
+    max_context_tokens: int,
+    boost_plan: dict[str, Any] | None = None,
+) -> int | None:
+    plan = boost_plan if isinstance(boost_plan, dict) else None
+    if plan is None:
+        raw = request.raw if isinstance(request.raw, dict) else {}
+        hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+        plan = hub.get("boost_plan") if isinstance(hub.get("boost_plan"), dict) else {}
+    ratio = plan.get("target_context_ratio") if isinstance(plan, dict) else None
+    try:
+        value = float(ratio)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0 or value >= 1:
+        return None
+    return max(1_000, min(int(max_context_tokens), int(int(max_context_tokens) * value)))
+
+
 def _compress_messages_for_budget(
     messages: list[dict[str, Any]],
     budget: int,
@@ -4436,6 +4529,7 @@ def _routing_decision_explanation(decision: RoutingDecision) -> RoutingDecisionE
             "workflow": decision.selected_workflow,
             "routing_mode": decision.routing_mode,
             "boost_mode": decision.boost_mode,
+            "boost_plan": dict(decision.boost_plan),
             "task_type": decision.task_type,
             "optimizer_task_type": decision.task_policy.get("task_type"),
             "task_category": decision.task_category,
@@ -4995,6 +5089,7 @@ def _request_context_optimization(request: HubRequest) -> dict[str, Any]:
     hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
     repo = hub.get("repo_context") if isinstance(hub.get("repo_context"), dict) else {}
     usage = hub.get("context_usage") if isinstance(hub.get("context_usage"), dict) else {}
+    plan = hub.get("boost_plan") if isinstance(hub.get("boost_plan"), dict) else {}
     result: dict[str, Any] = {}
     if repo:
         result.update(
@@ -5020,6 +5115,16 @@ def _request_context_optimization(request: HubRequest) -> dict[str, Any]:
                 "saved_percent": usage.get("saved_percent"),
                 "compression_ratio": usage.get("compression_ratio"),
                 "context_cache_hit": usage.get("context_cache_hit"),
+            }
+        )
+    if plan:
+        result.update(
+            {
+                "boost_target_context_ratio": plan.get("target_context_ratio"),
+                "boost_algorithms": list(plan.get("algorithms") or []),
+                "boost_context_policy": plan.get("context_policy"),
+                "boost_model_policy": plan.get("model_policy"),
+                "boost_validation_policy": plan.get("validation_policy"),
             }
         )
     return {key: value for key, value in result.items() if value not in (None, [], {})}
