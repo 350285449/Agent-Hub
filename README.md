@@ -5,16 +5,18 @@
 [![packaging](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=packaging)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 [![fresh install](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=fresh%20install)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 
-The routing layer that reduces AI costs while preserving quality.
+Make Claude Code and Codex write better code with fewer tokens.
 
-Stop manually choosing AI models.
+Agent-Hub compresses repository context, routes each task to the best
+success-per-token model, validates outputs, and retries failed attempts
+automatically.
 
-Agent-Hub automatically routes coding tasks to the model most likely to succeed,
-then records the evidence: cost, latency, success/failure, rejected candidates,
-and why the winning model was selected.
+Agent Hub Boost starts in `Balanced` mode. Switch to `Save Tokens`, `Best Code`,
+`Fast Fix`, `Big Refactor`, or `Local First` when you want a more opinionated
+optimization profile.
 
 Agent-Hub does not ask you to trust benchmark claims. It ships the benchmark
-corpus so you can verify routing, cost, latency, and success locally.
+corpus so you can compare raw agents against Agent Hub locally.
 
 ## Quick Start
 
@@ -22,17 +24,19 @@ corpus so you can verify routing, cost, latency, and success locally.
 pip install agent-hub
 agent-hub doctor
 agent-hub demo
-agent-hub benchmark --dataset coding-100 --export results.json
-agent-hub benchmark verify results.json --dataset coding-100
+agent-hub benchmark --dataset coding-100 --baseline claude-sonnet --export results.json
 agent-hub benchmark compare results.json --dataset coding-100
 ```
 
 Example proof output:
 
 ```text
-Without Agent-Hub: $100/month
-With Agent-Hub:    $66/month
-Savings:           34%
+Claude Code + Agent Hub
+
+Tokens used:    -43%
+Task success:   +18 pp
+Prompt retries: -31%
+Cost:           -39%
 ```
 
 Route each request automatically, then inspect the local proof:
@@ -46,11 +50,13 @@ agent-hub replay-route <request-id>
 
 ## Proof You Can Run Locally
 
-Measured results are generated locally from your configured providers:
+Benchmark your own agents locally:
 
 ```sh
-agent-hub benchmark --dataset coding-100 --baseline claude-sonnet --route coding --export results.json
-agent-hub benchmark compare --baseline claude-sonnet --dataset coding-100
+agent-hub benchmark --dataset coding-100 --baseline claude-sonnet --route coding --export claude.json
+agent-hub benchmark compare claude.json --dataset coding-100
+agent-hub benchmark --dataset coding-100 --baseline codex --route coding --export codex.json
+agent-hub benchmark compare codex.json --dataset coding-100
 ```
 
 The command writes reproducible proof to
@@ -59,9 +65,11 @@ The command writes reproducible proof to
 `--export` target gives you a one-click JSON artifact to post or compare.
 Each report includes:
 
-- cost reduction versus your baseline model
-- latency reduction versus your baseline model
-- success-rate delta across the same task corpus
+- Claude Code alone vs Claude Code + Agent Hub, or Codex alone vs Codex + Agent Hub
+- tokens saved versus your raw agent baseline
+- tasks completed, quality score, and success-rate delta
+- prompt loops avoided and time to working solution
+- cost saved versus your baseline model
 - per-task selected model, cost, latency, and outcome
 - dataset name and fingerprint for verification
 - rerun and verify commands

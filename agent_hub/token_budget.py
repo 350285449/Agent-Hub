@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .boost import boost_mode_from_request, boost_policy
 from .context import estimate_message_tokens
 
 CONTEXT_MODES = {"minimal", "balanced", "deep"}
@@ -49,6 +50,8 @@ class TokenBudgetManager:
             value = hub_options.get("context_mode") or hub_options.get("agent_context_mode")
         if value is None and isinstance(raw, dict):
             value = raw.get("context_mode") or raw.get("agent_context_mode")
+        if value is None and _has_explicit_boost_mode(raw, hub_options):
+            value = boost_policy(boost_mode_from_request(request, default=default)).context_mode
         return cls(normalize_context_mode(value or default))
 
     def effective_input_budget(
@@ -101,6 +104,11 @@ class TokenBudgetManager:
             if previous_input_tokens is None
             else input_tokens - previous_input_tokens,
             "estimated_tokens_saved": max(0, tokens_saved),
+            "estimated_tokens_saved_percent": (
+                round((max(0, tokens_saved) / max(1, input_tokens + max(0, tokens_saved))) * 100, 1)
+                if tokens_saved
+                else 0.0
+            ),
         }
 
 
@@ -122,3 +130,11 @@ def content_to_text(content: Any) -> str:
 def _min_positive(*values: int | None) -> int | None:
     positives = [int(value) for value in values if value is not None and int(value) > 0]
     return min(positives) if positives else None
+
+
+def _has_explicit_boost_mode(raw: Any, hub_options: Any) -> bool:
+    if isinstance(hub_options, dict) and (
+        "boost_mode" in hub_options or "agent_hub_mode" in hub_options
+    ):
+        return True
+    return isinstance(raw, dict) and ("boost_mode" in raw or "agent_hub_mode" in raw)

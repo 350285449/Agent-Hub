@@ -1,8 +1,8 @@
 {
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub Workspace",
-  "description": "Evidence-driven AI orchestration for coding agents with adaptive routing, route replay, health checks, and benchmark proof.",
-  "version": "9.6.6",
+  "description": "Make Claude Code and Codex write better code with fewer tokens through context compression, routing, validation, and retries.",
+  "version": "9.6.7",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",

@@ -304,6 +304,19 @@ def handle_get(handler: object, path: str) -> bool:
 
 
 def handle_post(handler: object, path: str, payload: dict[str, Any]) -> bool:
+    if path == "/v1/boost-mode":
+        mode = handler.server.config.set_boost_mode(
+            payload.get("boost_mode", payload.get("mode"))
+        )
+        handler._send_diagnostics_json(
+            {
+                "object": "agent_hub.boost_mode",
+                "mode": mode,
+                "label": handler.server.config.boost_mode_label,
+                "options": handler.server.config.boost_mode_options,
+            }
+        )
+        return True
     if path == "/v1/inbox/submit":
         from ..inbox import enqueue_task, inbox_task_preview
 
@@ -622,11 +635,16 @@ def _benchmark_results_dashboard_html(body: dict[str, Any]) -> str:
     reports = body.get("reports") if isinstance(body.get("reports"), list) else []
     snapshot = _dict(body.get("coverage_snapshot"))
     snapshot_rows = snapshot.get("results") if isinstance(snapshot.get("results"), list) else []
+    latest_summary = _dict(reports[0].get("summary")) if reports and isinstance(reports[0], dict) else {}
+    latest_outcomes = _dict(latest_summary.get("outcome_metrics"))
+    latest_comparison = _dict(latest_summary.get("comparison"))
     cards = [
         ("Reports", summary.get("report_count", len(reports))),
         ("Latest", summary.get("latest_report") or "none"),
-        ("Coverage rows", summary.get("snapshot_result_count", len(snapshot_rows))),
-        ("State", summary.get("data_state", "unknown")),
+        ("Tokens saved", _pct(latest_comparison.get("token_reduction")) if latest_comparison else "--"),
+        ("Quality delta", _pp(latest_comparison.get("success_delta")) if latest_comparison else "--"),
+        ("Cost saved", _money(latest_outcomes.get("cost_saved_usd")) if latest_outcomes else "--"),
+        ("Prompt loops avoided", latest_outcomes.get("prompt_loops_avoided", "--")),
     ]
     table_rows = "".join(_benchmark_report_row_html(row) for row in reports if isinstance(row, dict))
     if not table_rows:
@@ -638,7 +656,21 @@ def _benchmark_results_dashboard_html(body: dict[str, Any]) -> str:
         snapshot_table_rows = "<tr><td colspan=\"7\" class=\"muted\">No benchmark coverage rows.</td></tr>"
     content = f"""
 <section class="panel">
-  <h2>Benchmark Coverage Snapshot</h2>
+  <h2>Agent Hub vs Raw Agent</h2>
+  <table>
+    <thead><tr><th>Metric</th><th>Latest Result</th></tr></thead>
+    <tbody>
+      <tr><td>Tasks completed</td><td>{_html(latest_outcomes.get('tasks_completed', '--'))}</td></tr>
+      <tr><td>Tokens used</td><td>{_html(_pct(latest_comparison.get('token_reduction')) if latest_comparison else '--')}</td></tr>
+      <tr><td>Task success</td><td>{_html(_pp(latest_comparison.get('success_delta')) if latest_comparison else '--')}</td></tr>
+      <tr><td>Cost</td><td>{_html(_pct(latest_comparison.get('cost_reduction')) if latest_comparison else '--')}</td></tr>
+      <tr><td>Quality score</td><td>{_html(_number(latest_outcomes.get('quality_score')) if latest_outcomes else '--')}</td></tr>
+      <tr><td>Time to working solution</td><td>{_html(_latency(latest_outcomes.get('time_to_working_solution_ms')) if latest_outcomes else '--')}</td></tr>
+    </tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Advanced Benchmark Coverage</h2>
   <table>
     <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Readiness</th><th>Samples</th><th>Latency</th><th>Status</th></tr></thead>
     <tbody>{snapshot_table_rows}</tbody>
@@ -1633,12 +1665,11 @@ def _benchmark_report_row_html(row: dict[str, Any]) -> str:
     results = row.get("results") if isinstance(row.get("results"), list) else []
     detail = []
     for key in (
+        "token_reduction",
         "cost_reduction",
-        "latency_reduction",
         "success_delta",
-        "success_rate_delta",
         "average_score_delta",
-        "cost_savings_usd",
+        "prompt_loops_avoided",
     ):
         if key in comparison:
             detail.append(f"{key}: {comparison[key]}")
@@ -2175,6 +2206,18 @@ def _money(value: Any) -> str:
 def _percent(value: Any) -> str:
     number = _float(value)
     return "unknown" if number is None else f"{number * 100:.1f}%"
+
+
+def _pct(value: Any) -> str:
+    number = _float(value)
+    return "unknown" if number is None else f"{number:.1f}%"
+
+
+def _pp(value: Any) -> str:
+    number = _float(value)
+    if number is None:
+        return "unknown"
+    return f"{number:+.1f} pp"
 
 
 def _latency(value: Any) -> str:

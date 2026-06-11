@@ -226,6 +226,9 @@ def _response_row(config: HubConfig, response: HubResponse, task: BenchmarkTask,
         "latency_ms": latency_ms,
         "cost_usd": cost,
         "usage": dict(response.usage),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
         "failover_count": len(response.failover),
         "routing_explanation": _response_explanation(response),
     }
@@ -243,6 +246,7 @@ def _report(
     baseline_summary = _summary(baseline_rows)
     routed_summary = _summary(routed_rows)
     comparison = _comparison(baseline_summary, routed_summary)
+    outcome_metrics = _outcome_metrics(baseline_summary, routed_summary, comparison)
     return {
         "object": "agent_hub.benchmark_proof",
         "created_at": time.time(),
@@ -261,7 +265,15 @@ def _report(
         "baseline_summary": baseline_summary,
         "agent_hub_summary": routed_summary,
         "comparison": comparison,
+        "outcome_metrics": outcome_metrics,
+        "agent_hub_vs_raw_agent": {
+            "raw_agent": baseline_summary,
+            "raw_agent_label": _raw_agent_label(baseline_agent),
+            "agent_hub": routed_summary,
+            "metrics": outcome_metrics,
+        },
         "cost_reduction": comparison.get("cost_reduction"),
+        "token_reduction": comparison.get("token_reduction"),
         "latency_reduction": comparison.get("latency_reduction"),
         "success_delta": comparison.get("success_delta"),
         "results": pairs,
@@ -283,23 +295,31 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     costs = [_float(row.get("cost_usd")) for row in rows if row.get("cost_usd") is not None]
     latencies = [_float(row.get("latency_ms")) for row in rows]
     scores = [_float(row.get("score")) for row in rows]
+    tokens = [_float(row.get("total_tokens")) for row in rows]
     return {
         "task_count": total,
+        "tasks_completed": successes,
         "successes": successes,
         "failures": max(0, total - successes),
         "success_rate": round(successes / max(1, total), 4),
+        "quality_score": round(sum(scores) / max(1, len(scores)), 4),
         "average_score": round(sum(scores) / max(1, len(scores)), 4),
         "average_latency_ms": round(sum(latencies) / max(1, len(latencies)), 2) if latencies else 0.0,
+        "time_to_working_solution_ms": round(sum(latencies) / max(1, successes), 2) if successes else 0.0,
+        "total_tokens": int(sum(tokens)) if tokens else 0,
+        "average_tokens": round(sum(tokens) / max(1, len(tokens)), 2) if tokens else 0.0,
         "total_cost_usd": round(sum(costs), 8) if costs else None,
         "average_cost_usd": round(sum(costs) / len(costs), 8) if costs else None,
         "priced_task_count": len(costs),
         "failover_count": sum(int(row.get("failover_count") or 0) for row in rows),
+        "prompt_loops": sum(int(row.get("failover_count") or 0) for row in rows),
     }
 
 
 def _comparison(baseline: dict[str, Any], routed: dict[str, Any]) -> dict[str, Any]:
     return {
         "cost_reduction": _percent_reduction(routed.get("total_cost_usd"), baseline.get("total_cost_usd")),
+        "token_reduction": _percent_reduction(routed.get("total_tokens"), baseline.get("total_tokens")),
         "latency_reduction": _percent_reduction(routed.get("average_latency_ms"), baseline.get("average_latency_ms")),
         "success_delta": round(
             (_float(routed.get("success_rate")) - _float(baseline.get("success_rate"))) * 100,
@@ -308,6 +328,8 @@ def _comparison(baseline: dict[str, Any], routed: dict[str, Any]) -> dict[str, A
         "average_score_delta": round(_float(routed.get("average_score")) - _float(baseline.get("average_score")), 4),
         "failure_delta": int(routed.get("failures") or 0) - int(baseline.get("failures") or 0),
         "total_cost_delta_usd": _delta(routed.get("total_cost_usd"), baseline.get("total_cost_usd")),
+        "total_tokens_delta": _delta(routed.get("total_tokens"), baseline.get("total_tokens")),
+        "prompt_loops_avoided": max(0, int(baseline.get("prompt_loops") or 0) - int(routed.get("prompt_loops") or 0)),
         "average_latency_delta_ms": _delta(routed.get("average_latency_ms"), baseline.get("average_latency_ms")),
     }
 
@@ -315,9 +337,33 @@ def _comparison(baseline: dict[str, Any], routed: dict[str, Any]) -> dict[str, A
 def _pair_comparison(baseline: dict[str, Any], routed: dict[str, Any]) -> dict[str, Any]:
     return {
         "cost_reduction": _percent_reduction(routed.get("cost_usd"), baseline.get("cost_usd")),
+        "token_reduction": _percent_reduction(routed.get("total_tokens"), baseline.get("total_tokens")),
         "latency_reduction": _percent_reduction(routed.get("latency_ms"), baseline.get("latency_ms")),
         "success_delta": int(bool(routed.get("success"))) - int(bool(baseline.get("success"))),
         "score_delta": round(_float(routed.get("score")) - _float(baseline.get("score")), 4),
+    }
+
+
+def _outcome_metrics(
+    baseline: dict[str, Any],
+    routed: dict[str, Any],
+    comparison: dict[str, Any],
+) -> dict[str, Any]:
+    cost_delta = comparison.get("total_cost_delta_usd")
+    tokens_delta = comparison.get("total_tokens_delta")
+    return {
+        "tasks_completed": int(routed.get("tasks_completed") or 0),
+        "tokens_saved": int(abs(tokens_delta)) if tokens_delta is not None and float(tokens_delta) < 0 else 0,
+        "tokens_saved_percent": comparison.get("token_reduction"),
+        "prompt_loops_avoided": comparison.get("prompt_loops_avoided", 0),
+        "cost_saved_usd": round(abs(float(cost_delta)), 8)
+        if cost_delta is not None and float(cost_delta) < 0
+        else 0.0,
+        "cost_saved_percent": comparison.get("cost_reduction"),
+        "quality_score": routed.get("quality_score"),
+        "quality_delta_pp": comparison.get("success_delta"),
+        "time_to_working_solution_ms": routed.get("time_to_working_solution_ms"),
+        "baseline_time_to_working_solution_ms": baseline.get("time_to_working_solution_ms"),
     }
 
 
@@ -341,6 +387,18 @@ def _resolve_baseline_agent(config: HubConfig, baseline: str) -> AgentConfig:
     raise ValueError("No enabled baseline agent is configured.")
 
 
+def _raw_agent_label(agent: AgentConfig) -> str:
+    haystack = " ".join(
+        str(value or "").lower()
+        for value in (agent.name, agent.provider, agent.provider_type, agent.model)
+    )
+    if "claude" in haystack or "anthropic" in haystack:
+        return "Claude Code alone"
+    if "codex" in haystack or "openai" in haystack or "gpt" in haystack:
+        return "Codex alone"
+    return f"{agent.name} alone"
+
+
 def _resolve_corpus_path(config: HubConfig, corpus_dir: str | Path | None) -> Path:
     return resolve_corpus_path(config, corpus_dir)
 
@@ -360,36 +418,43 @@ def _response_explanation(response: HubResponse) -> dict[str, Any]:
 
 def _markdown_report(report: dict[str, Any]) -> str:
     comparison = report.get("comparison") if isinstance(report.get("comparison"), dict) else {}
+    outcomes = report.get("outcome_metrics") if isinstance(report.get("outcome_metrics"), dict) else {}
     baseline = report.get("baseline") if isinstance(report.get("baseline"), dict) else {}
     baseline_summary = report.get("baseline_summary") if isinstance(report.get("baseline_summary"), dict) else {}
     routed_summary = report.get("agent_hub_summary") if isinstance(report.get("agent_hub_summary"), dict) else {}
+    raw_label = str((report.get("agent_hub_vs_raw_agent") or {}).get("raw_agent_label") or "Raw Agent")
     lines = [
-        "# Agent-Hub Benchmark Report",
+        "# Agent Hub vs Raw Agent",
         "",
         f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(_float(report.get('created_at'))))}",
         f"Route: `{report.get('route')}`",
-        f"Baseline: `{baseline.get('agent')}` (`{baseline.get('provider')}` / `{baseline.get('model')}`)",
+        f"Baseline: `{raw_label}` (`{baseline.get('provider')}` / `{baseline.get('model')}`)",
         f"Tasks: {report.get('task_count', 0)}",
         "",
-        "## Measured Results",
+        "## Outcome Metrics",
         "",
         "| Metric | Agent-Hub vs Baseline |",
         "| --- | ---: |",
+        f"| Tasks completed | {outcomes.get('tasks_completed', routed_summary.get('tasks_completed', 0))} |",
+        f"| Tokens used | {_metric(_negative_percent(comparison.get('token_reduction')), '%')} |",
+        f"| Tokens saved | {_metric(outcomes.get('tokens_saved'), ' tokens')} |",
+        f"| Prompt loops avoided | {outcomes.get('prompt_loops_avoided', 0)} |",
         f"| Cost reduction | {_metric(comparison.get('cost_reduction'), '%')} |",
-        f"| Latency reduction | {_metric(comparison.get('latency_reduction'), '%')} |",
-        f"| Success delta | {_metric(comparison.get('success_delta'), ' pp')} |",
-        f"| Total cost delta | {_money(comparison.get('total_cost_delta_usd'))} |",
+        f"| Cost saved | {_money(outcomes.get('cost_saved_usd'))} |",
+        f"| Task success | {_metric(comparison.get('success_delta'), ' pp')} |",
+        f"| Quality score | {_metric(outcomes.get('quality_score'), '')} |",
+        f"| Time to working solution | {_metric(outcomes.get('time_to_working_solution_ms'), ' ms')} |",
         "",
         "## Summary",
         "",
-        "| Strategy | Success | Avg latency | Total cost | Avg score |",
-        "| --- | ---: | ---: | ---: | ---: |",
-        _summary_line("Baseline", baseline_summary),
-        _summary_line("Agent-Hub", routed_summary),
+        "| Strategy | Success | Tokens | Cost | Quality | Time to working solution |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        _summary_line(raw_label, baseline_summary),
+        _summary_line("Agent Hub", routed_summary),
         "",
         "## Task Details",
         "",
-        "| Task | Baseline | Agent-Hub | Cost reduction | Latency reduction | Success delta |",
+        "| Task | Raw Agent | Agent Hub | Tokens | Cost | Success delta |",
         "| --- | --- | --- | ---: | ---: | ---: |",
     ]
     for row in report.get("results", [])[:50]:
@@ -405,8 +470,8 @@ def _markdown_report(report: dict[str, Any]) -> str:
                     _md(row.get("task_type")),
                     _md(f"{baseline_row.get('agent')} / {baseline_row.get('model')}"),
                     _md(f"{routed_row.get('agent')} / {routed_row.get('model')}"),
+                    _metric(_negative_percent(compare.get("token_reduction")), "%"),
                     _metric(compare.get("cost_reduction"), "%"),
-                    _metric(compare.get("latency_reduction"), "%"),
                     str(compare.get("success_delta", 0)),
                 ]
             )
@@ -419,8 +484,9 @@ def _markdown_report(report: dict[str, Any]) -> str:
 def _summary_line(label: str, row: dict[str, Any]) -> str:
     return (
         f"| {label} | {_metric(_float(row.get('success_rate')) * 100, '%')} | "
-        f"{_metric(row.get('average_latency_ms'), ' ms')} | {_money(row.get('total_cost_usd'))} | "
-        f"{_metric(row.get('average_score'), '')} |"
+        f"{_metric(row.get('total_tokens'), '')} | {_money(row.get('total_cost_usd'))} | "
+        f"{_metric(row.get('quality_score', row.get('average_score')), '')} | "
+        f"{_metric(row.get('time_to_working_solution_ms'), ' ms')} |"
     )
 
 
@@ -490,6 +556,12 @@ def _metric(value: Any, suffix: str) -> str:
         return "unpriced"
     number = _float(value)
     return f"{number:.2f}{suffix}"
+
+
+def _negative_percent(value: Any) -> float | None:
+    if value is None:
+        return None
+    return -_float(value)
 
 
 def _money(value: Any) -> str:

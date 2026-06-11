@@ -1,5 +1,11 @@
 # Changelog
 
+## 9.6.7
+
+- Adds a benchmark report menu for opening reports, folders, dashboard views, share cards, and reruns.
+- Adds a models/providers configuration menu from the sidebar and command palette.
+- Shows personal benchmark progress with task/call counts and ETA while the run is active.
+
 ## 9.6.6
 
 - Repositions the Marketplace README around evidence-driven coding-agent orchestration.

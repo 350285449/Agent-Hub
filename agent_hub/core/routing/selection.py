@@ -11,6 +11,7 @@ from threading import RLock
 from typing import Any
 
 from ...adaptive import AdaptiveLearningStore, estimate_known_cost_usd
+from ...boost import boost_mode_from_request, boost_policy, task_optimization_policy
 from ...capabilities import agent_capabilities
 from ...config import AgentConfig, HubConfig, agent_allowed_by_cost_policy, is_free_agent, normalize_provider
 from ...context import estimate_message_tokens, is_protected_context_message
@@ -27,6 +28,7 @@ from ...events import (
 from ...evaluation import ProviderScoreStore
 from ...mcp import MCPServerRegistry
 from ...models import FailoverEvent, HubRequest, HubResponse, ProviderResult, StructuredError
+from ...output_validator import build_task_explanation, validate_output
 from ...measurement import record_completed_request
 from ...payloads import content_to_text, request_text
 from ...providers import Provider, ProviderError, create_provider
@@ -150,6 +152,9 @@ class RoutingDecision:
     risk: str = "low"
     context_estimate: str = "small"
     selected_workflow: str = ""
+    boost_mode: str = "balanced"
+    boost_policy: dict[str, Any] = field(default_factory=dict)
+    task_policy: dict[str, Any] = field(default_factory=dict)
     permission_requirements: list[str] = field(default_factory=list)
     routing_reasons: list[str] = field(default_factory=list)
     memory_adjustments: list[dict[str, Any]] = field(default_factory=list)
@@ -176,6 +181,9 @@ class RoutingDecision:
             "risk": self.risk,
             "context_estimate": self.context_estimate,
             "selected_workflow": self.selected_workflow,
+            "boost_mode": self.boost_mode,
+            "boost_policy": dict(self.boost_policy),
+            "task_policy": dict(self.task_policy),
             "reason": self.reason,
             "routing_reasons": list(self.routing_reasons),
             "fallback_chain": list(self.fallback_chain),
@@ -880,6 +888,9 @@ class AgentRouter:
         raw = dict(prepared.raw or {})
         hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
         hub["context_usage"] = usage
+        hub["boost_mode"] = decision.boost_mode
+        hub["boost_policy"] = dict(decision.boost_policy)
+        hub["task_policy"] = dict(decision.task_policy)
         hub.setdefault("auto_retry", _routing_bool(self.config, "auto_retry", True))
         hub.setdefault("auto_failover", _routing_bool(self.config, "auto_failover", True))
         raw["agent_hub"] = hub
@@ -1013,6 +1024,35 @@ class AgentRouter:
             metadata={"issues": validation.issues},
         )
 
+    def _validate_provider_output(
+        self,
+        *,
+        request: HubRequest,
+        agent: AgentConfig,
+        result: ProviderResult,
+        decision: RoutingDecision,
+    ):
+        raw = request.raw if isinstance(request.raw, dict) else {}
+        hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+        repo_context = hub.get("repo_context") if isinstance(hub.get("repo_context"), dict) else {}
+        selected_files = repo_context.get("selected_files") if isinstance(repo_context.get("selected_files"), list) else []
+        usage = hub.get("context_usage") if isinstance(hub.get("context_usage"), dict) else {}
+        policy = decision.task_policy.get("validation_policy") if isinstance(decision.task_policy, dict) else ""
+        quality = validate_output(
+            request=request,
+            response_text=result.text,
+            workspace_dir=self.config.workspace_dir,
+            selected_files=[str(path) for path in selected_files],
+            token_usage=usage,
+            validation_policy=str(policy or self.config.validation_mode or "basic_quality_checks"),
+        )
+        result_raw = dict(result.raw) if isinstance(result.raw, dict) else {}
+        result_hub = dict(result_raw.get("agent_hub")) if isinstance(result_raw.get("agent_hub"), dict) else {}
+        result_hub["quality_check"] = quality.to_dict()
+        result_raw["agent_hub"] = result_hub
+        result.raw = result_raw
+        return quality
+
     def _continue_after_output_limit(
         self,
         *,
@@ -1101,15 +1141,19 @@ class AgentRouter:
         warnings.extend(optimized.warnings)
         final_tokens = optimized.final_tokens
         ratio = round(final_tokens / original_tokens, 4) if original_tokens else 1.0
+        tokens_saved = optimized.tokens_saved
         usage = {
             "estimated_input_tokens": final_tokens,
+            "optimized_context_tokens": final_tokens,
             "estimated_output_tokens": int(output_tokens),
             "provider_limit": provider_limit,
             "max_context_tokens": effective_cap,
             "original_input_tokens": original_tokens,
+            "original_context_tokens": original_tokens,
             "compression_ratio": ratio,
             "context_reduced": bool(warnings),
-            "tokens_saved": optimized.tokens_saved,
+            "tokens_saved": tokens_saved,
+            "saved_percent": round((tokens_saved / max(1, original_tokens)) * 100, 1),
             "context_cache_hit": optimized.cache_hit,
             "context_cache_enabled": self.context_cache.enabled,
             "summarization_hook_applied": optimized.summarized,
@@ -1183,6 +1227,13 @@ class AgentRouter:
         """Choose a ranked fallback chain before execution."""
 
         classification = self._classify_request(request)
+        mode_name = boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
+        mode_policy = boost_policy(mode_name)
+        task_policy = task_optimization_policy(
+            task_type=classification.task_type,
+            task_category=classification.task_category,
+            boost_mode=mode_name,
+        )
         mode = self._routing_mode(request)
         task_type = classification.task_type
         agents = self._candidate_agent_pool(request, mode=mode)
@@ -1210,6 +1261,12 @@ class AgentRouter:
         if reviewer_signal.get("reason"):
             reason = f"{reason} {reviewer_signal['reason']}"
         routing_reasons = [reason, *classification.reasons[:8]]
+        routing_reasons.append(f"Boost Mode: {mode_policy.label} ({mode_policy.behavior}).")
+        routing_reasons.append(
+            "Task policy: "
+            f"{task_policy['task_type']} / {task_policy['context_policy']} / "
+            f"{task_policy['model_policy']} / {task_policy['validation_policy']}."
+        )
         if memory_reason:
             routing_reasons.append(memory_reason)
         if token_saver_reason:
@@ -1248,6 +1305,9 @@ class AgentRouter:
             risk=classification.risk_level,
             context_estimate=classification.context_estimate,
             selected_workflow=selected_workflow,
+            boost_mode=mode_name,
+            boost_policy=mode_policy.to_dict(),
+            task_policy=task_policy,
             reason=reason,
             routing_reasons=routing_reasons,
             fallback_chain=[agent.name for agent in agents],
@@ -1305,6 +1365,12 @@ class AgentRouter:
             agents = [agent for agent in agents if agent_allowed_by_cost_policy(self.config, agent)]
         if request.preferred_agent and agents and agents[0].name == request.preferred_agent:
             return [agents[0], *self._rank_agents_for_mode(agents[1:], request, mode)]
+        elif self.config.free_only:
+            blocked = [agent for agent in agents if not agent_allowed_by_cost_policy(self.config, agent)]
+            if blocked:
+                allowed = [agent for agent in agents if agent_allowed_by_cost_policy(self.config, agent)]
+                ranked_allowed = self._rank_agents_for_mode(allowed, request, mode)
+                return [*blocked, *self._apply_token_saver_ranking(ranked_allowed, request, mode)]
         ranked = self._rank_agents_for_mode(agents, request, mode)
         return self._apply_token_saver_ranking(ranked, request, mode)
 
@@ -1359,6 +1425,10 @@ class AgentRouter:
             return "manual"
         if _privacy_requested(request):
             return "local_private"
+        mode_name = boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
+        mode_policy = boost_policy(mode_name)
+        if mode_policy.routing_mode != "auto":
+            return mode_policy.routing_mode
         return self._classify_request(request).routing_mode
 
     def _classify_task(self, request: HubRequest) -> str:
@@ -1886,6 +1956,64 @@ class AgentRouter:
             ),
         }
 
+    def _route_efficiency_signal(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        classification: Any,
+    ) -> dict[str, Any]:
+        """Score the new goal: best expected outcome per token/cost unit."""
+
+        health = self._health.get(agent.name)
+        outcome_score, samples = self._model_efficiency_score(agent, request, classification)
+        quality = outcome_score
+        if quality is None:
+            quality = _bounded_float(
+                float(agent.coding_score or 0.55) * 0.48
+                + float(agent.reasoning_score or 0.55) * 0.32
+                + 0.20,
+                0.05,
+                0.98,
+            )
+        success_probability = _bounded_float(health.reliability_score if health else 0.70, 0.05, 0.98)
+        if health and health.is_degraded():
+            success_probability = max(0.05, success_probability - 0.18)
+        input_tokens = max(1, estimate_input_tokens(request))
+        output_budget = output_token_budget(
+            self.config,
+            request,
+            agent,
+            input_tokens=input_tokens,
+            health=health,
+        )
+        output_tokens = int(output_budget.effective)
+        cost = estimate_known_cost_usd(agent, input_tokens=input_tokens, output_tokens=output_tokens)
+        token_cost_units = max(1.0, (input_tokens + output_tokens) / 1000.0)
+        dollar_cost_units = 1.0 if cost is None else max(0.01, float(cost) * 1000.0)
+        raw_efficiency = (quality * success_probability) / (token_cost_units * dollar_cost_units)
+        normalized = _bounded_float(raw_efficiency * 100.0, 0.0, 20.0)
+        if is_free_agent(agent):
+            normalized += 1.0
+        if boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced")) == "best_code":
+            normalized += min(2.0, float(agent.coding_score or 0.0) * 2.0)
+        adjustment = _bounded_float(normalized, 0.0, 24.0) * 0.35
+        return {
+            "object": "agent_hub.route_efficiency",
+            "formula": "quality * success_probability / token_cost",
+            "quality": round(float(quality), 4),
+            "success_probability": round(success_probability, 4),
+            "estimated_input_tokens": input_tokens,
+            "estimated_output_tokens": output_tokens,
+            "estimated_cost_usd": cost,
+            "score": round(normalized, 4),
+            "routing_adjustment": round(adjustment, 3),
+            "samples": samples,
+            "summary": (
+                f"Efficiency {normalized:.2f}: expected success per token/cost for "
+                f"{getattr(classification, 'task_type', 'task')}."
+            ),
+        }
+
     def _tournament_plan(
         self,
         agents: list[AgentConfig],
@@ -2055,6 +2183,7 @@ class AgentRouter:
                 repository_dna,
             )
             outcome_signal = self._outcome_based_routing_signal(agent, request, classification)
+            efficiency_signal = self._route_efficiency_signal(agent, request, classification)
             memory_adjustment = float(routing_memory.get("adjustment", 0.0) or 0.0)
             token_saver_adjustment = float(token_saver.get("adjustment", 0.0) or 0.0)
             final_routing_score = original_routing_score + memory_adjustment + token_saver_adjustment
@@ -2088,6 +2217,10 @@ class AgentRouter:
                     "routing_memory": routing_memory,
                     "repository_dna": repository_signal,
                     "outcome_based_routing": outcome_signal,
+                    "route_efficiency": efficiency_signal,
+                    "efficiency_score": efficiency_signal.get("score"),
+                    "efficiency_routing_adjustment": efficiency_signal.get("routing_adjustment"),
+                    "context_optimization": _request_context_optimization(request),
                     "health": {
                         "success_count": health.success_count if health else 0,
                         "failure_count": health.failure_count if health else 0,
@@ -2177,6 +2310,30 @@ class AgentRouter:
             tool_loop_metadata.tool_calls or tool_loop_metadata.tool_results
         ):
             raw = merge_tool_loop_metadata(raw if isinstance(raw, dict) else {}, tool_loop_metadata)
+            result.raw = raw
+        quality = None
+        if decision is not None:
+            quality = self._validate_provider_output(
+                request=request,
+                agent=agent,
+                result=result,
+                decision=decision,
+            )
+            raw = dict(result.raw) if isinstance(result.raw, dict) else {}
+            agent_metadata = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
+            agent_metadata["boost_explanation"] = build_task_explanation(
+                decision=decision,
+                agent=agent,
+                model=result.model or agent.model,
+                request=request,
+                quality=quality,
+                usage=(
+                    (request.raw.get("agent_hub") or {}).get("context_usage")
+                    if isinstance(request.raw, dict) and isinstance(request.raw.get("agent_hub"), dict)
+                    else {}
+                ),
+            )
+            raw["agent_hub"] = agent_metadata
         if self.config.expose_routing_details and isinstance(raw, dict):
             raw = dict(raw)
             agent_metadata = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
@@ -2226,6 +2383,8 @@ class AgentRouter:
                 failover=failover,
                 latency_seconds=latency_seconds,
             )
+            if quality is not None:
+                agent_metadata["quality_check"] = quality.to_dict()
             if tool_loop_metadata is not None:
                 agent_metadata.update(tool_loop_metadata.to_dict())
             raw["agent_hub"] = agent_metadata
@@ -2717,6 +2876,9 @@ class AgentRouter:
                     classification=self._classify_request(request),
                 )
                 score += float(token_saver.get("adjustment", 0.0) or 0.0)
+            if _routing_bool(self.config, "efficiency_routing_enabled", True):
+                efficiency = self._route_efficiency_signal(agent, request, self._classify_request(request))
+                score += float(efficiency.get("routing_adjustment", 0.0) or 0.0)
         evaluation = self.provider_scores.get(agent.name) if isinstance(self.provider_scores, dict) else None
         if isinstance(evaluation, dict):
             try:
@@ -4270,11 +4432,14 @@ def _routing_decision_explanation(decision: RoutingDecision) -> RoutingDecisionE
             "model": selected_model,
             "workflow": decision.selected_workflow,
             "routing_mode": decision.routing_mode,
+            "boost_mode": decision.boost_mode,
             "task_type": decision.task_type,
+            "optimizer_task_type": decision.task_policy.get("task_type"),
             "task_category": decision.task_category,
             "risk_level": decision.risk,
             "complexity": decision.complexity,
             "final_routing_score": round(selected_score, 3) if selected_score is not None else None,
+            "efficiency_score": selected.get("efficiency_score"),
             "token_saver": token_saver,
         },
         reasons=reasons,
@@ -4341,6 +4506,25 @@ def _routing_explanation_reasons(
     )
     if category:
         _append_reason(reasons, "Task classification", category, "TaskClassifier")
+    if decision.boost_policy:
+        _append_reason(
+            reasons,
+            "Boost Mode",
+            f"{decision.boost_policy.get('label', decision.boost_mode)}: {decision.boost_policy.get('behavior', '')}",
+            "BoostModePolicy",
+        )
+    if decision.task_policy:
+        _append_reason(
+            reasons,
+            "Task policy",
+            (
+                f"{decision.task_policy.get('task_type')} / "
+                f"{decision.task_policy.get('context_policy')} / "
+                f"{decision.task_policy.get('model_policy')} / "
+                f"{decision.task_policy.get('validation_policy')}"
+            ),
+            "TaskClassifier",
+        )
     workspace_bits = []
     if decision.language != "unknown":
         workspace_bits.append(decision.language)
@@ -4408,6 +4592,14 @@ def _routing_explanation_reasons(
         summary = str(repository_dna.get("summary") or "").strip()
         if summary:
             _append_reason(reasons, "Repository DNA", summary, "repository_intelligence.json")
+    efficiency = selected.get("route_efficiency") if isinstance(selected.get("route_efficiency"), dict) else {}
+    if efficiency:
+        _append_reason(
+            reasons,
+            "Efficiency score",
+            efficiency.get("summary") or f"Efficiency score {efficiency.get('score')}.",
+            "candidate scorecard",
+        )
     estimated_cost = selected.get("estimated_cost_usd")
     if estimated_cost is not None:
         _append_reason(
@@ -4458,6 +4650,7 @@ def _routing_explanation_rankings(
         capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
         repository_signal = row.get("repository_dna") if isinstance(row.get("repository_dna"), dict) else {}
         token_saver = row.get("token_saver") if isinstance(row.get("token_saver"), dict) else {}
+        efficiency = row.get("route_efficiency") if isinstance(row.get("route_efficiency"), dict) else {}
         ranking = {
             "rank": row.get("rank"),
             "agent": row.get("agent"),
@@ -4478,6 +4671,8 @@ def _routing_explanation_rankings(
             "token_saver_active": token_saver.get("active"),
             "token_saver_confidence": token_saver.get("confidence"),
             "token_saver_adjustment": row.get("token_saver_adjustment"),
+            "efficiency_score": efficiency.get("score", row.get("efficiency_score")),
+            "efficiency_adjustment": efficiency.get("routing_adjustment", row.get("efficiency_routing_adjustment")),
             "why": row.get("why"),
         }
         if by == "provider":
@@ -4776,7 +4971,7 @@ def _routing_explanation_context(
     context_window = _optional_int(capabilities.get("context_window"))
     required_total = max(0, int(estimated_input or 0)) + max(0, int(estimated_output or 0))
     fits_context = None if context_window is None else context_window >= required_total
-    return {
+    context = {
         "estimated_input_tokens": estimated_input,
         "estimated_output_tokens": estimated_output,
         "estimated_total_tokens": required_total,
@@ -4787,6 +4982,44 @@ def _routing_explanation_context(
         "selected_context_window": context_window,
         "fits_selected_context_window": fits_context,
     }
+    request_context = selected.get("context_optimization") if isinstance(selected.get("context_optimization"), dict) else {}
+    context.update({key: value for key, value in request_context.items() if value not in (None, {}, [])})
+    return context
+
+
+def _request_context_optimization(request: HubRequest) -> dict[str, Any]:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    repo = hub.get("repo_context") if isinstance(hub.get("repo_context"), dict) else {}
+    usage = hub.get("context_usage") if isinstance(hub.get("context_usage"), dict) else {}
+    result: dict[str, Any] = {}
+    if repo:
+        result.update(
+            {
+                "selected_files": list(repo.get("selected_files") or []),
+                "excluded_files": list(repo.get("excluded_files") or []),
+                "context_levels": dict(repo.get("context_levels") or repo.get("levels") or {}),
+                "selection_reason": repo.get("reason"),
+                "original_context_tokens": repo.get("original_context_tokens"),
+                "optimized_context_tokens": repo.get("optimized_context_tokens"),
+                "tokens_saved": repo.get("tokens_saved"),
+                "saved_percent": repo.get("saved_percent"),
+                "total_files": repo.get("total_files"),
+            }
+        )
+    if usage:
+        result.update(
+            {
+                "estimated_input_tokens": usage.get("estimated_input_tokens"),
+                "original_input_tokens": usage.get("original_input_tokens"),
+                "optimized_context_tokens": usage.get("optimized_context_tokens"),
+                "tokens_saved": usage.get("tokens_saved"),
+                "saved_percent": usage.get("saved_percent"),
+                "compression_ratio": usage.get("compression_ratio"),
+                "context_cache_hit": usage.get("context_cache_hit"),
+            }
+        )
+    return {key: value for key, value in result.items() if value not in (None, [], {})}
 
 
 def _fallback_rejections(candidate_scores: list[dict[str, Any]]) -> list[dict[str, Any]]:

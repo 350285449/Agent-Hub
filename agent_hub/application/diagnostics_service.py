@@ -152,6 +152,9 @@ BACKEND_FEATURES = {
     "runtime_kernel_dashboard": True,
     "runtime_kernel_durable_history": True,
     "feature_scorecard": True,
+    "agent_hub_boost_mode": True,
+    "context_relevance_ranking": True,
+    "output_quality_validation": True,
     "utf8_bom_config_loading": True,
 }
 
@@ -1393,6 +1396,7 @@ def _benchmark_report_summary(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(summary, dict) and summary:
         return summary
     comparison = _dict(payload.get("comparison"))
+    outcomes = _dict(payload.get("outcome_metrics"))
     baseline = _dict(payload.get("baseline"))
     agent_hub_summary = _dict(payload.get("agent_hub_summary"))
     baseline_summary = _dict(payload.get("baseline_summary"))
@@ -1406,13 +1410,17 @@ def _benchmark_report_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "agent_hub_summary": agent_hub_summary,
             "baseline_summary": baseline_summary,
             "comparison": {
+                "token_reduction": comparison.get("token_reduction"),
                 "cost_reduction": comparison.get("cost_reduction"),
                 "latency_reduction": comparison.get("latency_reduction"),
                 "success_delta": comparison.get("success_delta"),
                 "average_score_delta": comparison.get("average_score_delta"),
+                "prompt_loops_avoided": comparison.get("prompt_loops_avoided"),
+                "total_tokens_delta": comparison.get("total_tokens_delta"),
                 "total_cost_delta_usd": comparison.get("total_cost_delta_usd"),
                 "average_latency_delta_ms": comparison.get("average_latency_delta_ms"),
             },
+            "outcome_metrics": outcomes,
         }
     return {}
 

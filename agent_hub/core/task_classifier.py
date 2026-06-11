@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..boost import task_optimization_policy
 from ..models import HubRequest
 from ..payloads import content_to_text, request_text
 from ..permissions import tool_permission_request
@@ -55,6 +56,10 @@ class TaskClassification:
     workflow_hint: str = ""
     reviewer_required: bool = False
     expected_cost: str = "low"
+    optimizer_task_type: str = "explanation"
+    context_policy: str = "focused_files"
+    model_policy: str = "balanced_quality"
+    validation_policy: str = "basic_quality_checks"
     permission_requirements: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     estimated_input_tokens: int = 0
@@ -84,6 +89,16 @@ class TaskClassification:
             "workflow_hint": self.workflow_hint,
             "reviewer_required": self.reviewer_required,
             "expected_cost": self.expected_cost,
+            "optimizer_task_type": self.optimizer_task_type,
+            "context_policy": self.context_policy,
+            "model_policy": self.model_policy,
+            "validation_policy": self.validation_policy,
+            "optimization_policy": {
+                "task_type": self.optimizer_task_type,
+                "context_policy": self.context_policy,
+                "model_policy": self.model_policy,
+                "validation_policy": self.validation_policy,
+            },
             "permission_requirements": list(self.permission_requirements),
             "reasons": list(self.reasons),
             "estimated_input_tokens": self.estimated_input_tokens,
@@ -143,6 +158,11 @@ class TaskClassifier:
         reviewer_required = _reviewer_required(task_type, risk_level, text, files_involved)
         permission_requirements = _permission_requirements(request, text, file_types)
         expected_cost = _expected_cost(estimated_tokens, complexity, repo_size_bucket)
+        optimization_policy = task_optimization_policy(
+            task_type=task_type,
+            task_category=task_category,
+            text=text,
+        )
         reasons = _reasons(
             task_type=task_type,
             task_category=task_category,
@@ -176,6 +196,10 @@ class TaskClassifier:
             workflow_hint=workflow_hint,
             reviewer_required=reviewer_required,
             expected_cost=expected_cost,
+            optimizer_task_type=optimization_policy["task_type"],
+            context_policy=optimization_policy["context_policy"],
+            model_policy=optimization_policy["model_policy"],
+            validation_policy=optimization_policy["validation_policy"],
             permission_requirements=permission_requirements,
             reasons=reasons,
             estimated_input_tokens=estimated_tokens,

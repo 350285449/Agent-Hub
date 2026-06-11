@@ -1,30 +1,28 @@
-# Agent Hub — Adaptive AI Orchestration for Coding Agents
+# Agent Hub - Claude Code and Codex Optimizer
 
-Reduce AI coding costs, improve reliability, and automatically route every task
-to the model most likely to succeed.
+Make Claude Code and Codex write better code with fewer tokens.
 
-Agent Hub sits between your coding agents and AI providers, continuously
-evaluating performance, latency, cost, context requirements, and repository
-characteristics to select the best route for each request.
+Agent Hub compresses repository context, routes each task to the best model,
+validates outputs, and retries failed attempts automatically.
 
-Agent Hub is to coding agents what a load balancer is to servers: it
-continuously chooses the best route and explains every decision.
+Start with Boost Mode `Balanced`, then switch to `Save Tokens`, `Best Code`,
+`Fast Fix`, `Big Refactor`, or `Local First` when the task needs it.
 
 Supports OpenAI, Claude, Gemini, Ollama, OpenRouter, Codex CLI, Cline, Roo Code,
 Continue, LM Studio, and local models through a single OpenAI-compatible
 endpoint.
 
-## Why Trust The Routing?
+## Benchmark Your Agents Locally
 
-Unlike most AI tools, Agent Hub includes a reproducible benchmark corpus.
+Unlike most AI tools, Agent Hub includes a reproducible benchmark corpus for
+raw-agent comparisons.
 
 You can:
 
-- Run the benchmark locally
-- Verify routing decisions yourself
-- Replay historical decisions
-- Compare providers on your hardware
-- Generate shareable proof reports
+- Compare Claude Code alone vs Claude Code + Agent Hub
+- Compare Codex alone vs Codex + Agent Hub
+- Measure tokens saved, quality score, prompt loops avoided, and cost saved
+- Replay historical decisions and verify why each route won
 
 No vendor benchmarks required.
 
@@ -32,21 +30,19 @@ Run `Agent Hub: Run Personal Benchmark` to generate your local savings report,
 or use the CLI:
 
 ```text
-agent-hub benchmark --dataset coding-100 --export results.json
-agent-hub benchmark verify results.json --dataset coding-100
-agent-hub benchmark compare results.json --dataset coding-100
+agent-hub benchmark --dataset coding-100 --baseline claude-sonnet --export claude.json
+agent-hub benchmark compare claude.json --dataset coding-100
 ```
 
 ## Explain Every Decision
 
-Route Replay records the evidence behind each model choice:
+Each task explanation records the evidence behind the optimization:
 
-- selected provider
-- rejected candidates
-- confidence score
-- routing signals
-- failover events
-- benchmark history
+- files selected from the repository
+- tokens saved by context compression
+- model selected by success-per-token
+- quality checks and retry strategy
+- rejected candidates and failover events
 
 Inspect exactly why a model was chosen and why alternatives were rejected with
 `Agent Hub: Explain Route` or `agent-hub replay-route <request-id>`.

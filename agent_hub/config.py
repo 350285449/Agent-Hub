@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .boost import BOOST_MODES, boost_policy, normalize_boost_mode
 from .provider_presets import OPENAI_COMPATIBLE_PROVIDER_TYPES
 
 
@@ -60,6 +61,7 @@ DEFAULT_ROUTING_CONFIG = {
     "failover_on_slow_stream": True,
     "failover_on_quota_exhaustion": True,
     "continue_after_output_limit": True,
+    "efficiency_routing_enabled": True,
     "max_provider_attempts": 5,
     "slow_first_token_timeout_seconds": 20,
     "stream_stall_timeout_seconds": 30,
@@ -166,6 +168,7 @@ class HubConfig:
     agent_max_steps: int = 8
     agent_context_budget_tokens: int = 32_000
     agent_context_compaction_enabled: bool = True
+    boost_mode: str = "balanced"
     context_mode: str = "balanced"
     cline_compatibility_mode: bool = True
     force_compatibility_streaming: bool = False
@@ -261,6 +264,31 @@ class HubConfig:
 
     include_raw_responses: bool = False
     expose_routing_details: bool = False
+
+    @property
+    def boost_mode_label(self) -> str:
+        """Return the user-facing label for the configured Boost Mode."""
+
+        return boost_policy(self.boost_mode).label
+
+    @property
+    def boost_mode_options(self) -> list[dict[str, str]]:
+        """Return the available Boost Modes for compact dashboard selectors."""
+
+        return [
+            {
+                "mode": mode,
+                "label": policy.label,
+                "behavior": policy.behavior,
+            }
+            for mode, policy in BOOST_MODES.items()
+        ]
+
+    def set_boost_mode(self, value: Any) -> str:
+        """Normalize and apply a runtime Boost Mode selection."""
+
+        self.boost_mode = normalize_boost_mode(value)
+        return self.boost_mode
 
     def ensure_dirs(self) -> None:
         """Create all local persistence folders required by the hub."""
@@ -597,6 +625,7 @@ def free_local_config() -> HubConfig:
         agent_max_steps=8,
         agent_context_budget_tokens=32_000,
         agent_context_compaction_enabled=True,
+        boost_mode="balanced",
         context_mode="balanced",
         cline_compatibility_mode=True,
         force_compatibility_streaming=False,
@@ -803,6 +832,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             raw.get("agent_context_compaction_enabled"),
             True,
         ),
+        boost_mode=normalize_boost_mode(raw.get("boost_mode", raw.get("agent_hub_mode", "balanced"))),
         context_mode=_normalize_context_mode(raw.get("context_mode", "balanced")),
         cline_compatibility_mode=_bool_with_default(raw.get("cline_compatibility_mode"), True),
         force_compatibility_streaming=_bool_with_default(
@@ -1107,6 +1137,7 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "agent_max_steps": config.agent_max_steps,
         "agent_context_budget_tokens": config.agent_context_budget_tokens,
         "agent_context_compaction_enabled": config.agent_context_compaction_enabled,
+        "boost_mode": config.boost_mode,
         "context_mode": config.context_mode,
         "cline_compatibility_mode": config.cline_compatibility_mode,
         "force_compatibility_streaming": config.force_compatibility_streaming,
@@ -1601,6 +1632,10 @@ def _normalize_routing_config(value: Any) -> dict[str, Any]:
         "continue_after_output_limit": _bool_with_default(
             source.get("continue_after_output_limit"),
             bool(defaults["continue_after_output_limit"]),
+        ),
+        "efficiency_routing_enabled": _bool_with_default(
+            source.get("efficiency_routing_enabled"),
+            bool(defaults["efficiency_routing_enabled"]),
         ),
         "max_provider_attempts": _normalize_positive_int(
             source.get("max_provider_attempts"),

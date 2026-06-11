@@ -125,7 +125,8 @@ class VscodeExtensionContributionTests(unittest.TestCase):
             "Kernel",
             "Checkup",
             "Route Lab",
-            "Settings",
+            "Models",
+            "Benchmarks",
             "Save Codex Tokens",
             "Free Models Only",
             "Use Codex CLI",
@@ -578,8 +579,9 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('id="quickTokenSafeMode"', source)
         self.assertIn('id="quickCodexCliMode"', source)
         self.assertIn('id="quickInstallCodexCli"', source)
-        self.assertIn('id="quickStartBenchmark"', source)
-        self.assertIn(">Start Benchmarks</span>", source)
+        self.assertIn('id="quickBenchmarkReports"', source)
+        self.assertIn(">Benchmarks</span>", source)
+        self.assertIn('"openBenchmarkReportMenu"', source)
         self.assertIn('"runPersonalBenchmark"', source)
         self.assertIn('id="installOllamaDesktop"', source)
         self.assertIn('id="tokenSafeMode"', source)

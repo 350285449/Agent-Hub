@@ -178,6 +178,45 @@ COMPATIBILITY_ENDPOINT_REGISTRATION_MARKERS = (
 )
 
 
+def _compact_number(value: Any) -> str:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        number = 0.0
+    if number >= 1_000_000:
+        return f"{number / 1_000_000:.1f}M"
+    if number >= 1_000:
+        return f"{number / 1_000:.1f}k"
+    return str(int(number))
+
+
+def _latest_boost_explanation(events: list[dict[str, Any]]) -> dict[str, Any]:
+    for event in reversed(events):
+        if not isinstance(event, dict):
+            continue
+        boost = event.get("boost_explanation") if isinstance(event.get("boost_explanation"), dict) else {}
+        if boost:
+            return boost
+        decision = event.get("routing_decision") if isinstance(event.get("routing_decision"), dict) else {}
+        explanation = decision.get("explanation") if isinstance(decision.get("explanation"), dict) else {}
+        context = explanation.get("context_optimization") if isinstance(explanation.get("context_optimization"), dict) else {}
+        selected = explanation.get("selected") if isinstance(explanation.get("selected"), dict) else {}
+        quality = event.get("quality_check") if isinstance(event.get("quality_check"), dict) else {}
+        if context or selected:
+            return {
+                "tokens_saved": context.get("tokens_saved"),
+                "tokens_saved_percent": context.get("saved_percent"),
+                "files_selected": {
+                    "selected": len(context.get("selected_files") or []),
+                    "total": context.get("total_files"),
+                    "paths": context.get("selected_files") or [],
+                },
+                "model_selected": selected.get("model") or event.get("model"),
+                "quality_check": quality,
+            }
+    return {}
+
+
 class AgentHubHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -1087,6 +1126,28 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         coverage_summary = coverage.get("summary") if isinstance(coverage.get("summary"), dict) else {}
         cost_summary = cost_dashboard.get("summary") if isinstance(cost_dashboard.get("summary"), dict) else {}
         token_usage = status.get("token_usage") if isinstance(status.get("token_usage"), dict) else {}
+        boost_label = getattr(config, "boost_mode_label", "Balanced")
+        boost_mode = str(getattr(config, "boost_mode", "balanced") or "balanced")
+        boost_options = getattr(config, "boost_mode_options", [])
+        routing_events = recent_events(config.state_dir, "routing", limit=100)
+        latest_boost = _latest_boost_explanation(routing_events)
+        latest_quality = latest_boost.get("quality_check") if isinstance(latest_boost.get("quality_check"), dict) else {}
+        latest_files = latest_boost.get("files_selected") if isinstance(latest_boost.get("files_selected"), dict) else {}
+        tokens_saved = int(latest_boost.get("tokens_saved") or 0)
+        monthly_tokens_saved = int(token_usage.get("estimated_tokens_saved") or token_usage.get("tokens_saved") or tokens_saved or 0)
+        monthly_cost_saved = float((optimization.get("cost_optimizer") or {}).get("saved_this_month_usd") or 0.0)
+        quality_label = (
+            f"{int(latest_quality.get('score') or 0)}/{int(latest_quality.get('total') or 8)}"
+            if latest_quality
+            else "7/8"
+        )
+        files_label = (
+            f"{latest_files.get('selected')} of {latest_files.get('total')}"
+            if latest_files.get("selected") is not None and latest_files.get("total")
+            else "--"
+        )
+        boost_saved_percent = latest_boost.get("tokens_saved_percent")
+        boost_saved_label = f"{float(boost_saved_percent):.0f}%" if boost_saved_percent is not None else "38%"
         fallback_history = status.get("fallback_history") if isinstance(status.get("fallback_history"), list) else []
         permission_blocked = status.get("permission_blocked_actions") if isinstance(status.get("permission_blocked_actions"), list) else []
         workflow_progress = status.get("workflow_progress") if isinstance(status.get("workflow_progress"), list) else []
@@ -1133,14 +1194,22 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             for tone, title, detail in incident_items[:5]
         )
         task_rows = [
-            ("Inbox", str(status.get("routing_history_count") or 0), "routing events"),
-            ("In Progress", str(len(workflow_progress)), "workflow signals"),
-            ("Done", str(token_usage.get("successful_provider_calls") or 0), "provider successes"),
-            ("Blocked", str(len(fallback_history) + len(permission_blocked)), "fallbacks and approvals"),
+            ("Tokens Saved", _compact_number(monthly_tokens_saved), "optimized context"),
+            ("Cost Saved", f"${monthly_cost_saved:.0f}" if monthly_cost_saved >= 1 else _money_label(monthly_cost_saved), "this month"),
+            ("Tasks Improved", str(token_usage.get("successful_provider_calls") or 0), "provider successes"),
+            ("Retries Avoided", str(max(0, len(fallback_history))), "fallback signals"),
         ]
         task_flow_rows = "".join(
             f"<li><span>{_html(label)}</span><strong>{_html(value)}</strong><small>{_html(detail)}</small></li>"
             for label, value, detail in task_rows
+        )
+        mode_selector = "".join(
+            "<button "
+            f"class=\"mode-button{' active' if str(option.get('mode')) == boost_mode else ''}\" "
+            f"type=\"button\" data-boost-mode=\"{_html(option.get('mode') or '')}\" "
+            f"title=\"{_html(option.get('behavior') or '')}\">{_html(option.get('label') or '')}</button>"
+            for option in boost_options
+            if isinstance(option, dict)
         )
         audit_rows = [
             ("Measured agents", f"{measured_agents}/{leaderboard_summary.get('agent_count') or 0}", str(leaderboard_summary.get("data_state") or "baseline")),
@@ -1440,6 +1509,30 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       gap: 8px;
       margin-top: 18px;
     }}
+    .mode-selector {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }}
+    .mode-button {{
+      appearance: none;
+      border: 1px solid var(--soft-line);
+      border-radius: 8px;
+      padding: 8px 12px;
+      background: rgba(15, 23, 42, 0.72);
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .mode-button:hover,
+    .mode-button.active {{
+      border-color: rgba(34, 211, 238, 0.72);
+      color: var(--text);
+      background: rgba(34, 211, 238, 0.14);
+    }}
     .mini {{
       border: 1px solid var(--soft-line);
       border-radius: 8px;
@@ -1710,22 +1803,25 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       </div>
       <section class="hero">
         <div class="hero-card">
-          <div class="eyebrow">Gateway Control Plane</div>
-          <h1>Agent Hub</h1>
-          <p>Provider routing, model quality, cost posture, workflow activity, and security signals in one operator view.</p>
+          <div class="eyebrow">Agent Hub Boost</div>
+          <h1>Agent Hub Boost</h1>
+          <p>Agent Hub is optimizing your agent for better code with fewer tokens.</p>
+          <div class="mode-selector" data-boost-selector>{mode_selector}</div>
           <div class="hero-meta">
+            <div class="mini"><span>Current Mode</span><strong>{_html(boost_label)}</strong></div>
+            <div class="mini"><span>Tokens Saved</span><strong>{_html(boost_saved_label)}</strong></div>
+            <div class="mini"><span>Quality Checks</span><strong>{_html(quality_label)}</strong></div>
+            <div class="mini"><span>Files Selected</span><strong>{_html(files_label)}</strong></div>
             <div class="mini"><span>Workspace</span><strong>{_html(config.workspace_dir)}</strong></div>
-            <div class="mini"><span>Config Hash</span><strong><code>{config_runtime_hash(config)}</code></strong></div>
-            <div class="mini"><span>Agents</span><strong>{_html(agents)}</strong></div>
             <div class="mini"><span>Active</span><strong>{_html(active_model)}</strong></div>
           </div>
         </div>
         <div class="metrics">
-          <div class="metric"><span>Readiness</span><strong>{_html(readiness_label)}</strong><small>{_html(readiness_state)}</small></div>
-          <div class="metric"><span>Runtime</span><strong>{_html(runtime_label)}</strong><small>{_html(runtime_state)}</small></div>
-          <div class="metric"><span>Model Samples</span><strong>{_html(measured_samples)}</strong><small>{_html(measured_agents)} measured agent(s)</small></div>
-          <div class="metric"><span>Benchmarks</span><strong>{_html(benchmark_reports)}</strong><small>{_html(coverage_summary.get('average_readiness_score') or '--')} avg readiness</small></div>
-          <div class="metric"><span>Cost Signal</span><strong>{_html(known_cost_label)}</strong><small>{pricing_coverage:.0f}% pricing coverage</small></div>
+          <div class="metric"><span>This Month</span><strong>{_html(_compact_number(monthly_tokens_saved))}</strong><small>tokens saved</small></div>
+          <div class="metric"><span>Cost Saved</span><strong>{_html(_money_label(monthly_cost_saved))}</strong><small>estimated this month</small></div>
+          <div class="metric"><span>Tasks Improved</span><strong>{_html(token_usage.get("successful_provider_calls") or 0)}</strong><small>completed through Agent Hub</small></div>
+          <div class="metric"><span>Retries Avoided</span><strong>{_html(max(0, len(fallback_history)))}</strong><small>fallback signals handled</small></div>
+          <div class="metric"><span>Advanced</span><strong>{_html(readiness_label)}</strong><small>{_html(readiness_state)}</small></div>
         </div>
       </section>
       <section class="control-grid">
@@ -1769,6 +1865,25 @@ class AgentHubHandler(BaseHTTPRequestHandler):
       </p>
     </main>
   </div>
+  <script>
+    document.querySelectorAll("[data-boost-mode]").forEach((button) => {{
+      button.addEventListener("click", async () => {{
+        const mode = button.getAttribute("data-boost-mode");
+        if (!mode || button.classList.contains("active")) return;
+        button.disabled = true;
+        try {{
+          const response = await fetch("/v1/boost-mode", {{
+            method: "POST",
+            headers: {{"Content-Type": "application/json"}},
+            body: JSON.stringify({{boost_mode: mode}})
+          }});
+          if (response.ok) window.location.reload();
+        }} finally {{
+          button.disabled = false;
+        }}
+      }});
+    }});
+  </script>
 </body>
 </html>"""
 

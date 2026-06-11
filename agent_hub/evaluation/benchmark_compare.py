@@ -101,6 +101,7 @@ def format_benchmark_comparison(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            f"Tokens: {_signed_percent(summary.get('tokens_pct'), empty='unavailable')}",
             f"Cost: {_signed_percent(summary.get('cost_pct'), empty='unpriced')}",
             f"Latency: {_signed_percent(summary.get('latency_pct'), empty='unavailable')}",
             f"Quality: {_signed_percent(summary.get('quality_pct'), empty='unavailable')}",
@@ -121,8 +122,10 @@ def format_benchmark_comparison(report: dict[str, Any]) -> str:
 def _comparison_summary(comparison: dict[str, Any]) -> dict[str, Any]:
     cost_reduction = _float_or_none(comparison.get("cost_reduction"))
     latency_reduction = _float_or_none(comparison.get("latency_reduction"))
+    token_reduction = _float_or_none(comparison.get("token_reduction"))
     quality_delta = _float_or_none(comparison.get("success_delta"))
     return {
+        "tokens_pct": -token_reduction if token_reduction is not None else None,
         "cost_pct": -cost_reduction if cost_reduction is not None else None,
         "latency_pct": -latency_reduction if latency_reduction is not None else None,
         "quality_pct": quality_delta,

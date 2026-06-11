@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
+from ..boost import boost_mode_from_request, boost_policy, task_optimization_policy
 from ..capabilities import agent_supports_tools
 from ..config import AgentConfig, HubConfig
 from ..models import HubRequest
@@ -58,6 +59,14 @@ class ContextPreparationService:
             return request
         max_files = self.config.repo_context_max_files
         max_chars = self.config.repo_context_max_chars
+        mode = boost_mode_from_request(request, default=getattr(self.config, "boost_mode", "balanced"))
+        policy = boost_policy(mode)
+        if mode == "balanced":
+            max_files = min(max(max_files, 1), policy.repo_max_files)
+            max_chars = min(max(max_chars, 1_000), policy.repo_max_chars)
+        else:
+            max_files = policy.repo_max_files
+            max_chars = policy.repo_max_chars
         if compatibility_reductions_enabled(self.config, request, "reduced_repo_context"):
             max_files = min(max_files, 3)
             max_chars = min(max_chars, 4_000)
@@ -68,6 +77,10 @@ class ContextPreparationService:
                 max_files=max_files,
                 max_chars=max_chars,
                 ignore_patterns=self.config.repo_ignore_patterns,
+                full_files=policy.full_files,
+                compressed_files=policy.compressed_files,
+                map_files=policy.map_files,
+                compression_aggression=policy.compression_aggression,
             )
         except Exception:
             return request
@@ -78,6 +91,13 @@ class ContextPreparationService:
         hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
         hub["repo_context"] = selection.to_dict()
         hub["context_strategy"] = classification.context_strategy
+        hub["boost_mode"] = mode
+        hub["boost_policy"] = policy.to_dict()
+        hub["task_policy"] = task_optimization_policy(
+            task_type=classification.task_type,
+            task_category=classification.task_category,
+            boost_mode=mode,
+        )
         raw["agent_hub"] = hub
         return replace(request, messages=[message, *request.messages], raw=raw)
 

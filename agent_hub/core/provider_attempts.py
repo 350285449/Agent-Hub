@@ -362,6 +362,57 @@ class ProviderAttemptExecutor:
                     )
                     continue
 
+                quality = router._validate_provider_output(
+                    request=provider_request,
+                    agent=agent,
+                    result=result,
+                    decision=decision,
+                )
+                if (
+                    quality.should_retry
+                    and agent != candidates[-1]
+                    and helpers.routing_bool(router.config, "auto_retry", True)
+                ):
+                    reason = (
+                        f"Output validation failed: {quality.retry_reason}; "
+                        f"retry strategy: {quality.retry_strategy}"
+                    )
+                    router._record_failure(
+                        agent,
+                        error_type="output_validation_failed",
+                        message=reason,
+                        unavailable_until=None,
+                        metadata={"quality_check": quality.to_dict()},
+                        request_id=request_id,
+                        request=provider_request,
+                        routing_mode=decision.routing_mode,
+                        failover_attempts=len(failover),
+                    )
+                    failover.append(
+                        FailoverEvent(
+                            agent=agent.name,
+                            provider=agent.provider,
+                            model=agent.model,
+                            reason=reason,
+                            retryable=True,
+                            error_type="output_validation_failed",
+                            metadata={"quality_check": quality.to_dict()},
+                        )
+                    )
+                    router._record_internal_event(
+                        ROUTER_FALLBACK,
+                        request_id=request_id,
+                        request=provider_request,
+                        from_agent=agent.name,
+                        from_provider=agent.provider,
+                        from_model=agent.model,
+                        reason=reason,
+                        error_type="output_validation_failed",
+                        next_agent=helpers.next_candidate_name(candidates, agent),
+                        routing_mode=decision.routing_mode,
+                    )
+                    continue
+
                 router._record_success(
                     agent,
                     latency,
@@ -395,6 +446,16 @@ class ProviderAttemptExecutor:
                     latency_seconds=round(latency, 4),
                     failover=[event.to_dict() for event in failover],
                     routing_decision=decision.to_dict(),
+                    boost_explanation=(
+                        response.raw.get("agent_hub", {}).get("boost_explanation")
+                        if isinstance(response.raw, dict) and isinstance(response.raw.get("agent_hub"), dict)
+                        else {}
+                    ),
+                    quality_check=(
+                        response.raw.get("agent_hub", {}).get("quality_check")
+                        if isinstance(response.raw, dict) and isinstance(response.raw.get("agent_hub"), dict)
+                        else {}
+                    ),
                 )
                 router._record_internal_event(
                     PROVIDER_SELECTED,
