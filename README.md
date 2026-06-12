@@ -616,12 +616,12 @@ Cloud control starts with Ollama cloud model IDs in fresh VS Code configs. Those
 models run through Ollama Cloud, not on your local CPU/GPU. To put hosted API-key
 models first, open the chat `Settings` menu, set `Cloud route` to `API-key
 models first`, save provider keys, and restart Agent Hub.
-Use `Save Codex Tokens` in the same chat `Settings` menu when you want confident
-free models to handle safe work first while Codex fallback stays compact. The
-router protects Codex for high-risk, large-context, security-sensitive,
-low-confidence, or tool-incompatible tasks, then gives Codex CLI fallback an
-adaptive micro/surgical/rescue context digest with reduced tool and repo
-metadata, fewer agent steps, and shorter output caps.
+Use `Boost + Save Tokens` in the same chat `Settings` menu when you want Codex
+to stay final while Agent-Hub adaptively assigns free helper models to compact
+planning/context digests. The router keeps free helpers out of privacy-sensitive
+or critical tasks, records helper outcomes for adaptive learning, and gives
+Codex CLI an adaptive micro/surgical/rescue context digest with reduced tool and
+repo metadata, fewer agent steps, and shorter output caps.
 Use `Free Models Only` when you want to disable Codex CLI, OpenAI, Claude, Gemini,
 ChatGPT, and other non-free/API-key fallbacks entirely. This keeps local,
 Ollama Cloud, local research, and configured free-tier models eligible, and it
@@ -706,17 +706,18 @@ matching free provider presets at runtime and inserts them into the cloud/coding
 routes. For example, setting `GROQ_API_KEY` is enough for the Groq free presets
 to become eligible on the next start; no config edit is required.
 
-## Save Codex Tokens And Free Models Only
+## Boost + Save Tokens And Free Models Only
 
 These two modes solve different cost problems:
 
-- `Save Codex Tokens` / `python -m agent_hub presets apply token-saver`: save
-  Codex tokens by trying eligible free models first and making Codex fallback
-  compact. Free models are promoted only when the task classifier, provider
-  health, context fit, tool support, and recent outcomes say they are likely to
-  handle the task within the configured productivity-loss tolerance; Codex CLI
-  fallback uses an adaptive context digest, reduced tool schemas, reduced repo
-  context, fewer agent steps, and shorter output caps.
+- `Boost + Save Tokens`: save Codex tokens by keeping Codex as the final model
+  while eligible free helpers produce bounded context/planning digests selected
+  from task fit, provider health, routing memory, and adaptive outcomes.
+  Codex CLI then receives reduced tool schemas, reduced repo context, fewer
+  agent steps, and shorter output caps.
+- `python -m agent_hub presets apply token-saver`: use the older cheapest-route
+  token-saver preset when you explicitly want eligible free models to be tried
+  as final models before paid fallback.
 - `Free Models Only` / `python -m agent_hub presets apply free-only`: block
   Codex CLI and non-free/API-key fallbacks. Use this when spending tokens or
   subscription-backed model calls is not acceptable for the current workspace.

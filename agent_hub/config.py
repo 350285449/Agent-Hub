@@ -57,6 +57,12 @@ DEFAULT_ROUTING_CONFIG = {
     "token_saver_confidence_threshold": 0.74,
     "token_saver_max_productivity_loss": 0.08,
     "token_saver_free_candidate_bonus": 22.0,
+    "cooperative_codex_enabled": True,
+    "cooperative_codex_mode": False,
+    "cooperative_codex_min_confidence": 0.68,
+    "cooperative_codex_max_productivity_loss": 0.14,
+    "cooperative_codex_context_budget_tokens": 1800,
+    "cooperative_codex_output_tokens": 360,
     "prefer_available_quota": True,
     "failover_on_slow_stream": True,
     "failover_on_quota_exhaustion": True,
@@ -288,6 +294,7 @@ class HubConfig:
         """Normalize and apply a runtime Boost Mode selection."""
 
         self.boost_mode = normalize_boost_mode(value)
+        self.context_mode = boost_policy(self.boost_mode).context_mode
         return self.boost_mode
 
     def ensure_dirs(self) -> None:
@@ -816,6 +823,11 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         for item in _dict_list(raw.get("mcp_servers"))
         if str(item.get("name") or "").strip()
     ]
+    boost_mode = normalize_boost_mode(raw.get("boost_mode", raw.get("agent_hub_mode", "balanced")))
+    context_mode_value = raw.get("context_mode")
+    if context_mode_value is None:
+        context_mode_value = boost_policy(boost_mode).context_mode
+    context_mode = _normalize_context_mode(context_mode_value)
     return HubConfig(
         host=str(raw.get("host") or "127.0.0.1"),
         port=_normalize_positive_int(raw.get("port"), 8787, minimum=1, maximum=65535),
@@ -832,8 +844,8 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             raw.get("agent_context_compaction_enabled"),
             True,
         ),
-        boost_mode=normalize_boost_mode(raw.get("boost_mode", raw.get("agent_hub_mode", "balanced"))),
-        context_mode=_normalize_context_mode(raw.get("context_mode", "balanced")),
+        boost_mode=boost_mode,
+        context_mode=context_mode,
         cline_compatibility_mode=_bool_with_default(raw.get("cline_compatibility_mode"), True),
         force_compatibility_streaming=_bool_with_default(
             raw.get("force_compatibility_streaming"),
@@ -1616,6 +1628,38 @@ def _normalize_routing_config(value: Any) -> dict[str, Any]:
             float(defaults["token_saver_free_candidate_bonus"]),
             minimum=0.0,
             maximum=200.0,
+        ),
+        "cooperative_codex_enabled": _bool_with_default(
+            source.get("cooperative_codex_enabled"),
+            bool(defaults["cooperative_codex_enabled"]),
+        ),
+        "cooperative_codex_mode": _bool_with_default(
+            source.get("cooperative_codex_mode"),
+            bool(defaults["cooperative_codex_mode"]),
+        ),
+        "cooperative_codex_min_confidence": _normalize_positive_float(
+            source.get("cooperative_codex_min_confidence"),
+            float(defaults["cooperative_codex_min_confidence"]),
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        "cooperative_codex_max_productivity_loss": _normalize_positive_float(
+            source.get("cooperative_codex_max_productivity_loss"),
+            float(defaults["cooperative_codex_max_productivity_loss"]),
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        "cooperative_codex_context_budget_tokens": _normalize_positive_int(
+            source.get("cooperative_codex_context_budget_tokens"),
+            int(defaults["cooperative_codex_context_budget_tokens"]),
+            minimum=500,
+            maximum=64_000,
+        ),
+        "cooperative_codex_output_tokens": _normalize_positive_int(
+            source.get("cooperative_codex_output_tokens"),
+            int(defaults["cooperative_codex_output_tokens"]),
+            minimum=64,
+            maximum=8_000,
         ),
         "prefer_available_quota": _bool_with_default(
             source.get("prefer_available_quota"),

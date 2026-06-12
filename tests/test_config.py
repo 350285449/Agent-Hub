@@ -226,6 +226,21 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(data["agent_context_compaction_enabled"])
         self.assertFalse(data["prefer_multi_file_patches"])
 
+    def test_boost_mode_defaults_context_mode_when_omitted(self) -> None:
+        save_tokens = config_from_dict({"boost_mode": "save_tokens", "agents": []})
+        best_code = config_from_dict({"boost_mode": "best_code", "agents": []})
+        explicit = config_from_dict(
+            {
+                "boost_mode": "save_tokens",
+                "context_mode": "deep",
+                "agents": [],
+            }
+        )
+
+        self.assertEqual(save_tokens.context_mode, "minimal")
+        self.assertEqual(best_code.context_mode, "deep")
+        self.assertEqual(explicit.context_mode, "deep")
+
     def test_adaptive_learning_settings_round_trip(self) -> None:
         config = config_from_dict(
             {

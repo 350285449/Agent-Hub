@@ -313,6 +313,7 @@ def handle_post(handler: object, path: str, payload: dict[str, Any]) -> bool:
                 "object": "agent_hub.boost_mode",
                 "mode": mode,
                 "label": handler.server.config.boost_mode_label,
+                "context_mode": handler.server.config.context_mode,
                 "options": handler.server.config.boost_mode_options,
             }
         )

@@ -37,6 +37,9 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertIn("Best Code", [option["label"] for option in config.boost_mode_options])
         self.assertEqual(config.set_boost_mode("Save Tokens"), "save_tokens")
         self.assertEqual(config.boost_mode_label, "Save Tokens")
+        self.assertEqual(config.context_mode, "minimal")
+        self.assertEqual(config.set_boost_mode("Best Code"), "best_code")
+        self.assertEqual(config.context_mode, "deep")
 
     def test_adaptive_boost_plan_tightens_context_under_token_pressure(self) -> None:
         plan = build_boost_plan(
@@ -652,6 +655,80 @@ index 867a3ee..b77d49d 100644
         self.assertEqual(response.raw["agent_hub"]["optimization_trace"]["actual_provider_input_tokens"], 600)
         self.assertEqual(response.raw["agent_hub"]["optimization_trace"]["token_accounting_source"], "actual_provider_usage")
 
+    def test_cooperative_codex_boost_keeps_codex_final_with_free_digest(self) -> None:
+        _CooperativeProvider.calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / "state",
+                free_only=False,
+                repo_context_enabled=False,
+                boost_mode="save_tokens",
+                approval_mode="auto",
+                default_route=["free-helper", "codex-cli"],
+                agents={
+                    "free-helper": AgentConfig(
+                        name="free-helper",
+                        provider="openai-compatible",
+                        provider_type="groq",
+                        model="free-qwen",
+                        base_url="http://127.0.0.1:9999",
+                        free=True,
+                        enabled=True,
+                        coding_score=0.95,
+                        reasoning_score=0.9,
+                        speed_score=0.8,
+                        context_window=64_000,
+                        supports_tools=True,
+                    ),
+                    "codex-cli": AgentConfig(
+                        name="codex-cli",
+                        provider="codex-cli",
+                        provider_type="codex-cli",
+                        model="gpt-5.5",
+                        free=False,
+                        enabled=True,
+                        coding_score=0.92,
+                        reasoning_score=0.92,
+                        speed_score=0.5,
+                        context_window=400_000,
+                    ),
+                },
+            )
+            config.routing.update(
+                {
+                    "cooperative_codex_mode": True,
+                    "cooperative_codex_min_confidence": 0.5,
+                    "cooperative_codex_max_productivity_loss": 0.3,
+                    "free_first": False,
+                }
+            )
+            response = AgentRouter(config, provider_factory=_CooperativeProvider).route(
+                HubRequest(
+                    session_id="s",
+                    messages=[
+                        {"role": "user", "content": "Fix the failing cache token budget test in src/cache.py."}
+                    ],
+                    raw={"agent_hub": {"boost_mode": "save_tokens", "cooperative_codex": True}},
+                )
+            )
+
+        self.assertEqual(response.agent, "codex-cli")
+        self.assertEqual([agent for agent, _request in _CooperativeProvider.calls], ["free-helper", "codex-cli"])
+        final_request = _CooperativeProvider.calls[-1][1]
+        self.assertTrue(
+            any(message.get("agent_hub_cooperative_codex_digest") for message in final_request.messages)
+        )
+        final_hub = final_request.raw["agent_hub"]
+        cooperative = final_hub["cooperative_codex"]
+        self.assertTrue(cooperative["active"])
+        self.assertEqual(cooperative["worker_agent"], "free-helper")
+        self.assertEqual(cooperative["paid_final_agent"], "codex-cli")
+        self.assertEqual(cooperative["roles"]["paid_model"], "final_reasoning_and_action")
+        self.assertTrue(final_hub["context_usage"]["cooperative_codex"]["active"])
+        self.assertEqual(response.raw["agent_hub"]["cooperative_codex"]["worker_agent"], "free-helper")
+
 
 class _OkProvider:
     def __init__(self, agent: AgentConfig) -> None:
@@ -670,6 +747,27 @@ class _CaptureProvider:
     def complete(self, request: HubRequest) -> ProviderResult:
         type(self).last_request = request
         return ProviderResult(text="ok", model=self.agent.model, usage={"prompt_tokens": 600, "completion_tokens": 10})
+
+
+class _CooperativeProvider:
+    calls: list[tuple[str, HubRequest]] = []
+
+    def __init__(self, agent: AgentConfig) -> None:
+        self.agent = agent
+
+    def complete(self, request: HubRequest) -> ProviderResult:
+        type(self).calls.append((self.agent.name, request))
+        if self.agent.name == "free-helper":
+            return ProviderResult(
+                text="Digest: inspect src/cache.py, keep failing token budget test, avoid unrelated config churn.",
+                model=self.agent.model,
+                usage={"prompt_tokens": 120, "completion_tokens": 36},
+            )
+        return ProviderResult(
+            text="final codex answer",
+            model=self.agent.model,
+            usage={"prompt_tokens": 600, "completion_tokens": 80},
+        )
 
 
 if __name__ == "__main__":

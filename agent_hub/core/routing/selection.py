@@ -868,6 +868,12 @@ class AgentRouter:
         stream: bool = False,
     ) -> HubRequest:
         request = prepare_tool_compatibility_request(self.config, agent, request)
+        request = self._with_cooperative_codex_boost(
+            request_id=request_id,
+            request=request,
+            agent=agent,
+            decision=decision,
+        )
         prepared, usage = self._apply_context_safety_cap(agent, request, boost_plan=decision.boost_plan)
         prepared, limit_usage = self._apply_model_output_limit(agent, prepared, usage)
         if limit_usage.get("output_tokens_adjusted"):
@@ -904,6 +910,14 @@ class AgentRouter:
         if plan_obj is not None:
             plan_obj = plan_obj.with_context_usage(usage)
             decision.boost_plan = plan_obj.to_dict()
+        cooperative = hub.get("cooperative_codex") if isinstance(hub.get("cooperative_codex"), dict) else {}
+        if cooperative:
+            usage["cooperative_codex"] = {
+                "active": bool(cooperative.get("active")),
+                "worker_agent": cooperative.get("worker_agent"),
+                "confidence": cooperative.get("confidence"),
+                "skipped_reason": cooperative.get("skipped_reason"),
+            }
         hub["context_usage"] = usage
         hub["boost_mode"] = decision.boost_mode
         hub["boost_policy"] = dict(decision.boost_policy)
@@ -1229,6 +1243,409 @@ class AgentRouter:
             latency,
         )
 
+    def _with_cooperative_codex_boost(
+        self,
+        *,
+        request_id: str,
+        request: HubRequest,
+        agent: AgentConfig,
+        decision: RoutingDecision,
+    ) -> HubRequest:
+        if not _cooperative_codex_requested(self.config, request):
+            return request
+        if not _codex_like_agent(agent):
+            return self._request_with_cooperative_codex_metadata(
+                request,
+                {
+                    "enabled": True,
+                    "active": False,
+                    "mode": "cooperative_codex",
+                    "paid_final_agent": agent.name,
+                    "skipped_reason": "selected agent is not Codex-like",
+                },
+            )
+        if _cooperative_codex_digest_present(request.messages):
+            return request
+
+        ranked_workers = self._cooperative_codex_worker_rankings(
+            request=request,
+            codex_agent=agent,
+            decision=decision,
+        )
+        if not ranked_workers:
+            return self._request_with_cooperative_codex_metadata(
+                request,
+                {
+                    "enabled": True,
+                    "active": False,
+                    "mode": "cooperative_codex",
+                    "paid_final_agent": agent.name,
+                    "skipped_reason": "no free worker reached adaptive confidence",
+                },
+            )
+
+        skipped: list[dict[str, Any]] = []
+        for worker, signal in ranked_workers[:3]:
+            worker_request = self._cooperative_codex_worker_request(
+                request=request,
+                codex_agent=agent,
+                worker=worker,
+                signal=signal,
+            )
+            skip_reason = self._preflight_skip_reason(worker, worker_request)
+            if skip_reason:
+                skipped.append({"worker_agent": worker.name, "reason": skip_reason})
+                continue
+            permission = self._provider_permission_decision(worker, worker_request)
+            if permission is not None and not permission.allowed:
+                skipped.append(
+                    {
+                        "worker_agent": worker.name,
+                        "reason": permission.reason or "permission required for cooperative worker",
+                    }
+                )
+                continue
+
+            started = time.perf_counter()
+            try:
+                result = self.provider_manager.chat(worker, worker_request)
+            except ProviderError as exc:
+                latency = time.perf_counter() - started
+                skipped.append({"worker_agent": worker.name, "reason": str(exc), "error_type": exc.error_type})
+                self._record_adaptive_outcome(
+                    request_id=request_id,
+                    request=worker_request,
+                    agent=worker,
+                    model=worker.model,
+                    success=False,
+                    latency_seconds=latency,
+                    failover_attempts=0,
+                    input_tokens=estimate_input_tokens(worker_request),
+                    output_tokens=0,
+                    estimated_cost_usd=estimate_known_cost_usd(worker, input_tokens=estimate_input_tokens(worker_request), output_tokens=0),
+                    error_type=exc.error_type,
+                    routing_mode=decision.routing_mode,
+                    final=False,
+                )
+                self._record_route_event(
+                    "cooperative_codex_worker_failed",
+                    request_id=request_id,
+                    request=worker_request,
+                    agent=worker.name,
+                    provider=worker.provider,
+                    model=worker.model,
+                    error_type=exc.error_type,
+                    message=str(exc),
+                    paid_final_agent=agent.name,
+                )
+                continue
+            except Exception as exc:
+                latency = time.perf_counter() - started
+                skipped.append({"worker_agent": worker.name, "reason": str(exc), "error_type": "cooperative_worker_error"})
+                self._record_adaptive_outcome(
+                    request_id=request_id,
+                    request=worker_request,
+                    agent=worker,
+                    model=worker.model,
+                    success=False,
+                    latency_seconds=latency,
+                    failover_attempts=0,
+                    input_tokens=estimate_input_tokens(worker_request),
+                    output_tokens=0,
+                    estimated_cost_usd=estimate_known_cost_usd(worker, input_tokens=estimate_input_tokens(worker_request), output_tokens=0),
+                    error_type="cooperative_worker_error",
+                    routing_mode=decision.routing_mode,
+                    final=False,
+                )
+                continue
+
+            latency = time.perf_counter() - started
+            digest = _cooperative_codex_digest_text(
+                result.text,
+                max_tokens=_routing_int(self.config, "cooperative_codex_output_tokens", 360),
+            )
+            input_tokens = _usage_int(result.usage, "prompt_tokens", "input_tokens")
+            if input_tokens <= 0:
+                input_tokens = estimate_input_tokens(worker_request)
+            output_tokens = _usage_int(result.usage, "completion_tokens", "output_tokens")
+            if output_tokens <= 0:
+                output_tokens = _result_output_tokens(result)
+            self._record_adaptive_outcome(
+                request_id=request_id,
+                request=worker_request,
+                agent=worker,
+                model=result.model or worker.model,
+                success=bool(digest),
+                latency_seconds=latency,
+                failover_attempts=0,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                estimated_cost_usd=estimate_known_cost_usd(worker, input_tokens=input_tokens, output_tokens=output_tokens),
+                error_type=None if digest else "empty_cooperative_digest",
+                routing_mode=decision.routing_mode,
+                final=False,
+            )
+            if not digest:
+                skipped.append({"worker_agent": worker.name, "reason": "empty cooperative digest"})
+                continue
+
+            metadata = {
+                "enabled": True,
+                "active": True,
+                "mode": "cooperative_codex",
+                "paid_final_agent": agent.name,
+                "paid_final_model": agent.model,
+                "worker_agent": worker.name,
+                "worker_provider": worker.provider,
+                "worker_model": result.model or worker.model,
+                "confidence": signal.get("effective_confidence"),
+                "base_confidence": signal.get("confidence"),
+                "adaptive": signal.get("adaptive"),
+                "routing_memory": signal.get("routing_memory"),
+                "estimated_productivity_loss": signal.get("estimated_productivity_loss"),
+                "roles": {
+                    "free_worker": "context_digest",
+                    "paid_model": "final_reasoning_and_action",
+                },
+                "worker_usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "latency_ms": round(latency * 1000, 2),
+                },
+                "skipped_workers": skipped,
+            }
+            messages = _insert_cooperative_codex_digest(
+                request.messages,
+                worker=worker,
+                codex_agent=agent,
+                digest=digest,
+                confidence=signal.get("effective_confidence"),
+            )
+            self._record_route_event(
+                "cooperative_codex_worker_selected",
+                request_id=request_id,
+                request=worker_request,
+                agent=worker.name,
+                provider=worker.provider,
+                model=result.model or worker.model,
+                paid_final_agent=agent.name,
+                confidence=signal.get("effective_confidence"),
+                worker_usage=metadata["worker_usage"],
+            )
+            return self._request_with_cooperative_codex_metadata(
+                replace(request, messages=messages),
+                metadata,
+            )
+
+        return self._request_with_cooperative_codex_metadata(
+            request,
+            {
+                "enabled": True,
+                "active": False,
+                "mode": "cooperative_codex",
+                "paid_final_agent": agent.name,
+                "skipped_reason": skipped[-1]["reason"] if skipped else "no cooperative worker available",
+                "skipped_workers": skipped,
+            },
+        )
+
+    def _cooperative_codex_worker_rankings(
+        self,
+        *,
+        request: HubRequest,
+        codex_agent: AgentConfig,
+        decision: RoutingDecision,
+    ) -> list[tuple[AgentConfig, dict[str, Any]]]:
+        classification = self._classify_request(request)
+        names = _dedupe_strings([*decision.fallback_chain, *self._route_names(request), *self.config.default_route])
+        rows: list[tuple[AgentConfig, dict[str, Any], float]] = []
+        for name in names:
+            worker = self.config.agents.get(name)
+            if worker is None or not worker.enabled or worker.name == codex_agent.name:
+                continue
+            if not _cooperative_codex_worker_candidate(worker):
+                continue
+            if not agent_allowed_by_cost_policy(self.config, worker):
+                continue
+            signal = self._cooperative_codex_signal(
+                worker,
+                request,
+                classification=classification,
+                codex_agent=codex_agent,
+            )
+            if not signal.get("active"):
+                continue
+            score = self._routing_score(
+                worker,
+                request,
+                include_routing_memory=False,
+                include_token_saver=False,
+            )
+            rows.append((worker, signal, score))
+        rows.sort(
+            key=lambda item: (
+                -float(item[1].get("effective_confidence", 0.0) or 0.0),
+                -float((item[1].get("adaptive") or {}).get("adaptive_bonus", 0.0) or 0.0),
+                -float(item[2]),
+            )
+        )
+        return [(worker, signal) for worker, signal, _score in rows]
+
+    def _cooperative_codex_signal(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        *,
+        classification: Any,
+        codex_agent: AgentConfig,
+    ) -> dict[str, Any]:
+        threshold = _bounded_float(
+            _routing_float(self.config, "cooperative_codex_min_confidence", 0.68),
+            0.0,
+            1.0,
+        )
+        max_loss = _bounded_float(
+            _routing_float(self.config, "cooperative_codex_max_productivity_loss", 0.14),
+            0.0,
+            1.0,
+        )
+        confidence, reasons = self._token_saver_confidence(agent, request, classification)
+        reference_confidence = self._token_saver_confidence(codex_agent, request, classification)[0]
+        productivity_loss = max(0.0, float(reference_confidence) - float(confidence))
+        if self.config.adaptive_learning_enabled and self.config.adaptive_routing_enabled:
+            adaptive = self.adaptive_learning.routing_signal(
+                agent.name,
+                route=request.route or "",
+                task_type=str(getattr(classification, "task_type", "") or "general"),
+                workflow_pattern=_request_workflow_pattern(request),
+                workflow_role="cooperative_codex_worker",
+            )
+        else:
+            adaptive = {
+                "agent": agent.name,
+                "active": False,
+                "adaptive_bonus": 0.0,
+                "summary": "Adaptive routing is disabled by configuration.",
+            }
+        routing_memory = self._routing_memory_signal(agent, request, classification=classification)
+        adaptive_adjustment = _bounded_float(
+            float(adaptive.get("adaptive_bonus", 0.0) or 0.0) / 100.0 if adaptive.get("active") else 0.0,
+            -0.08,
+            0.12,
+        )
+        memory_adjustment = _bounded_float(
+            float(routing_memory.get("adjustment", 0.0) or 0.0) / 100.0,
+            -0.08,
+            0.12,
+        )
+        effective_confidence = _bounded_float(
+            float(confidence) + adaptive_adjustment + memory_adjustment,
+            0.0,
+            1.0,
+        )
+        protection_reasons = _cooperative_codex_protection_reasons(self, agent, request, classification)
+        active = bool(
+            _cooperative_codex_worker_candidate(agent)
+            and not protection_reasons
+            and effective_confidence >= threshold
+            and productivity_loss <= max_loss
+        )
+        if active:
+            summary = (
+                "Cooperative Codex worker active: free model confidence is high enough "
+                "for a bounded context digest while Codex remains final."
+            )
+        elif protection_reasons:
+            summary = "Cooperative Codex worker protected: " + "; ".join(protection_reasons[:3]) + "."
+        elif effective_confidence < threshold:
+            summary = f"Effective confidence {effective_confidence:.2f} is below cooperative threshold {threshold:.2f}."
+        else:
+            summary = f"Estimated productivity loss {productivity_loss:.2f} exceeds cooperative tolerance {max_loss:.2f}."
+        return {
+            "enabled": True,
+            "active": active,
+            "agent": agent.name,
+            "provider": agent.provider,
+            "model": agent.model,
+            "confidence": round(float(confidence), 4),
+            "effective_confidence": round(float(effective_confidence), 4),
+            "confidence_threshold": round(threshold, 4),
+            "reference_confidence": round(float(reference_confidence), 4),
+            "estimated_productivity_loss": round(productivity_loss, 4),
+            "max_productivity_loss": round(max_loss, 4),
+            "confidence_reasons": reasons,
+            "protection_reasons": protection_reasons,
+            "adaptive": adaptive,
+            "routing_memory": routing_memory,
+            "summary": summary,
+        }
+
+    def _cooperative_codex_worker_request(
+        self,
+        *,
+        request: HubRequest,
+        codex_agent: AgentConfig,
+        worker: AgentConfig,
+        signal: dict[str, Any],
+    ) -> HubRequest:
+        max_context_tokens = _routing_int(self.config, "cooperative_codex_context_budget_tokens", 1800)
+        output_tokens = _routing_int(self.config, "cooperative_codex_output_tokens", 360)
+        optimizer = TokenOptimizer(
+            cache=self.context_cache,
+            summarization_enabled=False,
+        )
+        optimized = optimizer.optimize(
+            [dict(message) for message in request.messages],
+            max_context_tokens=max(500, max_context_tokens),
+            target_context_tokens=max(500, int(max_context_tokens * 0.82)),
+        )
+        system = {
+            "role": "system",
+            "content": (
+                "You are a free cooperative worker assisting Codex. Codex is the final model. "
+                "Do not produce the final answer or make tool calls. Return a compact digest for Codex with: "
+                "relevant files/symbols, constraints, likely plan, risks, tests to run, and anything low-signal to ignore. "
+                f"Keep it under {output_tokens} tokens."
+            ),
+            "agent_hub_cooperative_codex_worker_instruction": True,
+        }
+        raw = dict(request.raw) if isinstance(request.raw, dict) else {}
+        hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
+        hub.update(
+            {
+                "cooperative_codex_worker": True,
+                "disable_cooperative_codex": True,
+                "workflow_role": "cooperative_codex_worker",
+                "paid_final_agent": codex_agent.name,
+                "worker_agent": worker.name,
+                "cooperative_signal": signal,
+                "max_context_tokens": max_context_tokens,
+                "max_output_tokens": output_tokens,
+            }
+        )
+        raw["agent_hub"] = hub
+        metadata = dict(request.metadata)
+        metadata["cooperative_codex_worker"] = True
+        return replace(
+            request,
+            messages=[system, *optimized.messages],
+            max_tokens=output_tokens,
+            raw=raw,
+            metadata=metadata,
+            record_session=False,
+        )
+
+    def _request_with_cooperative_codex_metadata(
+        self,
+        request: HubRequest,
+        metadata: dict[str, Any],
+    ) -> HubRequest:
+        raw = dict(request.raw) if isinstance(request.raw, dict) else {}
+        hub = dict(raw.get("agent_hub")) if isinstance(raw.get("agent_hub"), dict) else {}
+        hub["cooperative_codex"] = metadata
+        raw["agent_hub"] = hub
+        return replace(request, raw=raw)
+
     def _apply_context_safety_cap(
         self,
         agent: AgentConfig,
@@ -1403,6 +1820,10 @@ class AgentRouter:
             routing_reasons.append(memory_reason)
         if token_saver_reason:
             routing_reasons.append(token_saver_reason)
+        if _cooperative_codex_requested(self.config, request):
+            routing_reasons.append(
+                "Cooperative Codex boost: Codex remains the final model while free models may provide adaptive compact digests."
+            )
         if reviewer_signal.get("reason"):
             routing_reasons.append(str(reviewer_signal["reason"]))
         dna = self._repository_dna()
@@ -1503,8 +1924,12 @@ class AgentRouter:
             if blocked:
                 allowed = [agent for agent in agents if agent_allowed_by_cost_policy(self.config, agent)]
                 ranked_allowed = self._rank_agents_for_mode(allowed, request, mode)
+                if _cooperative_codex_requested(self.config, request):
+                    return [*blocked, *self._cooperative_codex_final_order(ranked_allowed, request)]
                 return [*blocked, *self._apply_token_saver_ranking(ranked_allowed, request, mode)]
         ranked = self._rank_agents_for_mode(agents, request, mode)
+        if _cooperative_codex_requested(self.config, request):
+            return self._cooperative_codex_final_order(ranked, request)
         return self._apply_token_saver_ranking(ranked, request, mode)
 
     def _route_names(self, request: HubRequest) -> list[str]:
@@ -1517,6 +1942,62 @@ class AgentRouter:
             if route.matches(text):
                 return route.agents
         return self.config.default_route
+
+    def _cooperative_codex_final_order(
+        self,
+        agents: list[AgentConfig],
+        request: HubRequest,
+    ) -> list[AgentConfig]:
+        if not agents:
+            return agents
+        codex_agents = [
+            agent
+            for agent in agents
+            if _codex_like_agent(agent)
+            and agent_allowed_by_cost_policy(self.config, agent)
+        ]
+        if not codex_agents:
+            return agents
+        if request.preferred_agent:
+            preferred = [agent for agent in codex_agents if agent.name == request.preferred_agent]
+            if preferred:
+                selected = preferred[0]
+            else:
+                selected = self._rank_cooperative_codex_finalists(codex_agents, request)[0]
+        else:
+            selected = self._rank_cooperative_codex_finalists(codex_agents, request)[0]
+        ordered_codex = [selected, *[agent for agent in codex_agents if agent.name != selected.name]]
+        free_helpers = [
+            agent
+            for agent in agents
+            if agent.name not in {item.name for item in ordered_codex}
+            and _cooperative_codex_worker_candidate(agent)
+        ]
+        rest = [
+            agent
+            for agent in agents
+            if agent.name not in {item.name for item in ordered_codex}
+            and agent.name not in {item.name for item in free_helpers}
+        ]
+        return _dedupe_agents([*ordered_codex, *free_helpers, *rest])
+
+    def _rank_cooperative_codex_finalists(
+        self,
+        agents: list[AgentConfig],
+        request: HubRequest,
+    ) -> list[AgentConfig]:
+        return self._rank_by_key(
+            agents,
+            request,
+            key=lambda agent: (
+                8.0 if agent.name.lower() == "codex-cli" else 0.0,
+                6.0 if agent.name.lower() == "codex" else 0.0,
+                float(agent.priority or 0.0) / 10.0,
+                float(agent.coding_score or 0.0) * 10,
+                float(agent.reasoning_score or 0.0) * 8,
+                float(agent.context_window or 0),
+            ),
+        )
 
     def _manual_model_or_provider_agent_names(self, request: HubRequest) -> list[str]:
         model = _request_option(request, "model")
@@ -2671,6 +3152,18 @@ class AgentRouter:
             )
             if isinstance(context_usage, dict) and context_usage:
                 agent_metadata["context_usage"] = dict(context_usage)
+            request_hub = (
+                request.raw.get("agent_hub")
+                if isinstance(request.raw, dict) and isinstance(request.raw.get("agent_hub"), dict)
+                else {}
+            )
+            cooperative = (
+                request_hub.get("cooperative_codex")
+                if isinstance(request_hub, dict) and isinstance(request_hub.get("cooperative_codex"), dict)
+                else {}
+            )
+            if cooperative:
+                agent_metadata["cooperative_codex"] = dict(cooperative)
             retry_history = (
                 (request.raw.get("agent_hub") or {}).get("retry_history")
                 if isinstance(request.raw, dict) and isinstance(request.raw.get("agent_hub"), dict)
@@ -3913,6 +4406,33 @@ def _request_bool_option(request: HubRequest, *keys: str, default: bool = False)
     return bool(value)
 
 
+def _cooperative_codex_requested(config: HubConfig, request: HubRequest | None) -> bool:
+    if request is None:
+        return False
+    if not _routing_bool(config, "cooperative_codex_enabled", True):
+        return False
+    if _request_bool_option(
+        request,
+        "disable_cooperative_codex",
+        "cooperative_codex_disabled",
+        "disable_free_workers",
+        default=False,
+    ):
+        return False
+    if _request_bool_option(
+        request,
+        "cooperative_codex",
+        "cooperative_codex_boost",
+        "codex_cooperative_boost",
+        "agent_hub_cooperative_codex",
+        default=False,
+    ):
+        return True
+    if _request_bool_option(request, "cooperative_codex_mode", default=False):
+        return True
+    return _routing_bool(config, "cooperative_codex_mode", False)
+
+
 def _free_remote_cloud_agent(agent: AgentConfig) -> bool:
     if not is_free_agent(agent):
         return False
@@ -3941,6 +4461,10 @@ def _token_saver_offload_candidate(agent: AgentConfig) -> bool:
     if provider == "echo":
         return False
     return True
+
+
+def _cooperative_codex_worker_candidate(agent: AgentConfig) -> bool:
+    return bool(agent.enabled and _token_saver_offload_candidate(agent))
 
 
 def _codex_like_agent(agent: AgentConfig) -> bool:
@@ -3986,6 +4510,27 @@ def _token_saver_task_capability(agent: AgentConfig, classification: Any) -> flo
         ]
         return _bounded_float(max(values), 0.0, 1.0)
     return _bounded_float(max(value for value in (coding or 0.0, reasoning or 0.0, 0.58)), 0.0, 1.0)
+
+
+def _cooperative_codex_protection_reasons(
+    router: Any,
+    agent: AgentConfig,
+    request: HubRequest,
+    classification: Any,
+) -> list[str]:
+    reasons: list[str] = []
+    if _privacy_requested(request):
+        reasons.append("privacy requested")
+    if _request_bool_option(request, "no_free_workers", "disable_free_workers", default=False):
+        reasons.append("free workers disabled for request")
+    risk = str(getattr(classification, "risk_level", "low") or "low")
+    task_type = str(getattr(classification, "task_type", "") or "")
+    if risk == "critical" or task_type == "security_sensitive_change":
+        reasons.append("critical or security-sensitive task")
+    health = getattr(router, "_health", {}).get(agent.name) if hasattr(router, "_health") else None
+    if health is not None and health.is_degraded():
+        reasons.append("provider health is degraded")
+    return reasons
 
 
 def _token_saver_task_penalty(classification: Any) -> float:
@@ -4064,6 +4609,61 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _cooperative_codex_digest_present(messages: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(message, dict) and bool(message.get("agent_hub_cooperative_codex_digest"))
+        for message in messages
+    )
+
+
+def _cooperative_codex_digest_text(text: Any, *, max_tokens: int) -> str:
+    digest = content_to_text(text).strip()
+    if not digest:
+        return ""
+    max_chars = max(400, int(max_tokens or 360) * 4)
+    if len(digest) > max_chars:
+        digest = digest[:max_chars].rstrip() + "\n[Digest truncated for Codex token budget]"
+    return digest
+
+
+def _insert_cooperative_codex_digest(
+    messages: list[dict[str, Any]],
+    *,
+    worker: AgentConfig,
+    codex_agent: AgentConfig,
+    digest: str,
+    confidence: Any,
+) -> list[dict[str, Any]]:
+    if _cooperative_codex_digest_present(messages):
+        return [dict(message) for message in messages]
+    confidence_text = ""
+    try:
+        confidence_text = f" Confidence: {float(confidence):.2f}."
+    except (TypeError, ValueError):
+        confidence_text = ""
+    message = {
+        "role": "system",
+        "content": (
+            "Agent Hub cooperative Codex digest from free worker "
+            f"{worker.name} ({worker.model}) for final model {codex_agent.name}.{confidence_text}\n"
+            "Use this as a compact teammate note, not as the final answer.\n\n"
+            f"{digest}"
+        ),
+        "agent_hub_cooperative_codex_digest": True,
+        "worker_agent": worker.name,
+        "worker_model": worker.model,
+        "paid_final_agent": codex_agent.name,
+    }
+    copied = [dict(item) for item in messages]
+    insert_at = 0
+    while insert_at < len(copied) and str(copied[insert_at].get("role") or "").lower() in {
+        "system",
+        "developer",
+    }:
+        insert_at += 1
+    return [*copied[:insert_at], message, *copied[insert_at:]]
 
 
 def _routing_value(config: HubConfig, key: str, default: Any) -> Any:

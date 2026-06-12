@@ -47,6 +47,9 @@ const DEFAULT_CODEX_CLI_MODEL = "gpt-5.5";
 const DEFAULT_AGENT_CONTEXT_BUDGET = 32000;
 const DEFAULT_AGENT_MAX_STEPS = 20;
 const MAX_TOKEN_SAVE_OUTPUT_TOKENS = 800;
+const BOOST_SAVE_LABEL = "Boost + Save Tokens";
+const BOOST_SAVE_ACTIVE_LABEL = "Boosted + Saving Tokens";
+const BOOST_SAVE_STOP_LABEL = "Turn Off Boost";
 const CODEX_CLI_MICRO_CONTEXT_BUDGET = 1200;
 const CODEX_CLI_CONTEXT_BUDGET = 2400;
 const CODEX_CLI_RESCUE_CONTEXT_BUDGET = 3600;
@@ -941,7 +944,7 @@ function dashboardModeLabel(dashboard = {}) {
     return "Use Codex CLI";
   }
   if (dashboard.tokenSafeMode) {
-    return "Save Codex Tokens";
+    return BOOST_SAVE_LABEL;
   }
   return "";
 }
@@ -4871,7 +4874,7 @@ function sidebarHtml(webview, logoPath) {
       <div class="actions tool-actions">
         <button class="primary" id="connectClaudeCode" type="button">Connect Claude Code</button>
         <button id="connectCodex" type="button">Connect Codex</button>
-        <button id="boostMyAgent" type="button">Boost My Agent</button>
+        <button class="primary" id="boostMyAgent" type="button">${BOOST_SAVE_LABEL}</button>
         <button class="primary" id="autoSetupCline" type="button">Auto-Configure Cline</button>
         <button id="setupCodingTool" type="button">Copy + Test Tool</button>
         <button id="copyCodingToolConfigQuick" type="button">Copy Values</button>
@@ -4965,11 +4968,11 @@ function sidebarHtml(webview, logoPath) {
             ${sidebarActionHelp("Benchmarks", "Open benchmark reports, report folder, dashboard, share card, or start a new 50-task benchmark run.")}
           </div>
           <div class="action-with-help">
-            <button class="command-button mode-toggle" id="quickTokenSafeMode" type="button" title="Save Codex tokens with adaptive compact fallback routing" data-icon="T">
-              <span class="button-main">Save Codex Tokens</span>
-              <span class="button-meta">Compact fallback</span>
+            <button class="command-button mode-toggle" id="quickTokenSafeMode" type="button" title="Boost performance with adaptive compact fallback routing" data-icon="T">
+              <span class="button-main">${BOOST_SAVE_LABEL}</span>
+              <span class="button-meta">Faster, compact</span>
             </button>
-            ${sidebarActionHelp("Save Codex Tokens", "Use free models first, then send Codex fallback an adaptive compact digest with smaller context, shorter output, and reduced tool schema.")}
+            ${sidebarActionHelp(BOOST_SAVE_LABEL, "Keep Codex as the final model while free workers provide adaptive compact digests with smaller context, shorter output, and reduced tool schema.")}
           </div>
           <div class="action-with-help">
             <button class="command-button mode-toggle" id="quickFreeOnlyMode" type="button" title="Use only free or local models" data-icon="F">
@@ -5202,11 +5205,11 @@ function sidebarHtml(webview, logoPath) {
           ${sidebarActionHelp("Free Models Only", "Prefer free and local routes while disabling non-free provider choices.")}
         </div>
         <div class="action-with-help">
-          <button class="mode-toggle" id="tokenSafeMode" type="button">Save Codex Tokens</button>
-          ${sidebarActionHelp("Save Codex Tokens", "Enable adaptive micro/surgical/rescue Codex fallback budgets, shorter responses, and token-conscious routing defaults.")}
+          <button class="mode-toggle" id="tokenSafeMode" type="button">${BOOST_SAVE_LABEL}</button>
+          ${sidebarActionHelp(BOOST_SAVE_LABEL, "Enable adaptive micro/surgical/rescue Codex budgets, free helper digests, shorter responses, and token-conscious routing defaults.")}
         </div>
       </div>
-      <div class="detail" id="tokenSafeModeDetail">Save Codex Tokens: Off</div>
+      <div class="detail" id="tokenSafeModeDetail">${BOOST_SAVE_LABEL}: Off</div>
     </details>
     <details class="panel">
       <summary class="section-head">
@@ -5267,6 +5270,9 @@ function sidebarHtml(webview, logoPath) {
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const BOOST_SAVE_LABEL = ${JSON.stringify(BOOST_SAVE_LABEL)};
+    const BOOST_SAVE_ACTIVE_LABEL = ${JSON.stringify(BOOST_SAVE_ACTIVE_LABEL)};
+    const BOOST_SAVE_STOP_LABEL = ${JSON.stringify(BOOST_SAVE_STOP_LABEL)};
     const extensionVersion = document.getElementById("extensionVersion");
     const heroSummary = document.getElementById("heroSummary");
     const heroHealthCard = document.getElementById("heroHealthCard");
@@ -6585,8 +6591,8 @@ function sidebarHtml(webview, logoPath) {
         return "Use Codex CLI: On. No OpenAI API key fallback, compacted workspace, 500-token output cap.";
       }
       return dashboard.tokenSafeMode
-        ? "Save Codex Tokens: On. Free models first; Codex fallback uses adaptive micro/surgical/rescue digests, reduced tools, and short output caps."
-        : "Save Codex Tokens: Off. Uses the current token and context settings.";
+        ? BOOST_SAVE_LABEL + ": On. Codex stays final while free helpers provide adaptive micro/surgical/rescue digests, reduced tools, and short output caps."
+        : BOOST_SAVE_LABEL + ": Off. Uses the current token and context settings.";
     }
 
     function renderModeToggles(dashboard) {
@@ -6596,12 +6602,12 @@ function sidebarHtml(webview, logoPath) {
       updateCommandToggle(
         "quickTokenSafeMode",
         tokenSafeActive,
-        "Saving Codex Tokens",
-        "Save Codex Tokens",
+        BOOST_SAVE_ACTIVE_LABEL,
+        BOOST_SAVE_LABEL,
         "Click to turn off",
-        "Adaptive fallback",
-        "Codex token saving is on. Click to restore normal routing.",
-        "Save Codex tokens with adaptive compact fallback routing"
+        "Faster, compact",
+        "Boost + Save Tokens is on. Click to restore normal routing.",
+        "Boost performance with adaptive compact fallback routing"
       );
       updateCommandToggle(
         "quickFreeOnlyMode",
@@ -6623,7 +6629,7 @@ function sidebarHtml(webview, logoPath) {
         "Signed-in Codex CLI is active. Click to restore normal routing.",
         "Use your signed-in Codex CLI"
       );
-      updatePlainToggle("tokenSafeMode", tokenSafeActive, "Stop Saving Codex Tokens", "Save Codex Tokens");
+      updatePlainToggle("tokenSafeMode", tokenSafeActive, BOOST_SAVE_STOP_LABEL, BOOST_SAVE_LABEL);
       updatePlainToggle("freeOnlyMode", freeOnlyActive, "Turn Off Free Models Only", "Free Models Only");
     }
 
@@ -6990,7 +6996,7 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
   const prompt = (request && typeof request.prompt === "string" ? request.prompt : "").trim();
   const command = request && typeof request.command === "string" ? request.command : "agent";
   if (command === "token-safe") {
-    stream.progress("Turning on Save Codex Tokens...");
+    stream.progress(`Turning on ${BOOST_SAVE_LABEL}...`);
     const result = await enableTokenSafeModeCommand();
     stream.markdown(result.message);
     return { metadata: { command, ok: !!result.ok, cancelled: !!result.cancelled } };
@@ -7727,10 +7733,11 @@ function chatSettingsPayload(config) {
 
 function modeToggleState(config = settings()) {
   const cloudSettings = cloudModelSettingsPayload(config);
+  const cooperativeCodex = isCooperativeCodexBoostMode(config);
   return {
-    tokenSafeMode: isFreeCloudSavingsMode(config),
+    tokenSafeMode: isFreeCloudSavingsMode(config) || cooperativeCodex,
     freeOnlyStrictMode: cloudSettings.freeOnly !== false && cloudSettings.disableNonFreeModels === true,
-    codexCliMode: isCodexCliTokenOptimizedMode(config)
+    codexCliMode: isCodexCliTokenOptimizedMode(config) && !cooperativeCodex
   };
 }
 
@@ -7782,7 +7789,7 @@ async function saveChatSettingsFromWebview(panel, rawSettings) {
 async function enableTokenSafeModeCommand(options = {}) {
   const modes = modeToggleState(settings());
   const result = modes.tokenSafeMode && options.forceEnable !== true
-    ? await applyStandardCloudModeSettings(options.rawSettings, "Save Codex Tokens")
+    ? await applyStandardCloudModeSettings(options.rawSettings, BOOST_SAVE_LABEL)
     : await applyTokenSafeModeSettings(options.rawSettings);
   return finishModeCommand(result, options);
 }
@@ -7819,7 +7826,7 @@ async function syncRunningBackendBoostMode(mode) {
 async function enableMaxTokenSaveModeFromWebview(panel, rawSettings) {
   const modes = modeToggleState(settings());
   const result = modes.tokenSafeMode
-    ? await applyStandardCloudModeSettings(rawSettings, "Save Codex Tokens")
+    ? await applyStandardCloudModeSettings(rawSettings, BOOST_SAVE_LABEL)
     : await applyTokenSafeModeSettings(rawSettings);
   postChatSettings(panel, result.message);
   if (result.ok && sidebarProvider) {
@@ -8596,7 +8603,7 @@ async function applyFreeOnlyModeSettings(rawSettings) {
       ...baseSettings,
       ...(rawSettings && typeof rawSettings === "object" ? rawSettings : {}),
       agentProviderMode: "cloud",
-      cloudRouteMode: "ollama-cloud",
+      cloudRouteMode: "codex-cli",
       codexCliEnabled: false,
       apiKeyModelsEnabled: false,
       freeCloudPresetsEnabled: true,
@@ -8713,15 +8720,15 @@ async function applyTokenSafeModeSettings(rawSettings) {
       : "VS Code user settings";
     if (!(await requestPermission({
       category: "config_edit",
-      description: "Agent Hub wants to save Codex tokens with compact fallback routing.",
+      description: "Agent Hub wants to boost performance with compact fallback routing.",
       resource,
       risk: "medium",
-      detail: "This promotes free models first, then keeps Codex CLI/API-key fallback compact with adaptive micro/surgical/rescue context budgets, reduced tool schemas, fewer agent steps, and shorter output caps."
+      detail: "This keeps Codex as the final model, lets Agent Hub pick free helper models for adaptive compact digests, and applies micro/surgical/rescue context budgets, reduced tool schemas, fewer agent steps, and shorter output caps."
     }))) {
       return {
         ok: false,
         cancelled: true,
-        message: "Save Codex Tokens was cancelled."
+        message: `${BOOST_SAVE_LABEL} was cancelled.`
       };
     }
 
@@ -8749,7 +8756,7 @@ async function applyTokenSafeModeSettings(rawSettings) {
     const configChanged = configPath
       ? await saveCloudModelSettingsToConfig(configPath, {
         ...next.cloudSettings,
-        cloudRouteMode: "ollama-cloud",
+        cloudRouteMode: "codex-cli",
         codexCliEnabled: true,
         apiKeyModelsEnabled: true,
         freeCloudPresetsEnabled: true,
@@ -8757,7 +8764,8 @@ async function applyTokenSafeModeSettings(rawSettings) {
         disableNonFreeModels: false,
         enableLoadBalancing: true,
         maxTokenSaveMode: true,
-        freeCloudSavingsMode: true,
+        freeCloudSavingsMode: false,
+        cooperativeCodexMode: true,
         codexCliTokenOptimized: true,
         agentContextBudgetTokens: CODEX_CLI_CONTEXT_BUDGET
       }, {
@@ -8775,13 +8783,13 @@ async function applyTokenSafeModeSettings(rawSettings) {
     return {
       ok: true,
       cancelled: false,
-      message: `Save Codex Tokens is on: free models first, Codex fallback now uses adaptive compact digests (${CODEX_CLI_MICRO_CONTEXT_BUDGET}-${CODEX_CLI_RESCUE_CONTEXT_BUDGET} context tokens, ${CODEX_CLI_MICRO_AGENT_STEPS}-${CODEX_CLI_RESCUE_AGENT_STEPS} agent steps, ${CODEX_CLI_MICRO_OUTPUT_TOKENS}-${CODEX_CLI_RESCUE_OUTPUT_TOKENS} output tokens).${migrationNote}${configNote}${boostSyncNote}${restartNote}`
+      message: `${BOOST_SAVE_LABEL} is on: Codex stays final while Agent Hub adaptively assigns free helper models to compact context digests (${CODEX_CLI_MICRO_CONTEXT_BUDGET}-${CODEX_CLI_RESCUE_CONTEXT_BUDGET} context tokens, ${CODEX_CLI_MICRO_AGENT_STEPS}-${CODEX_CLI_RESCUE_AGENT_STEPS} agent steps, ${CODEX_CLI_MICRO_OUTPUT_TOKENS}-${CODEX_CLI_RESCUE_OUTPUT_TOKENS} output tokens).${migrationNote}${configNote}${boostSyncNote}${restartNote}`
     };
   } catch (error) {
     return {
       ok: false,
       cancelled: false,
-      message: `Could not enable Save Codex Tokens: ${error.message}`
+      message: `Could not enable ${BOOST_SAVE_LABEL}: ${error.message}`
     };
   }
 }
@@ -8928,6 +8936,7 @@ function normalizeChatSettingsInput(value) {
       disableNonFreeModels: !!input.disableNonFreeModels,
       enableLoadBalancing: !!input.enableLoadBalancing,
       exposeRoutingDetails: !!input.exposeRoutingDetails,
+      cooperativeCodexMode: !!input.cooperativeCodexMode,
       codexModel: cleanSettingString(input.codexModel, DEFAULT_CODEX_MODEL),
       codexCliEnabled: normalizeCloudRouteMode(input.cloudRouteMode || current.cloudRouteMode) === "codex-cli" || !!input.codexCliEnabled,
       codexCliModel: cleanSettingString(input.codexCliModel, DEFAULT_CODEX_CLI_MODEL),
@@ -9051,6 +9060,18 @@ function isFreeCloudSavingsMode(config) {
   return isMaxTokenSaveMode(config) && cloudSettings.cloudRouteMode !== "codex-cli";
 }
 
+function isCooperativeCodexBoostMode(config) {
+  const raw = readResolvedAgentHubConfig(config);
+  const routing = raw && raw.routing && typeof raw.routing === "object" && !Array.isArray(raw.routing)
+    ? raw.routing
+    : {};
+  if (routing.cooperative_codex_mode === true) {
+    return true;
+  }
+  const cloudSettings = cloudModelSettingsPayload(config);
+  return isMaxTokenSaveMode(config) && cloudSettings.cloudRouteMode === "codex-cli" && cloudSettings.cooperativeCodexMode === true;
+}
+
 function isCodexCliTokenOptimizedMode(config) {
   const cloudSettings = cloudModelSettingsPayload(config);
   return isMaxTokenSaveMode(config) && cloudSettings.cloudRouteMode === "codex-cli";
@@ -9079,7 +9100,7 @@ function activeRequestBoostMode(config) {
   if (explicitMode && explicitMode !== "balanced") {
     return explicitMode;
   }
-  if (isFreeCloudSavingsMode(config)) {
+  if (isFreeCloudSavingsMode(config) || isCooperativeCodexBoostMode(config)) {
     return "save_tokens";
   }
   return "";
@@ -9089,6 +9110,7 @@ function agentHubRequestOptions(config, extra = {}) {
   const options = { ...(extra && typeof extra === "object" ? extra : {}) };
   const cloudSettings = cloudModelSettingsPayload(config);
   const boostMode = activeRequestBoostMode(config);
+  const cooperativeCodex = isCooperativeCodexBoostMode(config);
   if (boostMode && typeof options.boost_mode !== "string") {
     options.boost_mode = boostMode;
   }
@@ -9097,7 +9119,29 @@ function agentHubRequestOptions(config, extra = {}) {
     options.disable_non_free_models = true;
     options.routing_mode = "cheapest";
   }
-  if (isFreeCloudSavingsMode(config)) {
+  if (cooperativeCodex) {
+    const plan = tokenSafeRequestPlan(config, extra);
+    if (!options.boost_mode) {
+      options.boost_mode = "save_tokens";
+    }
+    options.cooperative_codex = true;
+    options.cooperative_codex_boost = true;
+    options.max_token_save_mode = true;
+    options.context_mode = "minimal";
+    options.minimal_tool_schema = true;
+    options.reduced_repo_context = true;
+    options.codex_cli_token_optimized = true;
+    options.codex_cli_prompt_strategy = "cooperative_task_context_digest";
+    options.token_safe_profile = plan.profile;
+    options.token_safe_reason = plan.reason;
+    options.token_safe_keywords = plan.keywords;
+    options.codex_cli_prompt_budget_tokens = plan.contextBudgetTokens;
+    options.max_context_tokens = plan.contextBudgetTokens;
+    options.context_budget_tokens = plan.contextBudgetTokens;
+    options.max_output_tokens = plan.outputTokens;
+    options.max_tool_steps = plan.agentSteps;
+    options.agent_max_steps = plan.agentSteps;
+  } else if (isFreeCloudSavingsMode(config)) {
     const plan = tokenSafeRequestPlan(config, extra);
     if (!options.boost_mode) {
       options.boost_mode = "save_tokens";
@@ -9122,7 +9166,7 @@ function agentHubRequestOptions(config, extra = {}) {
     options.max_tool_steps = plan.agentSteps;
     options.agent_max_steps = plan.agentSteps;
   }
-  if (isCodexCliTokenOptimizedMode(config)) {
+  if (!cooperativeCodex && isCodexCliTokenOptimizedMode(config)) {
     const plan = tokenSafeRequestPlan(config, extra);
     options.max_token_save_mode = true;
     options.context_mode = "minimal";
@@ -9272,6 +9316,7 @@ function cloudModelSettingsPayload(config) {
     disableNonFreeModels: false,
     enableLoadBalancing: true,
     exposeRoutingDetails: false,
+    cooperativeCodexMode: false,
     codexModel: DEFAULT_CODEX_MODEL,
     codexCliModel: DEFAULT_CODEX_CLI_MODEL,
     claudeModel: DEFAULT_CLAUDE_MODEL,
@@ -9309,6 +9354,7 @@ function cloudModelSettingsPayload(config) {
       disableNonFreeModels: raw.disable_non_free_models === true,
       enableLoadBalancing: raw.enable_load_balancing !== false,
       exposeRoutingDetails: raw.expose_routing_details === true,
+      cooperativeCodexMode: !!(raw.routing && typeof raw.routing === "object" && raw.routing.cooperative_codex_mode === true),
       codexModel: modelForAgent(raw, "codex", DEFAULT_CODEX_MODEL),
       codexCliModel: modelForAgent(raw, CODEX_CLI_AGENT_NAME, DEFAULT_CODEX_CLI_MODEL),
       claudeModel: modelForAgent(raw, "claude", DEFAULT_CLAUDE_MODEL),
@@ -10929,7 +10975,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
             <div class="settings-actions">
               <button class="secondary" id="codexCliMode" type="button">Use Codex CLI</button>
               <button class="secondary" id="freeOnlyModeSettings" type="button">Free Models Only</button>
-              <button class="secondary" id="maxTokenSave" type="button">Save Codex Tokens</button>
+              <button class="secondary" id="maxTokenSave" type="button">${BOOST_SAVE_LABEL}</button>
               <button id="saveSettings" type="button">Save Settings</button>
               <button class="secondary" id="openSettings" type="button">Open VS Code Settings</button>
             </div>
@@ -10991,6 +11037,9 @@ ${apiKeyFieldsHtml()}
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const BOOST_SAVE_LABEL = ${JSON.stringify(BOOST_SAVE_LABEL)};
+    const BOOST_SAVE_ACTIVE_LABEL = ${JSON.stringify(BOOST_SAVE_ACTIVE_LABEL)};
+    const BOOST_SAVE_STOP_LABEL = ${JSON.stringify(BOOST_SAVE_STOP_LABEL)};
     const initialSettings = ${initialSettingsJson};
     const apiKeyIds = ${apiKeyIdsJson};
     const transcript = document.getElementById("transcript");
@@ -11141,7 +11190,7 @@ ${apiKeyFieldsHtml()}
     function renderChatModeButtons(settings) {
       updateChatModeButton("codexCliMode", !!settings.codexCliMode, "Stop Using Codex CLI", "Use Codex CLI");
       updateChatModeButton("freeOnlyModeSettings", !!settings.freeOnlyStrictMode, "Turn Off Free Models Only", "Free Models Only");
-      updateChatModeButton("maxTokenSave", !!settings.tokenSafeMode, "Stop Saving Codex Tokens", "Save Codex Tokens");
+      updateChatModeButton("maxTokenSave", !!settings.tokenSafeMode, BOOST_SAVE_STOP_LABEL, BOOST_SAVE_LABEL);
       renderChatModeSummary(settings);
     }
 
@@ -11170,8 +11219,8 @@ ${apiKeyFieldsHtml()}
         detail.textContent = "Routes through your local Codex login with compact context and no OpenAI API-key fallback.";
         modeSummary.dataset.mode = "codex-cli";
       } else if (settings.tokenSafeMode) {
-        title.textContent = "Saving Codex Tokens";
-        detail.textContent = "Free models try safe work first; Codex fallback uses adaptive compact digests and short output caps.";
+        title.textContent = BOOST_SAVE_ACTIVE_LABEL;
+        detail.textContent = "Codex stays final while free helper models provide adaptive compact digests and short output caps.";
         modeSummary.dataset.mode = "token-safe";
       } else {
         title.textContent = "Standard Routing";
@@ -11898,7 +11947,7 @@ ${apiKeyFieldsHtml()}
       const active = event.currentTarget.dataset.active === "true";
       markChatModeRunning(event.currentTarget);
       if (active) {
-        settingsMessage.textContent = "Turning off Save Codex Tokens...";
+        settingsMessage.textContent = "Turning off " + BOOST_SAVE_LABEL + "...";
         vscode.postMessage({
           type: "enableMaxTokenSave",
           settings: collectChatSettings()
@@ -11915,7 +11964,7 @@ ${apiKeyFieldsHtml()}
       settingInputs.maxTokens.value = "";
       settingInputs.agentMaxSteps.value = String(${DEFAULT_AGENT_MAX_STEPS});
       settingInputs.groupPlanCandidates.value = "1";
-      settingsMessage.textContent = "Turning on Save Codex Tokens...";
+      settingsMessage.textContent = "Turning on " + BOOST_SAVE_LABEL + "...";
       vscode.postMessage({
         type: "enableMaxTokenSave",
         settings: collectChatSettings()
@@ -12910,6 +12959,12 @@ function clearModeOptimizationFromConfig(data) {
   delete data.repo_context_max_chars;
   if (data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)) {
     delete data.routing.free_cloud_savings_mode;
+    delete data.routing.cooperative_codex_mode;
+    delete data.routing.cooperative_codex_enabled;
+    delete data.routing.cooperative_codex_min_confidence;
+    delete data.routing.cooperative_codex_max_productivity_loss;
+    delete data.routing.cooperative_codex_context_budget_tokens;
+    delete data.routing.cooperative_codex_output_tokens;
     delete data.routing.max_tokens_mode;
     delete data.routing.simple_cloud_exploration_enabled;
     delete data.routing.simple_cloud_exploration_rate;
@@ -12946,12 +13001,18 @@ function applyMaxTokenSaveModeToConfig(data, settings = {}) {
     ...(data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)
       ? data.routing
       : {}),
-    free_cloud_savings_mode: true,
-    free_first: true,
+    free_cloud_savings_mode: false,
+    cooperative_codex_enabled: true,
+    cooperative_codex_mode: true,
+    cooperative_codex_min_confidence: 0.68,
+    cooperative_codex_max_productivity_loss: 0.14,
+    cooperative_codex_context_budget_tokens: 1800,
+    cooperative_codex_output_tokens: 360,
+    free_first: false,
     prefer_available_quota: true,
     max_tokens_mode: "explicit",
-    simple_cloud_exploration_enabled: true,
-    simple_cloud_exploration_rate: 0.35,
+    simple_cloud_exploration_enabled: false,
+    simple_cloud_exploration_rate: 0.0,
     simple_cloud_min_relative_score: 0.82,
     simple_cloud_min_samples: 3,
     codex_cli_token_optimized: true

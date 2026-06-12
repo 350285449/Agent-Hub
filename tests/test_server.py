@@ -198,6 +198,28 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(cached_headers.get("X-Agent-Hub-Cache"), "hit")
             self.assertEqual(refreshed_headers.get("X-Agent-Hub-Cache"), "miss")
 
+    def test_boost_mode_endpoint_updates_context_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["echo"],
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                data = _post_json(f"{base}/v1/boost-mode", {"boost_mode": "save_tokens"})
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(data["mode"], "save_tokens")
+            self.assertEqual(data["context_mode"], "minimal")
+            self.assertEqual(config.boost_mode, "save_tokens")
+            self.assertEqual(config.context_mode, "minimal")
+
     def test_runtime_kernel_endpoint_and_dashboard_report_live_server_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

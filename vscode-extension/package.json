@@ -150,7 +150,7 @@
           },
           {
             "name": "token-safe",
-            "description": "Save Codex tokens with adaptive compact fallback"
+            "description": "Boost performance with adaptive compact fallback"
           },
           {
             "name": "codex-cli",
@@ -230,7 +230,7 @@
       },
       {
         "command": "agentHub.enableTokenSafeMode",
-        "title": "Agent Hub: Save Codex Tokens",
+        "title": "Agent Hub: Boost + Save Tokens",
         "icon": "$(shield)"
       },
       {

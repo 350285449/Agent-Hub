@@ -36,7 +36,7 @@ Start with one button:
 
 - `Connect Claude Code`
 - `Connect Codex`
-- `Boost My Agent`
+- `Boost + Save Tokens`
 
 Then switch Boost Mode from `Balanced` to `Save Tokens`, `Best Code`,
 `Fast Fix`, `Big Refactor`, or `Local First` when the task needs it.

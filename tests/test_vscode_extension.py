@@ -40,7 +40,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertEqual(commands["agentHub.openDashboard"], "Agent Hub: Open Dashboard")
         self.assertEqual(commands["agentHub.runCheckup"], "Agent Hub: Run Checkup")
         self.assertEqual(commands["agentHub.enableFreeOnlyMode"], "Agent Hub: Use Free Models Only")
-        self.assertEqual(commands["agentHub.enableTokenSafeMode"], "Agent Hub: Save Codex Tokens")
+        self.assertEqual(commands["agentHub.enableTokenSafeMode"], "Agent Hub: Boost + Save Tokens")
         self.assertEqual(commands["agentHub.enableCodexCliMode"], "Agent Hub: Use Signed-In Codex CLI")
         self.assertEqual(commands["agentHub.installCodexCli"], "Agent Hub: Install Codex CLI")
         self.assertEqual(commands["agentHub.installOllamaDesktop"], "Agent Hub: Install Ollama Desktop")
@@ -117,6 +117,11 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("wireStaticActionHelpButtons()", sidebar)
         self.assertIn("createActionHelpButton", sidebar)
 
+        self.assertIn("BOOST_SAVE_LABEL", source)
+        self.assertIn("BOOST_SAVE_ACTIVE_LABEL", source)
+        self.assertIn("BOOST_SAVE_STOP_LABEL", source)
+        self.assertIn("sidebarActionHelp(BOOST_SAVE_LABEL", sidebar)
+
         for label in [
             "Start",
             "Send",
@@ -127,7 +132,6 @@ class VscodeExtensionContributionTests(unittest.TestCase):
             "Route Lab",
             "Models",
             "Benchmarks",
-            "Save Codex Tokens",
             "Free Models Only",
             "Use Codex CLI",
             "Install Codex CLI",
@@ -163,8 +167,9 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('class="command-button mode-toggle" id="quickFreeOnlyMode"', sidebar)
         self.assertIn('class="command-button mode-toggle" id="quickCodexCliMode"', sidebar)
         self.assertIn("renderModeToggles(dashboard)", sidebar)
-        self.assertIn("Saving Codex Tokens", sidebar)
-        self.assertIn("Adaptive fallback", sidebar)
+        self.assertIn("Boosted + Saving Tokens", source)
+        self.assertIn("BOOST_SAVE_ACTIVE_LABEL", sidebar)
+        self.assertIn("Faster, compact", sidebar)
         self.assertIn("micro/surgical/rescue", sidebar)
         self.assertIn("Free Models Only", sidebar)
         self.assertIn("Using Codex CLI", sidebar)
@@ -268,7 +273,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('id="connectCodex"', source)
         self.assertIn("Connect Codex", source)
         self.assertIn('id="boostMyAgent"', source)
-        self.assertIn("Boost My Agent", source)
+        self.assertIn("Boost + Save Tokens", source)
         self.assertIn('postFromEvent("copyClaudeCodeConfig"', source)
         self.assertIn('postFromEvent("enableCodexCliMode"', source)
         self.assertIn('postFromEvent("enableTokenSafeMode"', source)
@@ -583,7 +588,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('id="freeOnlyModeSettings"', source)
         self.assertIn('id="quickFreeOnlyMode"', source)
         self.assertIn('id="freeOnlyMode"', source)
-        self.assertIn(">Save Codex Tokens</button>", source)
+        self.assertIn("${BOOST_SAVE_LABEL}</button>", source)
         self.assertIn(">Free Models Only</button>", source)
         self.assertIn('id="quickTokenSafeMode"', source)
         self.assertIn('id="quickCodexCliMode"', source)
@@ -631,7 +636,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("enableMaxTokenSaveModeFromWebview", source)
         self.assertIn("applyTokenSafeModeSettings", source)
         self.assertIn("applyFreeOnlyModeSettings", source)
-        self.assertIn("Save Codex Tokens is on", source)
+        self.assertIn("Boost + Save Tokens is on", source)
         self.assertIn("Free Models Only is on", source)
         self.assertIn("disableNonFreeModels: true", source)
         self.assertIn("disable_non_free_models", source)
@@ -655,12 +660,12 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("freeOnly: false", source)
         self.assertIn("agentHubRequestOptions", source)
         self.assertIn("classification_text", source)
-        self.assertIn("free_cloud_offload", source)
-        self.assertIn("allow_cloud_exploration", source)
+        self.assertIn("cooperative_codex", source)
+        self.assertIn("cooperative_codex_mode", source)
         self.assertIn('data.context_mode = "minimal"', source)
         self.assertIn("data.agent_context_compaction_enabled = true", source)
-        self.assertIn("free_first: true", source)
-        self.assertIn("simple_cloud_exploration_enabled: true", source)
+        self.assertIn("free_first: false", source)
+        self.assertIn("simple_cloud_exploration_enabled: false", source)
         self.assertIn("free: source.free !== false", source)
 
     def test_save_codex_tokens_compacts_codex_fallback_budget(self) -> None:
@@ -677,7 +682,8 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("CODEX_CLI_MICRO_CONTEXT_BUDGET", source)
         self.assertIn("CODEX_CLI_RESCUE_CONTEXT_BUDGET", source)
         self.assertIn('config.update("contextMode", "minimal"', token_safe_source)
-        self.assertIn("freeCloudSavingsMode: true", token_safe_source)
+        self.assertIn("freeCloudSavingsMode: false", token_safe_source)
+        self.assertIn("cooperativeCodexMode: true", token_safe_source)
         self.assertIn("codexCliTokenOptimized: true", token_safe_source)
         self.assertIn('syncRunningBackendBoostMode("save_tokens")', token_safe_source)
         self.assertIn('syncRunningBackendBoostMode("balanced")', token_safe_source)
@@ -691,26 +697,29 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         request_options_start = source.index("function agentHubRequestOptions")
         request_options_end = source.index("function normalizeServerUrl", request_options_start)
         request_options_source = source[request_options_start:request_options_end]
-        free_branch = request_options_source[
-            request_options_source.index("if (isFreeCloudSavingsMode(config))"):
-            request_options_source.index("if (isCodexCliTokenOptimizedMode(config))")
+        cooperative_branch = request_options_source[
+            request_options_source.index("if (cooperativeCodex)"):
+            request_options_source.index("} else if (isFreeCloudSavingsMode(config))")
         ]
         self.assertIn("const boostMode = activeRequestBoostMode(config)", request_options_source)
+        self.assertIn("const cooperativeCodex = isCooperativeCodexBoostMode(config)", request_options_source)
         self.assertIn("options.boost_mode = boostMode", request_options_source)
-        self.assertIn('options.boost_mode = "save_tokens"', free_branch)
-        self.assertIn('options.routing_mode = "cheapest"', free_branch)
-        self.assertIn("options.free_cloud_offload = true", free_branch)
-        self.assertIn("options.context_mode = \"minimal\"", free_branch)
-        self.assertIn("options.minimal_tool_schema = true", free_branch)
-        self.assertIn("options.reduced_repo_context = true", free_branch)
-        self.assertIn("options.codex_cli_token_optimized = true", free_branch)
-        self.assertIn('options.codex_cli_prompt_strategy = "task_context_digest"', free_branch)
-        self.assertIn("options.token_safe_profile = plan.profile", free_branch)
-        self.assertIn("options.token_safe_keywords = plan.keywords", free_branch)
-        self.assertIn("options.max_context_tokens = plan.contextBudgetTokens", free_branch)
-        self.assertIn("options.max_output_tokens = plan.outputTokens", free_branch)
-        self.assertIn("options.max_tool_steps = plan.agentSteps", free_branch)
-        self.assertIn("options.agent_max_steps = plan.agentSteps", free_branch)
+        self.assertIn('options.boost_mode = "save_tokens"', cooperative_branch)
+        self.assertIn("options.cooperative_codex = true", cooperative_branch)
+        self.assertIn("options.cooperative_codex_boost = true", cooperative_branch)
+        self.assertNotIn('options.routing_mode = "cheapest"', cooperative_branch)
+        self.assertNotIn("options.free_cloud_offload = true", cooperative_branch)
+        self.assertIn("options.context_mode = \"minimal\"", cooperative_branch)
+        self.assertIn("options.minimal_tool_schema = true", cooperative_branch)
+        self.assertIn("options.reduced_repo_context = true", cooperative_branch)
+        self.assertIn("options.codex_cli_token_optimized = true", cooperative_branch)
+        self.assertIn('options.codex_cli_prompt_strategy = "cooperative_task_context_digest"', cooperative_branch)
+        self.assertIn("options.token_safe_profile = plan.profile", cooperative_branch)
+        self.assertIn("options.token_safe_keywords = plan.keywords", cooperative_branch)
+        self.assertIn("options.max_context_tokens = plan.contextBudgetTokens", cooperative_branch)
+        self.assertIn("options.max_output_tokens = plan.outputTokens", cooperative_branch)
+        self.assertIn("options.max_tool_steps = plan.agentSteps", cooperative_branch)
+        self.assertIn("options.agent_max_steps = plan.agentSteps", cooperative_branch)
 
         config_start = source.index("function applyMaxTokenSaveModeToConfig")
         config_end = source.index("function applyCodexCliModeToConfig", config_start)
@@ -718,7 +727,11 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn('data.boost_mode = "save_tokens"', config_source)
         self.assertIn('data.context_mode = "minimal"', config_source)
         self.assertIn("data.max_context_tokens = budget", config_source)
-        self.assertIn("free_cloud_savings_mode: true", config_source)
+        self.assertIn("free_cloud_savings_mode: false", config_source)
+        self.assertIn("cooperative_codex_mode: true", config_source)
+        self.assertIn("cooperative_codex_enabled: true", config_source)
+        self.assertIn("free_first: false", config_source)
+        self.assertIn("simple_cloud_exploration_enabled: false", config_source)
         self.assertIn('max_tokens_mode: "explicit"', config_source)
         self.assertIn("minimal_tool_schema: true", config_source)
         self.assertIn("codex_cli_prompt_optimized: true", config_source)
