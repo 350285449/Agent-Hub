@@ -1,5 +1,10 @@
 # Changelog
 
+## 9.6.9
+
+- Syncs extension and backend release metadata for the next package.
+- Adds install verification, packaging checks, and command-runner hardening.
+
 ## 9.6.8
 
 - Moves Boost into a dedicated optimizer pipeline with shared OptimizationPlan and trace output.

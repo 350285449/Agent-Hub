@@ -50,6 +50,7 @@ def request_from_payload(payload: dict[str, Any], api_shape: str = "native") -> 
 
 
 def request_from_native(payload: dict[str, Any]) -> HubRequest:
+    payload = sanitize_request_payload(payload)
     session_id = _session_id(payload)
     messages = _message_list(payload.get("messages"))
     task = payload.get("task") or payload.get("input") or payload.get("prompt") or payload.get("message")
@@ -75,6 +76,7 @@ def request_from_native(payload: dict[str, Any]) -> HubRequest:
 
 
 def request_from_openai_chat(payload: dict[str, Any]) -> HubRequest:
+    payload = sanitize_request_payload(payload)
     metadata = enrich_metadata_with_context(payload, _dict_value(payload.get("metadata")))
     hub_options = _dict_value(payload.get("agent_hub"))
     model_route, model_agent = _routing_from_model(payload.get("model"))
@@ -94,6 +96,7 @@ def request_from_openai_chat(payload: dict[str, Any]) -> HubRequest:
 
 
 def request_from_openai_responses(payload: dict[str, Any]) -> HubRequest:
+    payload = sanitize_request_payload(payload)
     metadata = enrich_metadata_with_context(payload, _dict_value(payload.get("metadata")))
     hub_options = _dict_value(payload.get("agent_hub"))
     model_route, model_agent = _routing_from_model(payload.get("model"))
@@ -120,6 +123,7 @@ def request_from_openai_responses(payload: dict[str, Any]) -> HubRequest:
 
 
 def request_from_anthropic_messages(payload: dict[str, Any]) -> HubRequest:
+    payload = sanitize_request_payload(payload)
     metadata = enrich_metadata_with_context(payload, _dict_value(payload.get("metadata")))
     hub_options = _dict_value(payload.get("agent_hub"))
     model_route, model_agent = _routing_from_model(payload.get("model"))
@@ -682,6 +686,25 @@ def _session_id(*sources: dict[str, Any]) -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return uuid.uuid4().hex
+
+
+def sanitize_request_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Strip client-supplied execution plans unless this is an internal handoff."""
+
+    if not isinstance(payload, dict):
+        return {}
+    cleaned = dict(payload)
+    hub = dict(cleaned.get("agent_hub")) if isinstance(cleaned.get("agent_hub"), dict) else {}
+    trusted = hub.get("trusted_internal") is True
+    if not trusted:
+        for key in ("boost_plan", "optimization_plan"):
+            cleaned.pop(key, None)
+            hub.pop(key, None)
+        if hub:
+            cleaned["agent_hub"] = hub
+        elif "agent_hub" in cleaned:
+            cleaned.pop("agent_hub", None)
+    return cleaned
 
 
 def _dict_value(value: Any) -> dict[str, Any]:

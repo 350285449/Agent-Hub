@@ -51,6 +51,7 @@ class OptimizationPlan:
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
     validation_gates: list[dict[str, Any]] = field(default_factory=list)
     explanation: list[str] = field(default_factory=list)
+    boost_limits: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.boost_mode:
@@ -96,6 +97,7 @@ class OptimizationPlan:
             "retry_policy": self.retry_policy.to_dict(),
             "validation_gates": list(self.validation_gates),
             "explanation": list(self.explanation),
+            "boost_limits": dict(self.boost_limits),
         }
 
     def task_policy_dict(self) -> dict[str, str]:
@@ -427,6 +429,12 @@ def build_optimization_plan(
         preferred_models=_preferred_model_policy(task_policy["model_policy"], mode),
         retry_policy=retry_policy_for(boost_mode=mode, task_type=optimizer_task, retry_budget=retry_budget),
         validation_gates=[gate.to_dict() for gate in validation_gates_for_task(optimizer_task)],
+        boost_limits=_boost_limits(
+            mode=mode,
+            allow_premium=mode != "save_tokens",
+            max_context_chars=repo_max_chars,
+            max_retries=retry_budget,
+        ),
     )
 
 
@@ -448,15 +456,19 @@ def optimization_plan_from_dict(data: dict[str, Any] | None) -> OptimizationPlan
     ]
     retry_policy = RetryPolicy.from_dict(data.get("retry_policy") if isinstance(data.get("retry_policy"), dict) else None)
     token_budget = TokenBudget.from_dict(data.get("token_budget") if isinstance(data.get("token_budget"), dict) else None)
+    limits = _boost_limits_from_dict(
+        data.get("boost_limits") if isinstance(data.get("boost_limits"), dict) else None,
+        base=base,
+    )
     repo_max_files, repo_max_chars, full_files, compressed_files, map_files = _normalize_plan_limits(
         repo_max_files=_int(data.get("repo_max_files"), base.repo_max_files),
-        repo_max_chars=_int(data.get("repo_max_chars"), base.repo_max_chars),
+        repo_max_chars=min(_int(data.get("repo_max_chars"), base.repo_max_chars), _int(limits.get("max_context_chars"), base.repo_max_chars)),
         full_files=_int(data.get("full_files"), base.full_files),
         compressed_files=_int(data.get("compressed_files"), base.compressed_files),
         map_files=_int(data.get("map_files"), base.map_files),
     )
     target_context_ratio = round(_clamp(_float(data.get("target_context_ratio"), token_budget.target_context_ratio), 0.22, 0.94), 3)
-    max_context_tokens = max(1, _int(token_budget.max_context_tokens, repo_max_chars // 4))
+    max_context_tokens = max(1, min(_int(token_budget.max_context_tokens, repo_max_chars // 4), repo_max_chars // 4))
     target_context_tokens = token_budget.target_context_tokens
     if target_context_tokens is None or target_context_tokens <= 0 or target_context_tokens > max_context_tokens:
         target_context_tokens = _target_context_tokens(max_context_tokens, target_context_ratio)
@@ -481,9 +493,9 @@ def optimization_plan_from_dict(data: dict[str, Any] | None) -> OptimizationPlan
         full_files=full_files,
         compressed_files=compressed_files,
         map_files=map_files,
-        retry_budget=max(0, _int(data.get("retry_budget"), retry_policy.max_retries)),
+        retry_budget=min(max(0, _int(data.get("retry_budget"), retry_policy.max_retries)), _int(limits.get("max_retries"), retry_policy.max_retries)),
         prefer_local=bool(data.get("prefer_local", base.prefer_local)),
-        prefer_premium=bool(data.get("prefer_premium", base.prefer_premium)),
+        prefer_premium=bool(data.get("prefer_premium", base.prefer_premium)) and bool(limits.get("allow_premium", base.prefer_premium)),
         compression_aggression=round(_clamp(_float(data.get("compression_aggression"), base.compression_aggression), 0.18, 0.92), 3),
         target_context_ratio=target_context_ratio,
         quality_weight=round(_clamp(_float(data.get("quality_weight"), 1.0), 0.5, 1.7), 3),
@@ -504,15 +516,18 @@ def optimization_plan_from_dict(data: dict[str, Any] | None) -> OptimizationPlan
         context_level_counts=dict(data.get("context_level_counts") or {}),
         token_budget=token_budget,
         preferred_models=[str(item) for item in data.get("preferred_models", []) if isinstance(item, str)],
-        retry_policy=retry_policy,
+        retry_policy=replace(retry_policy, max_retries=min(retry_policy.max_retries, _int(limits.get("max_retries"), retry_policy.max_retries))),
         validation_gates=list(data.get("validation_gates") or []),
         explanation=[str(item) for item in data.get("explanation", data.get("reasons", [])) if isinstance(item, str)],
+        boost_limits=limits,
     )
 
 
 def optimization_plan_from_request(request: Any) -> OptimizationPlan | None:
     raw = getattr(request, "raw", {}) if request is not None else {}
     hub = raw.get("agent_hub") if isinstance(raw, dict) and isinstance(raw.get("agent_hub"), dict) else {}
+    if hub.get("trusted_internal") is not True:
+        return None
     for key in ("optimization_plan", "boost_plan"):
         plan = optimization_plan_from_dict(hub.get(key) if isinstance(hub.get(key), dict) else None)
         if plan is not None:
@@ -664,3 +679,42 @@ def _float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _boost_limits(
+    *,
+    mode: str,
+    allow_premium: bool,
+    max_context_chars: int,
+    max_retries: int,
+    max_estimated_cost_usd: float | None = None,
+) -> dict[str, Any]:
+    if max_estimated_cost_usd is None:
+        max_estimated_cost_usd = {
+            "save_tokens": 0.01,
+            "balanced": 0.05,
+            "best_code": 0.25,
+            "turbo_boost": 0.5,
+            "big_refactor": 0.5,
+        }.get(mode)
+    return {
+        "allow_premium": bool(allow_premium),
+        "max_context_chars": max(1_000, int(max_context_chars or 1_000)),
+        "max_retries": max(0, int(max_retries or 0)),
+        "max_estimated_cost_usd": max_estimated_cost_usd,
+    }
+
+
+def _boost_limits_from_dict(data: dict[str, Any] | None, *, base: Any) -> dict[str, Any]:
+    raw = data if isinstance(data, dict) else {}
+    max_cost = raw.get("max_estimated_cost_usd")
+    try:
+        max_cost_value = None if max_cost is None else max(0.0, float(max_cost))
+    except (TypeError, ValueError):
+        max_cost_value = None
+    return {
+        "allow_premium": bool(raw.get("allow_premium", getattr(base, "prefer_premium", True))),
+        "max_context_chars": max(1_000, _int(raw.get("max_context_chars"), getattr(base, "repo_max_chars", 12_000))),
+        "max_retries": max(0, _int(raw.get("max_retries"), getattr(base, "retry_budget", 2))),
+        "max_estimated_cost_usd": max_cost_value,
+    }

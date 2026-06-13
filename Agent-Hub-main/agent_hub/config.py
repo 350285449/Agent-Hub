@@ -281,13 +281,20 @@ class HubConfig:
     def boost_mode_options(self) -> list[dict[str, str]]:
         """Return the available Boost Modes for compact dashboard selectors."""
 
+        return self.boost_mode_options_for_advanced(False)
+
+    def boost_mode_options_for_advanced(self, advanced: bool = False) -> list[dict[str, str]]:
+        """Return simple solo-dev modes unless advanced modes are requested."""
+
         return [
             {
                 "mode": mode,
                 "label": policy.label,
                 "behavior": policy.behavior,
+                "advanced": str(not policy.simple_mode).lower(),
             }
             for mode, policy in BOOST_MODES.items()
+            if advanced or policy.simple_mode
         ]
 
     def set_boost_mode(self, value: Any) -> str:

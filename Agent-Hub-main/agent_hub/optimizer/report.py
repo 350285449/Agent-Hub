@@ -25,6 +25,9 @@ class OptimizationTrace:
     actual_cost_saved_usd: float | None = None
     token_accounting_source: str = "estimated"
     plan_diff: dict[str, Any] | None = None
+    planned_algorithms: list[str] | None = None
+    executed_algorithms: list[str] | None = None
+    disabled_by_guardrail: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -50,6 +53,9 @@ class OptimizationTrace:
         }
         if self.plan_diff:
             data["plan_diff"] = dict(self.plan_diff)
+        data["planned_algorithms"] = list(self.planned_algorithms or [])
+        data["executed_algorithms"] = list(self.executed_algorithms or [])
+        data["disabled_by_guardrail"] = list(self.disabled_by_guardrail or [])
         return data
 
 
@@ -79,6 +85,7 @@ def trace_from_plan(
     estimated_cost_saved_usd: float | None = None,
     actual_cost_saved_usd: float | None = None,
     plan_diff: dict[str, Any] | None = None,
+    disabled_by_guardrail: list[dict[str, Any]] | None = None,
 ) -> OptimizationTrace:
     if isinstance(plan, dict):
         return trace_from_mapping(
@@ -126,6 +133,9 @@ def trace_from_plan(
         actual_cost_saved_usd=_optional_float(actual_cost_saved_usd),
         token_accounting_source="actual_provider_usage" if actual_input is not None else "estimated",
         plan_diff=plan_diff,
+        planned_algorithms=[str(item) for item in getattr(plan, "algorithms", []) if isinstance(item, str)],
+        executed_algorithms=_executed_algorithms(usage),
+        disabled_by_guardrail=list(disabled_by_guardrail or []),
     )
 
 
@@ -140,6 +150,7 @@ def trace_from_mapping(
     estimated_cost_saved_usd: float | None = None,
     actual_cost_saved_usd: float | None = None,
     plan_diff: dict[str, Any] | None = None,
+    disabled_by_guardrail: list[dict[str, Any]] | None = None,
 ) -> OptimizationTrace:
     data = plan if isinstance(plan, dict) else {}
     usage = context_usage or {}
@@ -186,6 +197,9 @@ def trace_from_mapping(
         actual_cost_saved_usd=_optional_float(actual_cost_saved_usd),
         token_accounting_source="actual_provider_usage" if actual_input is not None else "estimated",
         plan_diff=plan_diff,
+        planned_algorithms=[str(item) for item in data.get("algorithms", []) if isinstance(item, str)],
+        executed_algorithms=_executed_algorithms(usage),
+        disabled_by_guardrail=list(disabled_by_guardrail or data.get("disabled_by_guardrail") or []),
     )
 
 
@@ -228,6 +242,29 @@ def _usage_input_tokens(usage: dict[str, Any]) -> int | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _executed_algorithms(usage: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for item in usage.get("warnings", []) if isinstance(usage.get("warnings"), list) else []:
+        if isinstance(item, str) and item.strip():
+            values.append(item.strip())
+    if usage.get("context_cache_hit"):
+        values.append("cached_context_replay")
+    if usage.get("context_reduced"):
+        values.append("context_safety_cap")
+    return _dedupe(values)
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _optional_float(value: Any) -> float | None:

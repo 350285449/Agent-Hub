@@ -50,6 +50,15 @@ const MAX_TOKEN_SAVE_OUTPUT_TOKENS = 800;
 const BOOST_SAVE_LABEL = "Boost + Save Tokens";
 const BOOST_SAVE_ACTIVE_LABEL = "Boosted + Saving Tokens";
 const BOOST_SAVE_STOP_LABEL = "Turn Off Boost";
+const BOOST_MODE_OPTIONS = [
+  { mode: "save_tokens", label: "Save Tokens", meta: "Lowest spend", simple: true },
+  { mode: "balanced", label: "Balanced", meta: "Everyday work", simple: true },
+  { mode: "best_code", label: "Best Result", meta: "More quality", simple: true },
+  { mode: "turbo_boost", label: "Turbo Boost", meta: "Adaptive max", simple: false },
+  { mode: "big_refactor", label: "Big Refactor", meta: "Large changes", simple: false },
+  { mode: "fast_fix", label: "Fast Fix", meta: "Small bugs", simple: false },
+  { mode: "local_first", label: "Local First", meta: "Private route", simple: false }
+];
 const CODEX_CLI_MICRO_CONTEXT_BUDGET = 1200;
 const CODEX_CLI_CONTEXT_BUDGET = 2400;
 const CODEX_CLI_RESCUE_CONTEXT_BUDGET = 3600;
@@ -686,6 +695,11 @@ class AgentHubSidebarProvider {
       await this.refresh();
       return;
     }
+    if (message.type === "setBoostMode") {
+      await setBoostModeCommand(message.mode, { refreshSidebar: false });
+      await this.refresh();
+      return;
+    }
     if (message.type === "enableFreeOnlyMode") {
       await enableFreeOnlyModeCommand({ refreshSidebar: false });
       await this.refresh();
@@ -946,6 +960,9 @@ function dashboardModeLabel(dashboard = {}) {
   if (dashboard.tokenSafeMode) {
     return BOOST_SAVE_LABEL;
   }
+  if (dashboard.boostMode && dashboard.boostMode !== "balanced") {
+    return `Boost: ${dashboard.boostModeLabel || boostModeLabel(dashboard.boostMode)}`;
+  }
   return "";
 }
 
@@ -959,6 +976,8 @@ async function sidebarDashboardState() {
     agentProviderMode: config.agentProviderMode,
     agentMode: config.agentMode,
     approvalMode: config.approvalMode,
+    boostMode: modes.boostMode,
+    boostModeLabel: modes.boostModeLabel,
     tokenSafeMode: modes.tokenSafeMode,
     freeOnlyStrictMode: modes.freeOnlyStrictMode,
     codexCliMode: modes.codexCliMode,
@@ -2732,6 +2751,17 @@ function sidebarActionHelp(label, help) {
   return `<button class="action-help" type="button" aria-label="${safeLabel} help: ${safeHelp}" title="${safeHelp}" data-help="${safeHelp}">i</button>`;
 }
 
+function boostModeButtons(simple) {
+  return BOOST_MODE_OPTIONS
+    .filter((option) => option.simple === simple)
+    .map((option) => `
+      <button class="boost-mode-option" type="button" data-boost-mode="${escapeHtml(option.mode)}" title="Set Boost Mode to ${escapeHtml(option.label)}">
+        <span class="boost-mode-main">${escapeHtml(option.label)}</span>
+        <span class="boost-mode-meta">${escapeHtml(option.meta)}</span>
+      </button>`)
+    .join("");
+}
+
 function sidebarHtml(webview, logoPath) {
   const nonce = getNonce();
   const logoSrc = webview.asWebviewUri(logoPath);
@@ -4208,6 +4238,7 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .mode-toggle[data-active="true"],
+    .boost-mode-option[data-active="true"],
     .trust-preset[data-active="true"] {
       color: #ffffff;
       border-color: color-mix(in srgb, var(--ok) 58%, var(--subtle-border));
@@ -4218,6 +4249,49 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .command-button.mode-toggle[data-active="true"] .button-meta {
+      color: color-mix(in srgb, #ffffff 78%, var(--ok));
+    }
+
+    .boost-mode-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .boost-mode-grid.advanced {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .boost-mode-option {
+      min-height: 48px;
+      display: grid;
+      align-content: center;
+      gap: 2px;
+      text-align: left;
+      padding: 8px;
+    }
+
+    .boost-mode-main,
+    .boost-mode-meta {
+      display: block;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .boost-mode-main {
+      font-weight: 700;
+      color: inherit;
+    }
+
+    .boost-mode-meta {
+      color: var(--muted-fg);
+      font-size: 11px;
+    }
+
+    .boost-mode-option[data-active="true"] .boost-mode-meta {
       color: color-mix(in srgb, #ffffff 78%, var(--ok));
     }
 
@@ -4871,16 +4945,19 @@ function sidebarHtml(webview, logoPath) {
         <span>Base URL: ${escapeHtml(settings().serverUrl.replace(/\/+$/, ""))}/v1</span>
         <span>Model: agent-hub-coding</span>
       </div>
+      <div class="boost-mode-grid" id="boostModeGrid">
+        ${boostModeButtons(true)}
+      </div>
       <div class="actions tool-actions">
         <button class="primary" id="connectClaudeCode" type="button">Connect Claude Code</button>
         <button id="connectCodex" type="button">Connect Codex</button>
-        <button class="primary" id="boostMyAgent" type="button">${BOOST_SAVE_LABEL}</button>
         <button class="primary" id="autoSetupCline" type="button">Auto-Configure Cline</button>
         <button id="setupCodingTool" type="button">Copy + Test Tool</button>
         <button id="copyCodingToolConfigQuick" type="button">Copy Values</button>
         <button id="testCodingToolConnectionQuick" type="button">Test</button>
         <button id="showCodingToolSetupQuick" type="button">Guide</button>
       </div>
+      <div class="detail" id="boostModeInstructions">Choose a Boost Mode, then send work through Chat, Code, Cline, Claude Code, or Codex using model agent-hub-coding.</div>
     </section>
     <details class="panel">
       <summary class="section-head">
@@ -4995,6 +5072,9 @@ function sidebarHtml(webview, logoPath) {
             </button>
             ${sidebarActionHelp("Install Codex CLI", "Install or sign in to the Codex CLI runtime used by Agent Hub.")}
           </div>
+        </div>
+        <div class="boost-mode-grid advanced" id="advancedBoostModeGrid">
+          ${boostModeButtons(false)}
         </div>
       </section>
     <section class="model-control-plane">
@@ -5283,6 +5363,7 @@ function sidebarHtml(webview, logoPath) {
     const heroReadiness = document.getElementById("heroReadiness");
     const heroCostMode = document.getElementById("heroCostMode");
     const heroCostPill = document.getElementById("heroCostPill");
+    const boostModeInstructions = document.getElementById("boostModeInstructions");
     const setupProgressText = document.getElementById("setupProgressText");
     const setupProgressFill = document.getElementById("setupProgressFill");
     const nextStepTitle = document.getElementById("nextStepTitle");
@@ -6596,9 +6677,17 @@ function sidebarHtml(webview, logoPath) {
     }
 
     function renderModeToggles(dashboard) {
+      const boostMode = dashboard.boostMode || "balanced";
       const tokenSafeActive = !!dashboard.tokenSafeMode;
       const freeOnlyActive = !!dashboard.freeOnlyStrictMode;
       const codexCliActive = !!dashboard.codexCliMode;
+      for (const button of document.querySelectorAll(".boost-mode-option")) {
+        const active = button.getAttribute("data-boost-mode") === boostMode;
+        button.dataset.active = active ? "true" : "false";
+      }
+      if (boostModeInstructions) {
+        boostModeInstructions.textContent = boostModeInstructionText(boostMode);
+      }
       updateCommandToggle(
         "quickTokenSafeMode",
         tokenSafeActive,
@@ -6631,6 +6720,28 @@ function sidebarHtml(webview, logoPath) {
       );
       updatePlainToggle("tokenSafeMode", tokenSafeActive, BOOST_SAVE_STOP_LABEL, BOOST_SAVE_LABEL);
       updatePlainToggle("freeOnlyMode", freeOnlyActive, "Turn Off Free Models Only", "Free Models Only");
+    }
+
+    function boostModeInstructionText(mode) {
+      if (mode === "save_tokens") {
+        return "Save Tokens: premium routes are guarded, context is compacted, and free helpers are preferred when they fit.";
+      }
+      if (mode === "best_code") {
+        return "Best Result: Agent Hub can use stronger models, deeper context, and stricter validation for important work.";
+      }
+      if (mode === "turbo_boost") {
+        return "Turbo Boost: advanced adaptive routing with larger evidence and confidence-gated escalation.";
+      }
+      if (mode === "big_refactor") {
+        return "Big Refactor: advanced broad-map context and safer retries for larger codebase changes.";
+      }
+      if (mode === "fast_fix") {
+        return "Fast Fix: advanced small-bug routing with tight context and fast validation.";
+      }
+      if (mode === "local_first") {
+        return "Local First: advanced private/local routing before cloud candidates.";
+      }
+      return "Balanced: the default solo-dev mode for everyday coding with moderate context and cost controls.";
     }
 
     function updateCommandToggle(id, active, activeMain, inactiveMain, activeMeta, inactiveMeta, activeTitle, inactiveTitle) {
@@ -6929,7 +7040,6 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("openSettings").addEventListener("click", (event) => postFromEvent("openSettings", event));
     document.getElementById("connectClaudeCode").addEventListener("click", (event) => postFromEvent("copyClaudeCodeConfig", event));
     document.getElementById("connectCodex").addEventListener("click", (event) => postFromEvent("enableCodexCliMode", event));
-    document.getElementById("boostMyAgent").addEventListener("click", (event) => postFromEvent("enableTokenSafeMode", event));
     document.getElementById("autoSetupCline").addEventListener("click", (event) => postFromEvent("autoSetupCline", event));
     document.getElementById("setupCodingTool").addEventListener("click", (event) => postFromEvent("setupCodingTool", event));
     document.getElementById("copyCodingToolConfigQuick").addEventListener("click", (event) => postFromEvent("copyClineConfig", event));
@@ -6947,6 +7057,15 @@ function sidebarHtml(webview, logoPath) {
         vscode.postMessage({
           type: "applyTrustPreset",
           preset: button.getAttribute("data-preset") || "safe"
+        });
+      });
+    }
+    for (const button of document.querySelectorAll(".boost-mode-option")) {
+      button.addEventListener("click", (event) => {
+        markButtonRunning(event.currentTarget);
+        vscode.postMessage({
+          type: "setBoostMode",
+          mode: button.getAttribute("data-boost-mode") || "balanced"
         });
       });
     }
@@ -7734,7 +7853,10 @@ function chatSettingsPayload(config) {
 function modeToggleState(config = settings()) {
   const cloudSettings = cloudModelSettingsPayload(config);
   const cooperativeCodex = isCooperativeCodexBoostMode(config);
+  const boostMode = activeRequestBoostMode(config) || "balanced";
   return {
+    boostMode,
+    boostModeLabel: boostModeLabel(boostMode),
     tokenSafeMode: isFreeCloudSavingsMode(config) || cooperativeCodex,
     freeOnlyStrictMode: cloudSettings.freeOnly !== false && cloudSettings.disableNonFreeModels === true,
     codexCliMode: isCodexCliTokenOptimizedMode(config) && !cooperativeCodex
@@ -7791,6 +7913,19 @@ async function enableTokenSafeModeCommand(options = {}) {
   const result = modes.tokenSafeMode && options.forceEnable !== true
     ? await applyStandardCloudModeSettings(options.rawSettings, BOOST_SAVE_LABEL)
     : await applyTokenSafeModeSettings(options.rawSettings);
+  return finishModeCommand(result, options);
+}
+
+async function setBoostModeCommand(mode, options = {}) {
+  const boostMode = normalizeBoostMode(mode);
+  if (!boostMode) {
+    return finishModeCommand({ ok: false, message: "Unknown Boost Mode." }, options);
+  }
+  if (boostMode === "save_tokens") {
+    const result = await applyTokenSafeModeSettings(options.rawSettings);
+    return finishModeCommand(result, options);
+  }
+  const result = await applyBoostModeSettings(boostMode, options.rawSettings);
   return finishModeCommand(result, options);
 }
 
@@ -8794,6 +8929,68 @@ async function applyTokenSafeModeSettings(rawSettings) {
   }
 }
 
+async function applyBoostModeSettings(mode, rawSettings) {
+  const boostMode = normalizeBoostMode(mode);
+  const label = boostModeLabel(boostMode);
+  if (!boostMode) {
+    return { ok: false, cancelled: false, message: "Unknown Boost Mode." };
+  }
+  try {
+    const baseSettings = chatSettingsPayload(settings());
+    const next = normalizeChatSettingsInput({
+      ...baseSettings,
+      ...(rawSettings && typeof rawSettings === "object" ? rawSettings : {})
+    });
+    const workspace = workspaceRoot();
+    const resource = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
+      : "running backend";
+    if (!(await requestPermission({
+      category: "config_edit",
+      description: `Agent Hub wants to set Boost Mode to ${label}.`,
+      resource,
+      risk: "medium",
+      detail: "This changes the server-side boost policy used for routing, context budget, retry budget, model preference, and guardrails. Advanced modes stay hidden unless you choose them from the Advanced section."
+    }))) {
+      return {
+        ok: false,
+        cancelled: true,
+        message: `Boost Mode was not changed.`
+      };
+    }
+
+    let configChanged = false;
+    if (workspace) {
+      const configPath = resolveConfigPath(next.workspaceSettings.configPath, workspace);
+      configChanged = await updateBoostModeConfigFile(configPath, next, boostMode);
+    }
+    const contextMode = boostModeContextMode(boostMode);
+    const target = vscode.ConfigurationTarget.Global;
+    const config = vscode.workspace.getConfiguration("agentHub");
+    await config.update("contextMode", contextMode, target);
+    if (workspace) {
+      await clearWorkspaceAgentHubSettings(config, ["contextMode"]);
+    }
+    const boostSynced = await syncRunningBackendBoostMode(boostMode);
+    const restartNote = serverProcess || (await isServerOnline())
+      ? " Restart Agent Hub if an already-running provider route should reload config defaults."
+      : "";
+    const configNote = configChanged ? " Updated Agent Hub config." : "";
+    const boostSyncNote = boostSynced ? " Synced Boost Mode to the running backend." : "";
+    return {
+      ok: true,
+      cancelled: false,
+      message: `Boost Mode set to ${label}.${configNote}${boostSyncNote}${restartNote}`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      cancelled: false,
+      message: `Could not set Boost Mode to ${label}: ${error.message}`
+    };
+  }
+}
+
 async function applyStandardCloudModeSettings(rawSettings, modeName = "mode") {
   try {
     const baseSettings = chatSettingsPayload(settings());
@@ -9185,6 +9382,26 @@ function agentHubRequestOptions(config, extra = {}) {
     options.agent_max_steps = plan.agentSteps;
   }
   return options;
+}
+
+function boostModeOption(mode) {
+  const normalized = normalizeBoostMode(mode) || "balanced";
+  return BOOST_MODE_OPTIONS.find((option) => option.mode === normalized) || BOOST_MODE_OPTIONS.find((option) => option.mode === "balanced");
+}
+
+function boostModeLabel(mode) {
+  return boostModeOption(mode).label;
+}
+
+function boostModeContextMode(mode) {
+  const normalized = normalizeBoostMode(mode);
+  if (["best_code", "turbo_boost", "big_refactor"].includes(normalized)) {
+    return "deep";
+  }
+  if (["save_tokens", "fast_fix"].includes(normalized)) {
+    return "minimal";
+  }
+  return "balanced";
 }
 
 function tokenSafeCodexBudget(config) {
@@ -12979,6 +13196,49 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
   return true;
 }
 
+async function updateBoostModeConfigFile(configPath, settingsInput, boostMode) {
+  const workspaceDir = generatedConfigWorkspaceDir(settingsInput.workspaceSettings.configPath, workspaceRoot());
+  const storageDir = generatedConfigStorageDir(settingsInput.workspaceSettings.configPath, workspaceRoot());
+  const existingText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
+  let data;
+  let backedUpExisting = false;
+  if (existingText) {
+    try {
+      data = parseJsonConfigText(existingText).value;
+    } catch (_error) {
+      const backupPath = backupConfigFile(configPath);
+      backedUpExisting = true;
+      output.appendLine(`Backed up unreadable Agent Hub config to ${backupPath}.`);
+    }
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    const sources = await detectLocalModelSources();
+    data = localConfigForLocalModels(sources.length ? sources : fallbackLocalModelSources(), {
+      cloudRouteMode: settingsInput.cloudSettings.cloudRouteMode,
+      cloudSettings: settingsInput.cloudSettings,
+      workspaceDir,
+      storageDir
+    });
+  }
+  if (workspaceDir) {
+    data.workspace_dir = workspaceDir;
+  }
+  applyGeneratedStoragePaths(data, storageDir, workspaceDir);
+  applyBoostModeToConfig(data, boostMode);
+  const nextText = `${JSON.stringify(data, null, 2)}\n`;
+  if (existingText && stableConfigText(existingText) === stableConfigText(nextText)) {
+    return false;
+  }
+  if (existingText && !backedUpExisting) {
+    const backupPath = backupConfigFile(configPath);
+    output.appendLine(`Backed up Agent Hub config to ${backupPath}.`);
+  }
+  ensureConfigDirectory(configPath);
+  fs.writeFileSync(configPath, nextText, "utf8");
+  output.appendLine(`Configured Boost Mode: ${boostModeLabel(boostMode)}.`);
+  return true;
+}
+
 function clearModeOptimizationFromConfig(data) {
   data.boost_mode = "balanced";
   data.agent_context_budget_tokens = DEFAULT_AGENT_CONTEXT_BUDGET;
@@ -13056,6 +13316,35 @@ function applyMaxTokenSaveModeToConfig(data, settings = {}) {
     max_context_tokens: budget,
     codex_cli_prompt_optimized: true,
     codex_cli_prompt_budget_tokens: budget
+  };
+}
+
+function applyBoostModeToConfig(data, mode) {
+  const boostMode = normalizeBoostMode(mode) || "balanced";
+  clearModeOptimizationFromConfig(data);
+  data.boost_mode = boostMode;
+  const deepModes = new Set(["best_code", "turbo_boost", "big_refactor"]);
+  const minimalModes = new Set(["save_tokens", "fast_fix"]);
+  data.context_mode = deepModes.has(boostMode)
+    ? "deep"
+    : minimalModes.has(boostMode)
+      ? "minimal"
+      : "balanced";
+  data.agent_context_compaction_enabled = true;
+  data.free_only = false;
+  data.disable_non_free_models = false;
+  data.enable_load_balancing = true;
+  data.routing = {
+    ...(data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)
+      ? data.routing
+      : {}),
+    token_saver_enabled: boostMode === "save_tokens",
+    cooperative_codex_enabled: boostMode === "save_tokens",
+    cooperative_codex_mode: false,
+    free_first: boostMode !== "best_code" && boostMode !== "turbo_boost",
+    prefer_available_quota: true,
+    max_tokens_mode: "auto",
+    simple_cloud_exploration_enabled: false
   };
 }
 
@@ -18003,6 +18292,25 @@ function appendBoostTrace(response) {
   }
   if (trace.plan_diff && typeof trace.plan_diff.summary === "string") {
     output.appendLine(`- Plan diff: ${trace.plan_diff.summary}`);
+  }
+  const planned = Array.isArray(trace.planned_algorithms) ? trace.planned_algorithms.filter(Boolean) : [];
+  const executed = Array.isArray(trace.executed_algorithms) ? trace.executed_algorithms.filter(Boolean) : [];
+  const disabled = Array.isArray(trace.disabled_by_guardrail) ? trace.disabled_by_guardrail.filter(Boolean) : [];
+  if (planned.length) {
+    output.appendLine(`- Planned algorithms: ${planned.slice(0, 6).join(", ")}${planned.length > 6 ? "..." : ""}`);
+  }
+  if (executed.length) {
+    output.appendLine(`- Executed algorithms: ${executed.slice(0, 6).join(", ")}${executed.length > 6 ? "..." : ""}`);
+  }
+  if (disabled.length) {
+    const labels = disabled.slice(0, 4).map((row) => {
+      if (!row || typeof row !== "object") {
+        return String(row);
+      }
+      const reasons = Array.isArray(row.reasons) ? row.reasons.join("+") : row.reason || "guardrail";
+      return `${row.agent || row.model || row.provider || "candidate"} (${reasons})`;
+    });
+    output.appendLine(`- Disabled by guardrail: ${labels.join(", ")}${disabled.length > 4 ? "..." : ""}`);
   }
 }
 

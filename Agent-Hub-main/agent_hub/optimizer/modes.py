@@ -26,6 +26,7 @@ class BoostModePolicy:
     prefer_local: bool = False
     prefer_premium: bool = False
     compression_aggression: float = 0.55
+    simple_mode: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -46,6 +47,7 @@ class BoostModePolicy:
             "prefer_local": self.prefer_local,
             "prefer_premium": self.prefer_premium,
             "compression_aggression": self.compression_aggression,
+            "simple_mode": self.simple_mode,
         }
 
 
@@ -78,7 +80,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
     ),
     "best_code": BoostModePolicy(
         mode="best_code",
-        label="Best Code",
+        label="Best Result",
         behavior="premium models + validation",
         context_mode="deep",
         context_policy="validated_context",
@@ -111,6 +113,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         retry_budget=3,
         prefer_premium=True,
         compression_aggression=0.42,
+        simple_mode=False,
     ),
     "fast_fix": BoostModePolicy(
         mode="fast_fix",
@@ -128,6 +131,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         map_files=4,
         retry_budget=1,
         compression_aggression=0.65,
+        simple_mode=False,
     ),
     "big_refactor": BoostModePolicy(
         mode="big_refactor",
@@ -146,6 +150,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         retry_budget=3,
         prefer_premium=True,
         compression_aggression=0.32,
+        simple_mode=False,
     ),
     "local_first": BoostModePolicy(
         mode="local_first",
@@ -164,6 +169,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         retry_budget=2,
         prefer_local=True,
         compression_aggression=0.55,
+        simple_mode=False,
     ),
 }
 
