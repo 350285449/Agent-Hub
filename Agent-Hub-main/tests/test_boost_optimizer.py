@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agent_hub.boost import build_boost_plan, boost_policy, normalize_boost_mode
 from agent_hub.config import AgentConfig, HubConfig, config_from_dict, config_to_dict
-from agent_hub.core.router import AgentRouter
+from agent_hub.core.router import AgentRouter, RouterError
 from agent_hub.core.task_classifier import TaskClassifier
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.optimizer import (
@@ -33,6 +33,13 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertEqual(normalize_boost_mode("Boost + Save Tokens"), "save_tokens")
         self.assertEqual(normalize_boost_mode("Turbo Boost!"), "turbo_boost")
         self.assertEqual(boost_policy("local first").routing_mode, "local_private")
+        for mode in ("balanced", "save_tokens", "best_code", "turbo_boost", "fast_fix", "big_refactor", "local_first"):
+            policy = boost_policy(mode)
+            self.assertGreaterEqual(
+                policy.repo_max_files,
+                policy.full_files + policy.compressed_files + policy.map_files,
+                mode,
+            )
 
     def test_boost_mode_runtime_selector_options(self) -> None:
         config = HubConfig()
@@ -111,6 +118,8 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertEqual(plan.boost_mode, "turbo_boost")
         self.assertEqual(plan.model_policy, "adaptive_quality_speed")
         self.assertGreaterEqual(plan.repo_max_files, 12)
+        self.assertGreaterEqual(plan.map_files, 10)
+        self.assertGreaterEqual(plan.repo_max_files, plan.full_files + plan.compressed_files + plan.map_files)
         self.assertGreater(plan.quality_weight, plan.cost_weight)
         self.assertGreaterEqual(plan.retry_policy.max_retries, 3)
         self.assertEqual(plan.retry_policy.strategy_for("missing context"), "expand_context")
@@ -726,6 +735,36 @@ index 867a3ee..b77d49d 100644
         self.assertIn("planned_algorithms", trace)
         self.assertIn("executed_algorithms", trace)
         self.assertEqual(trace["disabled_by_guardrail"][0]["agent"], "premium")
+
+    def test_save_tokens_guardrail_fails_closed_without_free_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / "state",
+                free_only=False,
+                repo_context_enabled=False,
+                boost_mode="save_tokens",
+                default_route=["premium"],
+                agents={
+                    "premium": AgentConfig(
+                        name="premium",
+                        provider="openai",
+                        model="premium-model",
+                        free=False,
+                        coding_score=1.0,
+                        cost_per_million_input=10.0,
+                        cost_per_million_output=30.0,
+                    ),
+                },
+            )
+            request = HubRequest(
+                session_id="s",
+                messages=[{"role": "user", "content": "Explain this helper briefly."}],
+            )
+
+            with self.assertRaises(RouterError):
+                AgentRouter(config, provider_factory=_OkProvider).route(request)
 
     def test_compatible_chat_inherits_config_boost_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

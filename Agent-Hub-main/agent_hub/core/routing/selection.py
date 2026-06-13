@@ -2020,7 +2020,9 @@ class AgentRouter:
                 allowed.append(agent)
         if isinstance(request.metadata, dict):
             request.metadata["_agent_hub_disabled_by_guardrail"] = disabled
-        return allowed if allowed else agents
+        if allowed:
+            return allowed
+        return [] if disabled else agents
 
     def _route_names(self, request: HubRequest) -> list[str]:
         if request.route:

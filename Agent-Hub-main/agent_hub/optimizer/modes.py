@@ -60,6 +60,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         context_policy="focused_files",
         model_policy="best_outcome_per_token",
         validation_policy="basic_quality_checks",
+        repo_max_files=12,
     ),
     "save_tokens": BoostModePolicy(
         mode="save_tokens",
@@ -70,7 +71,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         model_policy="cheap_first",
         validation_policy="basic_quality_checks",
         routing_mode="cheapest",
-        repo_max_files=5,
+        repo_max_files=8,
         repo_max_chars=7_000,
         full_files=1,
         compressed_files=2,
@@ -87,7 +88,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         model_policy="premium_first",
         validation_policy="strict_quality_checks",
         routing_mode="coding",
-        repo_max_files=12,
+        repo_max_files=18,
         repo_max_chars=24_000,
         full_files=4,
         compressed_files=6,
@@ -105,7 +106,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         model_policy="adaptive_quality_speed",
         validation_policy="confidence_gated_checks",
         routing_mode="coding",
-        repo_max_files=14,
+        repo_max_files=24,
         repo_max_chars=30_000,
         full_files=4,
         compressed_files=7,
@@ -124,7 +125,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         model_policy="fastest_successful",
         validation_policy="run_targeted_tests",
         routing_mode="fastest",
-        repo_max_files=6,
+        repo_max_files=8,
         repo_max_chars=8_000,
         full_files=2,
         compressed_files=2,
@@ -142,7 +143,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         model_policy="long_context_quality",
         validation_policy="run_tests",
         routing_mode="long_context",
-        repo_max_files=18,
+        repo_max_files=25,
         repo_max_chars=40_000,
         full_files=5,
         compressed_files=8,
@@ -161,7 +162,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         model_policy="local_first",
         validation_policy="basic_quality_checks",
         routing_mode="local_private",
-        repo_max_files=8,
+        repo_max_files=12,
         repo_max_chars=12_000,
         full_files=2,
         compressed_files=4,
@@ -240,6 +241,30 @@ def normalize_boost_mode(value: Any) -> str:
     if "fast" in words or "bug" in words:
         return "fast_fix"
     return "balanced"
+
+
+def is_valid_boost_mode_value(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    key = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    key = re.sub(r"_+", "_", key)
+    if key in BOOST_MODE_ALIASES:
+        return True
+    words = set(key.split("_"))
+    if "save" in words and ("token" in words or "tokens" in words):
+        return True
+    if "turbo" in words or ("boost" in words and not {"save", "token", "tokens"} & words):
+        return True
+    if {"best", "code"} <= words or "quality" in words:
+        return True
+    if "local" in words:
+        return True
+    if "refactor" in words:
+        return True
+    if "fast" in words or "bug" in words:
+        return True
+    return False
 
 
 def boost_policy(mode: Any) -> BoostModePolicy:

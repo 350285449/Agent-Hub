@@ -305,8 +305,24 @@ def handle_get(handler: object, path: str) -> bool:
 
 def handle_post(handler: object, path: str, payload: dict[str, Any]) -> bool:
     if path == "/v1/boost-mode":
+        from ..boost import is_valid_boost_mode_value
+
+        value = payload.get("boost_mode", payload.get("mode"))
+        if not is_valid_boost_mode_value(value):
+            handler._send_json(
+                {
+                    "object": "agent_hub.error",
+                    "error": {
+                        "type": "invalid_boost_mode",
+                        "message": "Unknown Boost Mode. Use one of the returned options or a supported alias.",
+                    },
+                    "options": handler.server.config.boost_mode_options_for_advanced(True),
+                },
+                status=400,
+            )
+            return True
         mode = handler.server.config.set_boost_mode(
-            payload.get("boost_mode", payload.get("mode"))
+            value
         )
         handler._send_diagnostics_json(
             {
