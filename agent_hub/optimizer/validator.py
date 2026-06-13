@@ -47,6 +47,32 @@ QUALITY_GATES: dict[str, list[ValidationGate]] = {
         ValidationGate("patch_applies"),
         ValidationGate("benchmarks_or_tests", required=False),
     ],
+    "feature": [
+        ValidationGate("patch_applies", description="Patch applies when a patch is proposed."),
+        ValidationGate("syntax_valid", description="No obvious syntax or path errors are present."),
+        ValidationGate("related_tests", required=False),
+    ],
+    "ui_change": [
+        ValidationGate("patch_applies"),
+        ValidationGate("syntax_valid"),
+        ValidationGate("visual_or_snapshot_check", required=False),
+    ],
+    "build_fix": [
+        ValidationGate("patch_applies"),
+        ValidationGate("syntax_valid"),
+        ValidationGate("build_or_tests", required=False),
+    ],
+    "migration": [
+        ValidationGate("patch_applies"),
+        ValidationGate("no_public_api_break", required=False),
+        ValidationGate("tests_pass", required=False),
+    ],
+    "docs": [
+        ValidationGate("answered_task"),
+    ],
+    "explanation": [
+        ValidationGate("answered_task"),
+    ],
 }
 
 
@@ -89,7 +115,7 @@ def _gate_status(name: str, checks: dict[str, Any], text: str) -> str:
         return "failed" if syntax == "failed" else "passed"
     if name in {"no_public_api_break", "security_review"}:
         return "passed" if checks.get("hallucinated_files") == "none" else "failed"
-    if name in {"related_tests", "tests_pass", "tests_run", "benchmarks_or_tests"}:
+    if name in {"related_tests", "tests_pass", "tests_run", "benchmarks_or_tests", "build_or_tests", "visual_or_snapshot_check"}:
         tests = checks.get("tests")
         if tests == "failed":
             return "failed"

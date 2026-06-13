@@ -143,6 +143,47 @@ class SmartWorkspaceRoutingTests(unittest.TestCase):
         free_scorecard = next(row for row in coding.candidate_scores if row["agent"] == "free-cloud")
         self.assertFalse(free_scorecard["token_saver"]["active"])
 
+    def test_boost_mode_intercepts_codex_route_for_capable_free_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _cooperative_codex_config(root, free_context_window=64_000)
+            router = AgentRouter(config, provider_factory=_OkProvider)
+
+            decision = router.decide(
+                HubRequest(
+                    session_id="s",
+                    route="cloud-agent",
+                    messages=[{"role": "user", "content": "Explain this selected code clearly."}],
+                    raw={"agent_hub": {"boost_mode": "save_tokens", "cooperative_codex": True}},
+                )
+            )
+
+        self.assertEqual(decision.selected_agent, "free-cloud")
+        self.assertEqual(decision.fallback_chain[:2], ["free-cloud", "codex-fallback"])
+        free_scorecard = next(row for row in decision.candidate_scores if row["agent"] == "free-cloud")
+        self.assertTrue(free_scorecard["token_saver"]["active"])
+        self.assertIn("capable free models can take the task directly", " ".join(decision.routing_reasons))
+
+    def test_boost_mode_keeps_codex_when_free_model_lacks_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _cooperative_codex_config(root, free_context_window=256)
+            router = AgentRouter(config, provider_factory=_OkProvider)
+            large_context = "File: app.py\n" + ("def run():\n    return 1\n" * 600)
+
+            decision = router.decide(
+                HubRequest(
+                    session_id="s",
+                    route="cloud-agent",
+                    context=large_context,
+                    messages=[{"role": "user", "content": "Explain this selected code clearly."}],
+                    raw={"agent_hub": {"boost_mode": "save_tokens", "cooperative_codex": True}},
+                )
+            )
+
+        self.assertEqual(decision.selected_agent, "codex-fallback")
+        self.assertEqual(decision.fallback_chain[:2], ["codex-fallback", "free-cloud"])
+
     def test_disable_non_free_models_excludes_codex_cli_from_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -566,6 +607,55 @@ def _cloud_exploration_config(root: Path) -> HubConfig:
             ),
         },
     )
+
+
+def _cooperative_codex_config(root: Path, *, free_context_window: int) -> HubConfig:
+    config = HubConfig(
+        workspace_dir=root,
+        state_dir=root / ".agent-hub" / "state",
+        free_only=False,
+        enable_load_balancing=True,
+        repo_context_enabled=False,
+        boost_mode="save_tokens",
+        default_route=["codex-fallback", "free-cloud"],
+        routes=[RouteRule(name="cloud-agent", agents=["codex-fallback", "free-cloud"])],
+        agents={
+            "codex-fallback": AgentConfig(
+                name="codex-fallback",
+                provider="openai",
+                provider_type="openai",
+                model="codex-like",
+                free=False,
+                coding_score=0.9,
+                reasoning_score=0.9,
+                supports_tools=True,
+                context_window=128_000,
+            ),
+            "free-cloud": AgentConfig(
+                name="free-cloud",
+                provider="openai-compatible",
+                provider_type="groq",
+                model="free-qwen",
+                base_url="https://example.invalid/v1",
+                free=True,
+                speed_score=1.0,
+                coding_score=0.9,
+                reasoning_score=0.95,
+                context_window=free_context_window,
+            ),
+        },
+    )
+    config.routing.update(
+        {
+            "cooperative_codex_mode": True,
+            "cooperative_codex_min_confidence": 0.5,
+            "cooperative_codex_max_productivity_loss": 0.4,
+            "token_saver_confidence_threshold": 0.5,
+            "token_saver_max_productivity_loss": 0.4,
+            "free_first": False,
+        }
+    )
+    return config
 
 
 def _workflow_config(root: Path) -> HubConfig:

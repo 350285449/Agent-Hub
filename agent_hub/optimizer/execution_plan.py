@@ -188,6 +188,7 @@ def build_optimization_plan(
         "balanced": 0.62,
         "local_first": 0.58,
         "best_code": 0.78,
+        "turbo_boost": 0.82,
         "big_refactor": 0.88,
     }.get(mode, 0.62)
     quality_weight = {
@@ -196,6 +197,7 @@ def build_optimization_plan(
         "balanced": 1.0,
         "local_first": 0.96,
         "best_code": 1.26,
+        "turbo_boost": 1.32,
         "big_refactor": 1.2,
     }.get(mode, 1.0)
     cost_weight = {
@@ -204,9 +206,10 @@ def build_optimization_plan(
         "balanced": 1.0,
         "local_first": 1.16,
         "best_code": 0.78,
+        "turbo_boost": 0.72,
         "big_refactor": 0.86,
     }.get(mode, 1.0)
-    speed_weight = 1.22 if mode == "fast_fix" else 1.0
+    speed_weight = 1.22 if mode == "fast_fix" else 1.08 if mode == "turbo_boost" else 1.0
     risk_weight = 1.0
     algorithms = [
         "task_policy_matrix",
@@ -220,6 +223,19 @@ def build_optimization_plan(
         "success_per_token_routing",
     ]
     reasons: list[str] = [f"Started from {base.label} mode."]
+    complexity = _task_complexity(text=text, file_count=file_count, estimated_input_tokens=estimated_input_tokens)
+
+    if mode == "turbo_boost":
+        algorithms.extend(
+            [
+                "adaptive_evidence_ladder",
+                "confidence_gated_model_escalation",
+                "risk_cost_speed_tradeoff",
+                "validation_first_retry_budget",
+            ]
+        )
+        risk_weight += 0.08
+        reasons.append("Turbo Boost keeps a larger evidence ladder and escalates only when confidence or risk requires it.")
 
     if optimizer_task in {"explanation", "docs"}:
         repo_max_files = min(repo_max_files, 2 if mode == "save_tokens" else 3)
@@ -243,6 +259,25 @@ def build_optimization_plan(
         speed_weight += 0.08
         algorithms.append("anchored_bug_context")
         reasons.append("Bug-fix tasks prioritize mentioned files, stack traces, and nearest tests.")
+    elif optimizer_task == "feature":
+        repo_max_files = max(repo_max_files, 8)
+        repo_max_chars = max(repo_max_chars, 16_000 if mode != "save_tokens" else 9_000)
+        full_files = min(max(2, full_files), repo_max_files)
+        compressed_files = max(compressed_files, 4)
+        map_files = max(map_files, 5)
+        quality_weight += 0.06
+        algorithms.append("feature_surface_mapping")
+        reasons.append("Feature work keeps implementation, adjacent tests, and public surfaces in view.")
+    elif optimizer_task == "ui_change":
+        repo_max_files = max(repo_max_files, 9)
+        repo_max_chars = max(repo_max_chars, 18_000 if mode != "save_tokens" else 10_000)
+        full_files = min(max(3, full_files), repo_max_files)
+        compressed_files = max(compressed_files, 4)
+        map_files = max(map_files, 5)
+        quality_weight += 0.08
+        risk_weight += 0.04
+        algorithms.extend(["ui_surface_context", "style_test_pairing"])
+        reasons.append("UI work preserves component, style, and nearby test/snapshot context.")
     elif optimizer_task in {"refactor", "repo_analysis"}:
         repo_max_files = max(repo_max_files, 10 if optimizer_task == "refactor" else 8)
         repo_max_chars = max(repo_max_chars, 22_000 if mode != "save_tokens" else 12_000)
@@ -260,6 +295,27 @@ def build_optimization_plan(
         compressed_files = min(max(3, compressed_files), max(0, repo_max_files - full_files))
         algorithms.append("source_test_pairing")
         reasons.append("Test generation pairs source files with nearby tests and validation targets.")
+    elif optimizer_task == "build_fix":
+        repo_max_files = min(max(repo_max_files, 7), 12)
+        repo_max_chars = max(repo_max_chars, 12_000 if mode != "save_tokens" else 8_000)
+        full_files = min(max(2, full_files), repo_max_files)
+        compressed_files = max(compressed_files, 3)
+        map_files = min(max(map_files, 4), 7)
+        speed_weight += 0.1
+        algorithms.extend(["build_log_anchor", "config_callsite_pairing"])
+        reasons.append("Build fixes anchor on compiler output, package/config files, and failing call sites.")
+    elif optimizer_task == "migration":
+        repo_max_files = max(repo_max_files, 14)
+        repo_max_chars = max(repo_max_chars, 28_000 if mode != "save_tokens" else 14_000)
+        full_files = max(full_files, 3)
+        compressed_files = max(compressed_files, 6)
+        map_files = max(map_files, 9)
+        compression = max(0.26, compression - 0.05)
+        target_context_ratio = max(target_context_ratio, 0.78)
+        quality_weight += 0.12
+        risk_weight += 0.12
+        algorithms.extend(["migration_impact_graph", "callsite_coverage_sampling"])
+        reasons.append("Migration work broadens dependency, config, and call-site coverage before editing.")
     elif optimizer_task in {"security", "performance"}:
         repo_max_files = max(repo_max_files, 8)
         repo_max_chars = max(repo_max_chars, 14_000)
@@ -269,6 +325,21 @@ def build_optimization_plan(
         risk_weight += 0.16 if optimizer_task == "security" else 0.06
         algorithms.append("risk_weighted_validation")
         reasons.append("High-risk or performance tasks preserve more evidence and favor stronger validation.")
+
+    if complexity >= 2:
+        repo_max_files += 2 if mode != "save_tokens" else 1
+        repo_max_chars = int(repo_max_chars * (1.12 if mode != "save_tokens" else 1.04))
+        compressed_files += 1
+        map_files += 2
+        risk_weight += 0.08
+        algorithms.append("complexity_aware_context_expansion")
+        reasons.append("Complex request signals expand map coverage before deciding whether to spend full-file context.")
+    if complexity >= 3 and mode in {"turbo_boost", "best_code", "big_refactor"}:
+        retry_budget = max(retry_budget, 3)
+        quality_weight += 0.08
+        cost_weight = max(0.62, cost_weight - 0.06)
+        algorithms.append("high_complexity_quality_floor")
+        reasons.append("High-complexity work raises the quality floor and preserves retry budget.")
 
     pressure = _token_pressure(estimated_input_tokens)
     if pressure > 0:
@@ -307,19 +378,22 @@ def build_optimization_plan(
         algorithms.append("explicit_file_focus")
         reasons.append("Explicit file references narrow context to nearby evidence.")
 
-    repo_max_files = max(1, int(repo_max_files))
-    repo_max_chars = max(1_000, int(repo_max_chars))
-    full_files = min(max(0, int(full_files)), repo_max_files)
-    compressed_files = min(max(0, int(compressed_files)), max(0, repo_max_files - full_files))
-    map_files = min(max(0, int(map_files)), max(0, repo_max_files - full_files - compressed_files))
+    repo_max_files, repo_max_chars, full_files, compressed_files, map_files = _normalize_plan_limits(
+        repo_max_files=repo_max_files,
+        repo_max_chars=repo_max_chars,
+        full_files=full_files,
+        compressed_files=compressed_files,
+        map_files=map_files,
+    )
     compression = round(_clamp(compression, 0.18, 0.92), 3)
     target_context_ratio = round(_clamp(target_context_ratio, 0.22, 0.94), 3)
+    max_context_tokens = max(1, repo_max_chars // 4)
     token_budget = TokenBudget(
         context_budget=base.context_mode,
         raw_context_tokens=max(0, int(estimated_input_tokens or 0)),
         optimized_context_tokens=0,
-        max_context_tokens=repo_max_chars // 4,
-        target_context_tokens=max(1_000, int((repo_max_chars // 4) * target_context_ratio)),
+        max_context_tokens=max_context_tokens,
+        target_context_tokens=_target_context_tokens(max_context_tokens, target_context_ratio),
         target_context_ratio=target_context_ratio,
         compression=_compression_name(compression),
     )
@@ -374,6 +448,24 @@ def optimization_plan_from_dict(data: dict[str, Any] | None) -> OptimizationPlan
     ]
     retry_policy = RetryPolicy.from_dict(data.get("retry_policy") if isinstance(data.get("retry_policy"), dict) else None)
     token_budget = TokenBudget.from_dict(data.get("token_budget") if isinstance(data.get("token_budget"), dict) else None)
+    repo_max_files, repo_max_chars, full_files, compressed_files, map_files = _normalize_plan_limits(
+        repo_max_files=_int(data.get("repo_max_files"), base.repo_max_files),
+        repo_max_chars=_int(data.get("repo_max_chars"), base.repo_max_chars),
+        full_files=_int(data.get("full_files"), base.full_files),
+        compressed_files=_int(data.get("compressed_files"), base.compressed_files),
+        map_files=_int(data.get("map_files"), base.map_files),
+    )
+    target_context_ratio = round(_clamp(_float(data.get("target_context_ratio"), token_budget.target_context_ratio), 0.22, 0.94), 3)
+    max_context_tokens = max(1, _int(token_budget.max_context_tokens, repo_max_chars // 4))
+    target_context_tokens = token_budget.target_context_tokens
+    if target_context_tokens is None or target_context_tokens <= 0 or target_context_tokens > max_context_tokens:
+        target_context_tokens = _target_context_tokens(max_context_tokens, target_context_ratio)
+    token_budget = replace(
+        token_budget,
+        max_context_tokens=max_context_tokens,
+        target_context_tokens=target_context_tokens,
+        target_context_ratio=target_context_ratio,
+    )
     return OptimizationPlan(
         mode=mode,
         boost_mode=mode,
@@ -384,20 +476,20 @@ def optimization_plan_from_dict(data: dict[str, Any] | None) -> OptimizationPlan
         model_policy=str(data.get("model_policy") or base.model_policy),
         validation_policy=str(data.get("validation_policy") or base.validation_policy),
         routing_mode=str(data.get("routing_mode") or base.routing_mode),
-        repo_max_files=_int(data.get("repo_max_files"), base.repo_max_files),
-        repo_max_chars=_int(data.get("repo_max_chars"), base.repo_max_chars),
-        full_files=_int(data.get("full_files"), base.full_files),
-        compressed_files=_int(data.get("compressed_files"), base.compressed_files),
-        map_files=_int(data.get("map_files"), base.map_files),
-        retry_budget=_int(data.get("retry_budget"), retry_policy.max_retries),
+        repo_max_files=repo_max_files,
+        repo_max_chars=repo_max_chars,
+        full_files=full_files,
+        compressed_files=compressed_files,
+        map_files=map_files,
+        retry_budget=max(0, _int(data.get("retry_budget"), retry_policy.max_retries)),
         prefer_local=bool(data.get("prefer_local", base.prefer_local)),
         prefer_premium=bool(data.get("prefer_premium", base.prefer_premium)),
-        compression_aggression=_float(data.get("compression_aggression"), base.compression_aggression),
-        target_context_ratio=_float(data.get("target_context_ratio"), token_budget.target_context_ratio),
-        quality_weight=_float(data.get("quality_weight"), 1.0),
-        cost_weight=_float(data.get("cost_weight"), 1.0),
-        speed_weight=_float(data.get("speed_weight"), 1.0),
-        risk_weight=_float(data.get("risk_weight"), 1.0),
+        compression_aggression=round(_clamp(_float(data.get("compression_aggression"), base.compression_aggression), 0.18, 0.92), 3),
+        target_context_ratio=target_context_ratio,
+        quality_weight=round(_clamp(_float(data.get("quality_weight"), 1.0), 0.5, 1.7), 3),
+        cost_weight=round(_clamp(_float(data.get("cost_weight"), 1.0), 0.45, 1.8), 3),
+        speed_weight=round(_clamp(_float(data.get("speed_weight"), 1.0), 0.5, 1.6), 3),
+        risk_weight=round(_clamp(_float(data.get("risk_weight"), 1.0), 0.7, 1.8), 3),
         algorithms=[str(item) for item in data.get("algorithms", []) if isinstance(item, str)],
         reasons=[str(item) for item in data.get("reasons", []) if isinstance(item, str)],
         selected_files=[str(item) for item in data.get("selected_files", []) if isinstance(item, str)],
@@ -461,6 +553,8 @@ def _request_text_fallback(request: Any) -> str:
 
 
 def _preferred_model_policy(model_policy: str, mode: str) -> list[str]:
+    if mode == "turbo_boost" or model_policy == "adaptive_quality_speed":
+        return ["coding", "reasoning", "premium", "fast", "long_context"]
     if model_policy in {"premium_first", "premium_review", "stronger_model"} or mode in {"best_code", "big_refactor"}:
         return ["premium", "coding", "reasoning", "long_context"]
     if model_policy in {"cheap_first", "fastest_successful"} or mode == "save_tokens":
@@ -484,12 +578,62 @@ def _token_pressure(estimated_input_tokens: int) -> float:
     return (tokens - 4_000) / 28_000
 
 
+def _task_complexity(*, text: str, file_count: int, estimated_input_tokens: int) -> int:
+    haystack = str(text or "").lower()
+    score = 0
+    if file_count >= 4:
+        score += 1
+    if file_count >= 8:
+        score += 1
+    if estimated_input_tokens >= 12_000:
+        score += 1
+    if estimated_input_tokens >= 28_000:
+        score += 1
+    complex_terms = (
+        "multi-file",
+        "multiple files",
+        "architecture",
+        "cross-cutting",
+        "end-to-end",
+        "integration",
+        "race condition",
+        "regression",
+        "rollout",
+        "backwards compatible",
+        "backward compatible",
+    )
+    score += min(2, sum(1 for term in complex_terms if term in haystack))
+    return min(score, 4)
+
+
 def _compression_name(aggression: float) -> str:
     if aggression >= 0.7:
         return "aggressive"
     if aggression <= 0.4:
         return "light"
     return "balanced"
+
+
+def _normalize_plan_limits(
+    *,
+    repo_max_files: Any,
+    repo_max_chars: Any,
+    full_files: Any,
+    compressed_files: Any,
+    map_files: Any,
+) -> tuple[int, int, int, int, int]:
+    repo_files = max(1, _int(repo_max_files, 1))
+    repo_chars = max(1_000, _int(repo_max_chars, 1_000))
+    full = min(max(0, _int(full_files, 0)), repo_files)
+    compressed = min(max(0, _int(compressed_files, 0)), max(0, repo_files - full))
+    mapped = min(max(0, _int(map_files, 0)), max(0, repo_files - full - compressed))
+    return repo_files, repo_chars, full, compressed, mapped
+
+
+def _target_context_tokens(max_context_tokens: int, target_context_ratio: float) -> int:
+    maximum = max(1, _int(max_context_tokens, 1))
+    target = int(maximum * _clamp(target_context_ratio, 0.01, 1.0))
+    return min(maximum, max(1, target))
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -520,4 +664,3 @@ def _float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-

@@ -9281,7 +9281,7 @@ function normalizeCloudRouteMode(value) {
 }
 
 function normalizeBoostMode(value) {
-  const text = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const text = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").replace(/_+/g, "_");
   const aliases = {
     balanced: "balanced",
     balance: "balanced",
@@ -9290,11 +9290,19 @@ function normalizeBoostMode(value) {
     save: "save_tokens",
     spend_less: "save_tokens",
     save_tokens: "save_tokens",
+    boost_save_tokens: "save_tokens",
+    boost_and_save_tokens: "save_tokens",
     token_saver: "save_tokens",
     best: "best_code",
     best_result: "best_code",
     best_code: "best_code",
     quality: "best_code",
+    boost: "turbo_boost",
+    turbo: "turbo_boost",
+    turbo_boost: "turbo_boost",
+    max_boost: "turbo_boost",
+    maximum_boost: "turbo_boost",
+    another_level: "turbo_boost",
     fast: "fast_fix",
     fast_fix: "fast_fix",
     bug_fix: "fast_fix",
@@ -9304,7 +9312,29 @@ function normalizeBoostMode(value) {
     local: "local_first",
     local_first: "local_first"
   };
-  return aliases[text] || "";
+  if (aliases[text]) {
+    return aliases[text];
+  }
+  const words = new Set(text.split("_").filter(Boolean));
+  if (words.has("save") && (words.has("token") || words.has("tokens"))) {
+    return "save_tokens";
+  }
+  if (words.has("turbo") || (words.has("boost") && !words.has("save") && !words.has("token") && !words.has("tokens"))) {
+    return "turbo_boost";
+  }
+  if ((words.has("best") && words.has("code")) || words.has("quality")) {
+    return "best_code";
+  }
+  if (words.has("local")) {
+    return "local_first";
+  }
+  if (words.has("refactor")) {
+    return "big_refactor";
+  }
+  if (words.has("fast") || words.has("bug")) {
+    return "fast_fix";
+  }
+  return "";
 }
 
 function cloudModelSettingsPayload(config) {

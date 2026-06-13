@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -93,6 +94,24 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         prefer_premium=True,
         compression_aggression=0.38,
     ),
+    "turbo_boost": BoostModePolicy(
+        mode="turbo_boost",
+        label="Turbo Boost",
+        behavior="adaptive max-performance routing",
+        context_mode="deep",
+        context_policy="adaptive_evidence_graph",
+        model_policy="adaptive_quality_speed",
+        validation_policy="confidence_gated_checks",
+        routing_mode="coding",
+        repo_max_files=14,
+        repo_max_chars=30_000,
+        full_files=4,
+        compressed_files=7,
+        map_files=10,
+        retry_budget=3,
+        prefer_premium=True,
+        compression_aggression=0.42,
+    ),
     "fast_fix": BoostModePolicy(
         mode="fast_fix",
         label="Fast Fix",
@@ -159,6 +178,10 @@ BOOST_MODE_ALIASES = {
     "spend-less": "save_tokens",
     "save_tokens": "save_tokens",
     "save-tokens": "save_tokens",
+    "boost_save_tokens": "save_tokens",
+    "boost-save-tokens": "save_tokens",
+    "boost_and_save_tokens": "save_tokens",
+    "boost-and-save-tokens": "save_tokens",
     "token_saver": "save_tokens",
     "token-saver": "save_tokens",
     "best": "best_code",
@@ -167,6 +190,15 @@ BOOST_MODE_ALIASES = {
     "best_code": "best_code",
     "best-code": "best_code",
     "quality": "best_code",
+    "boost": "turbo_boost",
+    "turbo": "turbo_boost",
+    "turbo_boost": "turbo_boost",
+    "turbo-boost": "turbo_boost",
+    "max_boost": "turbo_boost",
+    "max-boost": "turbo_boost",
+    "maximum_boost": "turbo_boost",
+    "another_level": "turbo_boost",
+    "another-level": "turbo_boost",
     "fast": "fast_fix",
     "fast_fix": "fast_fix",
     "fast-fix": "fast_fix",
@@ -183,8 +215,25 @@ BOOST_MODE_ALIASES = {
 
 
 def normalize_boost_mode(value: Any) -> str:
-    text = str(value or "balanced").strip().lower().replace(" ", "_")
-    return BOOST_MODE_ALIASES.get(text, "balanced")
+    text = str(value or "balanced").strip().lower()
+    key = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    key = re.sub(r"_+", "_", key)
+    if key in BOOST_MODE_ALIASES:
+        return BOOST_MODE_ALIASES[key]
+    words = set(key.split("_"))
+    if "save" in words and ("token" in words or "tokens" in words):
+        return "save_tokens"
+    if "turbo" in words or ("boost" in words and not {"save", "token", "tokens"} & words):
+        return "turbo_boost"
+    if {"best", "code"} <= words or "quality" in words:
+        return "best_code"
+    if "local" in words:
+        return "local_first"
+    if "refactor" in words:
+        return "big_refactor"
+    if "fast" in words or "bug" in words:
+        return "fast_fix"
+    return "balanced"
 
 
 def boost_policy(mode: Any) -> BoostModePolicy:
@@ -201,4 +250,3 @@ def boost_mode_from_request(request: Any, default: str = "balanced") -> str:
             if isinstance(value, str) and value.strip():
                 return normalize_boost_mode(value)
     return normalize_boost_mode(default)
-

@@ -691,6 +691,9 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("function tokenSafeRequestPlan", source)
         self.assertIn("function activeRequestBoostMode", source)
         self.assertIn("function normalizeBoostMode", source)
+        self.assertIn('boost: "turbo_boost"', source)
+        self.assertIn('boost_save_tokens: "save_tokens"', source)
+        self.assertIn('return "turbo_boost"', source)
         self.assertIn("function syncRunningBackendBoostMode", source)
         self.assertIn("context_chars: String(context || \"\").length", source)
 

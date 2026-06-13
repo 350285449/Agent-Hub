@@ -13,7 +13,7 @@ from typing import Any
 from ...adaptive import AdaptiveLearningStore, estimate_known_cost_usd
 from ...capabilities import agent_capabilities
 from ...config import AgentConfig, HubConfig, agent_allowed_by_cost_policy, is_free_agent, normalize_provider
-from ...context import estimate_message_tokens, is_protected_context_message
+from ...context import estimate_message_tokens, estimate_text_tokens, is_protected_context_message
 from ...debug import debug_dir_for_state, provider_debug_context
 from ...events import (
     CONTEXT_TRUNCATED,
@@ -1552,8 +1552,8 @@ class AgentRouter:
         )
         if active:
             summary = (
-                "Cooperative Codex worker active: free model confidence is high enough "
-                "for a bounded context digest while Codex remains final."
+                "Cooperative Codex worker active: free model confidence and context fit are high enough "
+                "to handle the task with Codex fallback."
             )
         elif protection_reasons:
             summary = "Cooperative Codex worker protected: " + "; ".join(protection_reasons[:3]) + "."
@@ -1822,7 +1822,7 @@ class AgentRouter:
             routing_reasons.append(token_saver_reason)
         if _cooperative_codex_requested(self.config, request):
             routing_reasons.append(
-                "Cooperative Codex boost: Codex remains the final model while free models may provide adaptive compact digests."
+                "Cooperative Codex boost: capable free models can take the task directly with Codex kept as fallback."
             )
         if reviewer_signal.get("reason"):
             routing_reasons.append(str(reviewer_signal["reason"]))
@@ -1967,6 +1967,30 @@ class AgentRouter:
         else:
             selected = self._rank_cooperative_codex_finalists(codex_agents, request)[0]
         ordered_codex = [selected, *[agent for agent in codex_agents if agent.name != selected.name]]
+        if not request.preferred_agent and not self._manual_model_or_provider_agent_names(request):
+            direct_workers = [
+                worker
+                for worker, signal in self._cooperative_codex_worker_rankings(
+                    request=request,
+                    codex_agent=selected,
+                    decision=RoutingDecision(
+                        selected_agent=selected.name,
+                        selected_provider=selected.provider,
+                        selected_model=selected.model,
+                        routing_mode=self._routing_mode(request),
+                        reason="cooperative_codex_candidate_order",
+                        fallback_chain=[agent.name for agent in agents],
+                    ),
+                )
+                if signal.get("active")
+            ]
+            if direct_workers:
+                rest_after_direct = [
+                    agent
+                    for agent in agents
+                    if agent.name not in {item.name for item in direct_workers}
+                ]
+                return _dedupe_agents([*direct_workers, *ordered_codex, *rest_after_direct])
         free_helpers = [
             agent
             for agent in agents
@@ -2456,10 +2480,18 @@ class AgentRouter:
             self.config,
             request,
             agent,
-            input_tokens=max(1, int(getattr(classification, "estimated_input_tokens", 0) or 0)),
+            input_tokens=max(
+                1,
+                int(getattr(classification, "estimated_input_tokens", 0) or 0),
+                _request_total_input_estimate(request),
+            ),
             health=health,
         )
-        required = max(1, int(getattr(classification, "estimated_input_tokens", 0) or 0)) + int(output_budget.effective)
+        required = max(
+            1,
+            int(getattr(classification, "estimated_input_tokens", 0) or 0),
+            _request_total_input_estimate(request),
+        ) + int(output_budget.effective)
         window = int(agent.context_window or getattr(health, "context_window", 0) or 0)
         if window <= 0:
             return 0.72
@@ -2493,6 +2525,22 @@ class AgentRouter:
         if _request_has_tools(request) and tool_compatibility_mode(self.config, agent) == "unavailable":
             reasons.append("required tools unavailable")
         health = self._health.get(agent.name)
+        input_tokens = max(
+            1,
+            int(getattr(classification, "estimated_input_tokens", 0) or 0),
+            _request_total_input_estimate(request),
+        )
+        output_budget = output_token_budget(
+            self.config,
+            request,
+            agent,
+            input_tokens=input_tokens,
+            health=health,
+        )
+        required_tokens = input_tokens + int(output_budget.effective)
+        context_window = int(agent.context_window or getattr(health, "context_window", 0) or 0)
+        if context_window > 0 and context_window < required_tokens:
+            reasons.append(f"context window too small ({context_window} < {required_tokens})")
         if health is not None and health.is_degraded():
             reasons.append("provider health is degraded")
         return reasons
@@ -4391,6 +4439,13 @@ def _request_option(request: HubRequest, *keys: str) -> Any:
     return None
 
 
+def _request_total_input_estimate(request: HubRequest) -> int:
+    estimate = estimate_input_tokens(request)
+    if request.context:
+        estimate += estimate_text_tokens(str(request.context))
+    return max(1, int(estimate))
+
+
 def _request_bool_option(request: HubRequest, *keys: str, default: bool = False) -> bool:
     value = _request_option(request, *keys)
     if isinstance(value, bool):
@@ -4528,6 +4583,22 @@ def _cooperative_codex_protection_reasons(
     if risk == "critical" or task_type == "security_sensitive_change":
         reasons.append("critical or security-sensitive task")
     health = getattr(router, "_health", {}).get(agent.name) if hasattr(router, "_health") else None
+    input_tokens = max(
+        1,
+        int(getattr(classification, "estimated_input_tokens", 0) or 0),
+        _request_total_input_estimate(request),
+    )
+    output_budget = output_token_budget(
+        router.config,
+        request,
+        agent,
+        input_tokens=input_tokens,
+        health=health,
+    )
+    required_tokens = input_tokens + int(output_budget.effective)
+    context_window = int(agent.context_window or getattr(health, "context_window", 0) or 0)
+    if context_window > 0 and context_window < required_tokens:
+        reasons.append(f"context window too small ({context_window} < {required_tokens})")
     if health is not None and health.is_degraded():
         reasons.append("provider health is degraded")
     return reasons

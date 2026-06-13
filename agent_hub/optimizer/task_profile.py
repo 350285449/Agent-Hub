@@ -43,6 +43,8 @@ def task_optimization_policy(
         "ui_change": "ui_files_and_styles",
         "performance": "hot_paths_and_tests",
         "security": "focused_files_with_review",
+        "migration": "dependency_and_callsite_map",
+        "build_fix": "build_logs_and_config",
         "docs": "docs_only",
     }.get(optimizer_task_type, "focused_files")
     model_policy = {
@@ -55,6 +57,8 @@ def task_optimization_policy(
         "ui_change": "ui_capable",
         "performance": "quality_first",
         "security": "premium_review",
+        "migration": "quality_first",
+        "build_fix": "fastest_successful",
         "docs": "cheap_first",
     }.get(optimizer_task_type, "balanced_quality")
     validation_policy = {
@@ -67,6 +71,8 @@ def task_optimization_policy(
         "ui_change": "visual_or_snapshot_check",
         "performance": "run_benchmarks",
         "security": "security_checks",
+        "migration": "run_tests",
+        "build_fix": "run_targeted_tests",
         "docs": "docs_check",
     }.get(optimizer_task_type, "basic_quality_checks")
     mode = normalize_boost_mode(boost_mode)
@@ -76,6 +82,10 @@ def task_optimization_policy(
     elif mode == "best_code":
         model_policy = "premium_first"
         validation_policy = "strict_quality_checks"
+    elif mode == "turbo_boost":
+        context_policy = "adaptive_evidence_graph"
+        model_policy = "adaptive_quality_speed"
+        validation_policy = "confidence_gated_checks"
     elif mode == "fast_fix":
         context_policy = "bug_fix_focus"
         model_policy = "fastest_successful"
@@ -99,6 +109,23 @@ def optimizer_task_type_for(*, task_type: str, task_category: str = "", text: st
     haystack = f"{task} {category} {text.lower()}"
     if "security" in haystack or "secret" in haystack or task == "security_sensitive_change":
         return "security"
+    if (
+        "migrate" in haystack
+        or "migration" in haystack
+        or "upgrade" in haystack
+        or "breaking change" in haystack
+        or "deprecat" in haystack
+    ):
+        return "migration"
+    if (
+        "build failed" in haystack
+        or "build failure" in haystack
+        or "compile" in haystack
+        or "typescript error" in haystack
+        or "type error" in haystack
+        or "lint" in haystack
+    ):
+        return "build_fix"
     if "performance" in haystack or "latency" in haystack or "slow" in haystack:
         return "performance"
     if "ui" in haystack or "react" in haystack or "css" in haystack or "frontend" in haystack:
@@ -118,4 +145,3 @@ def optimizer_task_type_for(*, task_type: str, task_category: str = "", text: st
     if task in {"coding"}:
         return "feature"
     return "repo_analysis" if "repo" in haystack else "explanation"
-

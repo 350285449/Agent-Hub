@@ -56,6 +56,13 @@ def retry_policy_for(*, boost_mode: str, task_type: str, retry_budget: int) -> R
         mode = "stronger-model"
         strategies["low_confidence"] = "add_full_files"
         strategies["bad_patch"] = "stronger_model"
+    elif boost_mode == "turbo_boost":
+        mode = "adaptive-escalation"
+        strategies["missing_context"] = "expand_context"
+        strategies["low_confidence"] = "add_full_files"
+        strategies["bad_patch"] = "stronger_model"
+        strategies["test_failure"] = "include_test_output"
+        strategies["token_budget"] = "compress_prompt"
     elif boost_mode == "fast_fix":
         mode = "targeted"
         strategies["missing_context"] = "add_full_files"
@@ -148,6 +155,7 @@ def apply_retry_to_plan(
             target_context_ratio=max(0.22, float(getattr(plan, "target_context_ratio", 0.62) or 0.62) - 0.14),
             compression_aggression=min(0.92, float(getattr(plan, "compression_aggression", 0.55) or 0.55) + 0.12),
         )
+    kwargs = _normalize_retry_limits(plan, kwargs)
     try:
         return replace(plan, **kwargs)
     except TypeError:
@@ -167,3 +175,25 @@ def _int(value: Any, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
 
+
+def _normalize_retry_limits(plan: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    next_values = dict(kwargs)
+    repo_max_files = max(1, _int(next_values.get("repo_max_files", getattr(plan, "repo_max_files", 1)), 1))
+    full_files = min(max(0, _int(next_values.get("full_files", getattr(plan, "full_files", 0)), 0)), repo_max_files)
+    compressed_files = min(
+        max(0, _int(next_values.get("compressed_files", getattr(plan, "compressed_files", 0)), 0)),
+        max(0, repo_max_files - full_files),
+    )
+    map_files = min(
+        max(0, _int(next_values.get("map_files", getattr(plan, "map_files", 0)), 0)),
+        max(0, repo_max_files - full_files - compressed_files),
+    )
+    next_values.update(
+        repo_max_files=repo_max_files,
+        full_files=full_files,
+        compressed_files=compressed_files,
+        map_files=map_files,
+    )
+    if "repo_max_chars" in next_values:
+        next_values["repo_max_chars"] = max(1_000, _int(next_values["repo_max_chars"], 1_000))
+    return next_values

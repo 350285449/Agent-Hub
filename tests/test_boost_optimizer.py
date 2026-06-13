@@ -13,6 +13,7 @@ from agent_hub.optimizer import (
     ContextLevel,
     ContextPlanner,
     apply_retry_to_plan,
+    optimization_plan_from_dict,
     trace_from_plan,
 )
 from agent_hub.output_validator import validate_output
@@ -28,6 +29,9 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertEqual(config.boost_mode, "save_tokens")
         self.assertEqual(config_to_dict(config)["boost_mode"], "save_tokens")
         self.assertEqual(normalize_boost_mode("Big Refactor"), "big_refactor")
+        self.assertEqual(normalize_boost_mode("another level"), "turbo_boost")
+        self.assertEqual(normalize_boost_mode("Boost + Save Tokens"), "save_tokens")
+        self.assertEqual(normalize_boost_mode("Turbo Boost!"), "turbo_boost")
         self.assertEqual(boost_policy("local first").routing_mode, "local_private")
 
     def test_boost_mode_runtime_selector_options(self) -> None:
@@ -40,6 +44,55 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertEqual(config.context_mode, "minimal")
         self.assertEqual(config.set_boost_mode("Best Code"), "best_code")
         self.assertEqual(config.context_mode, "deep")
+        self.assertEqual(config.set_boost_mode("Boost"), "turbo_boost")
+        self.assertEqual(config.boost_mode_label, "Turbo Boost")
+
+    def test_turbo_boost_expands_complex_feature_context_and_retry_policy(self) -> None:
+        plan = build_boost_plan(
+            task_type="coding",
+            task_category="feature",
+            text=(
+                "Build a multi-file integration feature with backwards compatible API behavior, "
+                "UI updates, and related tests."
+            ),
+            boost_mode="Boost",
+            estimated_input_tokens=15_000,
+            repo_size_bucket="large",
+            file_count=5,
+        )
+
+        self.assertEqual(plan.boost_mode, "turbo_boost")
+        self.assertEqual(plan.model_policy, "adaptive_quality_speed")
+        self.assertGreaterEqual(plan.repo_max_files, 12)
+        self.assertGreater(plan.quality_weight, plan.cost_weight)
+        self.assertGreaterEqual(plan.retry_policy.max_retries, 3)
+        self.assertEqual(plan.retry_policy.strategy_for("missing context"), "expand_context")
+        self.assertIn("adaptive_evidence_ladder", plan.algorithms)
+        self.assertIn("complexity_aware_context_expansion", plan.algorithms)
+        self.assertIn("coding", plan.preferred_models)
+
+    def test_boost_profile_recognizes_migration_and_build_fix_tasks(self) -> None:
+        migration = build_boost_plan(
+            task_type="coding",
+            task_category="maintenance",
+            text="Migrate the auth package after a breaking change and update all call sites.",
+            boost_mode="balanced",
+            file_count=6,
+        )
+        build_fix = build_boost_plan(
+            task_type="debug",
+            task_category="ci",
+            text="Build failed with a TypeScript error in the route config.",
+            boost_mode="fast_fix",
+            file_count=1,
+        )
+
+        self.assertEqual(migration.task_type, "migration")
+        self.assertIn("migration_impact_graph", migration.algorithms)
+        self.assertGreater(migration.risk_weight, 1.0)
+        self.assertEqual(build_fix.task_type, "build_fix")
+        self.assertIn("build_log_anchor", build_fix.algorithms)
+        self.assertGreater(build_fix.speed_weight, 1.2)
 
     def test_adaptive_boost_plan_tightens_context_under_token_pressure(self) -> None:
         plan = build_boost_plan(
@@ -102,6 +155,61 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertGreater(retry.target_context_ratio, plan.target_context_ratio)
         self.assertIn("plan_based_retry", retry.algorithms)
         self.assertEqual(retry.context_policy, "expanded_context")
+
+    def test_boost_plan_normalizes_token_targets_and_serialized_limits(self) -> None:
+        tiny = build_boost_plan(
+            task_type="documentation",
+            task_category="documentation",
+            text="Explain the setup briefly.",
+            boost_mode="save_tokens",
+        )
+        self.assertLessEqual(tiny.token_budget.target_context_tokens, tiny.token_budget.max_context_tokens)
+
+        payload = tiny.to_dict()
+        payload.update(
+            {
+                "repo_max_files": -4,
+                "repo_max_chars": 100,
+                "full_files": 99,
+                "compressed_files": 99,
+                "map_files": 99,
+                "target_context_ratio": 2.5,
+                "compression_aggression": 3.0,
+                "quality_weight": 9.0,
+                "retry_budget": -2,
+            }
+        )
+        payload["token_budget"] = {
+            **payload["token_budget"],
+            "max_context_tokens": 120,
+            "target_context_tokens": 10_000,
+        }
+
+        restored = optimization_plan_from_dict(payload)
+
+        self.assertIsNotNone(restored)
+        assert restored is not None
+        self.assertGreaterEqual(restored.repo_max_files, 1)
+        self.assertGreaterEqual(restored.repo_max_chars, 1_000)
+        self.assertLessEqual(restored.full_files + restored.compressed_files + restored.map_files, restored.repo_max_files)
+        self.assertLessEqual(restored.token_budget.target_context_tokens, restored.token_budget.max_context_tokens)
+        self.assertLessEqual(restored.compression_aggression, 0.92)
+        self.assertLessEqual(restored.quality_weight, 1.7)
+        self.assertEqual(restored.retry_budget, 0)
+
+    def test_retry_policy_keeps_context_bucket_invariants(self) -> None:
+        plan = build_boost_plan(
+            task_type="debug",
+            task_category="debugging",
+            text="Fix src/app.py",
+            boost_mode="save_tokens",
+            file_count=1,
+        )
+
+        retry = apply_retry_to_plan(plan, reason="low confidence", strategy="add_full_files")
+
+        self.assertLessEqual(retry.full_files + retry.compressed_files + retry.map_files, retry.repo_max_files)
+        self.assertGreaterEqual(retry.repo_max_files, 1)
 
     def test_task_classifier_exposes_optimizer_policy_without_breaking_route_type(self) -> None:
         classification = TaskClassifier().classify(
@@ -707,8 +815,9 @@ index 867a3ee..b77d49d 100644
             response = AgentRouter(config, provider_factory=_CooperativeProvider).route(
                 HubRequest(
                     session_id="s",
+                    preferred_agent="codex-cli",
                     messages=[
-                        {"role": "user", "content": "Fix the failing cache token budget test in src/cache.py."}
+                        {"role": "user", "content": "Explain the cache token budget code in src/cache.py."}
                     ],
                     raw={"agent_hub": {"boost_mode": "save_tokens", "cooperative_codex": True}},
                 )
@@ -764,7 +873,11 @@ class _CooperativeProvider:
                 usage={"prompt_tokens": 120, "completion_tokens": 36},
             )
         return ProviderResult(
-            text="final codex answer",
+            text=(
+                "Final Codex answer: the cache token budget code should preserve the compacted "
+                "context estimate, compare it with the effective model budget, and avoid changing "
+                "unrelated configuration while explaining the token accounting clearly."
+            ),
             model=self.agent.model,
             usage={"prompt_tokens": 600, "completion_tokens": 80},
         )
