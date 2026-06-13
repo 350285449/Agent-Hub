@@ -1,0 +1,21 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "workspace_dir": ".",
+  "trusted_approval_token_env": "AGENT_HUB_TRUSTED_APPROVAL_TOKEN",
+  "approval_mode": "safe",
+  "allow_shell_tools": true,
+  "shell_command_policy": "ask",
+  "debug_raw_provider_responses": false,
+  "include_raw_responses": false,
+  "provider_privacy_mode_enabled": true,
+  "secret_scanning_enabled": true,
+  "prompt_injection_defense_enabled": true,
+  "auto_validate_after_edits": true,
+  "rollback_on_validation_failure": true,
+  "workspace_checkpoint_retention": 20,
+  "model_tournament_enabled": true,
+  "model_tournament_max_candidates": 4,
+  "automatic_escalation_enabled": true,
+  "confidence_threshold": 0.72
+}

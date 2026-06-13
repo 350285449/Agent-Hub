@@ -1,0 +1,675 @@
+{
+  "name": "agent-hub-vscode",
+  "displayName": "Agent Hub Workspace",
+  "description": "Agent Hub optimizes repo context, routes each task by success-per-token, validates outputs, and retries failed attempts automatically.",
+  "version": "9.6.8",
+  "publisher": "agent-hub",
+  "license": "MIT",
+  "icon": "assets/agent-hub-icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/350285449/Agent-Hub.git"
+  },
+  "bugs": {
+    "url": "https://github.com/350285449/Agent-Hub/issues"
+  },
+  "homepage": "https://github.com/350285449/Agent-Hub",
+  "keywords": [
+    "ai",
+    "agent",
+    "multi-agent",
+    "llm",
+    "llm-router",
+    "openai",
+    "chatgpt",
+    "claude",
+    "anthropic",
+    "gemini",
+    "ollama",
+    "openrouter",
+    "local-ai",
+    "cline",
+    "roo",
+    "continue",
+    "coding-agent",
+    "vscode-agent",
+    "mcp",
+    "api-router"
+  ],
+  "galleryBanner": {
+    "color": "#0D1117",
+    "theme": "dark"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "categories": [
+    "AI",
+    "Machine Learning",
+    "Programming Languages",
+    "Testing",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:agentHub.sidebar",
+    "onChatParticipant:agent-hub.agent-hub-vscode.agenthub",
+    "onCommand:agentHub.chat",
+    "onCommand:agentHub.startServer",
+    "onCommand:agentHub.stopServer",
+    "onCommand:agentHub.restartServer",
+    "onCommand:agentHub.checkHealth",
+    "onCommand:agentHub.openDashboard",
+    "onCommand:agentHub.openRuntimeKernel",
+    "onCommand:agentHub.openSettings",
+    "onCommand:agentHub.configureModels",
+    "onCommand:agentHub.runCheckup",
+    "onCommand:agentHub.checkRequirements",
+    "onCommand:agentHub.fixSafeConfig",
+    "onCommand:agentHub.installPython",
+    "onCommand:agentHub.installNode",
+    "onCommand:agentHub.enableFreeOnlyMode",
+    "onCommand:agentHub.enableTokenSafeMode",
+    "onCommand:agentHub.enableCodexCliMode",
+    "onCommand:agentHub.installCodexCli",
+    "onCommand:agentHub.installOllamaDesktop",
+    "onCommand:agentHub.status",
+    "onCommand:agentHub.ask",
+    "onCommand:agentHub.codeAgent",
+    "onCommand:agentHub.generateCommitMessage",
+    "onCommand:agentHub.research",
+    "onCommand:agentHub.explainSelection",
+    "onCommand:agentHub.explainFile",
+    "onCommand:agentHub.autoSetupCline",
+    "onCommand:agentHub.setupCodingTool",
+    "onCommand:agentHub.setupCline",
+    "onCommand:agentHub.copyClineConfig",
+    "onCommand:agentHub.testClineConnection",
+    "onCommand:agentHub.showClineSetup",
+    "onCommand:agentHub.copyClaudeCodeConfig",
+    "onCommand:agentHub.testAnthropicEndpoint",
+    "onCommand:agentHub.showClaudeCodeSetup",
+    "onCommand:agentHub.rollbackLatestCheckpoint",
+    "onCommand:agentHub.openModelLeaderboard",
+    "onCommand:agentHub.openCostDashboard",
+    "onCommand:agentHub.openBenchmarkResults",
+    "onCommand:agentHub.openBenchmarkReportMenu",
+    "onCommand:agentHub.runPersonalBenchmark",
+    "onCommand:agentHub.explainRoute",
+    "onCommand:agentHub.openRouteLab",
+    "onCommand:agentHub.openBenchmarkShareCard",
+    "onCommand:agentHub.openReadmeProof",
+    "onCommand:agentHub.openOutput"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "check": "node --check extension.js",
+    "check:version": "node scripts/check-version.js",
+    "check:vsix": "node scripts/run-python.js ../scripts/validate_vsix_cleanliness.py",
+    "generate-backend-snapshot": "node scripts/run-python.js ../scripts/generate_backend_snapshot.py",
+    "validate-backend-drift": "node scripts/run-python.js ../scripts/validate_backend_drift.py",
+    "validate-release": "node scripts/run-python.js ../scripts/validate_release.py",
+    "update-release-metadata": "node scripts/run-python.js ../scripts/update_release_metadata.py",
+    "package-clean": "node scripts/run-python.js ../scripts/package_clean.py",
+    "release-summary": "node scripts/run-python.js ../scripts/release_summary.py",
+    "compile": "npm run check",
+    "test": "npm run check && node --test test/*.test.js",
+    "install-extension": "node scripts/install-extension.js",
+    "mount": "node scripts/install-extension.js",
+    "prepare-backend": "node scripts/prepare-backend.js",
+    "vscode:prepublish": "npm run prepare-backend && npm run validate-backend-drift",
+    "package": "npm run prepare-backend && npm run validate-backend-drift && npx @vscode/vsce package --allow-missing-repository && npm run check:vsix",
+    "publish": "npm run prepare-backend && npm run validate-release && npx @vscode/vsce publish --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.9.2"
+  },
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "agent-hub.agent-hub-vscode.agenthub",
+        "name": "agenthub",
+        "fullName": "Agent Hub",
+        "description": "Run cloud or local workspace agents",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "agent",
+            "description": "Inspect or change the current workspace"
+          },
+          {
+            "name": "explain",
+            "description": "Explain the current selection or file"
+          },
+          {
+            "name": "research",
+            "description": "Research the web with local synthesis"
+          },
+          {
+            "name": "token-safe",
+            "description": "Boost performance with adaptive compact fallback"
+          },
+          {
+            "name": "codex-cli",
+            "description": "Use your signed-in Codex CLI"
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "agentHub.chat",
+        "title": "Agent Hub: Open Chat"
+      },
+      {
+        "command": "agentHub.startServer",
+        "title": "Agent Hub: Start Server"
+      },
+      {
+        "command": "agentHub.stopServer",
+        "title": "Agent Hub: Stop Server"
+      },
+      {
+        "command": "agentHub.restartServer",
+        "title": "Agent Hub: Restart Server"
+      },
+      {
+        "command": "agentHub.checkHealth",
+        "title": "Agent Hub: Check Health"
+      },
+      {
+        "command": "agentHub.openDashboard",
+        "title": "Agent Hub: Open Dashboard"
+      },
+      {
+        "command": "agentHub.openRuntimeKernel",
+        "title": "Agent Hub: Open Runtime Kernel",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "agentHub.openSettings",
+        "title": "Agent Hub: Open Settings"
+      },
+      {
+        "command": "agentHub.configureModels",
+        "title": "Agent Hub: Configure Models / Providers",
+        "icon": "$(server-process)"
+      },
+      {
+        "command": "agentHub.runCheckup",
+        "title": "Agent Hub: Run Checkup",
+        "icon": "$(verified)"
+      },
+      {
+        "command": "agentHub.checkRequirements",
+        "title": "Agent Hub: Check Requirements",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "agentHub.fixSafeConfig",
+        "title": "Agent Hub: Repair Config",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "agentHub.installPython",
+        "title": "Agent Hub: Install Python",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "agentHub.installNode",
+        "title": "Agent Hub: Install Node.js",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "agentHub.enableFreeOnlyMode",
+        "title": "Agent Hub: Use Free Models Only",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "agentHub.enableTokenSafeMode",
+        "title": "Agent Hub: Boost + Save Tokens",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "agentHub.enableCodexCliMode",
+        "title": "Agent Hub: Use Signed-In Codex CLI",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "agentHub.installCodexCli",
+        "title": "Agent Hub: Install Codex CLI",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "agentHub.installOllamaDesktop",
+        "title": "Agent Hub: Install Ollama Desktop",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "agentHub.status",
+        "title": "Agent Hub: Show Status"
+      },
+      {
+        "command": "agentHub.ask",
+        "title": "Agent Hub: Ask Agent"
+      },
+      {
+        "command": "agentHub.codeAgent",
+        "title": "Agent Hub: Run Coding Agent"
+      },
+      {
+        "command": "agentHub.generateCommitMessage",
+        "title": "Agent Hub: Generate Commit Message",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "agentHub.research",
+        "title": "Agent Hub: Research Web"
+      },
+      {
+        "command": "agentHub.explainSelection",
+        "title": "Agent Hub: Explain Selection"
+      },
+      {
+        "command": "agentHub.explainFile",
+        "title": "Agent Hub: Explain Current File"
+      },
+      {
+        "command": "agentHub.autoSetupCline",
+        "title": "Agent Hub: Auto-Configure Cline",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "agentHub.setupCline",
+        "title": "Agent Hub: Set Up Cline",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "agentHub.setupCodingTool",
+        "title": "Agent Hub: Set Up Coding Tool",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "agentHub.copyClineConfig",
+        "title": "Agent Hub: Copy Cline Config"
+      },
+      {
+        "command": "agentHub.testClineConnection",
+        "title": "Agent Hub: Test Cline Connection"
+      },
+      {
+        "command": "agentHub.showClineSetup",
+        "title": "Agent Hub: Show Cline Setup"
+      },
+      {
+        "command": "agentHub.copyClaudeCodeConfig",
+        "title": "Agent Hub: Copy Claude Code Config"
+      },
+      {
+        "command": "agentHub.testAnthropicEndpoint",
+        "title": "Agent Hub: Test Anthropic Endpoint"
+      },
+      {
+        "command": "agentHub.showClaudeCodeSetup",
+        "title": "Agent Hub: Show Claude Code Setup"
+      },
+      {
+        "command": "agentHub.openOutput",
+        "title": "Agent Hub: Open Output"
+      },
+      {
+        "command": "agentHub.rollbackLatestCheckpoint",
+        "title": "Agent Hub: Roll Back Latest Checkpoint"
+      },
+      {
+        "command": "agentHub.openModelLeaderboard",
+        "title": "Agent Hub: Open Model Leaderboard"
+      },
+      {
+        "command": "agentHub.openCostDashboard",
+        "title": "Agent Hub: Open Cost Dashboard"
+      },
+      {
+        "command": "agentHub.openBenchmarkResults",
+        "title": "Agent Hub: Open Benchmark Results"
+      },
+      {
+        "command": "agentHub.openBenchmarkReportMenu",
+        "title": "Agent Hub: Open Benchmark Report Menu",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "agentHub.runPersonalBenchmark",
+        "title": "Agent Hub: Run Personal Benchmark",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "agentHub.explainRoute",
+        "title": "Agent Hub: Explain Route",
+        "icon": "$(symbol-method)"
+      },
+      {
+        "command": "agentHub.openRouteLab",
+        "title": "Agent Hub: Open Route Lab",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "agentHub.openBenchmarkShareCard",
+        "title": "Agent Hub: Open Benchmark Share Card",
+        "icon": "$(megaphone)"
+      },
+      {
+        "command": "agentHub.openReadmeProof",
+        "title": "Agent Hub: Open README Proof Section",
+        "icon": "$(book)"
+      }
+    ],
+    "configuration": {
+      "title": "Agent Hub",
+      "properties": {
+        "agentHub.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8787",
+          "description": "Agent-Hub server URL."
+        },
+        "agentHub.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer/API token for Agent Hub when the server is bound publicly."
+        },
+        "agentHub.approvalToken": {
+          "type": "string",
+          "default": "",
+          "description": "Trusted approval token used when resuming approved Agent Hub actions."
+        },
+        "agentHub.pythonPath": {
+          "type": "string",
+          "default": "auto",
+          "description": "Python executable used to start Agent-Hub. Use auto to try workspace .venv, Python Launcher, python, and python3 until a Python 3.11+ runtime is found."
+        },
+        "agentHub.configPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Agent-Hub config. Leave empty to store a per-workspace config in VS Code global storage. Use an absolute path or ./agent-hub.config.json to opt into a workspace file."
+        },
+        "agentHub.route": {
+          "type": "string",
+          "default": "coding",
+          "description": "Default Agent-Hub route used by VS Code commands."
+        },
+        "agentHub.researchRoute": {
+          "type": "string",
+          "default": "research",
+          "description": "Agent-Hub route used by the Research Web command."
+        },
+        "agentHub.codingAgentRoute": {
+          "type": "string",
+          "default": "local-agent",
+          "description": "Agent-Hub route used when provider mode is local."
+        },
+        "agentHub.agentProviderMode": {
+          "type": "string",
+          "enum": [
+            "local",
+            "hybrid",
+            "cloud"
+          ],
+          "default": "cloud",
+          "description": "Control agent provider mode. Cloud uses the configured cloud-agent route, hybrid tries that route then local fallbacks, and local uses direct LM Studio/Ollama routes."
+        },
+        "agentHub.agentMaxSteps": {
+          "type": "number",
+          "default": 20,
+          "description": "Maximum tool steps for agent requests."
+        },
+        "agentHub.agentContextBudgetTokens": {
+          "type": "number",
+          "default": 32000,
+          "minimum": 1000,
+          "description": "Input-token budget for compacting long Agent Hub workspace-agent histories."
+        },
+        "agentHub.agentContextCompactionEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Compact old Agent Hub tool results before model calls to reduce context growth."
+        },
+        "agentHub.agentMode": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "group-agent"
+          ],
+          "default": "agent",
+          "description": "Workspace agent mode. Standard agent uses one routed model loop; group-agent coordinates planner, researcher, coder, reviewer, fixer, and finalizer roles."
+        },
+        "agentHub.approvalMode": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "auto",
+            "safe",
+            "readonly",
+            "shell-ask",
+            "deny"
+          ],
+          "default": "safe",
+          "description": "Permission mode for privileged Agent Hub actions. Ask prompts before commands, file/config changes, process control, model downloads, and cloud provider use."
+        },
+        "agentHub.contextMode": {
+          "type": "string",
+          "enum": [
+            "minimal",
+            "balanced",
+            "deep"
+          ],
+          "default": "balanced",
+          "description": "Adaptive context mode for Agent Hub token budgeting."
+        },
+        "agentHub.clineCompatibilityMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Preserve Cline/Claude Code structured content, task_progress, TODO state, tool chains, and active editor metadata during normalization and compaction."
+        },
+        "agentHub.groupPlanCandidates": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Number of planner candidates to ask in group-agent mode."
+        },
+        "agentHub.allowShellTools": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the coding agent command to run shell commands in the workspace."
+        },
+        "agentHub.maxTokens": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "description": "Optional maximum output tokens for VS Code agent requests. Null lets Agent Hub choose automatically."
+        },
+        "agentHub.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the local Agent-Hub server automatically when sending a request and the server is offline."
+        },
+        "agentHub.automatedModelFeedback": {
+          "type": "boolean",
+          "default": false,
+          "description": "After each successful Agent Hub chat response, ask a separate judge model to score the response and submit adaptive feedback automatically."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentHub",
+          "title": "Agent Hub",
+          "icon": "assets/activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentHub": [
+        {
+          "id": "agentHub.sidebar",
+          "name": "Agent Hub",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "agentHub.checkHealth",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openDashboard",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openRuntimeKernel",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.checkRequirements",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.fixSafeConfig",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.installPython",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.installNode",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.enableFreeOnlyMode",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.enableTokenSafeMode",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.enableCodexCliMode",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.installCodexCli",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.installOllamaDesktop",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.status",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.setupCline",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.copyClineConfig",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.testClineConnection",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.showClineSetup",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.copyClaudeCodeConfig",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.testAnthropicEndpoint",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.showClaudeCodeSetup",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openOutput",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.rollbackLatestCheckpoint",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openModelLeaderboard",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openCostDashboard",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openBenchmarkResults",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.runPersonalBenchmark",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.explainRoute",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openRouteLab",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openBenchmarkShareCard",
+          "when": "false"
+        },
+        {
+          "command": "agentHub.openReadmeProof",
+          "when": "false"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "agentHub.generateCommitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation@2"
+        }
+      ],
+      "scm/inputBox": [
+        {
+          "command": "agentHub.generateCommitMessage",
+          "when": "scmProvider == git"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "agentHub.explainSelection",
+          "when": "editorHasSelection",
+          "group": "navigation@9"
+        },
+        {
+          "command": "agentHub.explainFile",
+          "group": "navigation@10"
+        }
+      ]
+    }
+  }
+}

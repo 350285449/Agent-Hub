@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+from typing import Any, Iterator
+
+from ..config import AgentConfig, _is_local_or_private_url, normalize_provider
+from ..models import HubRequest, ProviderResult
+from ..provider_presets import provider_defaults_for_agent
+from .base import BaseProviderAdapter, StreamChunk
+from .errors import ProviderError
+from .shared import (
+    _agent_hub_tool_specs,
+    _chat_completions_url,
+    _copy_allowed,
+    _facade_callable,
+    _normalize_chat_result_for_agent,
+    _openai_messages,
+    _openai_tool_choice,
+    _openai_tool_specs,
+    _post_json_with_output_retry,
+    _post_stream_json,
+    _provider_debug,
+    _request_tool_specs,
+    _stream_chunk_from_openai_data,
+    provider_headers,
+)
+
+
+LOCAL_API_KEY_OPTIONAL_PROVIDER_TYPES = {
+    "llama-cpp",
+    "lm-studio",
+    "localai",
+    "ollama",
+    "ollama-local",
+    "openai-compatible",
+    "vllm",
+}
+
+
+class OpenAIChatProvider(BaseProviderAdapter):
+    def __init__(self, agent: AgentConfig) -> None:
+        self.agent = agent
+
+    def complete(self, request: HubRequest) -> ProviderResult:
+        api_key = self.agent.resolved_api_key
+        if _missing_required_api_key(self.agent, api_key):
+            raise ProviderError(
+                f"{self.agent.name} is missing API key env {self.agent.api_key_env}",
+                retryable=True,
+                error_type="configuration",
+            )
+
+        payload = self._payload(request)
+        headers = provider_headers(self.agent, api_key)
+
+        raw = _post_json_with_output_retry(
+            url=_chat_completions_url(self.agent),
+            headers=headers,
+            payload=payload,
+            timeout=self.agent.timeout_seconds,
+            debug=_provider_debug(request, self.agent),
+            request=request,
+            agent=self.agent,
+        )
+        return _normalize_chat_result_for_agent(raw, self.agent)
+
+    def stream(self, request: HubRequest) -> Iterator[StreamChunk]:
+        if not self.supports_streaming():
+            raise NotImplementedError(f"{self.name} does not support native streaming")
+        api_key = self.agent.resolved_api_key
+        if _missing_required_api_key(self.agent, api_key):
+            raise ProviderError(
+                f"{self.agent.name} is missing API key env {self.agent.api_key_env}",
+                retryable=True,
+                error_type="configuration",
+            )
+
+        payload = self._payload(request)
+        payload["stream"] = True
+        headers = provider_headers(self.agent, api_key)
+        post_stream_json = _facade_callable("_post_stream_json", _post_stream_json)
+        for data in post_stream_json(
+            url=_chat_completions_url(self.agent),
+            headers=headers,
+            payload=payload,
+            timeout=self.agent.timeout_seconds,
+            debug=_provider_debug(request, self.agent),
+        ):
+            chunk = _stream_chunk_from_openai_data(data, default_model=self.agent.model)
+            if chunk is not None:
+                yield chunk
+
+    def _payload(self, request: HubRequest) -> dict[str, Any]:
+        raw = request.raw if isinstance(request.raw, dict) else {}
+        payload = _copy_allowed(
+            raw,
+            {
+                "frequency_penalty",
+                "function_call",
+                "functions",
+                "logit_bias",
+                "logprobs",
+                "metadata",
+                "n",
+                "parallel_tool_calls",
+                "presence_penalty",
+                "reasoning_effort",
+                "response_format",
+                "seed",
+                "service_tier",
+                "stop",
+                "store",
+                "stream_options",
+                "temperature",
+                "tool_choice",
+                "tools",
+                "top_logprobs",
+                "top_p",
+                "user",
+            },
+        )
+        agent_tools = _request_tool_specs(request)
+        legacy_functions = (
+            not _agent_hub_tool_specs(request)
+            and "tools" not in raw
+            and isinstance(raw.get("functions"), list)
+        )
+        if agent_tools and not legacy_functions:
+            payload["tools"] = _openai_tool_specs(agent_tools)
+            converted_choice = _openai_tool_choice(
+                raw.get("tool_choice", raw.get("function_call"))
+            )
+            if converted_choice is not None:
+                payload["tool_choice"] = converted_choice
+            else:
+                payload.setdefault("tool_choice", "auto")
+        payload["model"] = self.agent.model
+        payload["messages"] = _openai_messages(request.messages)
+        if request.max_tokens is not None:
+            if "max_completion_tokens" in raw:
+                payload["max_completion_tokens"] = request.max_tokens
+            else:
+                payload["max_tokens"] = request.max_tokens
+        elif self.agent.max_tokens is not None:
+            payload["max_tokens"] = self.agent.max_tokens
+        if request.temperature is not None:
+            payload["temperature"] = request.temperature
+        return payload
+
+
+def _missing_required_api_key(agent: AgentConfig, api_key: str | None) -> bool:
+    if api_key or not agent.api_key_env:
+        return False
+    provider = normalize_provider(agent.provider)
+    if provider == "openai":
+        return True
+    if provider == "openai-compatible" and agent.base_url:
+        return not _is_local_or_private_url(agent.base_url)
+    metadata = provider_defaults_for_agent(agent)
+    if metadata and metadata.api_key_env == agent.api_key_env:
+        if metadata.base_url:
+            return not _is_local_or_private_url(metadata.base_url)
+        provider_type = (agent.provider_type or agent.provider).lower()
+        return provider_type not in LOCAL_API_KEY_OPTIONAL_PROVIDER_TYPES
+    return False
+
+
+OpenAIChatAdapter = OpenAIChatProvider
+
+
+__all__ = ["OpenAIChatAdapter", "OpenAIChatProvider"]

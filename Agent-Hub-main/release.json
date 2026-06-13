@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "agent-hub",
+  "extension_version": "9.6.8",
+  "backend_version": "9.6.8",
+  "protocol_api_compatibility_version": "1",
+  "minimum_supported_backend_version": "9.6.8",
+  "release_timestamp_utc": "2026-06-11T00:00:00Z",
+  "build": {
+    "metadata_source": "release.json",
+    "backend_snapshot_manifest": "vscode-extension/backend/SNAPSHOT.json",
+    "canonical_backend": "agent_hub",
+    "commit_sha": "",
+    "build_timestamp_utc": "",
+    "git_tag": ""
+  }
+}

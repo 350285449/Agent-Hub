@@ -1,0 +1,25 @@
+{
+  "free_only": true,
+  "default_route": ["ollama-local", "lm-studio"],
+  "agents": [
+    {
+      "name": "ollama-local",
+      "provider": "ollama",
+      "provider_type": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen2.5-coder",
+      "free": true,
+      "context_window": 32768,
+      "supports_streaming": true
+    },
+    {
+      "name": "lm-studio",
+      "provider": "openai-compatible",
+      "provider_type": "lm-studio",
+      "base_url": "http://127.0.0.1:1234/v1",
+      "model": "local-model",
+      "free": true,
+      "context_window": 32768
+    }
+  ]
+}

@@ -1,0 +1,190 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "state_dir": ".agent-hub/state",
+  "inbox_dir": ".agent-hub/inbox",
+  "outbox_dir": ".agent-hub/outbox",
+  "archive_dir": ".agent-hub/archive",
+  "workspace_dir": ".",
+  "boost_mode": "balanced",
+  "approval_mode": "safe",
+  "allow_shell_tools": false,
+  "shell_command_policy": "deny",
+  "cline_compatibility_mode": true,
+  "force_compatibility_streaming": true,
+  "native_stream_failure_policy": "recover",
+  "routing": {
+    "unlimited_default": true,
+    "max_tokens_mode": "auto",
+    "context_budget_mode": "auto",
+    "auto_failover": true,
+    "auto_retry": true,
+    "free_first": true,
+    "efficiency_routing_enabled": true,
+    "prefer_available_quota": true,
+    "failover_on_slow_stream": true,
+    "failover_on_quota_exhaustion": true,
+    "continue_after_output_limit": true,
+    "max_provider_attempts": 5,
+    "slow_first_token_timeout_seconds": 20,
+    "stream_stall_timeout_seconds": 30,
+    "min_tokens_per_second": 2,
+    "cooldown_rate_limit_seconds": 120,
+    "cooldown_overload_seconds": 60,
+    "cooldown_quota_seconds": 3600
+  },
+  "debug_raw_provider_responses": false,
+  "api_auth_token_env": "AGENT_HUB_API_TOKEN",
+  "trusted_approval_token_env": "AGENT_HUB_TRUSTED_APPROVAL_TOKEN",
+  "free_only": true,
+  "enable_load_balancing": true,
+  "adaptive_learning_enabled": true,
+  "adaptive_routing_enabled": true,
+  "adaptive_workflow_upgrades_enabled": true,
+  "routing_memory_enabled": true,
+  "routing_memory_store_prompts": false,
+  "routing_memory_retention_days": 30,
+  "provider_privacy_mode_enabled": true,
+  "secret_scanning_enabled": true,
+  "prompt_injection_defense_enabled": true,
+  "model_tournament_enabled": true,
+  "model_tournament_max_candidates": 4,
+  "automatic_escalation_enabled": true,
+  "confidence_threshold": 0.72,
+  "auto_detect_local_models": false,
+  "tool_loop_enabled": true,
+  "tool_loop_enabled_for_cline": false,
+  "tool_loop_debug": true,
+  "max_tool_iterations": 4,
+  "repo_context_enabled": true,
+  "repo_context_max_files": 8,
+  "repo_context_max_chars": 12000,
+  "repo_ignore_patterns": [
+    ".agent-hub/**",
+    "state/**",
+    "sessions/**",
+    "logs/**",
+    "*.log",
+    "__pycache__/**",
+    ".pytest_cache/**"
+  ],
+  "max_context_tokens": null,
+  "compatibility_mode": {
+    "universal_routing": true,
+    "emulate_tools": true,
+    "minimal_tool_schema": true,
+    "reduced_repo_context": true,
+    "max_context_tokens": null
+  },
+  "context_cache_enabled": true,
+  "context_cache_max_entries": 128,
+  "context_summarization_enabled": false,
+  "plugins_enabled": true,
+  "plugin_dirs": [
+    ".agent-hub/plugins"
+  ],
+  "enabled_plugins": [],
+  "trusted_plugins": [],
+  "disabled_plugins": [],
+  "plugin_trust_registry": ".agent-hub/plugin-trust.json",
+  "plugin_signature_key_env": "AGENT_HUB_PLUGIN_SIGNATURE_KEY",
+  "plugin_allow_unsigned": false,
+  "plugin_execution_enabled": false,
+  "plugin_capability_grants": {},
+  "enterprise_mode_enabled": false,
+  "enterprise_default_workspace_id": "default",
+  "enterprise_users": [],
+  "enterprise_workspaces": [],
+  "enterprise_roles": [],
+  "enterprise_permission_grants": [],
+  "enterprise_audit_retention_days": 90,
+  "include_raw_responses": false,
+  "expose_routing_details": false,
+  "default_route": [
+    "ollama-qwen-coder",
+    "openai-compatible-example"
+  ],
+  "routes": [
+    {
+      "name": "cloud-agent",
+      "keywords": [],
+      "agents": [
+        "ollama-qwen-coder",
+        "openai-compatible-example"
+      ]
+    },
+    {
+      "name": "coding",
+      "keywords": [
+        "code",
+        "debug",
+        "error",
+        "refactor",
+        "test"
+      ],
+      "agents": [
+        "ollama-qwen-coder",
+        "openai-compatible-example"
+      ]
+    }
+  ],
+  "agents": [
+    {
+      "name": "ollama-qwen-coder",
+      "provider": "openai-compatible",
+      "provider_type": "openai-compatible",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen2.5-coder:7b",
+      "enabled": true,
+      "free": true,
+      "context_window": 32768,
+      "supports_streaming": true,
+      "supports_tools": true
+    },
+    {
+      "name": "codex-cli",
+      "provider": "codex-cli",
+      "provider_type": "codex-cli",
+      "model": "gpt-5.5",
+      "enabled": false,
+      "free": true,
+      "timeout_seconds": 300,
+      "max_tokens": 500,
+      "context_window": 400000,
+      "supports_streaming": false,
+      "supports_tools": false
+    },
+    {
+      "name": "openai-compatible-example",
+      "provider": "openai-compatible",
+      "provider_type": "openai-compatible",
+      "base_url": "https://example.com/v1",
+      "api_key_env": "EXAMPLE_API_KEY",
+      "model": "example-model",
+      "enabled": false,
+      "free": false,
+      "context_window": 128000,
+      "cost_per_million_input": 0,
+      "cost_per_million_output": 0,
+      "supports_streaming": true,
+      "supports_tools": true
+    }
+  ],
+  "mcp_servers": [
+    {
+      "name": "example",
+      "enabled": false,
+      "command": "npx",
+      "args": [
+        "-y",
+        "example-mcp-server"
+      ],
+      "tools": []
+    }
+  ],
+  "group_roles": {
+    "planner": "ollama-qwen-coder",
+    "coder": "ollama-qwen-coder",
+    "reviewer": "ollama-qwen-coder"
+  }
+}

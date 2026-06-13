@@ -1,0 +1,57 @@
+title: "Share Your Benchmark"
+labels:
+  - benchmark
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Share a local Agent-Hub benchmark result. Remove secrets, private paths,
+        customer data, and proprietary prompts before posting.
+  - type: input
+    id: baseline
+    attributes:
+      label: Baseline
+      description: Which default model or workflow did you compare against?
+      placeholder: Claude Sonnet
+    validations:
+      required: true
+  - type: input
+    id: savings
+    attributes:
+      label: Savings
+      description: Paste the cost reduction from your benchmark report.
+      placeholder: 34% lower cost
+    validations:
+      required: true
+  - type: input
+    id: latency
+    attributes:
+      label: Latency
+      description: Paste the latency reduction from your benchmark report.
+      placeholder: 18% faster
+  - type: input
+    id: success
+    attributes:
+      label: Success Rate
+      description: Paste the success-rate delta from your benchmark report.
+      placeholder: +3%
+  - type: input
+    id: repo_size
+    attributes:
+      label: Repository Size
+      description: Share approximate LOC or file count if you can.
+      placeholder: 120k LOC
+  - type: input
+    id: workflow
+    attributes:
+      label: Workflow
+      description: What kind of work did the benchmark cover?
+      placeholder: debugging, refactoring, repo analysis
+  - type: textarea
+    id: report
+    attributes:
+      label: Benchmark Card or Case Study
+      description: Paste output from agent-hub benchmark-card or generate-case-study.
+      render: markdown
+    validations:
+      required: true
