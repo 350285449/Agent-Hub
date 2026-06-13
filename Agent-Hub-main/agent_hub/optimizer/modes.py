@@ -249,22 +249,7 @@ def is_valid_boost_mode_value(value: Any) -> bool:
         return False
     key = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
     key = re.sub(r"_+", "_", key)
-    if key in BOOST_MODE_ALIASES:
-        return True
-    words = set(key.split("_"))
-    if "save" in words and ("token" in words or "tokens" in words):
-        return True
-    if "turbo" in words or ("boost" in words and not {"save", "token", "tokens"} & words):
-        return True
-    if {"best", "code"} <= words or "quality" in words:
-        return True
-    if "local" in words:
-        return True
-    if "refactor" in words:
-        return True
-    if "fast" in words or "bug" in words:
-        return True
-    return False
+    return key in BOOST_MODE_ALIASES
 
 
 def boost_policy(mode: Any) -> BoostModePolicy:

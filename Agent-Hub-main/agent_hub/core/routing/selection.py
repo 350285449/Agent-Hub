@@ -1990,6 +1990,7 @@ class AgentRouter:
         classification = context.classification
         estimated_input = int(getattr(classification, "estimated_input_tokens", 0) or 0)
         max_cost = _optional_float(limits.get("max_estimated_cost_usd"))
+        require_known_cost = bool(limits.get("require_known_cost", False))
         allow_premium = bool(limits.get("allow_premium", True))
         allowed: list[AgentConfig] = []
         disabled: list[dict[str, Any]] = []
@@ -2004,8 +2005,11 @@ class AgentRouter:
                 input_tokens=estimated_input,
                 output_tokens=int(output_token_budget(self.config, request, agent, input_tokens=estimated_input).effective),
             )
-            if max_cost is not None and cost is not None and cost > max_cost:
-                reasons.append("estimated_cost_exceeds_limit")
+            if max_cost is not None:
+                if require_known_cost and cost is None and not is_free_agent(agent) and not premium_allowed_for_request:
+                    reasons.append("estimated_cost_unknown")
+                elif cost is not None and cost > max_cost:
+                    reasons.append("estimated_cost_exceeds_limit")
             if reasons:
                 disabled.append(
                     {

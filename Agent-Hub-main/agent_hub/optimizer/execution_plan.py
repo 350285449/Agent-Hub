@@ -702,12 +702,14 @@ def _boost_limits(
         "max_context_chars": max(1_000, int(max_context_chars or 1_000)),
         "max_retries": max(0, int(max_retries or 0)),
         "max_estimated_cost_usd": max_estimated_cost_usd,
+        "require_known_cost": mode == "save_tokens",
     }
 
 
 def _boost_limits_from_dict(data: dict[str, Any] | None, *, base: Any) -> dict[str, Any]:
     raw = data if isinstance(data, dict) else {}
     max_cost = raw.get("max_estimated_cost_usd")
+    require_known_default = getattr(base, "mode", "") == "save_tokens"
     try:
         max_cost_value = None if max_cost is None else max(0.0, float(max_cost))
     except (TypeError, ValueError):
@@ -717,4 +719,5 @@ def _boost_limits_from_dict(data: dict[str, Any] | None, *, base: Any) -> dict[s
         "max_context_chars": max(1_000, _int(raw.get("max_context_chars"), getattr(base, "repo_max_chars", 12_000))),
         "max_retries": max(0, _int(raw.get("max_retries"), getattr(base, "retry_budget", 2))),
         "max_estimated_cost_usd": max_cost_value,
+        "require_known_cost": bool(raw.get("require_known_cost", require_known_default)),
     }

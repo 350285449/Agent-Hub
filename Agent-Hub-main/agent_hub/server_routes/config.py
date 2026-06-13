@@ -687,7 +687,7 @@ def _benchmark_results_dashboard_html(body: dict[str, Any]) -> str:
   </table>
 </section>
 <section class="panel">
-  <h2>Advanced Benchmark Coverage</h2>
+  <h2>Benchmark Coverage Snapshot</h2>
   <table>
     <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Readiness</th><th>Samples</th><th>Latency</th><th>Status</th></tr></thead>
     <tbody>{snapshot_table_rows}</tbody>
