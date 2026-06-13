@@ -923,13 +923,23 @@ class AgentRouter:
         hub["boost_policy"] = dict(decision.boost_policy)
         hub["boost_plan"] = dict(decision.boost_plan)
         hub["optimization_plan"] = dict(decision.boost_plan)
-        hub["optimization_trace"] = trace_from_mapping(
+        disabled_by_guardrail = (
+            request.metadata.get("_agent_hub_disabled_by_guardrail")
+            if isinstance(request.metadata, dict)
+            else []
+        )
+        if disabled_by_guardrail:
+            hub["disabled_by_guardrail"] = list(disabled_by_guardrail)
+        optimization_trace = trace_from_mapping(
             decision.boost_plan,
             route=agent.name,
             validation="pending",
             retry_count=len(hub.get("retry_history") or []),
             context_usage=usage,
         ).to_dict()
+        if disabled_by_guardrail:
+            optimization_trace["disabled_by_guardrail"] = list(disabled_by_guardrail)
+        hub["optimization_trace"] = optimization_trace
         hub["task_policy"] = dict(decision.task_policy)
         hub.setdefault("auto_retry", _routing_bool(self.config, "auto_retry", True))
         hub.setdefault("auto_failover", _routing_bool(self.config, "auto_failover", True))
@@ -1917,6 +1927,7 @@ class AgentRouter:
                 agents.append(agent)
         if _strict_free_policy_enabled(self.config):
             agents = [agent for agent in agents if agent_allowed_by_cost_policy(self.config, agent)]
+        agents = self._apply_boost_guardrails(request, agents)
         if request.preferred_agent and agents and agents[0].name == request.preferred_agent:
             return [agents[0], *self._rank_agents_for_mode(agents[1:], request, mode)]
         elif self.config.free_only:
@@ -1931,6 +1942,53 @@ class AgentRouter:
         if _cooperative_codex_requested(self.config, request):
             return self._cooperative_codex_final_order(ranked, request)
         return self._apply_token_saver_ranking(ranked, request, mode)
+
+    def _apply_boost_guardrails(self, request: HubRequest, agents: list[AgentConfig]) -> list[AgentConfig]:
+        classification = self._classify_request(request)
+        plan = self._optimization_plan_for_request(request, classification)
+        plan_dict = plan.to_dict()
+        limits = plan_dict.get("boost_limits") if isinstance(plan_dict.get("boost_limits"), dict) else {}
+        if not limits:
+            return agents
+        estimated_input = int(getattr(classification, "estimated_input_tokens", 0) or 0)
+        max_cost = _optional_float(limits.get("max_estimated_cost_usd"))
+        require_known_cost = bool(limits.get("require_known_cost", False))
+        allow_premium = bool(limits.get("allow_premium", True))
+        allowed: list[AgentConfig] = []
+        disabled: list[dict[str, Any]] = []
+        cooperative_codex = _cooperative_codex_requested(self.config, request)
+        for agent in agents:
+            reasons: list[str] = []
+            premium_allowed_for_request = cooperative_codex and _codex_like_agent(agent)
+            if not allow_premium and not premium_allowed_for_request and not is_free_agent(agent):
+                reasons.append("premium_not_allowed")
+            cost = estimate_known_cost_usd(
+                agent,
+                input_tokens=estimated_input,
+                output_tokens=int(output_token_budget(self.config, request, agent, input_tokens=estimated_input).effective),
+            )
+            if max_cost is not None:
+                if require_known_cost and cost is None and not is_free_agent(agent) and not premium_allowed_for_request:
+                    reasons.append("estimated_cost_unknown")
+                elif cost is not None and cost > max_cost:
+                    reasons.append("estimated_cost_exceeds_limit")
+            if reasons:
+                disabled.append(
+                    {
+                        "agent": agent.name,
+                        "provider": agent.provider,
+                        "model": agent.model,
+                        "reasons": reasons,
+                        "estimated_cost_usd": cost,
+                    }
+                )
+            else:
+                allowed.append(agent)
+        if isinstance(request.metadata, dict):
+            request.metadata["_agent_hub_disabled_by_guardrail"] = disabled
+        if allowed:
+            return allowed
+        return [] if disabled else agents
 
     def _route_names(self, request: HubRequest) -> list[str]:
         if request.route:

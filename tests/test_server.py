@@ -220,6 +220,28 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(config.boost_mode, "save_tokens")
             self.assertEqual(config.context_mode, "minimal")
 
+    def test_boost_mode_endpoint_rejects_unknown_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                default_route=["echo"],
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with self.assertRaises(HTTPError) as error:
+                    _post_json(f"{base}/v1/boost-mode", {"boost_mode": "save_toknes"})
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(error.exception.code, 400)
+            self.assertEqual(config.boost_mode, "balanced")
+            self.assertEqual(config.context_mode, "balanced")
+
     def test_runtime_kernel_endpoint_and_dashboard_report_live_server_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

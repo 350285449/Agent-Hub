@@ -69,6 +69,14 @@ def routing_last_decision_body(config: Any) -> dict[str, Any]:
     routing = recent_events(config.state_dir, "routing", limit=100)
     latest = latest_routing_decision(routing)
     decision = latest.get("routing_decision") if isinstance(latest.get("routing_decision"), dict) else {}
+    if not decision:
+        memory = recent_events(config.state_dir, "routing_memory", limit=1)
+        decision = _decision_from_memory(memory[-1] if memory else {})
+    if decision:
+        decision = dict(decision)
+        decision["explanation"] = _normalized_decision_explanation(decision)
+        latest = dict(latest)
+        latest["routing_decision"] = decision
     return {
         "object": "agent_hub.routing.last_decision",
         "decision": latest,
@@ -147,11 +155,13 @@ def routing_intelligence_body(
     routing = recent_events(config.state_dir, "routing", limit=100)
     latest = latest_routing_decision(routing)
     latest_decision = latest.get("routing_decision") if isinstance(latest.get("routing_decision"), dict) else {}
-    latest_explanation = (
-        latest_decision.get("explanation")
-        if isinstance(latest_decision.get("explanation"), dict)
-        else {}
-    )
+    if not latest_decision:
+        memory = recent_events(config.state_dir, "routing_memory", limit=1)
+        latest_decision = _decision_from_memory(memory[-1] if memory else {})
+        if latest_decision:
+            latest = dict(latest)
+            latest["routing_decision"] = latest_decision
+    latest_explanation = _normalized_decision_explanation(latest_decision)
     optimization = optimization if isinstance(optimization, dict) else router.adaptive_learning.optimization_summary()
     routing_memory = router.routing_memory.stats()
     candidates = latest_decision.get("candidate_scores") if isinstance(latest_decision.get("candidate_scores"), list) else []
@@ -246,6 +256,13 @@ def routing_decision_by_id_body(config: Any, router: AgentRouter, request_id: st
         if isinstance(decision_event.get("routing_decision"), dict)
         else {}
     )
+    if not decision and memory:
+        decision = _decision_from_memory(memory[-1])
+    if decision:
+        decision = dict(decision)
+        decision["explanation"] = _normalized_decision_explanation(decision)
+        decision_event = dict(decision_event)
+        decision_event["routing_decision"] = decision
     return {
         "object": "agent_hub.routing_decision",
         "request_id": request_id,
@@ -281,6 +298,9 @@ def routing_failures(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def latest_routing_decision(events: list[dict[str, Any]]) -> dict[str, Any]:
     for event in reversed(events):
+        if isinstance(event.get("routing_decision"), dict):
+            return dict(event)
+    for event in reversed(events):
         if event.get("type") in {
             "routing_decision",
             "stream_request_started",
@@ -290,6 +310,80 @@ def latest_routing_decision(events: list[dict[str, Any]]) -> dict[str, Any]:
         }:
             return dict(event)
     return dict(events[-1]) if events else {}
+
+
+def _normalized_decision_explanation(decision: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(decision, dict) or not decision:
+        return {}
+    explanation = decision.get("explanation") if isinstance(decision.get("explanation"), dict) else {}
+    reasons = explanation.get("reasons") if isinstance(explanation.get("reasons"), list) else []
+    if reasons:
+        return {
+            "object": explanation.get("object") or "agent_hub.routing_decision_explanation",
+            **explanation,
+        }
+    selected = explanation.get("selected") if isinstance(explanation.get("selected"), dict) else {}
+    if not selected:
+        selected = {
+            "agent": decision.get("selected_agent"),
+            "provider": decision.get("selected_provider"),
+            "model": decision.get("selected_model"),
+            "workflow": decision.get("selected_workflow"),
+            "routing_mode": decision.get("routing_mode"),
+            "risk_level": decision.get("risk"),
+        }
+    raw_reasons = decision.get("routing_reasons") if isinstance(decision.get("routing_reasons"), list) else []
+    reasons = [str(reason) for reason in raw_reasons if str(reason or "").strip()]
+    if not reasons and decision.get("reason"):
+        reasons = [str(decision.get("reason"))]
+    if not reasons and selected.get("agent"):
+        reasons = [f"Selected {selected['agent']} for {decision.get('routing_mode') or 'auto'} routing."]
+    return {
+        "object": "agent_hub.routing_decision_explanation",
+        "summary": explanation.get("summary") or decision.get("selected_reason") or decision.get("reason") or "",
+        "selected": {key: value for key, value in selected.items() if value not in (None, "")},
+        "reasons": reasons,
+        "rejected": explanation.get("rejected") if isinstance(explanation.get("rejected"), list) else [],
+        **{key: value for key, value in explanation.items() if key not in {"object", "summary", "selected", "reasons", "rejected"}},
+    }
+
+
+def _decision_from_memory(row: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(row, dict) or not row:
+        return {}
+    agent = row.get("agent")
+    provider = row.get("provider")
+    model = row.get("model")
+    routing_mode = row.get("routing_mode") or row.get("route")
+    task_type = row.get("task_type")
+    reason = f"Recovered compact routing decision for {agent or model or 'selected model'} from routing memory."
+    return {
+        "request_id": row.get("request_id"),
+        "selected_agent": agent,
+        "selected_provider": provider,
+        "selected_model": model,
+        "routing_mode": routing_mode,
+        "route": row.get("route"),
+        "task_type": task_type,
+        "task_category": row.get("task_category"),
+        "language": row.get("language"),
+        "complexity": row.get("complexity"),
+        "risk": row.get("risk_level"),
+        "selected_workflow": row.get("workflow"),
+        "reason": reason,
+        "routing_reasons": [
+            reason,
+            f"Task type: {task_type or 'unknown'}.",
+            f"Outcome memory recorded success={bool(row.get('success'))}.",
+        ],
+        "task_classification": {
+            "task_type": task_type,
+            "task_category": row.get("task_category"),
+            "language": row.get("language"),
+            "complexity": row.get("complexity"),
+            "risk_level": row.get("risk_level"),
+        },
+    }
 
 
 def last_failover_reason(events: list[dict[str, Any]]) -> str:

@@ -305,8 +305,24 @@ def handle_get(handler: object, path: str) -> bool:
 
 def handle_post(handler: object, path: str, payload: dict[str, Any]) -> bool:
     if path == "/v1/boost-mode":
+        from ..boost import is_valid_boost_mode_value
+
+        value = payload.get("boost_mode", payload.get("mode"))
+        if not is_valid_boost_mode_value(value):
+            handler._send_json(
+                {
+                    "object": "agent_hub.error",
+                    "error": {
+                        "type": "invalid_boost_mode",
+                        "message": "Unknown Boost Mode. Use one of the returned options or a supported alias.",
+                    },
+                    "options": handler.server.config.boost_mode_options,
+                },
+                status=400,
+            )
+            return True
         mode = handler.server.config.set_boost_mode(
-            payload.get("boost_mode", payload.get("mode"))
+            value
         )
         handler._send_diagnostics_json(
             {
@@ -671,7 +687,7 @@ def _benchmark_results_dashboard_html(body: dict[str, Any]) -> str:
   </table>
 </section>
 <section class="panel">
-  <h2>Advanced Benchmark Coverage</h2>
+  <h2>Benchmark Coverage Snapshot</h2>
   <table>
     <thead><tr><th>Agent</th><th>Provider</th><th>Model</th><th>Readiness</th><th>Samples</th><th>Latency</th><th>Status</th></tr></thead>
     <tbody>{snapshot_table_rows}</tbody>

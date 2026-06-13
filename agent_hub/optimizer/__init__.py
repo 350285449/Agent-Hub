@@ -18,6 +18,7 @@ from .modes import (
     BoostModePolicy,
     boost_mode_from_request,
     boost_policy,
+    is_valid_boost_mode_value,
     normalize_boost_mode,
 )
 from .report import BoostReport, OptimizationTrace, trace_from_mapping, trace_from_plan
@@ -68,6 +69,7 @@ __all__ = [
     "compression_policy_for_plan",
     "default_retry_strategies",
     "evaluate_validation_gates",
+    "is_valid_boost_mode_value",
     "normalize_boost_mode",
     "normalize_failure_type",
     "optimization_plan_from_dict",

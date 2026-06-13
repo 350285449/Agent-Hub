@@ -236,6 +236,15 @@ def normalize_boost_mode(value: Any) -> str:
     return "balanced"
 
 
+def is_valid_boost_mode_value(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    key = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    key = re.sub(r"_+", "_", key)
+    return key in BOOST_MODE_ALIASES
+
+
 def boost_policy(mode: Any) -> BoostModePolicy:
     return BOOST_MODES[normalize_boost_mode(mode)]
 
