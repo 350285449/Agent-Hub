@@ -674,6 +674,39 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("simple_cloud_exploration_enabled: false", source)
         self.assertIn("free: source.free !== false", source)
 
+    def test_model_configuration_uses_one_click_cloud_free_model_picker(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertIn("Install Free Cloud Models", source)
+        self.assertIn("configureSelectedFreeCloudModelsCommand", source)
+        self.assertIn("freeCloudModelPickerItems", source)
+        self.assertIn("canPickMany: true", source)
+        self.assertIn("ensureModelProviderKey", source)
+        self.assertIn("saveSelectedFreeCloudModelsToConfig", source)
+        self.assertIn("applySelectedFreeCloudModelsToConfig", source)
+        self.assertIn("selected_free_models", source)
+        self.assertIn("Paste ${spec.env} for ${source.label}", source)
+        self.assertIn("keyUrl", source)
+        self.assertIn("Open Provider Website", source)
+        self.assertIn("promptForProviderKey", source)
+        self.assertIn("vscode.env.openExternal(vscode.Uri.parse(spec.keyUrl))", source)
+        self.assertIn("https://console.groq.com/keys", source)
+        self.assertIn("https://openrouter.ai/settings/keys", source)
+        self.assertIn("https://huggingface.co/settings/tokens", source)
+        self.assertIn("ollamaCloudModelAgentConfig(source)", source)
+        self.assertIn("cloudModelAgentConfig({", source)
+        direct_command_start = source.index("async function configureModelsProvidersCommand")
+        direct_command_end = source.index("async function configureAdvancedModelsProvidersCommand")
+        direct_command = source[direct_command_start:direct_command_end]
+        self.assertIn('title: "Agent Hub Models"', direct_command)
+        self.assertIn("Use signed-in Codex CLI", direct_command)
+        self.assertIn('description: "no API key"', direct_command)
+        self.assertIn("Choose local model", direct_command)
+        self.assertIn("provider keys only if needed", direct_command)
+        self.assertIn("return enableCodexCliModeCommand();", direct_command)
+        self.assertIn("return configureSelectedFreeCloudModelsCommand();", direct_command)
+        self.assertIn("return configureAdvancedModelsProvidersCommand();", direct_command)
+
     def test_save_codex_tokens_compacts_codex_fallback_budget(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 9.7.0
+
+- Syncs extension and backend release metadata for the next package.
+- Adds install verification, packaging checks, and command-runner hardening.
+
 ## 9.6.9
 
 - Syncs extension and backend release metadata for the next package.

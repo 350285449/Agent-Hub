@@ -158,6 +158,10 @@ DIAGNOSTIC_ENDPOINTS = {
     "/v1/plugins",
     "/v1/extension-contract",
     "/v1/enterprise/audit",
+    "/api/metrics/summary",
+    "/api/metrics/savings",
+    "/api/benchmarks",
+    "/api/benchmarks/run",
     "/debug/context",
     "/debug/request",
     "/metrics",
@@ -2602,7 +2606,6 @@ def serve(config: HubConfig) -> None:
         print("\nStopping Agent Hub")
     finally:
         server.server_close()
-
 
 
 

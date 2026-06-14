@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "updated_at": 1781387302.7897606,
+  "repository_dna": {
+    "object": "agent_hub.repository_dna",
+    "root": "C:\\Users\\vladi\\Downloads\\Agent-Hub-main",
+    "profile_id": "a7964654a4ab4a20",
+    "fingerprint": "c0990181c5bf758db4b4",
+    "project": "VS Code Extension",
+    "language": "python",
+    "architecture": "Event Driven",
+    "code_style": "Typed Imperative",
+    "testing": "Strong",
+    "frameworks": [
+      "pytest",
+      "vscode extension"
+    ],
+    "design_patterns": [
+      "Router",
+      "Provider Adapter",
+      "Workflow",
+      "Middleware",
+      "Registry",
+      "Plugin",
+      "Event Bus",
+      "Persistent Store",
+      "Application Service"
+    ],
+    "dependencies": [
+      "build",
+      "packaging",
+      "pytest",
+      "pytest-cov",
+      "pytest-timeout",
+      "@vscode/vsce"
+    ],
+    "risk_areas": [
+      "Networking",
+      "Serialization",
+      "Secrets",
+      "Permissions",
+      "Plugins",
+      "State Persistence"
+    ],
+    "package_files": [
+      "Agent-Hub-main/Dockerfile",
+      "Agent-Hub-main/pyproject.toml",
+      "Agent-Hub-main/README.md",
+      "Agent-Hub-main/vscode-extension/package.json",
+      "Agent-Hub-main/vscode-extension/README.md",
+      "Agent-Hub-main/vscode-extension/backend/pyproject.toml",
+      "Agent-Hub-main/vscode-extension/backend/README.md",
+      "Agent-Hub-main/docs/proofs/README.md",
+      "Agent-Hub-main/docs/screenshots/README.md"
+    ],
+    "source_counts": {
+      "python": 484,
+      "markdown": 62,
+      "text": 41,
+      "json": 19,
+      "javascript": 14,
+      "yaml": 4,
+      "toml": 2
+    },
+    "commit_history": {
+      "commit_count": 4,
+      "latest": "c12c26e Hardening boost routing guardrails",
+      "hot_files": [
+        {
+          "path": "Agent-Hub-main/agent_hub/core/routing/selection.py",
+          "count": 4
+        },
+        {
+          "path": "Agent-Hub-main/agent_hub/optimizer/modes.py",
+          "count": 4
+        },
+        {
+          "path": "Agent-Hub-main/tests/test_boost_optimizer.py",
+          "count": 4
+        },
+        {
+          "path": "Agent-Hub-main/agent_hub/optimizer/execution_plan.py",
+          "count": 3
+        },
+        {
+          "path": "Agent-Hub-main/agent_hub/server_routes/config.py",
+          "count": 3
+        },
+        {
+          "path": "Agent-Hub-main/agent_hub/boost.py",
+          "count": 2
+        },
+        {
+          "path": "Agent-Hub-main/agent_hub/config.py",
+          "count": 2
+        },
+        {
+          "path": "Agent-Hub-main/agent_hub/optimizer/__init__.py",
+          "count": 2
+        }
+      ]
+    },
+    "summary": "Project: VS Code Extension; Language: python; Architecture: Event Driven; Code style: Typed Imperative; Testing: Strong; Risk areas: Networking, Serialization, Secrets, Permissions.",
+    "confidence": 0.98,
+    "generated_at": 1781387302.789738,
+    "cache_key": "f8edeb4e010793c9705054836782f803d24adc18fde9f68da61a7b2bf19b8754"
+  },
+  "workspace_memory": {
+    "facts": [
+      "Repository profile: VS Code Extension",
+      "Primary language: python",
+      "Architecture: Event Driven",
+      "Code style: Typed Imperative",
+      "Testing strength: Strong",
+      "Frameworks: pytest, vscode extension",
+      "Risk areas: Networking, Serialization, Secrets, Permissions, Plugins, State Persistence"
+    ],
+    "remembered_files": [
+      "Agent-Hub-main/Dockerfile",
+      "Agent-Hub-main/pyproject.toml",
+      "Agent-Hub-main/README.md",
+      "Agent-Hub-main/vscode-extension/package.json",
+      "Agent-Hub-main/vscode-extension/README.md",
+      "Agent-Hub-main/vscode-extension/backend/pyproject.toml",
+      "Agent-Hub-main/vscode-extension/backend/README.md",
+      "Agent-Hub-main/docs/proofs/README.md",
+      "Agent-Hub-main/docs/screenshots/README.md"
+    ],
+    "last_updated_at": 1781387302.789854
+  }
+}

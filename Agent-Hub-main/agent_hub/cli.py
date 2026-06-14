@@ -64,6 +64,7 @@ from .commands_provider import (
     _route_history,
     _routing_preset_rows,
     _share_proof,
+    _setup_free_models,
 )
 from .commands_server import (
     _add_agent_runtime_flags,
@@ -251,6 +252,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     add_presets_parser.add_argument("--enable", action="store_true", help="Enable added presets immediately.")
     add_presets_parser.add_argument("--route", default="cloud-agent", help="Route to append presets to.")
+
+    free_models_parser = subparsers.add_parser(
+        "free-models",
+        help="One-command setup for free/local model routing.",
+    )
+    free_models_parser.add_argument("--route", default="cloud-agent", help="Route to append free presets to.")
+    free_models_parser.add_argument(
+        "--enable-all",
+        action="store_true",
+        help="Enable every free preset immediately instead of only presets with available keys.",
+    )
+    free_models_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     enable_provider_parser = subparsers.add_parser(
         "enable-provider",
@@ -567,6 +580,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.config,
             route=args.route,
             enabled=args.enable,
+        )
+    if command == "free-models":
+        return _setup_free_models(
+            args.config,
+            route=args.route,
+            enable_all=args.enable_all,
+            as_json=args.json,
         )
     if command == "migrate-config":
         return _migrate_config(

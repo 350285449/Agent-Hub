@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import uuid
@@ -336,6 +337,80 @@ def _add_free_presets(path: str, *, route: str, enabled: bool) -> int:
     return 0
 
 
+def _setup_free_models(
+    path: str,
+    *,
+    route: str,
+    enable_all: bool,
+    as_json: bool,
+) -> int:
+    """One-command setup for free/local/provider-key model routing."""
+
+    config_path = Path(path)
+    data = _load_or_default_config_dict(config_path)
+    _ensure_cloud_routes(data)
+
+    added: list[str] = []
+    enabled: list[str] = []
+    configured: list[str] = []
+    missing_keys: dict[str, str] = {}
+
+    for preset in FREE_PROVIDER_PRESETS:
+        agent = agent_dict_from_preset(preset, enabled=False)
+        api_key_env = agent.get("api_key_env")
+        ready = enable_all or not api_key_env or _env_var_present(str(api_key_env))
+        agent["enabled"] = bool(ready)
+        agent["free"] = True
+        if _upsert_agent(data, agent, replace_existing=False):
+            added.append(str(agent["name"]))
+        if ready:
+            _enable_config_agent(data, str(agent["name"]))
+            enabled.append(str(agent["name"]))
+        elif isinstance(api_key_env, str) and api_key_env:
+            missing_keys[str(agent["name"])] = api_key_env
+        _append_agent_to_route(data, route, str(agent["name"]))
+        configured.append(str(agent["name"]))
+
+    data["free_only"] = True
+    data["disable_non_free_models"] = True
+    data["auto_enable_available_providers"] = True
+    routing = data.setdefault("routing", {})
+    if isinstance(routing, dict):
+        routing["free_first"] = True
+        routing["auto_failover"] = True
+        routing["token_saver_enabled"] = False
+    selection = data.setdefault("cloud_control_selection", {})
+    if isinstance(selection, dict):
+        selection["api_key_models_enabled"] = bool(enabled)
+        selection["disable_non_free_models"] = True
+        selection["route_mode"] = "free-models"
+
+    _write_config_dict(config_path, data)
+    result = {
+        "config": str(config_path),
+        "route": route,
+        "added": added,
+        "configured": configured,
+        "enabled": enabled,
+        "missing_keys": missing_keys,
+        "free_only": True,
+        "disable_non_free_models": True,
+    }
+    if as_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"Configured free-model routing in {config_path}.")
+        if enabled:
+            print("Enabled from current environment: " + ", ".join(enabled))
+        else:
+            print("No API-key free presets were enabled from the current environment.")
+        if missing_keys:
+            keys = sorted(set(missing_keys.values()))
+            print("Set any of these env vars to auto-enable more free presets: " + ", ".join(keys))
+        print("Local/Ollama candidates remain available; run `agent-hub doctor --providers` to inspect readiness.")
+    return 0
+
+
 def _routing_preset_rows() -> list[dict[str, Any]]:
     return [
         {
@@ -523,6 +598,17 @@ def _disable_non_free_config_agents(data: dict[str, Any]) -> None:
             agent["free"] = False
 
 
+def _enable_config_agent(data: dict[str, Any], agent_name: str) -> None:
+    agents = data.get("agents")
+    if not isinstance(agents, list):
+        return
+    for agent in agents:
+        if isinstance(agent, dict) and agent.get("name") == agent_name:
+            agent["enabled"] = True
+            agent["free"] = True
+            return
+
+
 def _agent_is_private(agent: dict[str, Any]) -> bool:
     provider_type = str(agent.get("provider_type") or "").lower()
     provider = str(agent.get("provider") or "").lower()
@@ -569,6 +655,11 @@ def _safe_float(value: Any) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _env_var_present(name: str) -> bool:
+    value = os.environ.get(name)
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _agent_rows(config: Any) -> list[dict[str, Any]]:

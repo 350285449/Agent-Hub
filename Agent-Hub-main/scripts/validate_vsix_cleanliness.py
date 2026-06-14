@@ -38,6 +38,9 @@ LONG_TOKEN_PATTERN = re.compile(
     r"\b(?=[A-Za-z0-9._~+/=-]{40,}\b)(?=[A-Za-z0-9._~+/=-]*[A-Za-z])(?=[A-Za-z0-9._~+/=-]*\d)(?=[A-Za-z0-9._~+/=-]*[._~+/=-])[A-Za-z0-9._~+/=-]{40,}\b"
 )
 LOCAL_PATH_PATTERN = re.compile(r"([A-Za-z]:[\\/](?:Users|Documents)[\\/]|/Users/[^/\s]+/|/home/[^/\s]+/)")
+PRODUCTION_TEST_NAMED_MODULES = {
+    "extension/backend/agent_hub/repo_dna/test_detector.py",
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -97,7 +100,7 @@ def validate_vsix(vsix_path: Path, *, root: Path) -> list[str]:
                 failures.append(f"backup or local config included: {name}")
             if _dev_artifact(parts):
                 failures.append(f"development artifact included: {name}")
-            if _test_artifact(parts, basename):
+            if _test_artifact(parts, basename) and lower not in PRODUCTION_TEST_NAMED_MODULES:
                 failures.append(f"test artifact included: {name}")
             if _temp_artifact(basename):
                 failures.append(f"temporary file included: {name}")

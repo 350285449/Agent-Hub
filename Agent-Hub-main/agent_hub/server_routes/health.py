@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..measurement import usage_ledger_summary
+from ..measurement import metrics_savings, metrics_summary, usage_ledger_summary
 from ..observability import metrics_snapshot, permission_snapshot, usage_snapshot
 from ..security.secrets import redact_secrets
 
@@ -36,6 +36,18 @@ def handle_get(handler: object, path: str) -> bool:
         handler._send_cached_diagnostics_json(
             "GET /v1/usage",
             lambda: _usage_body(handler),
+        )
+        return True
+    if path == "/api/metrics/summary":
+        handler._send_cached_diagnostics_json(
+            "GET /api/metrics/summary",
+            lambda: metrics_summary(handler.server.config),
+        )
+        return True
+    if path == "/api/metrics/savings":
+        handler._send_cached_diagnostics_json(
+            "GET /api/metrics/savings",
+            lambda: metrics_savings(handler.server.config),
         )
         return True
     if path == "/health":

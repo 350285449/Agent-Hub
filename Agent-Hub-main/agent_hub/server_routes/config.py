@@ -205,6 +205,12 @@ def handle_get(handler: object, path: str) -> bool:
             lambda: handler.server.diagnostics_service.benchmark_results_body(),
         )
         return True
+    if path == "/api/benchmarks":
+        handler._send_cached_diagnostics_json(
+            "GET /api/benchmarks",
+            lambda: handler.server.diagnostics_service.benchmark_results_body(),
+        )
+        return True
     if path == "/v1/workspace/checkpoints":
         handler._send_cached_diagnostics_json(
             "GET /v1/workspace/checkpoints",
@@ -304,6 +310,11 @@ def handle_get(handler: object, path: str) -> bool:
 
 
 def handle_post(handler: object, path: str, payload: dict[str, Any]) -> bool:
+    if path == "/api/benchmarks/run":
+        from ..measurement.benchmark_runner import run_benchmark
+
+        handler._send_diagnostics_json(run_benchmark(handler.server.config, payload))
+        return True
     if path == "/v1/boost-mode":
         from ..boost import is_valid_boost_mode_value
 

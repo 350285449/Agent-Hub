@@ -8,6 +8,7 @@ from agent_hub.application import DiagnosticsApplicationService
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.core.router import AgentRouter
 from agent_hub.measurement import (
+    metrics_savings,
     record_completed_request,
     usage_ledger_path,
     usage_ledger_summary,
@@ -83,6 +84,47 @@ class MeasurementLedgerTests(unittest.TestCase):
             self.assertEqual(summary["request_count"], 1)
             self.assertEqual(summary["measurement_sources"]["actual"], 1)
             self.assertTrue(any(row["baseline_name"] == "vs_claude_sonnet" for row in summary["baseline_savings"]))
+            self.assertEqual(summary["recent_requests"][0]["input_tokens"], 1000)
+            self.assertEqual(summary["recent_requests"][0]["output_tokens"], 500)
+            self.assertEqual(summary["recent_requests"][0]["rejected_models"][0]["agent"], "cheap")
+            claude_baseline = next(
+                row for row in summary["baseline_savings"] if row["baseline_name"] == "vs_claude_sonnet"
+            )
+            self.assertGreater(claude_baseline["tokens_saved"], 0)
+
+    def test_metrics_savings_cards_are_derived_from_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _measurement_config(Path(tmp))
+
+            record_completed_request(
+                config=config,
+                request_id="hub-savings-1",
+                request=HubRequest(
+                    session_id="session-savings",
+                    route="coding",
+                    messages=[{"role": "user", "content": "fix the tests"}],
+                    record_session=False,
+                ),
+                agent=config.agents["selected"],
+                model="selected-model",
+                usage={"prompt_tokens": 1000, "completion_tokens": 500},
+                output_text="done",
+                latency_seconds=0.25,
+                success=True,
+                failover=[],
+                candidate_scores=[{"agent": "selected"}, {"agent": "default"}],
+                task_type="coding",
+                input_tokens_estimated=900,
+                output_tokens_estimated=400,
+            )
+
+            savings = metrics_savings(config)
+
+            self.assertEqual(savings["object"], "agent_hub.metrics.savings")
+            self.assertGreater(savings["tokens_saved"], 0)
+            self.assertGreater(savings["cost_avoided_usd"], 0)
+            self.assertEqual(savings["retries_avoided"], 0)
+            self.assertEqual(savings["best_model_for_repo"], "openai-compatible / selected-model")
 
     def test_provider_reported_cost_and_total_tokens_are_captured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
