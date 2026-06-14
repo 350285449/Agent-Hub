@@ -135,6 +135,10 @@ DIAGNOSTICS_CACHE_TTL_SECONDS = 1.5
 DIAGNOSTICS_CACHE_MAX_ENTRIES = 128
 
 
+class PayloadTooLargeError(ValueError):
+    pass
+
+
 DIAGNOSTIC_ENDPOINTS = {
     "/v1/provider-health",
     "/v1/provider-scores",
@@ -329,6 +333,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self._begin_kernel_request()
         try:
+            if self._reject_disallowed_origin():
+                return
             if self._reject_rate_limited_request():
                 return
             if self._reject_unauthenticated_public_request():
@@ -346,6 +352,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self._begin_kernel_request()
         try:
+            if self._reject_disallowed_origin():
+                return
             if self._reject_rate_limited_request():
                 return
             self.send_response(204)
@@ -374,12 +382,19 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._begin_kernel_request()
         try:
+            if self._reject_disallowed_origin():
+                return
             if self._reject_rate_limited_request(drain_body=True):
+                return
+            if self._reject_oversized_request_body():
                 return
             if self._reject_unauthenticated_public_request(drain_body=True):
                 return
             try:
                 payload = self._read_json()
+            except PayloadTooLargeError as exc:
+                self._send_json({"error": str(exc)}, status=413)
+                return
             except ValueError as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
@@ -398,6 +413,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         self._begin_kernel_request()
         try:
+            if self._reject_disallowed_origin():
+                return
             if self._reject_rate_limited_request():
                 return
             if self._reject_unauthenticated_public_request():
@@ -452,6 +469,42 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._discard_request_body()
         body, status = auth_error
         self._send_json(body, status=status)
+        return True
+
+    def _reject_disallowed_origin(self) -> bool:
+        origin = self.headers.get("Origin")
+        if not isinstance(origin, str) or not origin.strip():
+            return False
+        if self._allowed_cors_origin():
+            return False
+        self._send_json(
+            {
+                "error": {
+                    "type": "cors_origin_rejected",
+                    "message": "Origin is not allowed by Agent Hub CORS policy.",
+                }
+            },
+            status=403,
+        )
+        return True
+
+    def _reject_oversized_request_body(self) -> bool:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return False
+        maximum = int(getattr(self.server.config, "max_json_body_bytes", 1_000_000) or 1_000_000)
+        if length <= maximum:
+            return False
+        self._send_json(
+            {
+                "error": {
+                    "type": "request_body_too_large",
+                    "message": f"JSON request body exceeds the {maximum} byte limit.",
+                }
+            },
+            status=413,
+        )
         return True
 
     def _reject_rate_limited_request(self, *, drain_body: bool = False) -> bool:
@@ -1012,6 +1065,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             raise ValueError("Invalid Content-Length") from exc
         if length <= 0:
             raise ValueError("Expected a JSON request body")
+        maximum = int(getattr(self.server.config, "max_json_body_bytes", 1_000_000) or 1_000_000)
+        if length > maximum:
+            raise PayloadTooLargeError(f"JSON request body exceeds the {maximum} byte limit.")
         body = self.rfile.read(length).decode("utf-8")
         try:
             payload = json.loads(body)
@@ -1116,7 +1172,9 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         self.send_header(
             "Access-Control-Expose-Headers",
             (
@@ -1139,8 +1197,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         allowed = _allowed_cors_origins(self.server.config)
         if isinstance(origin, str) and origin.strip():
             origin = origin.strip()
-            return origin if origin in allowed else ""
-        return f"http://{self.server.config.host}:{self.server.config.port}"
+            if origin in allowed or _is_vscode_webview_origin(origin):
+                return origin
+            return ""
+        return ""
 
     def _root_html(self) -> str:
         config = self.server.config
@@ -2633,10 +2693,7 @@ def _cline_permission_guidance_fingerprint(
 
 
 def _allowed_cors_origins(config: HubConfig) -> set[str]:
-    origins = {
-        f"http://localhost:{config.port}",
-        f"http://127.0.0.1:{config.port}",
-    }
+    origins: set[str] = set()
     for origin in getattr(config, "cors_allowed_origins", []) or []:
         text = str(origin or "").strip().rstrip("/")
         if text:
@@ -2644,8 +2701,15 @@ def _allowed_cors_origins(config: HubConfig) -> set[str]:
     return origins
 
 
+def _is_vscode_webview_origin(origin: str) -> bool:
+    lowered = origin.strip().lower()
+    return lowered.startswith("vscode-webview://") or lowered.startswith("vscode-file://")
+
+
 def serve(config: HubConfig) -> None:
     config.ensure_dirs()
+    if not getattr(config, "dev_unauthenticated_mode", False):
+        config.local_auth_required = True
     credentials = ensure_local_credentials(config)
     if _public_bind_host(str(config.host or "")) and not _api_token(config):
         raise SystemExit(

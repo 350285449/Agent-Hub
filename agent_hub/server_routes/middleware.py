@@ -34,8 +34,8 @@ def api_auth_error(config: HubConfig, headers: Any) -> tuple[dict[str, Any], int
                     "type": "api_auth_not_configured",
                     "message": (
                         "All Agent Hub endpoints require api_auth_token/api_auth_token_env "
-                        "or diagnostics_auth_token/diagnostics_auth_token_env when the "
-                        "server is bound publicly."
+                        "or diagnostics_auth_token/diagnostics_auth_token_env unless "
+                        "dev_unauthenticated_mode is explicitly enabled."
                     ),
                 }
             },
@@ -60,7 +60,11 @@ def diagnostics_auth_error(config: HubConfig, headers: Any) -> tuple[dict[str, A
 
 
 def api_auth_required(config: HubConfig) -> bool:
-    return public_bind_host(str(getattr(config, "host", "127.0.0.1") or "127.0.0.1"))
+    if bool(getattr(config, "dev_unauthenticated_mode", False)):
+        return False
+    return bool(getattr(config, "local_auth_required", False)) or public_bind_host(
+        str(getattr(config, "host", "127.0.0.1") or "127.0.0.1")
+    )
 
 
 def diagnostics_auth_required(config: HubConfig) -> bool:

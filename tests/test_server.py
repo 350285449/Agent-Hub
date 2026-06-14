@@ -139,6 +139,7 @@ class ServerCompatibilityTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=Path(tmp) / "state",
                 workspace_dir=Path(tmp),
+                cors_allowed_origins=["http://localhost:8765"],
                 default_route=["echo"],
                 agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
             )
@@ -148,14 +149,91 @@ class ServerCompatibilityTests(unittest.TestCase):
                 port = server.server_address[1]
                 request = Request(
                     f"http://127.0.0.1:{port}/health",
-                    headers={"Origin": f"http://localhost:{port}"},
+                    headers={"Origin": "http://localhost:8765"},
                 )
                 with urlopen(request, timeout=5) as response:
                     origin = response.headers.get("Access-Control-Allow-Origin")
             finally:
                 _stop(server, thread)
 
-            self.assertEqual(origin, f"http://localhost:{port}")
+            self.assertEqual(origin, "http://localhost:8765")
+
+    def test_cors_rejects_unknown_origin_and_allows_vscode_webview_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                workspace_dir=Path(tmp),
+                default_route=["echo"],
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with self.assertRaises(HTTPError) as error:
+                    _get_json_with_headers_from_request(
+                        Request(f"{base}/health", headers={"Origin": "https://evil.example"})
+                    )
+                allowed, headers = _get_json_with_headers_from_request(
+                    Request(f"{base}/health", headers={"Origin": "vscode-webview://agent-hub"})
+                )
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(error.exception.code, 403)
+            self.assertEqual(allowed["status"], "ok")
+            self.assertEqual(headers.get("Access-Control-Allow-Origin"), "vscode-webview://agent-hub")
+            self.assertIsNone(headers.get("Access-Control-Allow-Private-Network"))
+
+    def test_local_auth_rejects_missing_or_invalid_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                workspace_dir=Path(tmp),
+                local_auth_required=True,
+                api_auth_token="local-secret",
+                default_route=["echo"],
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with self.assertRaises(HTTPError) as missing:
+                    _get_json(f"{base}/health")
+                with self.assertRaises(HTTPError) as invalid:
+                    _get_json_with_headers_from_request(
+                        Request(f"{base}/health", headers={"Authorization": "Bearer wrong"})
+                    )
+                authed = _get_json_with_headers_from_request(
+                    Request(f"{base}/health", headers={"Authorization": "Bearer local-secret"})
+                )[0]
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(missing.exception.code, 401)
+            self.assertEqual(invalid.exception.code, 401)
+            self.assertEqual(authed["status"], "ok")
+
+    def test_oversized_json_body_is_rejected_before_route_handling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                workspace_dir=Path(tmp),
+                max_json_body_bytes=128,
+                default_route=["echo"],
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                with self.assertRaises(HTTPError) as error:
+                    _post_json(f"{base}/debug/request", {"text": "x" * 512})
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(error.exception.code, 413)
 
     def test_health_uses_short_lived_diagnostics_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1552,6 +1630,11 @@ def _get_json(url: str) -> dict:
 
 def _get_json_with_headers(url: str) -> tuple[dict, object]:
     with urlopen(url, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8")), response.headers
+
+
+def _get_json_with_headers_from_request(request: Request) -> tuple[dict, object]:
+    with urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8")), response.headers
 
 

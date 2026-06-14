@@ -22,7 +22,10 @@ signatures before any trusted local-process execution is allowed.
 
 When the HTTP server is bound to a public host, every endpoint requires
 `Authorization: Bearer <token>` or `X-Agent-Hub-API-Token`. Set
-`api_auth_token_env`; the server refuses to start publicly without a token.
+`api_auth_token_env`. The VS Code extension generates a local token, stores it in
+VS Code Secret Storage, injects it into the backend as `AGENT_HUB_API_TOKEN`, and
+sends it with every request. Public binds still refuse to start without a token;
+unauthenticated local development requires `dev_unauthenticated_mode=true`.
 The legacy diagnostics token remains accepted for compatibility.
 
 Approval booleans such as `approval_granted` and `approved` are ignored when

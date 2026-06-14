@@ -105,6 +105,7 @@ def classify_tool_action(tool_name: str, args: dict[str, Any]) -> RiskAssessment
 def classify_shell_command(command: str) -> RiskAssessment:
     text = f" {command.strip()} "
     normalized = _normalize_command(text)
+    tier = command_tier(normalized)
     findings: list[dict[str, Any]] = []
     category = "shell_command"
     risk = "medium"
@@ -117,7 +118,7 @@ def classify_shell_command(command: str) -> RiskAssessment:
             category="read",
             risk_level="low",
             reason="Read-only shell command.",
-            metadata={"command": command[:500], "trust_level": "safe"},
+            metadata={"command": command[:500], "trust_level": "safe", "command_tier": tier},
         )
 
     critical_patterns = (
@@ -142,11 +143,12 @@ def classify_shell_command(command: str) -> RiskAssessment:
             blocked=True,
             explicit_approval_required=True,
             findings=[{"kind": "blocked_command", "command": command[:240]}],
-            metadata={"command": command[:500], "trust_level": "dangerous"},
+            metadata={"command": command[:500], "trust_level": "dangerous", "command_tier": "dangerous"},
         )
 
     package_patterns = (
         r"\bnpm\s+(?:i|install)\b",
+        r"\bnpx\b",
         r"\bpnpm\s+(?:i|install|add)\b",
         r"\byarn\s+(?:install|add)\b",
         r"\bpip(?:3)?\s+install\b",
@@ -196,7 +198,7 @@ def classify_shell_command(command: str) -> RiskAssessment:
             blocked=True,
             explicit_approval_required=True,
             findings=[{"kind": "install_script", "command": command[:240]}],
-            metadata={"command": command[:500], "trust_level": "dangerous"},
+            metadata={"command": command[:500], "trust_level": "dangerous", "command_tier": "dangerous"},
         )
 
     upload_patterns = (
@@ -246,6 +248,14 @@ def classify_shell_command(command: str) -> RiskAssessment:
         findings.extend(secret_findings)
         reason = "Command text appears to contain credentials or secrets."
 
+    if tier == "dangerous":
+        risk = _max_risk(risk, "high")
+        explicit = True
+        if not any(item.get("kind") == "dangerous_command_tier" for item in findings):
+            findings.append({"kind": "dangerous_command_tier", "command": command[:240]})
+    elif tier == "moderate":
+        risk = _max_risk(risk, "medium")
+
     return RiskAssessment(
         category=category,
         risk_level=risk,
@@ -253,8 +263,48 @@ def classify_shell_command(command: str) -> RiskAssessment:
         blocked=blocked,
         explicit_approval_required=explicit,
         findings=findings,
-        metadata={"command": command[:500], "trust_level": trust_level_for_risk(risk, blocked)},
+        metadata={
+            "command": command[:500],
+            "trust_level": trust_level_for_risk(risk, blocked),
+            "command_tier": tier,
+        },
     )
+
+
+def command_tier(normalized_command: str) -> str:
+    if _matches_any(
+        normalized_command,
+        (
+            r"^(?:ls|dir|cat|type|grep|rg|find|where|which|pwd|tree)(?:\s|$)",
+            r"^git\s+status(?:\s|$)",
+            r"^(?:get-content|select-string|get-childitem|get-location)(?:\s|$)",
+        ),
+    ):
+        return "safe"
+    if _matches_any(
+        normalized_command,
+        (
+            r"^git\s+(?:diff|log|show|branch|rev-parse|remote)(?:\s|$)",
+            r"^(?:npm|pnpm|yarn)\s+(?:test|run\s+test|run\s+lint|run\s+build)(?:\s|$)",
+            r"^(?:pytest|python(?:3)?\s+-m\s+pytest|py\s+-m\s+pytest)(?:\s|$)",
+            r"^(?:python|python3|py|node)\s+--version(?:\s|$)",
+            r"^(?:pip|pip3|uv)\s+(?:--version|-v|list|show)(?:\s|$)",
+        ),
+    ):
+        return "moderate"
+    if _matches_any(
+        normalized_command,
+        (
+            r"\b(?:npm|pnpm|yarn)\s+(?:i|install|add)\b",
+            r"\bnpx\b",
+            r"\bpip(?:3)?\s+install\b",
+            r"\bpython(?:3)?\s+-m\s+pip\s+install\b",
+            r"\b(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)\b",
+            r"\b(?:python|python3|py|node)\s+-[cem]\b",
+        ),
+    ):
+        return "dangerous"
+    return "dangerous"
 
 
 def trust_level_for_risk(risk_level: str, blocked: bool = False) -> str:

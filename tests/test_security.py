@@ -110,6 +110,17 @@ class ToolSecurityTests(unittest.TestCase):
 
         self.assertEqual(assessment.category, "package_install")
         self.assertEqual(assessment.to_dict()["trust_level"], "elevated")
+        self.assertEqual(assessment.to_dict()["metadata"]["command_tier"], "dangerous")
+
+    def test_command_classifier_splits_safe_moderate_and_dangerous_tiers(self) -> None:
+        safe = classify_shell_command("git status --short")
+        moderate = classify_shell_command("pytest tests/test_security.py")
+        dangerous = classify_shell_command("npx create-vite app")
+
+        self.assertEqual(safe.to_dict()["metadata"]["command_tier"], "safe")
+        self.assertEqual(moderate.to_dict()["metadata"]["command_tier"], "moderate")
+        self.assertEqual(dangerous.to_dict()["metadata"]["command_tier"], "dangerous")
+        self.assertTrue(dangerous.explicit_approval_required)
 
     def test_generated_credentials_are_stored_outside_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

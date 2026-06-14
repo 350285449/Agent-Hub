@@ -431,6 +431,13 @@ class AgentToolbox:
             "permission": decision.to_dict(),
         }
 
+    def _max_file_operation_chars(self) -> int:
+        try:
+            configured = int(getattr(self.config, "max_file_operation_bytes", 500_000) or 500_000)
+        except (TypeError, ValueError):
+            configured = 500_000
+        return max(1024, min(configured, 50_000_000))
+
     def _create_edit_checkpoint(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         paths = self._checkpoint_paths_for_edit(name, args)
         retention = _positive_int(
@@ -931,7 +938,7 @@ class AgentToolbox:
         patch_text = args.get("patch")
         changes_arg = args.get("changes")
         if isinstance(patch_text, str) and patch_text.strip():
-            if len(patch_text) > MAX_PATCH_CHARS:
+            if len(patch_text.encode("utf-8")) > min(MAX_PATCH_CHARS, self._max_file_operation_chars()):
                 raise ToolError("apply_patch patch is too large")
             changes = self._changes_from_unified_diff(patch_text)
             patch_preview = patch_text
@@ -972,7 +979,7 @@ class AgentToolbox:
                 content = item.get("content")
                 if not isinstance(content, str):
                     raise ToolError(f"Structured patch change {index} content must be a string")
-                if len(content) > MAX_PATCH_CHARS:
+                if len(content.encode("utf-8")) > min(MAX_PATCH_CHARS, self._max_file_operation_chars()):
                     raise ToolError(f"Structured patch change {index} content is too large")
                 changes.append(
                     {
@@ -1076,7 +1083,7 @@ class AgentToolbox:
         content = args.get("content")
         if not isinstance(content, str):
             raise ToolError("write_file requires string content")
-        if len(content) > 500_000:
+        if len(content.encode("utf-8")) > self._max_file_operation_chars():
             raise ToolError("write_file content is too large")
 
         append = bool(args.get("append", False))
@@ -1099,7 +1106,8 @@ class AgentToolbox:
             raise ToolError("replace_in_file requires non-empty old text")
         if not isinstance(new, str):
             raise ToolError("replace_in_file requires string new text")
-        if len(old) > MAX_REPLACE_CHARS or len(new) > MAX_REPLACE_CHARS:
+        max_chars = min(MAX_REPLACE_CHARS, self._max_file_operation_chars())
+        if len(old.encode("utf-8")) > max_chars or len(new.encode("utf-8")) > max_chars:
             raise ToolError("replace_in_file replacement is too large")
 
         expected = args.get("expected_replacements", 1)

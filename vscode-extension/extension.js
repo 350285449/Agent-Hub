@@ -23,7 +23,9 @@ let routeLabPanel = null;
 let lastActiveTextEditor = null;
 let serverLifecycleState = "Stopped";
 let lastServerMessage = "";
+let localApiToken = "";
 const runtimeApprovalToken = crypto.randomBytes(32).toString("hex");
+const LOCAL_API_TOKEN_SECRET = "agentHub.localApiToken";
 const EXTENSION_VERSION = readExtensionPackageVersion();
 const DEFAULT_CONFIG_FILENAME = "agent-hub.config.json";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
@@ -548,10 +550,11 @@ function permissionDeniedText(action, mode) {
   return `${action.description || "Agent Hub action"} was blocked by approval mode '${mode}'.`;
 }
 
-function activate(context) {
+async function activate(context) {
   extensionContext = context;
   output = vscode.window.createOutputChannel("Agent Hub");
   context.subscriptions.push(output);
+  localApiToken = await ensureLocalApiToken(context);
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBarItem.command = "agentHub.status";
   statusBarItem.text = "$(hubot) Agent Hub";
@@ -902,7 +905,7 @@ async function applySidebarTrustPreset(preset) {
   const profiles = {
     safe: {
       approvalMode: "safe",
-      allowShellTools: true,
+      allowShellTools: false,
       label: "Safe approvals"
     },
     shellAsk: {
@@ -917,7 +920,7 @@ async function applySidebarTrustPreset(preset) {
     },
     auto: {
       approvalMode: "auto",
-      allowShellTools: true,
+      allowShellTools: false,
       label: "Auto"
     }
   };
@@ -929,6 +932,19 @@ async function applySidebarTrustPreset(preset) {
     ? " Restart Agent Hub if an already-running backend should inherit this default."
     : "";
   vscode.window.showInformationMessage(`Agent Hub trust controls set to ${profile.label}.${restart}`);
+}
+
+async function ensureLocalApiToken(context) {
+  if (!context || !context.secrets) {
+    return "";
+  }
+  const existing = await context.secrets.get(LOCAL_API_TOKEN_SECRET);
+  if (existing && existing.trim()) {
+    return existing.trim();
+  }
+  const token = crypto.randomBytes(48).toString("base64url");
+  await context.secrets.store(LOCAL_API_TOKEN_SECRET, token);
+  return token;
 }
 
 async function toggleAutomatedModelFeedback(nextValue) {
@@ -12620,8 +12636,9 @@ async function serverLaunchEnvironment(workspace) {
   const env = { ...process.env };
   const config = settings();
   env.AGENT_HUB_TRUSTED_APPROVAL_TOKEN = config.approvalToken || runtimeApprovalToken;
-  if (config.apiToken) {
-    env.AGENT_HUB_API_TOKEN = config.apiToken;
+  const apiToken = config.apiToken || localApiToken;
+  if (apiToken) {
+    env.AGENT_HUB_API_TOKEN = apiToken;
   }
   await applySavedApiKeysToEnv(env);
   const backendRoot = backendSourceRoot(workspace);
@@ -13016,16 +13033,17 @@ async function repairGeneratedLocalConfig(configPath, options = {}) {
 
   const statePathsChanged = applyGeneratedStoragePaths(raw, storageDir, workspaceDir);
   const keyAvailabilityChanged = applyApiKeyProviderAvailability(raw, keyEnvs);
+  const securityDefaultsChanged = applyGeneratedSecurityDefaults(raw);
   if (keyAvailabilityChanged && Array.isArray(raw.routes)) {
     applyCloudRouteMode(raw, configCloudRouteMode(raw));
   }
-  if ((workspaceDir && raw.workspace_dir !== workspaceDir) || statePathsChanged || keyAvailabilityChanged) {
+  if ((workspaceDir && raw.workspace_dir !== workspaceDir) || statePathsChanged || keyAvailabilityChanged || securityDefaultsChanged) {
     const backupPath = backupConfigFile(configPath);
     if (workspaceDir) {
       raw.workspace_dir = workspaceDir;
     }
     fs.writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
-    output.appendLine(`Updated Agent Hub workspace/state paths for ${configPath}.`);
+    output.appendLine(`Updated Agent Hub generated config defaults for ${configPath}.`);
     output.appendLine(`Original config was backed up to ${backupPath}.`);
     return true;
   }
@@ -13038,6 +13056,30 @@ async function repairGeneratedLocalConfig(configPath, options = {}) {
     return true;
   }
   return false;
+}
+
+function applyGeneratedSecurityDefaults(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return false;
+  }
+  let changed = false;
+  const defaults = {
+    local_auth_required: true,
+    api_auth_token_env: "AGENT_HUB_API_TOKEN",
+    max_json_body_bytes: 1000000,
+    max_file_operation_bytes: 2000000,
+    allow_shell_tools: false,
+    shell_command_policy: "ask",
+    plugin_execution_enabled: false,
+    mcp_execution_enabled: false
+  };
+  for (const [key, value] of Object.entries(defaults)) {
+    if (data[key] !== value) {
+      data[key] = value;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function configsEquivalent(left, right) {
@@ -13824,10 +13866,10 @@ function listOrEmpty(value) {
 function generatedConfigApprovalMode(value) {
   const hasExplicitValue = value !== undefined && value !== null && String(value).trim() !== "";
   if (!hasExplicitValue) {
-    return "auto";
+    return "safe";
   }
   const mode = normalizeApprovalMode(value);
-  return mode === "ask" ? "auto" : mode;
+  return mode;
 }
 
 function localConfigForLocalModels(sources, options = {}) {
@@ -13868,7 +13910,14 @@ function localConfigForLocalModels(sources, options = {}) {
     context_mode: "balanced",
     cline_compatibility_mode: true,
     tool_loop_enabled_for_cline: false,
-    allow_shell_tools: true,
+    local_auth_required: true,
+    api_auth_token_env: "AGENT_HUB_API_TOKEN",
+    max_json_body_bytes: 1000000,
+    max_file_operation_bytes: 2000000,
+    allow_shell_tools: false,
+    shell_command_policy: "ask",
+    plugin_execution_enabled: false,
+    mcp_execution_enabled: false,
     approval_mode: generatedConfigApprovalMode(options.approvalMode),
     free_only: options.cloudSettings?.freeOnly !== false,
     disable_non_free_models: options.cloudSettings?.disableNonFreeModels === true,
@@ -17028,7 +17077,7 @@ function clineSetupValues(config) {
     provider: "openai",
     apiProvider: "openai-compatible",
     baseUrl: `${config.serverUrl.replace(/\/+$/, "")}/v1`,
-    apiKey: "agent-hub-local",
+    apiKey: config.apiToken || localApiToken || "agent-hub-local",
     model: "agent-hub-coding"
   };
 }
@@ -17482,10 +17531,11 @@ function clineConfigText(config) {
 
 function claudeCodeConfigText(config) {
   const baseUrl = config.serverUrl.replace(/\/+$/, "");
+  const token = config.apiToken || localApiToken || "agent-hub-local";
   return [
     "# Agent Hub Claude Code",
     `ANTHROPIC_BASE_URL=${baseUrl}`,
-    "ANTHROPIC_AUTH_TOKEN=agent-hub-local",
+    `ANTHROPIC_AUTH_TOKEN=${token}`,
     "ANTHROPIC_MODEL=agent-hub-coding"
   ].join("\n");
 }
@@ -18459,7 +18509,7 @@ function settings() {
   const providerMode = normalizeAgentProviderMode(config.get("agentProviderMode", "cloud"));
   return {
     serverUrl: config.get("serverUrl", "http://127.0.0.1:8787").replace(/\/+$/, ""),
-    apiToken: String(config.get("apiToken", "") || ""),
+    apiToken: String(config.get("apiToken", "") || localApiToken || ""),
     approvalToken: String(config.get("approvalToken", "") || ""),
     pythonPath: config.get("pythonPath", "auto"),
     configPath: config.get("configPath", ""),
@@ -18994,9 +19044,10 @@ function agentHubHttpHeaders(extra = {}) {
     "X-Agent-Hub-Client": "vscode-agent-hub",
     ...extra
   };
-  if (config.apiToken) {
-    headers.Authorization = `Bearer ${config.apiToken}`;
-    headers["X-Agent-Hub-API-Token"] = config.apiToken;
+  const apiToken = config.apiToken || localApiToken;
+  if (apiToken) {
+    headers.Authorization = `Bearer ${apiToken}`;
+    headers["X-Agent-Hub-API-Token"] = apiToken;
   }
   const approvalToken = config.approvalToken || runtimeApprovalToken;
   if (approvalToken) {

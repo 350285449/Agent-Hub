@@ -378,7 +378,7 @@
         "agentHub.apiToken": {
           "type": "string",
           "default": "",
-          "description": "Bearer/API token for Agent Hub when the server is bound publicly."
+          "description": "Bearer/API token for Agent Hub. Extension-owned local servers generate and store this in VS Code Secret Storage automatically."
         },
         "agentHub.approvalToken": {
           "type": "string",

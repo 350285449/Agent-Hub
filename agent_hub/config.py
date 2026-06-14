@@ -189,6 +189,10 @@ class HubConfig:
     diagnostics_auth_token: str | None = None
     diagnostics_auth_token_env: str | None = None
     cors_allowed_origins: list[str] = field(default_factory=list)
+    local_auth_required: bool = False
+    dev_unauthenticated_mode: bool = False
+    max_json_body_bytes: int = 1_000_000
+    max_file_operation_bytes: int = 2_000_000
     rate_limit_requests_per_minute: int = 100
     local_rate_limit_unlimited: bool = True
     session_remember_device_days: int = 30
@@ -905,6 +909,20 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             else None
         ),
         cors_allowed_origins=_string_list(raw.get("cors_allowed_origins")),
+        local_auth_required=_bool_with_default(raw.get("local_auth_required"), False),
+        dev_unauthenticated_mode=_bool_with_default(raw.get("dev_unauthenticated_mode"), False),
+        max_json_body_bytes=_normalize_positive_int(
+            raw.get("max_json_body_bytes"),
+            1_000_000,
+            minimum=1024,
+            maximum=20_000_000,
+        ),
+        max_file_operation_bytes=_normalize_positive_int(
+            raw.get("max_file_operation_bytes"),
+            2_000_000,
+            minimum=1024,
+            maximum=50_000_000,
+        ),
         rate_limit_requests_per_minute=_normalize_positive_int(
             raw.get("rate_limit_requests_per_minute"),
             100,
@@ -1193,6 +1211,10 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "diagnostics_auth_token": config.diagnostics_auth_token,
         "diagnostics_auth_token_env": config.diagnostics_auth_token_env,
         "cors_allowed_origins": config.cors_allowed_origins,
+        "local_auth_required": config.local_auth_required,
+        "dev_unauthenticated_mode": config.dev_unauthenticated_mode,
+        "max_json_body_bytes": config.max_json_body_bytes,
+        "max_file_operation_bytes": config.max_file_operation_bytes,
         "rate_limit_requests_per_minute": config.rate_limit_requests_per_minute,
         "local_rate_limit_unlimited": config.local_rate_limit_unlimited,
         "session_remember_device_days": config.session_remember_device_days,
