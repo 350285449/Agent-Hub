@@ -15,12 +15,13 @@ _SPEC.loader.exec_module(_legacy)
 for _name in getattr(_legacy, "__all__", []):
     globals()[_name] = getattr(_legacy, _name)
 
-from .learning import learn_from_outcomes
+from .learning import learn_from_outcomes, self_adjusting_signal
 from .model_profiles import build_model_profiles
 from .statistics import weighted_success_scores
 
 __all__ = list(getattr(_legacy, "__all__", [])) + [
     "build_model_profiles",
     "learn_from_outcomes",
+    "self_adjusting_signal",
     "weighted_success_scores",
 ]

@@ -1297,6 +1297,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                     ("Model Leaderboard", "/dashboard/model-leaderboard", "Ranked models and readiness baselines"),
                     ("Costs", "/dashboard/costs", "Pricing coverage and recorded spend"),
                     ("Benchmarks", "/dashboard/benchmarks", "Benchmark coverage and reports"),
+                    ("Proof Dashboard", "/dashboard/proof", "Per-repository savings, retries, success, and model proof"),
                 ],
             ),
             (

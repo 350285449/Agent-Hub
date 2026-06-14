@@ -1,0 +1,1522 @@
+{
+  "object": "agent_hub.public_benchmark_results",
+  "created_at": 1781400609.7874205,
+  "baseline_model": "claude",
+  "hub_model": "agent-hub",
+  "task_count": 150,
+  "baseline_tokens": 5300000,
+  "hub_tokens": 2185000,
+  "savings": 58.8,
+  "tests_passed": true,
+  "success_rate": 1.0,
+  "results": [
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "bug_fix",
+      "baseline_model": "claude",
+      "baseline_tokens": 28000,
+      "hub_tokens": 11200,
+      "savings": 60.0,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "refactor",
+      "baseline_model": "claude",
+      "baseline_tokens": 36000,
+      "hub_tokens": 15500,
+      "savings": 56.9,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    },
+    {
+      "task": "feature_request",
+      "baseline_model": "claude",
+      "baseline_tokens": 42000,
+      "hub_tokens": 17000,
+      "savings": 59.5,
+      "tests_passed": true,
+      "baseline_tests_passed": true,
+      "source": "deterministic_reference_harness"
+    }
+  ],
+  "suite": "agent-hub-public-150",
+  "suite_path": "benchmarks/public-150/tasks.jsonl",
+  "published_note": "Reference results generated by the local deterministic benchmark harness; live provider runs should write their own report alongside this file.",
+  "category_counts": {
+    "bug_fix": 50,
+    "refactor": 50,
+    "feature_request": 50
+  }
+}

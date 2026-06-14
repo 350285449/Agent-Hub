@@ -22,6 +22,15 @@
       "route": "coding",
       "task_count": 10,
       "command": "agent-hub benchmark --dataset before-after-10 --route coding --export results.json"
+    },
+    {
+      "name": "public-150",
+      "description": "Public benchmark suite with 50 bug fixes, 50 refactors, and 50 feature requests plus published reference results.",
+      "route": "coding",
+      "task_count": 150,
+      "path": "benchmarks/public-150/tasks.jsonl",
+      "reference_results": "docs/proofs/public-benchmark-results.json",
+      "command": "agent-hub benchmark --dataset public-150 --route coding --export results.json"
     }
   ]
 }

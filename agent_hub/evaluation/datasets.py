@@ -96,6 +96,12 @@ def load_benchmark_corpus(path: str | Path, *, route: str, limit: int = 50) -> l
     cap = _cap(limit)
     tasks: list[BenchmarkTask] = []
     files = [root] if root.is_file() else sorted(root.glob("**/*.jsonl"))
+    if root.is_dir() and root.name != "public-150":
+        files = [
+            path
+            for path in files
+            if "public-150" not in path.relative_to(root).parts
+        ]
     for file_path in files:
         category = file_path.parent.name
         for line in file_path.read_text(encoding="utf-8").splitlines():
@@ -121,7 +127,7 @@ def task_from_payload(payload: dict[str, Any], *, route: str, fallback_type: str
         return None
     keywords = payload.get("expected_keywords")
     return BenchmarkTask(
-        str(payload.get("type") or fallback_type or "general"),
+        str(payload.get("type") or payload.get("task") or fallback_type or "general"),
         prompt,
         [
             str(item)

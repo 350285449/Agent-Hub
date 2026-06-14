@@ -17,6 +17,7 @@ from ..mcp import normalize_mcp_tools
 from ..models import HubRequest
 from ..plugins import discover_plugins
 from ..provider_presets import provider_metadata_rows
+from ..routing_memory import RoutingMemoryStore
 from ..runtime_usability import runtime_usability_body
 from ..server_routes.middleware import api_token, public_bind_host
 from ..tool_compatibility import tool_emulation_enabled, universal_compatibility_enabled
@@ -374,6 +375,7 @@ class DiagnosticsApplicationService:
             "coverage_snapshot": snapshot,
             "reports": reports,
             "visual_proof_dashboard": visual_proof_dashboard_body(
+                repository=_repository_identity(self.config),
                 usage=usage_ledger_summary(self.config),
                 benchmarks={"summary": {
                     "report_count": len(reports),
@@ -386,6 +388,16 @@ class DiagnosticsApplicationService:
                 }, "reports": reports, "coverage_snapshot": snapshot},
             ),
         }
+
+    def proof_dashboard_body(self) -> dict[str, Any]:
+        benchmarks = self.benchmark_results_body()
+        memory = RoutingMemoryStore.from_config(self.config).stats()
+        return visual_proof_dashboard_body(
+            repository=_repository_identity(self.config),
+            usage=usage_ledger_summary(self.config),
+            benchmarks=benchmarks,
+            routing_memory=memory,
+        )
 
     def workspace_checkpoints_body(self) -> dict[str, Any]:
         root = Path(self.config.workspace_dir).resolve()
@@ -3235,6 +3247,15 @@ def _experience_summary(
             "score": runtime_usability.get("score", 0),
             "next_step": runtime_usability.get("next_step"),
         },
+    }
+
+
+def _repository_identity(config: HubConfig) -> dict[str, Any]:
+    root = Path(config.workspace_dir).resolve()
+    return {
+        "name": root.name,
+        "path": str(root),
+        "state_dir": str(Path(config.state_dir)),
     }
 
 

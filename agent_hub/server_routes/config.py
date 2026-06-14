@@ -58,6 +58,10 @@ def handle_get(handler: object, path: str) -> bool:
         body = handler.server.diagnostics_service.benchmark_results_body()
         handler._send_html(_benchmark_results_dashboard_html(body))
         return True
+    if path == "/dashboard/proof":
+        body = handler.server.diagnostics_service.proof_dashboard_body()
+        handler._send_html(_proof_dashboard_html(body))
+        return True
     if path == "/dashboard/status":
         body = server_module._status_body(
             handler.server.config,
@@ -209,6 +213,12 @@ def handle_get(handler: object, path: str) -> bool:
         handler._send_cached_diagnostics_json(
             "GET /api/benchmarks",
             lambda: handler.server.diagnostics_service.benchmark_results_body(),
+        )
+        return True
+    if path in {"/v1/proof-dashboard", "/api/proof-dashboard"}:
+        handler._send_cached_diagnostics_json(
+            f"GET {path}",
+            lambda: handler.server.diagnostics_service.proof_dashboard_body(),
         )
         return True
     if path == "/v1/workspace/checkpoints":
@@ -718,6 +728,56 @@ def _benchmark_results_dashboard_html(body: dict[str, Any]) -> str:
         content,
         body,
         json_path="/v1/benchmarks",
+    )
+
+
+def _proof_dashboard_html(body: dict[str, Any]) -> str:
+    repository = _dict(body.get("repository"))
+    cards_data = body.get("cards") if isinstance(body.get("cards"), list) else []
+    performance = body.get("model_performance") if isinstance(body.get("model_performance"), list) else []
+    cards = [
+        (row.get("label", ""), row.get("value", "--"))
+        for row in cards_data
+        if isinstance(row, dict)
+    ]
+    rows = "".join(
+        "<tr>"
+        f"<td>{_html(row.get('task_type', ''))}</td>"
+        f"<td>{_html(row.get('agent', ''))}</td>"
+        f"<td>{_html(row.get('model', ''))}</td>"
+        f"<td>{_html(row.get('success_rate', '--'))}</td>"
+        f"<td>{_html(row.get('attempts', '--'))}</td>"
+        f"<td>{_html(row.get('average_outcome_score', '--'))}</td>"
+        "</tr>"
+        for row in performance
+        if isinstance(row, dict)
+    )
+    if not rows:
+        rows = "<tr><td colspan=\"6\" class=\"muted\">No model performance samples yet.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>Repository</h2>
+  <table>
+    <tbody>
+      <tr><td>Name</td><td>{_html(repository.get('name', 'unknown'))}</td></tr>
+      <tr><td>Path</td><td>{_html(repository.get('path', ''))}</td></tr>
+    </tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Model Performance</h2>
+  <table>
+    <thead><tr><th>Task</th><th>Agent</th><th>Model</th><th>Success</th><th>Attempts</th><th>Outcome</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>"""
+    return _dashboard_page(
+        "Agent Hub Proof Dashboard",
+        "Per-repository proof for tokens saved, cost saved, success rate, retry reduction, and model performance.",
+        cards,
+        content,
+        body,
+        json_path="/v1/proof-dashboard",
     )
 
 

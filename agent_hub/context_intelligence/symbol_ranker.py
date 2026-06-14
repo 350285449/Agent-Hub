@@ -4,11 +4,13 @@ import ast
 from pathlib import Path
 
 
-def rank_symbols(root: str | Path, query: str = "", *, limit: int = 50) -> list[dict[str, object]]:
+def rank_symbols(root: str | Path, query: str = "", *, limit: int = 50, max_files: int = 250) -> list[dict[str, object]]:
     root = Path(root)
     terms = {term.lower() for term in query.replace("_", " ").split() if len(term) > 2}
     rows: list[dict[str, object]] = []
-    for path in _files(root):
+    for index, path in enumerate(_files(root)):
+        if index >= max_files:
+            break
         if path.suffix != ".py":
             continue
         try:

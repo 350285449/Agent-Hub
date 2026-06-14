@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field, fields, replace
@@ -14,6 +15,7 @@ from ...adaptive import AdaptiveLearningStore, estimate_known_cost_usd
 from ...capabilities import agent_capabilities
 from ...config import AgentConfig, HubConfig, agent_allowed_by_cost_policy, is_free_agent, normalize_provider
 from ...context import estimate_message_tokens, estimate_text_tokens, is_protected_context_message
+from ...context_intelligence import pack_context, rank_dependencies, rank_error_paths, rank_symbols
 from ...debug import debug_dir_for_state, provider_debug_context
 from ...events import (
     CONTEXT_TRUNCATED,
@@ -47,7 +49,7 @@ from ...repository_intelligence import (
     build_failure_prediction,
     repository_routing_signal,
 )
-from ...routing_memory import RoutingMemoryStore, outcome_score
+from ...routing_memory import RoutingMemoryStore, outcome_score, self_adjusting_signal
 from ...security.provider_permissions import ProviderPermissionPolicy
 from ...session_store import SessionStore
 from ...streaming import normalize_stream_chunk
@@ -149,6 +151,7 @@ class RoutingContext:
     boost_mode: str
     boost_policy: dict[str, Any]
     boost_plan: dict[str, Any]
+    context_intelligence: dict[str, Any] = field(default_factory=dict)
     candidate_scores: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -164,6 +167,7 @@ class RoutingContext:
             "boost_mode": self.boost_mode,
             "boost_policy": dict(self.boost_policy),
             "boost_plan": dict(self.boost_plan),
+            "context_intelligence": dict(self.context_intelligence),
             "candidate_scores": list(self.candidate_scores),
         }
 
@@ -2243,6 +2247,7 @@ class AgentRouter:
             boost_mode=mode_name,
             boost_policy=boost_policy(mode_name).to_dict(),
             boost_plan=plan.to_dict(),
+            context_intelligence=self._context_intelligence_signal(request, classification),
         )
         if isinstance(request.metadata, dict):
             request.metadata["_agent_hub_routing_context"] = context
@@ -3197,11 +3202,24 @@ class AgentRouter:
             repository_adjustment = float(repository_signal.get("adjustment", 0.0) or 0.0)
             efficiency_adjustment = float(efficiency_signal.get("routing_adjustment", 0.0) or 0.0)
             final_routing_score = original_routing_score + memory_adjustment + token_saver_adjustment
+            context_intelligence = context.context_intelligence
+            context_adjustment = self._context_intelligence_adjustment(
+                agent,
+                request,
+                classification,
+                context_intelligence,
+            )
+            final_routing_score += context_adjustment
             score_adjustments = [
                 {"name": "routing_memory", "value": round(memory_adjustment, 3), "summary": routing_memory.get("summary")},
                 {"name": "token_saver", "value": round(token_saver_adjustment, 3), "summary": token_saver.get("summary")},
                 {"name": "repository_dna", "value": round(repository_adjustment, 3), "summary": repository_signal.get("summary")},
                 {"name": "route_efficiency", "value": round(efficiency_adjustment, 3), "summary": efficiency_signal.get("summary")},
+                {
+                    "name": "context_intelligence",
+                    "value": round(context_adjustment, 3),
+                    "summary": context_intelligence.get("summary"),
+                },
             ]
             rows.append(
                 {
@@ -3214,6 +3232,7 @@ class AgentRouter:
                     "base_score": round(original_routing_score, 3),
                     "memory_adjustment": round(memory_adjustment, 3),
                     "token_saver_adjustment": round(token_saver_adjustment, 3),
+                    "context_intelligence_adjustment": round(context_adjustment, 3),
                     "repository_dna_adjustment": round(
                         float(repository_signal.get("adjustment", 0.0) or 0.0),
                         3,
@@ -3239,6 +3258,7 @@ class AgentRouter:
                     "repository_dna": repository_signal,
                     "outcome_based_routing": outcome_signal,
                     "route_efficiency": efficiency_signal,
+                    "context_intelligence": context_intelligence,
                     "efficiency_score": efficiency_signal.get("score"),
                     "efficiency_routing_adjustment": efficiency_signal.get("routing_adjustment"),
                     "context_optimization": _request_context_optimization(request),
@@ -3965,6 +3985,12 @@ class AgentRouter:
             if include_routing_memory:
                 signal = self._routing_memory_signal(agent, request)
                 score += float(signal.get("adjustment", 0.0) or 0.0)
+            score += self._context_intelligence_adjustment(
+                agent,
+                request,
+                self._classify_request(request),
+                self._routing_context(request).context_intelligence,
+            )
             if include_token_saver:
                 token_saver = self._token_saver_signal(
                     agent,
@@ -4002,7 +4028,20 @@ class AgentRouter:
             }
         try:
             classification = classification or self._classify_request(request)
-            return self.routing_memory.routing_signal(agent, classification)
+            signal = self.routing_memory.routing_signal(agent, classification)
+            learned = self_adjusting_signal(self.routing_memory, agent, classification)
+            learned_adjustment = float(learned.get("adjustment", 0.0) or 0.0)
+            if abs(learned_adjustment) > 0.0001:
+                signal = dict(signal)
+                signal["adjustment"] = round(float(signal.get("adjustment", 0.0) or 0.0) + learned_adjustment, 4)
+                signal["self_adjusting"] = learned
+                signal["summary"] = " ".join(
+                    part
+                    for part in (str(signal.get("summary") or ""), str(learned.get("summary") or ""))
+                    if part
+                )
+                signal["active"] = bool(signal.get("active")) or bool(learned.get("active"))
+            return signal
         except Exception:
             return {
                 "active": False,
@@ -4013,6 +4052,75 @@ class AgentRouter:
                 "summary": "Routing memory was unavailable.",
                 "similar_outcomes": [],
             }
+
+    def _context_intelligence_signal(self, request: HubRequest, classification: Any) -> dict[str, Any]:
+        if not getattr(self.config, "agent_context_compaction_enabled", True):
+            return {"active": False, "summary": "Context intelligence is disabled."}
+        root = Path(getattr(self.config, "workspace_dir", "."))
+        text = request_text(request)
+        changed_files = _mentioned_paths(text)
+        if not _context_intelligence_worth_scanning(text, changed_files):
+            return {
+                "active": False,
+                "summary": "Context Intelligence found no actionable path, symbol, or error signals.",
+            }
+        try:
+            symbols = rank_symbols(root, text, limit=12, max_files=180)
+            dependencies = rank_dependencies(root, changed_files, limit=12, max_files=220)
+            errors = rank_error_paths(text, root)
+        except Exception:
+            return {"active": False, "summary": "Context intelligence was unavailable."}
+        items = [
+            {"kind": "symbol", "score": item.get("score", 1), "tokens": 80, **item}
+            for item in symbols
+        ] + [
+            {"kind": "dependency", "score": item.get("score", 1), "tokens": 120, **item}
+            for item in dependencies
+        ] + [
+            {"kind": "error_path", "score": item.get("score", 10), "tokens": 60, **item}
+            for item in errors
+        ]
+        budget = int(getattr(classification, "estimated_input_tokens", 0) or 0)
+        budget = max(800, min(6000, budget // 3 if budget else 2000))
+        packed = pack_context(items, token_budget=budget)
+        signal = {
+            "active": bool(packed),
+            "symbols": symbols,
+            "dependencies": dependencies,
+            "error_paths": errors,
+            "packed_context": packed,
+            "packed_tokens": sum(int(item.get("tokens") or 0) for item in packed),
+            "budget_tokens": budget,
+            "summary": (
+                f"Context Intelligence selected {len(packed)} ranked context item(s): "
+                f"{len(symbols)} symbols, {len(dependencies)} dependencies, {len(errors)} error paths."
+            ),
+        }
+        return signal
+
+    def _context_intelligence_adjustment(
+        self,
+        agent: AgentConfig,
+        request: HubRequest,
+        classification: Any,
+        signal: dict[str, Any],
+    ) -> float:
+        if not signal.get("active"):
+            return 0.0
+        packed_tokens = int(signal.get("packed_tokens") or 0)
+        context_window = int(agent.context_window or 0)
+        adjustment = min(3.5, len(signal.get("packed_context") or []) * 0.18)
+        if signal.get("error_paths"):
+            adjustment += 1.0 if _agent_supports_tools(agent) else -0.5
+        if packed_tokens and context_window:
+            required = int(getattr(classification, "estimated_input_tokens", 0) or 0) + packed_tokens
+            if context_window >= required * 2:
+                adjustment += 0.8
+            elif context_window < required:
+                adjustment -= 2.0
+        if _repo_context_useful(request) and _agent_supports_tools(agent):
+            adjustment += 0.6
+        return round(max(-4.0, min(5.0, adjustment)), 4)
 
     def _repository_routing_signal(
         self,
@@ -6303,6 +6411,39 @@ def _request_context_optimization(request: HubRequest) -> dict[str, Any]:
     if trace:
         result["optimization_trace"] = dict(trace)
     return {key: value for key, value in result.items() if value not in (None, [], {})}
+
+
+def _mentioned_paths(text: str) -> list[str]:
+    candidates: list[str] = []
+    for token in str(text or "").replace("`", " ").split():
+        cleaned = token.strip(".,;:()[]{}\"'")
+        normalized = cleaned.replace("\\", "/")
+        if "/" not in normalized:
+            continue
+        if any(normalized.endswith(suffix) for suffix in (".py", ".js", ".ts", ".tsx", ".java", ".go", ".rs", ".md", ".json")):
+            candidates.append(normalized)
+    return candidates[:50]
+
+
+def _context_intelligence_worth_scanning(text: str, mentioned_paths: list[str]) -> bool:
+    if mentioned_paths:
+        return True
+    lowered = str(text or "").lower()
+    if "traceback" in lowered or re.search(r"\b\w+\.(py|js|ts|tsx|java|go|rs|json|md):\d+\b", lowered):
+        return True
+    if re.search(r"\b[A-Z][A-Za-z0-9]+(?:Service|Controller|Repository|Factory|Manager)\b", str(text or "")):
+        return True
+    return any(
+        term in lowered
+        for term in (
+            "import error",
+            "dependency",
+            "module not found",
+            "circular import",
+            "failing test",
+            "symbol",
+        )
+    )
 
 
 def _optimization_plan_diff(
