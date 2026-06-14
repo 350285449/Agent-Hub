@@ -2,8 +2,17 @@
 
 Make Claude Code and Codex write better code with fewer tokens.
 
-Agent Hub optimizes repo context, routes each task by success-per-token,
-validates outputs, and retries failed attempts automatically.
+Agent Hub routes each coding task, saves tokens, and explains why the selected
+model won.
+
+First run: `Start` -> connect a provider -> run a test task -> see savings.
+
+## Proof Types
+
+- **Real benchmark**: a local before/after run against Claude Code alone, Codex
+  alone, or another configured baseline.
+- **Demo projection**: an estimate shown before enough local tasks exist.
+- **Reference benchmark**: checked-in public examples from the benchmark corpus.
 
 ## Product Proof
 
@@ -30,13 +39,14 @@ Token savings are measured as raw agent request tokens versus the optimized
 Agent Hub request tokens actually sent, not as repository size minus compressed
 repository size.
 
-## One-Click Onboarding
+## First-Run Flow
 
-Start with one button:
+Start with one flow:
 
-- `Connect Claude Code`
-- `Connect Codex`
-- `Boost + Save Tokens`
+1. Click `Start`.
+2. Connect Claude Code, Codex, signed-in Codex CLI, or a provider key.
+3. Run a small test task.
+4. Review the selected model, estimated tokens saved, and rejected alternatives.
 
 Then switch Boost Mode from `Balanced` to `Save Tokens`, `Best Code`,
 `Fast Fix`, `Big Refactor`, or `Local First` when the task needs it.
@@ -139,7 +149,7 @@ Monitor latency, availability, quotas, and failovers.
 
 **Agent Hub Dashboard**
 
-Unified control center for orchestration and optimization.
+Advanced control center for routing, costs, benchmarks, and backend health.
 
 ![Agent Hub dashboard](media/dashboard.png)
 

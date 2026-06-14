@@ -2118,6 +2118,18 @@ function sidebarRoutingExplanation(intelligence, health, limits) {
     : intelligence && Array.isArray(intelligence.failover_events)
       ? intelligence.failover_events
       : [];
+  const tokenSavings = firstNumber(
+    context.estimated_tokens_saved,
+    cost.estimated_token_savings,
+    cost.estimated_tokens_saved,
+    latestDecision.estimated_token_savings,
+    latestDecision.tokens_saved
+  );
+  const tokenSavingsPercent = firstNumber(
+    context.estimated_token_savings_percent,
+    cost.estimated_token_savings_percent,
+    latestDecision.estimated_token_savings_percent
+  );
   const reasons = Array.isArray(latest.reasons) ? latest.reasons : [];
   const fallbackOptions = Array.isArray(latest.provider_rankings)
     ? latest.provider_rankings.slice(1, 5)
@@ -2154,6 +2166,8 @@ function sidebarRoutingExplanation(intelligence, health, limits) {
     costSavings: cost.estimated_savings_usd,
     savedToday: costOptimizer.saved_today_usd,
     savedMonth: costOptimizer.saved_this_month_usd,
+    tokenSavings,
+    tokenSavingsPercent,
     costEstimate,
     latencyMs,
     successChance: firstNumber(
@@ -3775,6 +3789,43 @@ function sidebarHtml(webview, logoPath) {
       line-height: 1.25;
     }
 
+    .first-run-flow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+      margin: 10px 0 0;
+    }
+
+    .first-run-step {
+      min-width: 0;
+      border: 1px solid var(--subtle-border);
+      border-radius: 8px;
+      padding: 7px;
+      background: color-mix(in srgb, var(--card) 86%, transparent);
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 8%, transparent);
+    }
+
+    .first-run-step span,
+    .first-run-step strong {
+      display: block;
+      overflow-wrap: anywhere;
+    }
+
+    .first-run-step span {
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.25;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .first-run-step strong {
+      margin-top: 3px;
+      color: var(--app-fg);
+      font-size: 11px;
+      line-height: 1.25;
+    }
+
     .route-visual-list {
       display: grid;
       gap: 6px;
@@ -3868,6 +3919,31 @@ function sidebarHtml(webview, logoPath) {
       color: var(--app-fg);
       font-size: 12px;
       line-height: 1.3;
+    }
+
+    .why-route-panel {
+      display: grid;
+      gap: 7px;
+      margin: 0 0 10px;
+      border: 1px solid color-mix(in srgb, var(--ok) 36%, var(--subtle-border));
+      border-radius: 8px;
+      padding: 9px;
+      background:
+        linear-gradient(135deg, color-mix(in srgb, var(--ok) 10%, var(--card)), color-mix(in srgb, var(--card) 86%, transparent));
+      box-shadow: inset 0 1px 0 color-mix(in srgb, var(--app-fg) 8%, transparent);
+    }
+
+    .why-route-panel h3 {
+      margin: 0;
+      color: var(--app-fg);
+      font-size: 12px;
+      line-height: 1.25;
+    }
+
+    .why-route-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 7px;
     }
 
     .flow-strip {
@@ -4948,6 +5024,11 @@ function sidebarHtml(webview, logoPath) {
       .flow-strip {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
+
+      .first-run-flow,
+      .why-route-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -4971,7 +5052,7 @@ function sidebarHtml(webview, logoPath) {
       <div class="hero-head">
         <div>
           <div class="hero-kicker">Simple start</div>
-          <h2>What do you need?</h2>
+          <h2>Start, connect, test, save</h2>
           <div class="hero-copy" id="heroSummary">Checking status</div>
         </div>
         <div class="health-card" id="heroHealthCard" data-state="Stopped" title="Shows whether Agent Hub is ready to answer tasks.">
@@ -5004,6 +5085,12 @@ function sidebarHtml(webview, logoPath) {
       <div class="action-with-help main-action-with-help">
         <button class="primary hero-server-action" id="heroServerAction" type="button" data-primary-action="start-server" data-state="Stopped">Start</button>
         ${sidebarActionHelp("Start", "Start, stop, or restart the local Agent Hub backend used by the sidebar, chat, Cline, and compatible clients.")}
+      </div>
+      <div class="first-run-flow" aria-label="First run flow">
+        <div class="first-run-step"><span>1</span><strong>Start</strong></div>
+        <div class="first-run-step"><span>2</span><strong>Connect provider</strong></div>
+        <div class="first-run-step"><span>3</span><strong>Run test task</strong></div>
+        <div class="first-run-step"><span>4</span><strong>See savings</strong></div>
       </div>
       <div class="command-surface">
         <form class="quick-task" id="quickTaskForm">
@@ -5066,11 +5153,11 @@ function sidebarHtml(webview, logoPath) {
     </section>
     <section class="tool-path">
       <div class="section-head">
-        <h2>Boost Your Coding Agent</h2>
-        <span class="status" id="toolReadyStatus">One click</span>
+        <h2>Claude Code and Codex Optimizer</h2>
+        <span class="status" id="toolReadyStatus">Connect</span>
       </div>
       <div class="tool-summary">
-        <strong>Connect Claude Code, connect Codex, or boost the agent you already use</strong>
+        <strong>Route each coding task, save tokens, and show why the route won</strong>
         <span>Provider: OpenAI Compatible</span>
         <span>Base URL: ${escapeHtml(settings().serverUrl.replace(/\/+$/, ""))}/v1</span>
         <span>Model: agent-hub-coding</span>
@@ -5087,7 +5174,7 @@ function sidebarHtml(webview, logoPath) {
         <button id="testCodingToolConnectionQuick" type="button">Test</button>
         <button id="showCodingToolSetupQuick" type="button">Guide</button>
       </div>
-      <div class="detail" id="boostModeInstructions">Choose a Boost Mode, then send work through Chat, Code, Cline, Claude Code, or Codex using model agent-hub-coding.</div>
+      <div class="detail" id="boostModeInstructions">Start Agent Hub, connect Claude Code or Codex, run a test task, then inspect the savings and route explanation.</div>
     </section>
     <details class="panel">
       <summary class="section-head">
@@ -5369,7 +5456,7 @@ function sidebarHtml(webview, logoPath) {
         <h2>Routing Intelligence</h2>
       </summary>
       <div class="section-head">
-        <h2>Live Savings</h2>
+        <h2>Token Savings</h2>
         <span class="status" id="liveSavingsWindow">This week</span>
       </div>
       <div class="live-savings-grid" id="liveSavingsGrid"></div>
@@ -5378,6 +5465,10 @@ function sidebarHtml(webview, logoPath) {
         <span class="status">Explainable</span>
       </div>
       <div class="route-visual-list" id="routeVisualization"></div>
+      <div class="why-route-panel" id="whyRoutePanel">
+        <h3>Why this matters</h3>
+        <div class="why-route-grid" id="whyRouteGrid"></div>
+      </div>
       <div class="routing-summary-grid" id="routingSummaryGrid"></div>
       <div class="detail" id="routingExplanation">No routing decision yet</div>
       <ul class="list" id="routingReasonList"></ul>
@@ -5515,6 +5606,7 @@ function sidebarHtml(webview, logoPath) {
     const liveSavingsWindow = document.getElementById("liveSavingsWindow");
     const liveSavingsGrid = document.getElementById("liveSavingsGrid");
     const routeVisualization = document.getElementById("routeVisualization");
+    const whyRouteGrid = document.getElementById("whyRouteGrid");
     const routingSummaryGrid = document.getElementById("routingSummaryGrid");
     const routingExplanation = document.getElementById("routingExplanation");
     const routingReasonList = document.getElementById("routingReasonList");
@@ -6465,26 +6557,33 @@ function sidebarHtml(webview, logoPath) {
       routingSummaryGrid.textContent = "";
       routingReasonList.textContent = "";
       routingRejectedList.textContent = "";
+      whyRouteGrid.textContent = "";
       const selectedModel = [row.selectedProvider, row.selectedModel].filter(Boolean).join(" / ");
       if (!selectedModel && !row.summary) {
         routingExplanation.textContent = "No routing decision yet";
+        whyRouteGrid.append(routingSummaryItem("Selected model", "--"));
+        whyRouteGrid.append(routingSummaryItem("Tokens saved", "--"));
+        whyRouteGrid.append(routingSummaryItem("Rejected alternatives", "--"));
         routingReasonList.append(emptyRow("Send a request to collect routing intelligence"));
         return;
       }
       routingExplanation.textContent = row.summary || "Routing decision recorded";
+      const rejected = Array.isArray(row.rejected) && row.rejected.length
+        ? row.rejected
+        : Array.isArray(row.fallbackOptions)
+          ? row.fallbackOptions
+          : [];
+      whyRouteGrid.append(routingSummaryItem("Selected model", selectedModel || row.selectedAgent || "--"));
+      whyRouteGrid.append(routingSummaryItem("Tokens saved", routingTokenSavingsText(row)));
+      whyRouteGrid.append(routingSummaryItem("Rejected alternatives", routingRejectedCountText(rejected)));
       const cards = [
         ["Model", selectedModel || row.selectedAgent || "--"],
-        ["Repository", routingRepositoryText(row)],
-        ["Success", routingSuccessText(row)],
         ["Workflow", row.selectedWorkflow || "direct route"],
-        ["Risk", row.riskLevel || "--"],
-        ["Task", row.taskType || "--"],
         ["Context", routingContextText(row)],
         ["Cost", routingCostText(row)],
         ["Saved Today", routingMoneyText(row.savedToday)],
-        ["Saved Month", routingMoneyText(row.savedMonth)],
-        ["Time", routingTimeText(row)],
-        ["Fallbacks", routingFallbackText(row)]
+        ["Fallbacks", routingFallbackText(row)],
+        ["Task", row.taskType || "--"]
       ];
       for (const card of cards) {
         routingSummaryGrid.append(routingSummaryItem(card[0], card[1]));
@@ -6501,11 +6600,6 @@ function sidebarHtml(webview, logoPath) {
       } else {
         routingReasonList.append(emptyRow("No explanation signals yet"));
       }
-      const rejected = Array.isArray(row.rejected) && row.rejected.length
-        ? row.rejected
-        : Array.isArray(row.fallbackOptions)
-          ? row.fallbackOptions
-          : [];
       if (rejected.length) {
         for (const item of rejected.slice(0, 4)) {
           routingRejectedList.append(rowElement(
@@ -6580,6 +6674,29 @@ function sidebarHtml(webview, logoPath) {
       }
       const value = Number(row.costSavings || 0);
       return Number.isFinite(value) ? "$" + value.toFixed(4) : "--";
+    }
+
+    function routingTokenSavingsText(row) {
+      const tokens = Number(row.tokenSavings);
+      const percent = Number(row.tokenSavingsPercent);
+      if (Number.isFinite(tokens) && tokens > 0 && Number.isFinite(percent) && percent > 0) {
+        return compactNumber(tokens) + " (" + percent.toFixed(percent >= 10 ? 0 : 1) + "%)";
+      }
+      if (Number.isFinite(tokens) && tokens > 0) {
+        return compactNumber(tokens) + " tokens";
+      }
+      if (Number.isFinite(percent) && percent > 0) {
+        return percent.toFixed(percent >= 10 ? 0 : 1) + "%";
+      }
+      return "--";
+    }
+
+    function routingRejectedCountText(rows) {
+      const count = Array.isArray(rows) ? rows.length : 0;
+      if (!count) {
+        return "None recorded";
+      }
+      return count === 1 ? "1 alternative" : count + " alternatives";
     }
 
     function routingCostText(row) {

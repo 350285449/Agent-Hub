@@ -1,4 +1,4 @@
-# Agent-Hub
+# Agent-Hub - Claude Code and Codex Optimizer
 
 [![tests](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=tests)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
 [![release validation](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=release%20validation)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
@@ -11,12 +11,11 @@ Agent-Hub compresses repository context, routes each task to the best
 success-per-token model, validates outputs, and retries failed attempts
 automatically.
 
-Agent Hub Boost starts in `Balanced` mode. Switch to `Save Tokens`, `Best Code`,
-`Fast Fix`, `Big Refactor`, or `Local First` when you want a more opinionated
-optimization profile.
+Focus on three things: route each coding task, save tokens, and explain why the
+selected model won.
 
-Agent-Hub does not ask you to trust benchmark claims. It ships the benchmark
-corpus so you can compare raw agents against Agent Hub locally.
+The first run is one path: `Start` -> connect a provider -> run a test task ->
+see savings.
 
 ## Quick Start
 
@@ -47,6 +46,16 @@ agent-hub share-proof
 agent-hub explain-route <request-id>
 agent-hub replay-route <request-id>
 ```
+
+## What The Numbers Mean
+
+- **Real benchmark**: your local before/after run against a baseline such as
+  Claude Code alone or Codex alone. These reports are reproducible and include
+  dataset fingerprints.
+- **Demo projection**: an onboarding estimate shown before enough local tasks
+  exist. It is useful for orientation, but it is not proof.
+- **Reference benchmark**: checked-in public results and screenshots from the
+  project benchmark corpus. Use them as examples, then run your own benchmark.
 
 ## Proof You Can Run Locally
 
@@ -84,14 +93,14 @@ Do not treat "tokens saved" as original repository size minus compressed
 repository size; publish the raw-agent-request versus Agent-Hub-request numbers
 from `token_savings_proof`.
 
-In VS Code, the first-run proof flow is:
+In VS Code, the first-run flow is:
 
 1. Install the extension.
-2. Run `Agent Hub: Run Personal Benchmark`.
-3. Review the generated personal savings report and share card.
-4. Run `Agent Hub: Explain Route`.
-5. Replay a specific decision with `agent-hub replay-route <request-id>`.
-6. Open this README proof section from `Agent Hub: Open README Proof Section`.
+2. Click `Start`.
+3. Connect Claude Code, Codex, a signed-in Codex CLI, or an API-key provider.
+4. Run a small test task from the sidebar.
+5. Review selected model, estimated tokens saved, and rejected alternatives.
+6. Run `Agent Hub: Run Personal Benchmark` when you want real local proof.
 
 Additional local proof commands:
 
@@ -125,11 +134,11 @@ Community proof lives in `docs/proofs/`. Submit benchmark cards or case studies
 by PR, or use the `Share Your Benchmark` GitHub Discussion template with your
 baseline, savings, repository size, and workflow.
 
-Agent-Hub is an Adaptive AI Orchestration Platform for developer workspaces. It
+Agent-Hub is a Claude Code and Codex optimizer for developer workspaces. It
 accepts local OpenAI, Anthropic, Responses, OpenRouter-style, VS Code, Cline,
-Claude Code, and native requests; classifies the task; understands repository
-signals; assesses risk; selects a workflow; ranks provider/model candidates;
-executes with failover; records outcomes; and learns from the result.
+Claude Code, and native requests; classifies the task; ranks provider/model
+candidates; executes with failover; records outcomes; and learns from the
+result.
 
 It is a local-first AI model router compatible with Cline, Codex, Claude Code,
 VS Code, OpenAI-compatible clients, and Anthropic-compatible clients. It routes

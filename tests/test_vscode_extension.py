@@ -197,8 +197,8 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
 
         headings = [
-            "<h2>What do you need?</h2>",
-            "<h2>Boost Your Coding Agent</h2>",
+            "<h2>Start, connect, test, save</h2>",
+            "<h2>Claude Code and Codex Optimizer</h2>",
             "<h2>Setup</h2>",
             "<h2>Advanced</h2>",
             "<h2>Tools</h2>",
@@ -237,6 +237,10 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("function updateQuickTaskState", source)
         self.assertIn("vscode.setState(currentSidebarState())", source)
         self.assertIn("quickTaskForm.requestSubmit()", source)
+        self.assertIn('class="first-run-flow"', source)
+        self.assertIn("Connect provider", source)
+        self.assertIn("Run test task", source)
+        self.assertIn("See savings", source)
         self.assertIn("heroStatusText(stats, status)", source)
         self.assertIn("dashboard.experience", source)
         self.assertIn("experience_summary", source)
@@ -290,6 +294,10 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("createStatusBarItem", source)
         self.assertIn('id="routingChain"', source)
         self.assertIn('id="routingSummaryGrid"', source)
+        self.assertIn('id="whyRouteGrid"', source)
+        self.assertIn("Why this matters", source)
+        self.assertIn("routingTokenSavingsText", source)
+        self.assertIn("routingRejectedCountText", source)
         self.assertIn('id="routingReasonList"', source)
         self.assertIn('id="heroReadiness"', source)
         self.assertIn('id="quickDashboard"', source)
@@ -402,7 +410,7 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("function renderRouteVisualization", sidebar)
         self.assertIn('id="liveSavingsGrid"', sidebar)
         self.assertIn('id="routeVisualization"', sidebar)
-        self.assertIn("Live Savings", sidebar)
+        self.assertIn("Token Savings", sidebar)
         self.assertIn("Route Decision", sidebar)
         self.assertIn("Cost Saved", source)
         self.assertIn("Fallbacks Prevented", source)

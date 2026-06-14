@@ -1,10 +1,9 @@
 # Why Agent-Hub
 
-Agent-Hub is an Adaptive AI Orchestration Platform for developer workspaces. It
-is not only an AI gateway and not only a provider router. It classifies tasks,
-understands repository context, assesses risk, selects workflows, ranks
-providers, executes with failover, records outcomes, and uses that history to
-improve future routing.
+Agent-Hub is a Claude Code and Codex optimizer for developer workspaces. It is
+not only an AI gateway and not only a provider router. It classifies tasks,
+understands repository context, assesses risk, ranks providers, executes with
+failover, records outcomes, and uses that history to improve future routing.
 
 ## Positioning
 
