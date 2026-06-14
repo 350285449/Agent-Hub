@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .boost import BOOST_MODES, boost_policy, normalize_boost_mode
-from .provider_presets import OPENAI_COMPATIBLE_PROVIDER_TYPES
+from .provider_presets import OPENAI_COMPATIBLE_PROVIDER_TYPES, provider_preset
 
 
 DEFAULT_CONFIG_PATH = Path("agent-hub.config.json")
@@ -390,6 +390,11 @@ def _ollama_cloud_agent(name: str, model: str) -> AgentConfig:
     )
 
 
+def _preset_model(name: str, fallback: str) -> str:
+    preset = provider_preset(name)
+    return preset.model if preset is not None else fallback
+
+
 def free_local_config() -> HubConfig:
     """Starter config with Ollama-cloud control and explicit local control."""
 
@@ -411,13 +416,22 @@ def free_local_config() -> HubConfig:
             context_window=1_000_000,
         ),
         "ollama-kimi-cloud": _ollama_cloud_agent("ollama-kimi-cloud", "kimi-k2.6:cloud"),
-        "ollama-glm-cloud": _ollama_cloud_agent("ollama-glm-cloud", "glm-5.1:cloud"),
-        "ollama-qwen-cloud": _ollama_cloud_agent("ollama-qwen-cloud", "qwen3.5:cloud"),
+        "ollama-glm-cloud": _ollama_cloud_agent(
+            "ollama-glm-cloud",
+            _preset_model("ollama-glm-cloud", "glm-5.1:cloud"),
+        ),
+        "ollama-qwen-cloud": _ollama_cloud_agent(
+            "ollama-qwen-cloud",
+            _preset_model("ollama-qwen-cloud", "qwen3.5:cloud"),
+        ),
         "ollama-nemotron-cloud": _ollama_cloud_agent(
             "ollama-nemotron-cloud",
-            "nemotron-3-super:cloud",
+            _preset_model("ollama-nemotron-cloud", "nemotron-3-super:cloud"),
         ),
-        "ollama-gemma-cloud": _ollama_cloud_agent("ollama-gemma-cloud", "gemma4:31b-cloud"),
+        "ollama-gemma-cloud": _ollama_cloud_agent(
+            "ollama-gemma-cloud",
+            _preset_model("ollama-gemma-cloud", "gemma4:31b-cloud"),
+        ),
         "custom-local": AgentConfig(
             name="custom-local",
             provider="openai-compatible",

@@ -23,6 +23,7 @@ from agent_hub.config import (
 )
 from agent_hub.config_reference import documented_config_keys, generate_config_reference
 from agent_hub.discovery import auto_configure_config
+from agent_hub.provider_presets import provider_preset
 
 
 class ConfigTests(unittest.TestCase):
@@ -113,6 +114,15 @@ class ConfigTests(unittest.TestCase):
         local_route = next(route for route in config.routes if route.name == "local-agent")
         self.assertEqual(local_route.agents, free_local_agent_names())
         self.assertEqual(config.agents["ollama-kimi-cloud"].model, "kimi-k2.6:cloud")
+        for name in [
+            "ollama-glm-cloud",
+            "ollama-qwen-cloud",
+            "ollama-nemotron-cloud",
+            "ollama-gemma-cloud",
+        ]:
+            preset = provider_preset(name)
+            self.assertIsNotNone(preset)
+            self.assertEqual(config.agents[name].model, preset.model)
         self.assertEqual(config.agents["ollama-qwen-coder"].timeout_seconds, 300.0)
         self.assertIsNone(config.agents["ollama-qwen-coder"].max_tokens)
         self.assertIsNone(config.agents["codex"].max_tokens)

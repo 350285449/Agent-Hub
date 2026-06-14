@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 from agent_hub.config import AgentConfig
 from agent_hub.models import HubRequest
-from agent_hub.provider_presets import provider_metadata
+from agent_hub.provider_presets import (
+    FREE_PROVIDER_PRESETS,
+    OPENAI_COMPATIBLE_PROVIDER_TYPES,
+    provider_metadata,
+    provider_preset,
+)
 from agent_hub.providers import ProviderDescriptor, SimpleOpenAICompatibleProvider
 from agent_hub.providers.sdk import (
     ProviderCapabilities,
@@ -115,6 +120,15 @@ class ProviderSDKTests(unittest.TestCase):
                 self.assertEqual(descriptor.provider, "openai-compatible")
                 self.assertTrue(descriptor.base_url)
                 self.assertTrue(descriptor.default_free)
+
+    def test_provider_preset_catalog_has_unique_known_entries(self) -> None:
+        names = [preset.name for preset in FREE_PROVIDER_PRESETS]
+        provider_types = {preset.provider_type for preset in FREE_PROVIDER_PRESETS}
+
+        self.assertEqual(len(names), len(set(names)))
+        self.assertLessEqual(provider_types, OPENAI_COMPATIBLE_PROVIDER_TYPES)
+        for preset in FREE_PROVIDER_PRESETS:
+            self.assertIs(provider_preset(preset.name), preset)
 
 
 if __name__ == "__main__":

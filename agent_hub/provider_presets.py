@@ -689,10 +689,21 @@ FREE_PROVIDER_PRESETS: list[ProviderPreset] = [
 ]
 
 
+FREE_PROVIDER_PRESETS_BY_NAME: dict[str, ProviderPreset] = {
+    preset.name: preset for preset in FREE_PROVIDER_PRESETS
+}
+
+
 def provider_metadata(provider_type: str | None) -> ProviderMetadata | None:
     if not provider_type:
         return None
     return PROVIDER_METADATA.get(provider_type.lower())
+
+
+def provider_preset(name: str | None) -> ProviderPreset | None:
+    if not name:
+        return None
+    return FREE_PROVIDER_PRESETS_BY_NAME.get(str(name).strip())
 
 
 def provider_metadata_rows() -> list[dict[str, Any]]:

@@ -11619,6 +11619,15 @@ ${apiKeyFieldsHtml()}
       }
     }
 
+    function webviewRequestId() {
+      const values = new Uint32Array(4);
+      crypto.getRandomValues(values);
+      return [
+        Date.now().toString(36),
+        ...Array.from(values, (value) => value.toString(36))
+      ].join("-");
+    }
+
     function setWelcomeVisible(value) {
       welcome.hidden = !value;
     }
@@ -12512,7 +12521,7 @@ ${apiKeyFieldsHtml()}
       if (!cleanText) {
         return;
       }
-      const requestId = Date.now().toString(36) + Math.random().toString(36).slice(2);
+      const requestId = webviewRequestId();
       appendMessage("user", cleanText);
       pending.set(requestId, appendLiveMessage());
       prompt.value = "";
@@ -12688,12 +12697,7 @@ function jsonForScript(value) {
 }
 
 function getNonce() {
-  let text = "";
-  const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  for (let index = 0; index < 32; index += 1) {
-    text += possible.charAt(Math.floor(Math.random() * possible.length));
-  }
-  return text;
+  return crypto.randomBytes(24).toString("base64url");
 }
 
 async function startServer(options = {}) {
@@ -14896,7 +14900,6 @@ async function wingetStatus() {
   }
   try {
     const { stdout, stderr } = await execFile("winget", ["--version"], {
-      shell: true,
       timeout: 5000
     });
     return {

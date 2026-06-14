@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from agent_hub.application.diagnostics_service import BACKEND_FEATURES
+from agent_hub.provider_presets import provider_preset
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -887,6 +888,57 @@ class VscodeExtensionContributionTests(unittest.TestCase):
         self.assertIn("/debug/request", source)
         self.assertIn("env.AGENT_HUB_API_TOKEN = config.apiToken", source)
         self.assertIn("config.approvalToken || runtimeApprovalToken", source)
+
+    def test_webview_csp_nonce_uses_crypto_random_bytes(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        nonce_start = source.index("function getNonce")
+        nonce_end = source.index("async function startServer", nonce_start)
+        nonce_source = source[nonce_start:nonce_end]
+
+        self.assertIn('crypto.randomBytes(24).toString("base64url")', nonce_source)
+        self.assertNotIn("Math.random", nonce_source)
+        self.assertIn("script-src 'nonce-${nonce}'", source)
+
+    def test_extension_random_ids_use_crypto_sources(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        webview_start = source.index("function webviewRequestId")
+        webview_end = source.index("function setWelcomeVisible", webview_start)
+        webview_source = source[webview_start:webview_end]
+
+        self.assertNotIn("Math.random", source)
+        self.assertIn("crypto.getRandomValues(values)", webview_source)
+        self.assertIn("const requestId = webviewRequestId();", source)
+
+    def test_extension_has_no_unconditional_shell_execfile_probe(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+
+        self.assertNotIn("shell: true", source)
+
+    def test_one_click_cloud_model_defaults_match_backend_presets(self) -> None:
+        source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
+        constants = {
+            name: value
+            for name, value in re.findall(
+                r'const\s+(DEFAULT_[A-Z0-9_]+_MODEL)\s*=\s*"([^"]+)"',
+                source,
+            )
+        }
+
+        expected = {
+            "groq-qwen3-32b": "DEFAULT_GROQ_MODEL",
+            "openrouter-qwen-free": "DEFAULT_OPENROUTER_MODEL",
+            "cerebras-llama-3-3-70b": "DEFAULT_CEREBRAS_MODEL",
+            "mistral-small-latest": "DEFAULT_MISTRAL_MODEL",
+            "github-models-qwen3-coder": "DEFAULT_GITHUB_MODELS_MODEL",
+            "huggingface-qwen3-coder": "DEFAULT_HUGGINGFACE_MODEL",
+            "nvidia-nemotron": "DEFAULT_NVIDIA_MODEL",
+            "cloudflare-llama-3-1-8b": "DEFAULT_CLOUDFLARE_MODEL",
+        }
+
+        for preset_name, constant_name in expected.items():
+            preset = provider_preset(preset_name)
+            self.assertIsNotNone(preset, preset_name)
+            self.assertEqual(constants[constant_name], preset.model, constant_name)
 
     def test_fresh_machine_requirement_helpers_are_exposed(self) -> None:
         source = (EXTENSION_DIR / "extension.js").read_text(encoding="utf-8")
