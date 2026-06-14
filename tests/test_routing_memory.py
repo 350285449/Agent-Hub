@@ -138,6 +138,181 @@ class RoutingMemoryTests(unittest.TestCase):
             self.assertGreater(decision["candidate_scores"][0]["memory_adjustment"], 0)
             self.assertIn("fallback_rejections", decision)
 
+    def test_memory_marks_model_teachable_after_deep_workspace_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = RoutingMemoryStore(root)
+            agent = AgentConfig(name="good", provider="openai-compatible", model="good-test")
+            request = _request("Refactor src/app.py and update the pytest coverage")
+            classification = _classification(
+                task_type="code_edit",
+                language="python",
+                framework="pytest",
+                repository_profile_id="repo-1",
+                repository_project="agent-hub",
+            )
+
+            for index in range(12):
+                store.record_outcome(
+                    request_id=f"workspace-{index}",
+                    request=request,
+                    classification=classification,
+                    agent=agent,
+                    model=agent.model,
+                    success=True,
+                    latency_seconds=1,
+                    failover_attempts=0,
+                    input_tokens=120,
+                    output_tokens=60,
+                    estimated_cost_usd=None,
+                    final=True,
+                )
+
+            rows = store._read_recent(limit=20)
+            first = dict(rows[0])
+            first["time"] = first["time"] - (5 * 60 * 60)
+            _write_jsonl(store.path, [first, *rows[1:]])
+
+            signal = RoutingMemoryStore(root).routing_signal(agent, classification)
+
+            self.assertTrue(signal["teach_ready"]["active"])
+            self.assertEqual(signal["teach_ready"]["basis"], "workspace_history")
+            self.assertGreater(signal["teach_ready"]["workspace_samples"], 0)
+            self.assertGreater(signal["adjustment"], signal["raw_adjustment"])
+
+    def test_memory_marks_model_teachable_after_many_similar_assessments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = RoutingMemoryStore(root)
+            agent = AgentConfig(name="good", provider="openai-compatible", model="good-test")
+            request = _request("Fix React state handling in src/App.tsx")
+            classification = _classification(
+                task_type="code_edit",
+                language="typescript",
+                framework="react",
+                repository_profile_id="repo-current",
+                repository_project="current",
+            )
+
+            for index in range(16):
+                store.record_outcome(
+                    request_id=f"similar-{index}",
+                    request=request,
+                    classification=_classification(
+                        task_type="code_edit",
+                        language="typescript",
+                        framework="react",
+                        repository_profile_id=f"repo-{index}",
+                        repository_project=f"project-{index}",
+                    ),
+                    agent=agent,
+                    model=agent.model,
+                    success=True,
+                    latency_seconds=1,
+                    failover_attempts=0,
+                    input_tokens=100,
+                    output_tokens=50,
+                    estimated_cost_usd=None,
+                    final=True,
+                )
+
+            signal = RoutingMemoryStore(root).routing_signal(agent, classification)
+
+            self.assertTrue(signal["teach_ready"]["active"])
+            self.assertEqual(signal["teach_ready"]["basis"], "similar_assessments")
+            self.assertGreaterEqual(signal["teach_ready"]["similar_samples"], 16)
+            self.assertIn("teachable", signal["summary"].lower())
+
+    def test_memory_blocks_teaching_from_bad_training_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = RoutingMemoryStore(root)
+            agent = AgentConfig(name="bad", provider="openai-compatible", model="bad-test")
+            request = _request("Fix React state handling in src/App.tsx")
+            classification = _classification(
+                task_type="code_edit",
+                language="typescript",
+                framework="react",
+            )
+
+            for index in range(8):
+                store.record_outcome(
+                    request_id=f"bad-data-{index}",
+                    request=request,
+                    classification=classification,
+                    agent=agent,
+                    model=agent.model,
+                    success=False,
+                    latency_seconds=20,
+                    failover_attempts=1,
+                    input_tokens=100,
+                    output_tokens=0,
+                    estimated_cost_usd=None,
+                    error_type="timeout",
+                    final=True,
+                )
+
+            signal = RoutingMemoryStore(root).routing_signal(agent, classification)
+
+            self.assertFalse(signal["teach_ready"]["active"])
+            self.assertEqual(signal["teach_ready"]["basis"], "similar_assessments")
+            self.assertGreater(signal["teach_ready"]["bad_rate"], 0.25)
+            self.assertLess(signal["teach_adjustment"], 0)
+            self.assertIn("blocked by bad", signal["teach_ready"]["summary"])
+
+    def test_memory_uses_backup_model_history_when_primary_profiles_are_sparse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = RoutingMemoryStore(root)
+            agent = AgentConfig(name="steady", provider="openai-compatible", model="steady-test")
+            backup_request = _request("Summarize markdown documentation")
+            backup_classification = _classification(
+                task_type="documentation",
+                task_category="documentation",
+                language="markdown",
+                framework="none",
+                complexity="low",
+                risk_level="low",
+                repo_size_bucket="small",
+                context_size_bucket="small",
+                file_types=[".md"],
+            )
+
+            for index in range(24):
+                store.record_outcome(
+                    request_id=f"backup-{index}",
+                    request=backup_request,
+                    classification=backup_classification,
+                    agent=agent,
+                    model=agent.model,
+                    success=True,
+                    latency_seconds=1,
+                    failover_attempts=0,
+                    input_tokens=80,
+                    output_tokens=40,
+                    estimated_cost_usd=None,
+                    final=True,
+                )
+
+            current = _classification(
+                task_type="security_sensitive_change",
+                task_category="security_sensitive_change",
+                language="rust",
+                framework="axum",
+                complexity="high",
+                risk_level="high",
+                repo_size_bucket="xlarge",
+                context_size_bucket="xlarge",
+                file_types=[".rs"],
+            )
+            signal = RoutingMemoryStore(root).routing_signal(agent, current)
+
+            self.assertTrue(signal["teach_ready"]["active"])
+            self.assertEqual(signal["teach_ready"]["basis"], "backup_model_history")
+            self.assertTrue(signal["teach_ready"]["backup"]["active"])
+            self.assertEqual(signal["attempts"], 0)
+            self.assertGreater(signal["adjustment"], 0)
+
     def test_router_ignores_memory_when_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -224,11 +399,32 @@ def _request(text: str) -> HubRequest:
     return HubRequest(session_id="s", messages=[{"role": "user", "content": text}], raw={})
 
 
+def _classification(**overrides: str) -> dict[str, object]:
+    data: dict[str, object] = {
+        "task_type": "code_edit",
+        "task_category": "code_edit",
+        "language": "python",
+        "framework": "pytest",
+        "complexity": "medium",
+        "risk_level": "low",
+        "repo_size_bucket": "medium",
+        "repository_profile_id": "",
+        "repository_project": "",
+        "repository_architecture": "",
+        "context_size_bucket": "small",
+        "file_types": [".py"],
+    }
+    data.update(overrides)
+    return data
+
+
 def _router_config(root: Path) -> HubConfig:
     return HubConfig(
         state_dir=root / "state",
         workspace_dir=root,
         free_only=False,
+        dev_unauthenticated_mode=True,
+        local_auth_required=False,
         adaptive_learning_enabled=False,
         automatic_escalation_enabled=False,
         repo_context_enabled=False,
@@ -282,6 +478,13 @@ def _delete_json(url: str) -> dict:
     request = Request(url, method="DELETE")
     with urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
+    path.write_text(
+        "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

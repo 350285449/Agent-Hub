@@ -17,6 +17,14 @@ from .payloads import request_text
 ROUTING_MEMORY_FILE = "routing_memory.jsonl"
 MAX_MEMORY_READ = 5000
 MAX_SIMILAR_OUTCOMES = 250
+TEACH_WORKSPACE_MIN_SAMPLES = 12
+TEACH_WORKSPACE_MIN_SPAN_SECONDS = 4 * 60 * 60
+TEACH_SIMILAR_MIN_SAMPLES = 16
+TEACH_BACKUP_MIN_SAMPLES = 24
+TEACH_MIN_SUCCESS_RATE = 0.65
+TEACH_MIN_GOOD_RATE = 0.70
+TEACH_MAX_BAD_RATE = 0.25
+TEACH_BAD_DATA_MIN_SAMPLES = 6
 
 
 class RoutingMemoryStore:
@@ -149,6 +157,7 @@ class RoutingMemoryStore:
             }
         pattern = pattern_from_classification(classification)
         similar = self.similar_outcomes(pattern, limit=MAX_SIMILAR_OUTCOMES)
+        all_rows = self._read_recent(limit=MAX_MEMORY_READ)
         candidate = [
             item
             for item in similar
@@ -158,17 +167,35 @@ class RoutingMemoryStore:
                 and item.get("model") == agent.model
             )
         ]
+        teach_ready = _teach_ready_signal(
+            agent=agent,
+            pattern=pattern,
+            candidate=candidate,
+            all_rows=all_rows,
+        )
+        teach_adjustment = _safe_float(teach_ready.get("adjustment"), 0.0)
         attempts = len(candidate)
         if attempts <= 0:
+            active = abs(teach_adjustment) >= 0.25
             return {
-                "active": False,
+                "active": active,
                 "agent": agent.name,
                 "provider": agent.provider,
                 "model": agent.model,
-                "adjustment": 0.0,
+                "adjustment": round(teach_adjustment, 4) if active else 0.0,
+                "raw_adjustment": 0.0,
+                "teach_adjustment": round(teach_adjustment, 4),
+                "teach_ready": teach_ready,
                 "attempts": 0,
                 "similar_outcomes": _public_similar(similar[:5]),
-                "summary": "No routing memory samples for this model on similar tasks.",
+                "summary": _memory_summary(
+                    agent=agent.name,
+                    active=active,
+                    adjustment=teach_adjustment,
+                    attempts=0,
+                    success_rate=0.0,
+                    teach_ready=teach_ready,
+                ),
             }
         successes = sum(1 for item in candidate if item.get("success") is True)
         timeouts = sum(1 for item in candidate if item.get("timeout") is True)
@@ -188,7 +215,7 @@ class RoutingMemoryStore:
             and str(pattern.get("context_size_bucket") or "") in {"large", "xlarge"}
         ):
             adjustment -= 6.0
-        adjustment = _clamp(adjustment, -18.0, 18.0)
+        adjustment = _clamp(adjustment + teach_adjustment, -18.0, 18.0)
         active = attempts >= 2 and abs(adjustment) >= 0.25
         return {
             "active": active,
@@ -196,7 +223,9 @@ class RoutingMemoryStore:
             "provider": agent.provider,
             "model": agent.model,
             "adjustment": round(adjustment, 4) if active else 0.0,
-            "raw_adjustment": round(adjustment, 4),
+            "raw_adjustment": round(adjustment - teach_adjustment, 4),
+            "teach_adjustment": round(teach_adjustment, 4),
+            "teach_ready": teach_ready,
             "attempts": attempts,
             "success_rate": round(success_rate, 4),
             "average_outcome_score": round(average_score, 4),
@@ -210,6 +239,7 @@ class RoutingMemoryStore:
                 adjustment=adjustment,
                 attempts=attempts,
                 success_rate=success_rate,
+                teach_ready=teach_ready,
             ),
         }
 
@@ -304,6 +334,7 @@ class RoutingMemoryStore:
                     "cost",
                     "feedback",
                     "repository_profile",
+                    "teach_ready",
                 ],
                 "prompt_storage": "hash_or_disabled" if not self.store_prompts else "enabled",
             },
@@ -341,6 +372,7 @@ class RoutingMemoryStore:
             "cost_performance_winner": _cost_performance_winner(rows),
             "routing_memory_influence_per_request": _memory_influence(rows[-25:]),
             "self_adjusting": _self_adjusting_memory_summary(rows),
+            "teach_ready": _teach_ready_summary(rows),
         }
 
     def reset(self) -> dict[str, Any]:
@@ -575,17 +607,306 @@ def _memory_summary(
     adjustment: float,
     attempts: int,
     success_rate: float,
+    teach_ready: dict[str, Any] | None = None,
 ) -> str:
+    teach = teach_ready if isinstance(teach_ready, dict) else {}
+    teach_summary = str(teach.get("summary") or "").strip()
     if not active:
-        return (
+        summary = (
             f"Routing memory has {attempts} similar sample(s) for {agent}; "
             "not enough influence to change ranking."
         )
+        return f"{summary} {teach_summary}".strip() if teach_summary else summary
     direction = "boosted" if adjustment > 0 else "penalized"
-    return (
+    summary = (
         f"Routing memory {direction} {agent} by {adjustment:+.2f} "
         f"from {attempts} similar sample(s), {success_rate * 100:.0f}% success."
     )
+    return f"{summary} {teach_summary}".strip() if teach_summary else summary
+
+
+def _teach_ready_signal(
+    *,
+    agent: AgentConfig,
+    pattern: dict[str, Any],
+    candidate: list[dict[str, Any]],
+    all_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    workspace_rows = _workspace_history_rows(agent, pattern, all_rows)
+    model_rows = _model_history_rows(agent, all_rows)
+    workspace_profile = _teach_profile(workspace_rows)
+    similar_profile = _teach_profile(candidate)
+    backup_profile = _teach_profile(model_rows)
+    profiles = {
+        "workspace_history": workspace_profile,
+        "similar_assessments": similar_profile,
+        "backup_model_history": backup_profile,
+    }
+    bad_profile = _worst_bad_profile(profiles)
+    if (
+        bad_profile
+        and bad_profile["samples"] >= TEACH_BAD_DATA_MIN_SAMPLES
+        and bad_profile["bad_rate"] > TEACH_MAX_BAD_RATE
+    ):
+        adjustment = -min(4.0, 1.0 + bad_profile["bad_rate"] * 4.0)
+        return {
+            "active": False,
+            "basis": str(bad_profile["basis"]),
+            "backup": {"active": False, "basis": "blocked_by_bad_data"},
+            "adjustment": round(adjustment, 4),
+            "workspace_samples": workspace_profile["samples"],
+            "similar_samples": similar_profile["samples"],
+            "backup_samples": backup_profile["samples"],
+            "good_samples": bad_profile["good_samples"],
+            "bad_samples": bad_profile["bad_samples"],
+            "neutral_samples": bad_profile["neutral_samples"],
+            "good_rate": round(bad_profile["good_rate"], 4),
+            "bad_rate": round(bad_profile["bad_rate"], 4),
+            "success_rate": round(bad_profile["success_rate"], 4),
+            "average_outcome_score": round(bad_profile["average_outcome_score"], 4),
+            "minimum_workspace_samples": TEACH_WORKSPACE_MIN_SAMPLES,
+            "minimum_similar_samples": TEACH_SIMILAR_MIN_SAMPLES,
+            "minimum_backup_samples": TEACH_BACKUP_MIN_SAMPLES,
+            "summary": (
+                f"{agent.name} teaching data is blocked by bad {bad_profile['basis']} samples "
+                f"({bad_profile['bad_rate'] * 100:.0f}% bad data)."
+            ),
+        }
+    basis = ""
+    selected = {}
+    backup = {"active": False, "basis": ""}
+    if _teachable_profile(
+        workspace_profile,
+        minimum_samples=TEACH_WORKSPACE_MIN_SAMPLES,
+        require_timespan=True,
+    ):
+        basis = "workspace_history"
+        selected = workspace_profile
+    elif _teachable_profile(
+        similar_profile,
+        minimum_samples=TEACH_SIMILAR_MIN_SAMPLES,
+        require_timespan=False,
+    ):
+        basis = "similar_assessments"
+        selected = similar_profile
+    elif _teachable_profile(
+        backup_profile,
+        minimum_samples=TEACH_BACKUP_MIN_SAMPLES,
+        require_timespan=False,
+        backup=True,
+    ):
+        basis = "backup_model_history"
+        selected = backup_profile
+        backup = {"active": True, "basis": "model_history"}
+    if not basis:
+        return {
+            "active": False,
+            "basis": "",
+            "backup": backup,
+            "adjustment": 0.0,
+            "workspace_samples": workspace_profile["samples"],
+            "similar_samples": similar_profile["samples"],
+            "backup_samples": backup_profile["samples"],
+            "good_samples": max(
+                workspace_profile["good_samples"],
+                similar_profile["good_samples"],
+                backup_profile["good_samples"],
+            ),
+            "bad_samples": max(
+                workspace_profile["bad_samples"],
+                similar_profile["bad_samples"],
+                backup_profile["bad_samples"],
+            ),
+            "neutral_samples": max(
+                workspace_profile["neutral_samples"],
+                similar_profile["neutral_samples"],
+                backup_profile["neutral_samples"],
+            ),
+            "minimum_workspace_samples": TEACH_WORKSPACE_MIN_SAMPLES,
+            "minimum_similar_samples": TEACH_SIMILAR_MIN_SAMPLES,
+            "minimum_backup_samples": TEACH_BACKUP_MIN_SAMPLES,
+            "summary": "Teaching data is not reliable enough yet.",
+        }
+    divisor = 24.0 if basis == "workspace_history" else 32.0
+    if basis == "backup_model_history":
+        divisor = 48.0
+    confidence = min(1.0, selected["good_samples"] / divisor)
+    quality = max(0.0, selected["success_rate"] - TEACH_MIN_SUCCESS_RATE)
+    score_quality = max(0.0, selected["average_outcome_score"] - 0.62)
+    bad_penalty = selected["bad_rate"] * 3.0
+    maximum_adjustment = 2.0 if basis == "backup_model_history" else 4.0
+    adjustment = min(
+        maximum_adjustment,
+        0.75 + confidence * 1.8 + quality * 3.0 + score_quality * 1.5 - bad_penalty,
+    )
+    label = {
+        "workspace_history": "workspace history",
+        "similar_assessments": "similar assessments",
+        "backup_model_history": "backup model history",
+    }[basis]
+    return {
+        "active": True,
+        "basis": basis,
+        "backup": backup,
+        "adjustment": round(adjustment, 4),
+        "workspace_samples": workspace_profile["samples"],
+        "similar_samples": similar_profile["samples"],
+        "backup_samples": backup_profile["samples"],
+        "usable_samples": selected["usable_samples"],
+        "good_samples": selected["good_samples"],
+        "bad_samples": selected["bad_samples"],
+        "neutral_samples": selected["neutral_samples"],
+        "good_rate": round(selected["good_rate"], 4),
+        "bad_rate": round(selected["bad_rate"], 4),
+        "success_rate": round(selected["success_rate"], 4),
+        "average_outcome_score": round(selected["average_outcome_score"], 4),
+        "timespan_seconds": round(selected["timespan_seconds"], 2),
+        "minimum_workspace_samples": TEACH_WORKSPACE_MIN_SAMPLES,
+        "minimum_similar_samples": TEACH_SIMILAR_MIN_SAMPLES,
+        "minimum_backup_samples": TEACH_BACKUP_MIN_SAMPLES,
+        "summary": (
+            f"{agent.name} is teachable from {selected['good_samples']} good {label} samples "
+            f"({selected['success_rate'] * 100:.0f}% success, "
+            f"{selected['bad_rate'] * 100:.0f}% bad data)."
+        ),
+    }
+
+
+def _workspace_history_rows(
+    agent: AgentConfig,
+    pattern: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    repository_profile_id = str(pattern.get("repository_profile_id") or "")
+    repository_project = str(pattern.get("repository_project") or "")
+    if not repository_profile_id and not repository_project:
+        return []
+    return [
+        row
+        for row in rows
+        if _same_agent_or_model(row, agent)
+        and (
+            (repository_profile_id and str(row.get("repository_profile_id") or "") == repository_profile_id)
+            or (repository_project and str(row.get("repository_project") or "") == repository_project)
+        )
+    ]
+
+
+def _model_history_rows(agent: AgentConfig, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if _same_agent_or_model(row, agent)]
+
+
+def _same_agent_or_model(row: dict[str, Any], agent: AgentConfig) -> bool:
+    return row.get("agent") == agent.name or (
+        row.get("provider") == agent.provider
+        and row.get("model") == agent.model
+    )
+
+
+def _teachable_profile(
+    profile: dict[str, Any],
+    *,
+    minimum_samples: int,
+    require_timespan: bool,
+    backup: bool = False,
+) -> bool:
+    if int(profile.get("samples") or 0) < minimum_samples:
+        return False
+    if require_timespan and float(profile.get("timespan_seconds") or 0.0) < TEACH_WORKSPACE_MIN_SPAN_SECONDS:
+        return False
+    min_good_rate = TEACH_MIN_GOOD_RATE + (0.05 if backup else 0.0)
+    min_success_rate = TEACH_MIN_SUCCESS_RATE + (0.05 if backup else 0.0)
+    return (
+        float(profile.get("success_rate") or 0.0) >= min_success_rate
+        and float(profile.get("good_rate") or 0.0) >= min_good_rate
+        and float(profile.get("bad_rate") or 0.0) <= TEACH_MAX_BAD_RATE
+    )
+
+
+def _worst_bad_profile(profiles: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    candidates = []
+    for basis, profile in profiles.items():
+        item = dict(profile)
+        item["basis"] = basis
+        candidates.append(item)
+    bad = [
+        item
+        for item in candidates
+        if int(item.get("samples") or 0) >= TEACH_BAD_DATA_MIN_SAMPLES
+        and float(item.get("bad_rate") or 0.0) > TEACH_MAX_BAD_RATE
+    ]
+    if not bad:
+        return None
+    return max(
+        bad,
+        key=lambda item: (
+            float(item.get("bad_rate") or 0.0),
+            int(item.get("bad_samples") or 0),
+            int(item.get("samples") or 0),
+        ),
+    )
+
+
+def _teach_profile(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    samples = len(rows)
+    if samples <= 0:
+        return {
+            "samples": 0,
+            "usable_samples": 0,
+            "good_samples": 0,
+            "bad_samples": 0,
+            "neutral_samples": 0,
+            "success_rate": 0.0,
+            "good_rate": 0.0,
+            "bad_rate": 0.0,
+            "average_outcome_score": 0.0,
+            "timespan_seconds": 0.0,
+        }
+    successes = sum(1 for row in rows if row.get("success") is True)
+    scores = [_safe_float(row.get("outcome_score"), 0.0) for row in rows]
+    times = [_safe_float(row.get("time"), 0.0) for row in rows if _safe_float(row.get("time"), 0.0) > 0]
+    good = sum(1 for row in rows if _training_data_label(row) == "good")
+    bad = sum(1 for row in rows if _training_data_label(row) == "bad")
+    neutral = max(0, samples - good - bad)
+    usable = good + bad
+    return {
+        "samples": samples,
+        "usable_samples": usable,
+        "good_samples": good,
+        "bad_samples": bad,
+        "neutral_samples": neutral,
+        "success_rate": successes / samples,
+        "good_rate": good / max(1, usable),
+        "bad_rate": bad / max(1, usable),
+        "average_outcome_score": sum(scores) / max(1, len(scores)),
+        "timespan_seconds": max(times) - min(times) if len(times) >= 2 else 0.0,
+    }
+
+
+def _training_data_label(row: dict[str, Any]) -> str:
+    final_outcome = str(row.get("final_outcome") or "").strip().lower()
+    feedback = str(row.get("feedback_rating") or "").strip().lower()
+    score = _safe_float(row.get("outcome_score"), 0.0)
+    retry_count = int(row.get("retry_count") or row.get("fallback_count") or 0)
+    if (
+        feedback == "down"
+        or final_outcome in {"user_rejected", "failure", "failed_attempt", "timeout", "tool_failure", "reviewer_failure"}
+        or row.get("timeout") is True
+        or row.get("tool_failure") is True
+        or row.get("reviewer_failure") is True
+        or row.get("user_cancellation") is True
+        or score <= 0.45
+    ):
+        return "bad"
+    if (
+        (row.get("success") is True or final_outcome in {"success", "user_confirmed"} or feedback == "up")
+        and final_outcome not in {"permission_denied", "cancelled"}
+        and row.get("fallback_used") is not True
+        and retry_count <= 1
+        and score >= 0.72
+    ):
+        return "good"
+    return "neutral"
 
 
 def _most_successful_models(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -805,6 +1126,80 @@ def _self_adjusting_memory_summary(rows: list[dict[str, Any]]) -> dict[str, Any]
         "active_profiles": sum(1 for item in profiles if item["active"]),
         "profile_count": len(profiles),
         "minimum_samples": 2,
+        "profiles": profiles[:25],
+    }
+
+
+def _teach_ready_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        agent = str(row.get("agent") or "")
+        provider = str(row.get("provider") or "")
+        model = str(row.get("model") or "")
+        if not agent and not model:
+            continue
+        repository_profile_id = str(row.get("repository_profile_id") or "")
+        repository_project = str(row.get("repository_project") or "")
+        workspace_key = repository_profile_id or repository_project
+        if not workspace_key:
+            continue
+        key = "|".join((agent, provider, model, workspace_key))
+        target = groups.setdefault(
+            key,
+            {
+                "agent": agent,
+                "provider": provider,
+                "model": model,
+                "workspace": workspace_key,
+                "rows": [],
+            },
+        )
+        target["rows"].append(row)
+    profiles = []
+    for group in groups.values():
+        profile = _teach_profile(group["rows"])
+        active = _teachable_profile(
+            profile,
+            minimum_samples=TEACH_WORKSPACE_MIN_SAMPLES,
+            require_timespan=True,
+        )
+        profiles.append(
+            {
+                "agent": group["agent"],
+                "provider": group["provider"],
+                "model": group["model"],
+                "workspace": group["workspace"],
+                "samples": profile["samples"],
+                "usable_samples": profile["usable_samples"],
+                "good_samples": profile["good_samples"],
+                "bad_samples": profile["bad_samples"],
+                "neutral_samples": profile["neutral_samples"],
+                "success_rate": round(profile["success_rate"], 4),
+                "good_rate": round(profile["good_rate"], 4),
+                "bad_rate": round(profile["bad_rate"], 4),
+                "average_outcome_score": round(profile["average_outcome_score"], 4),
+                "timespan_seconds": round(profile["timespan_seconds"], 2),
+                "active": active,
+            }
+        )
+    profiles.sort(
+        key=lambda item: (
+            not bool(item["active"]),
+            -int(item["samples"]),
+            -float(item["success_rate"]),
+            str(item["agent"]),
+        )
+    )
+    return {
+        "active_profiles": sum(1 for item in profiles if item["active"]),
+        "profile_count": len(profiles),
+        "workspace_minimum_samples": TEACH_WORKSPACE_MIN_SAMPLES,
+        "workspace_minimum_span_seconds": TEACH_WORKSPACE_MIN_SPAN_SECONDS,
+        "similar_minimum_samples": TEACH_SIMILAR_MIN_SAMPLES,
+        "backup_minimum_samples": TEACH_BACKUP_MIN_SAMPLES,
+        "minimum_success_rate": TEACH_MIN_SUCCESS_RATE,
+        "minimum_good_rate": TEACH_MIN_GOOD_RATE,
+        "maximum_bad_rate": TEACH_MAX_BAD_RATE,
         "profiles": profiles[:25],
     }
 
