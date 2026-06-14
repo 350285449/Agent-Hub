@@ -139,6 +139,7 @@ class ServerCompatibilityTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=Path(tmp) / "state",
                 workspace_dir=Path(tmp),
+                dev_unauthenticated_mode=True,
                 cors_allowed_origins=["http://localhost:8765"],
                 default_route=["echo"],
                 agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
@@ -163,6 +164,7 @@ class ServerCompatibilityTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=Path(tmp) / "state",
                 workspace_dir=Path(tmp),
+                dev_unauthenticated_mode=True,
                 default_route=["echo"],
                 agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
             )
@@ -220,6 +222,7 @@ class ServerCompatibilityTests(unittest.TestCase):
             config = HubConfig(
                 state_dir=Path(tmp) / "state",
                 workspace_dir=Path(tmp),
+                dev_unauthenticated_mode=True,
                 max_json_body_bytes=128,
                 default_route=["echo"],
                 agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},

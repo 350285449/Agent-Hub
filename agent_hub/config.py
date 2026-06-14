@@ -76,6 +76,7 @@ DEFAULT_ROUTING_CONFIG = {
     "cooldown_overload_seconds": 60,
     "cooldown_quota_seconds": 3600,
 }
+MAX_REQUEST_SIZE = 5 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -189,9 +190,9 @@ class HubConfig:
     diagnostics_auth_token: str | None = None
     diagnostics_auth_token_env: str | None = None
     cors_allowed_origins: list[str] = field(default_factory=list)
-    local_auth_required: bool = False
+    local_auth_required: bool = True
     dev_unauthenticated_mode: bool = False
-    max_json_body_bytes: int = 1_000_000
+    max_json_body_bytes: int = MAX_REQUEST_SIZE
     max_file_operation_bytes: int = 2_000_000
     rate_limit_requests_per_minute: int = 100
     local_rate_limit_unlimited: bool = True
@@ -271,6 +272,7 @@ class HubConfig:
     context_change_bar_mode: str = "light"
     rollback_on_validation_failure: bool = True
     workspace_checkpoint_retention: int = 5
+    workspace_trusted: bool = True
 
     default_route: list[str] = field(default_factory=list)
     routes: list[RouteRule] = field(default_factory=list)
@@ -909,11 +911,11 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             else None
         ),
         cors_allowed_origins=_string_list(raw.get("cors_allowed_origins")),
-        local_auth_required=_bool_with_default(raw.get("local_auth_required"), False),
+        local_auth_required=_bool_with_default(raw.get("local_auth_required"), True),
         dev_unauthenticated_mode=_bool_with_default(raw.get("dev_unauthenticated_mode"), False),
         max_json_body_bytes=_normalize_positive_int(
             raw.get("max_json_body_bytes"),
-            1_000_000,
+            MAX_REQUEST_SIZE,
             minimum=1024,
             maximum=20_000_000,
         ),
@@ -1100,6 +1102,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
                 _int_with_default(raw.get("workspace_checkpoint_retention", raw.get("checkpoint_retention")), 5),
             ),
         ),
+        workspace_trusted=_bool_with_default(raw.get("workspace_trusted"), True),
         default_route=_string_list(raw.get("default_route"), default=list(agents.keys())),
         routes=routes,
         agents=agents,
@@ -1293,6 +1296,7 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "context_change_bar_mode": config.context_change_bar_mode,
         "rollback_on_validation_failure": config.rollback_on_validation_failure,
         "workspace_checkpoint_retention": config.workspace_checkpoint_retention,
+        "workspace_trusted": config.workspace_trusted,
         "include_raw_responses": config.include_raw_responses,
         "expose_routing_details": config.expose_routing_details,
         "default_route": config.default_route,

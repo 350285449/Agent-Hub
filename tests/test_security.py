@@ -7,6 +7,8 @@ from pathlib import Path
 from agent_hub.agent_tools import AgentToolbox
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.models import HubRequest, ProviderResult
+from agent_hub.observability import audit_snapshot
+from agent_hub.plugins import execute_plugin
 from agent_hub.permissions import PermissionManager, tool_permission_request
 from agent_hub.core.router import AgentRouter, RouterError
 from agent_hub.security import classify_shell_command, detect_secrets
@@ -46,6 +48,63 @@ class ToolSecurityTests(unittest.TestCase):
 
             self.assertFalse(result["ok"])
             self.assertTrue(result["approval_required"])
+
+    def test_untrusted_workspace_forces_readonly_tool_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            toolbox = AgentToolbox(
+                HubConfig(
+                    workspace_dir=Path(tmp),
+                    state_dir=Path(tmp) / "state",
+                    approval_mode="auto",
+                    allow_shell_tools=True,
+                    workspace_trusted=False,
+                ),
+                HubRequest(session_id="untrusted", messages=[]),
+            )
+
+            write = toolbox.run("write_file", {"path": "note.txt", "content": "hello\n"})
+            shell = toolbox.run("run_command", {"command": "git status"})
+
+            self.assertFalse(write["ok"])
+            self.assertTrue(write["permission_denied"])
+            self.assertFalse(shell["ok"])
+            self.assertIn("disabled", shell["error"].lower())
+
+    def test_toolbox_records_local_audit_for_reads_and_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "note.txt").write_text("hello\n", encoding="utf-8")
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / "state",
+                approval_mode="auto",
+            )
+            toolbox = AgentToolbox(config, HubRequest(session_id="audit", messages=[]))
+
+            read = toolbox.run("read_file", {"path": "note.txt"})
+            write = toolbox.run("write_file", {"path": "out.txt", "content": "ok\n"})
+            audit = audit_snapshot(config.state_dir)
+
+            self.assertTrue(read["ok"])
+            self.assertTrue(write["ok"])
+            self.assertEqual(audit["counts"]["files_read"], 1)
+            self.assertEqual(audit["counts"]["files_modified"], 1)
+
+    def test_untrusted_workspace_blocks_plugin_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                workspace_dir=Path(tmp),
+                state_dir=Path(tmp) / "state",
+                plugin_execution_enabled=True,
+                workspace_trusted=False,
+            )
+
+            result = execute_plugin(config, plugin_id="tool.demo", action="execute")
+            audit = audit_snapshot(config.state_dir)
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.reason, "workspace_untrusted")
+            self.assertEqual(audit["counts"]["plugins_invoked"], 1)
 
     def test_secret_detection_marks_cloud_request_for_explicit_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

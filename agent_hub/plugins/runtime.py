@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..config import HubConfig
+from ..observability import record_event
 from .discovery import discover_plugins
 from .sandbox import PluginExecutionRequest, PluginExecutionResult, PluginExecutionSandbox
 
@@ -15,29 +16,43 @@ def execute_plugin(
     payload: dict[str, Any] | None = None,
     requested_scopes: list[str] | None = None,
 ) -> PluginExecutionResult:
+    if not bool(getattr(config, "workspace_trusted", True)):
+        result = _denied(plugin_id, action, "workspace_untrusted")
+        _record_plugin_audit(config, result)
+        return result
     discovered = next(
         (plugin for plugin in discover_plugins(config).plugins if plugin.manifest.id == plugin_id),
         None,
     )
     if discovered is None:
-        return _denied(plugin_id, action, "plugin_not_found")
+        result = _denied(plugin_id, action, "plugin_not_found")
+        _record_plugin_audit(config, result)
+        return result
     normalized_action = str(action or "execute").strip().lower()
     if normalized_action in {"validate", "preflight", "dry_run", "dry-run"}:
-        return _validate_plugin(discovered, action, requested_scopes=requested_scopes)
+        result = _validate_plugin(discovered, action, requested_scopes=requested_scopes)
+        _record_plugin_audit(config, result)
+        return result
     if not discovered.enabled:
-        return _denied(plugin_id, action, "plugin_disabled")
+        result = _denied(plugin_id, action, "plugin_disabled")
+        _record_plugin_audit(config, result)
+        return result
     if not discovered.trusted:
-        return _denied(plugin_id, action, "plugin_untrusted")
+        result = _denied(plugin_id, action, "plugin_untrusted")
+        _record_plugin_audit(config, result)
+        return result
     sandbox_policy = discovered.sandbox
     if not sandbox_policy.get("code_execution"):
-        return _denied(plugin_id, action, "plugin_execution_disabled")
+        result = _denied(plugin_id, action, "plugin_execution_disabled")
+        _record_plugin_audit(config, result)
+        return result
     sandbox = PluginExecutionSandbox(
         execution_enabled=True,
         granted_scopes=list(sandbox_policy.get("capability_scopes") or []),
         backend=str(sandbox_policy.get("backend") or "disabled"),
         entrypoint=sandbox_policy.get("entrypoint"),
     )
-    return sandbox.execute(
+    result = sandbox.execute(
         PluginExecutionRequest(
             plugin_id=plugin_id,
             action=action,
@@ -45,6 +60,23 @@ def execute_plugin(
             payload=dict(payload or {}),
         )
     )
+    _record_plugin_audit(config, result)
+    return result
+
+
+def _record_plugin_audit(config: HubConfig, result: PluginExecutionResult) -> None:
+    event = {
+        "type": "audit",
+        "action": "plugin_invoked",
+        "plugin_id": result.plugin_id,
+        "plugin_action": result.action,
+        "ok": result.ok,
+        "reason": result.reason,
+        "backend": result.backend,
+        "denied": not result.ok,
+    }
+    record_event(config.state_dir, "plugin_audit", event)
+    record_event(config.state_dir, "audit", event)
 
 
 def _denied(plugin_id: str, action: str, reason: str) -> PluginExecutionResult:

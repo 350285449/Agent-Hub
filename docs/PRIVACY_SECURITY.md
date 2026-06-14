@@ -26,6 +26,16 @@ When the HTTP server is bound to a public host, every endpoint requires
 VS Code Secret Storage, injects it into the backend as `AGENT_HUB_API_TOKEN`, and
 sends it with every request. Public binds still refuse to start without a token;
 unauthenticated local development requires `dev_unauthenticated_mode=true`.
+
+Requests over `max_json_body_bytes` are rejected with HTTP 413. The shipped
+default is 5 MiB.
+
+When VS Code marks a workspace untrusted, the extension sends Agent Hub requests
+in read-only mode and disables shell commands, plugin execution, and dependency
+installation actions.
+
+The local audit trail is available at `/v1/audit` and summarizes files read,
+files modified, commands executed, plugins invoked, and denied actions.
 The legacy diagnostics token remains accepted for compatibility.
 
 Approval booleans such as `approval_granted` and `approved` are ignored when

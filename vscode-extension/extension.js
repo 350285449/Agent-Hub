@@ -26,6 +26,7 @@ let lastServerMessage = "";
 let localApiToken = "";
 const runtimeApprovalToken = crypto.randomBytes(32).toString("hex");
 const LOCAL_API_TOKEN_SECRET = "agentHub.localApiToken";
+const WORKSPACE_PERMISSION_KEY = "agentHub.workspacePermissions";
 const EXTENSION_VERSION = readExtensionPackageVersion();
 const DEFAULT_CONFIG_FILENAME = "agent-hub.config.json";
 const CHAT_PARTICIPANT_ID = "agent-hub.agent-hub-vscode.agenthub";
@@ -506,7 +507,14 @@ class PermissionManager {
 
   async request(action) {
     const category = action && action.category ? action.category : "unknown";
+    if (!vscode.workspace.isTrusted && untrustedWorkspaceDeniedCategory(category)) {
+      vscode.window.showWarningMessage("Agent Hub is in read-only mode because this workspace is not trusted.");
+      return false;
+    }
     if (!SENSITIVE_PERMISSION_CATEGORIES.has(category)) {
+      return true;
+    }
+    if (workspacePermissionAllowed(action)) {
       return true;
     }
     if (this.mode === "auto") {
@@ -521,14 +529,59 @@ class PermissionManager {
     }
 
     const allow = "Allow Once";
+    const allowWorkspace = "Allow Workspace";
     const choice = await vscode.window.showWarningMessage(
       permissionPromptText(action),
       { modal: true },
       allow,
+      allowWorkspace,
       "Deny"
     );
+    if (choice === allowWorkspace) {
+      rememberWorkspacePermission(action);
+      return true;
+    }
     return choice === allow;
   }
+}
+
+function untrustedWorkspaceDeniedCategory(category) {
+  return new Set([
+    "config_edit",
+    "file_write",
+    "model_download",
+    "process_control",
+    "secret_edit",
+    "shell_command",
+    "workspace_cloud"
+  ]).has(category);
+}
+
+function workspacePermissionAllowed(action) {
+  if (!extensionContext || !extensionContext.workspaceState) {
+    return false;
+  }
+  const permissions = extensionContext.workspaceState.get(WORKSPACE_PERMISSION_KEY, {});
+  return permissions[workspacePermissionKey(action)] === true;
+}
+
+function rememberWorkspacePermission(action) {
+  if (!extensionContext || !extensionContext.workspaceState) {
+    return;
+  }
+  const permissions = extensionContext.workspaceState.get(WORKSPACE_PERMISSION_KEY, {});
+  permissions[workspacePermissionKey(action)] = true;
+  extensionContext.workspaceState.update(WORKSPACE_PERMISSION_KEY, permissions);
+}
+
+function workspacePermissionKey(action) {
+  const category = action && action.category ? action.category : "unknown";
+  const resource = action && action.resource ? String(action.resource).trim().toLowerCase() : "";
+  if (category === "shell_command") {
+    const executable = splitCommandLine(resource)[0] || resource.split(/\s+/, 1)[0] || "shell";
+    return `${category}:${executable}`;
+  }
+  return `${category}:${resource || "*"}`;
 }
 
 function normalizeApprovalMode(value) {
@@ -7242,8 +7295,9 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
     task,
     context,
     use_session_history: true,
-    approval_mode: config.approvalMode,
+    approval_mode: config.workspaceTrusted ? config.approvalMode : "readonly",
     provider_approval_granted: true,
+    workspace_trusted: config.workspaceTrusted,
     metadata: {
       source: "vscode-chat-participant",
       command,
@@ -7258,7 +7312,7 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
   applyOptionalMaxTokens(body, config);
 
   if (agentMode) {
-    body.allow_shell_tools = config.allowShellTools;
+    body.allow_shell_tools = config.allowShellTools && config.workspaceTrusted;
     body.agent_max_steps = config.agentMaxSteps;
     body.coder_max_steps = config.agentMaxSteps;
     body.agent_context_budget_tokens = config.agentContextBudgetTokens;
@@ -10154,9 +10208,10 @@ async function sendChatTurn(panel, message) {
     task: codexChatTask(text),
     context,
     use_session_history: true,
-    approval_mode: config.approvalMode,
+    approval_mode: config.workspaceTrusted ? config.approvalMode : "readonly",
     provider_approval_granted: true,
-    allow_shell_tools: config.allowShellTools,
+    allow_shell_tools: config.allowShellTools && config.workspaceTrusted,
+    workspace_trusted: config.workspaceTrusted,
     agent_max_steps: config.agentMaxSteps,
     coder_max_steps: config.agentMaxSteps,
     agent_context_budget_tokens: config.agentContextBudgetTokens,
@@ -13066,12 +13121,13 @@ function applyGeneratedSecurityDefaults(data) {
   const defaults = {
     local_auth_required: true,
     api_auth_token_env: "AGENT_HUB_API_TOKEN",
-    max_json_body_bytes: 1000000,
+    max_json_body_bytes: 5242880,
     max_file_operation_bytes: 2000000,
     allow_shell_tools: false,
     shell_command_policy: "ask",
     plugin_execution_enabled: false,
-    mcp_execution_enabled: false
+    mcp_execution_enabled: false,
+    workspace_trusted: vscode.workspace.isTrusted
   };
   for (const [key, value] of Object.entries(defaults)) {
     if (data[key] !== value) {
@@ -13912,12 +13968,13 @@ function localConfigForLocalModels(sources, options = {}) {
     tool_loop_enabled_for_cline: false,
     local_auth_required: true,
     api_auth_token_env: "AGENT_HUB_API_TOKEN",
-    max_json_body_bytes: 1000000,
+    max_json_body_bytes: 5242880,
     max_file_operation_bytes: 2000000,
     allow_shell_tools: false,
     shell_command_policy: "ask",
     plugin_execution_enabled: false,
     mcp_execution_enabled: false,
+    workspace_trusted: vscode.workspace.isTrusted,
     approval_mode: generatedConfigApprovalMode(options.approvalMode),
     free_only: options.cloudSettings?.freeOnly !== false,
     disable_non_free_models: options.cloudSettings?.disableNonFreeModels === true,
@@ -17599,7 +17656,8 @@ async function runCodingAgent() {
     routingText: task,
     agentMode: true,
     extra: {
-      allow_shell_tools: config.allowShellTools,
+      allow_shell_tools: config.allowShellTools && config.workspaceTrusted,
+      workspace_trusted: config.workspaceTrusted,
       agent_max_steps: config.agentMaxSteps,
       agent_context_budget_tokens: config.agentContextBudgetTokens,
       agent_context_compaction_enabled: config.agentContextCompactionEnabled,
@@ -17678,8 +17736,9 @@ async function requestCommitMessage(diffContext) {
     route: codingAgentRoute(config),
     task: commitMessageTask(diffContext.scope),
     context: diffContext.context,
-    approval_mode: config.approvalMode,
+    approval_mode: config.workspaceTrusted ? config.approvalMode : "readonly",
     provider_approval_granted: true,
+    workspace_trusted: config.workspaceTrusted,
     context_mode: config.contextMode,
     cline_compatibility_mode: config.clineCompatibilityMode,
     max_tokens: 160,
@@ -18095,8 +18154,9 @@ async function sendAgentRequest({ task, context, route, routingText, agentMode =
     route: route || config.route,
     task,
     context,
-    approval_mode: config.approvalMode,
+    approval_mode: config.workspaceTrusted ? config.approvalMode : "readonly",
     provider_approval_granted: true,
+    workspace_trusted: config.workspaceTrusted,
     agent_context_budget_tokens: config.agentContextBudgetTokens,
     agent_context_compaction_enabled: config.agentContextCompactionEnabled,
     context_mode: config.contextMode,
@@ -18525,7 +18585,8 @@ function settings() {
     agentContextCompactionEnabled: config.get("agentContextCompactionEnabled", true),
     contextMode: normalizeContextMode(config.get("contextMode", "balanced")),
     clineCompatibilityMode: config.get("clineCompatibilityMode", true),
-    allowShellTools: config.get("allowShellTools", false),
+    allowShellTools: vscode.workspace.isTrusted && config.get("allowShellTools", false),
+    workspaceTrusted: vscode.workspace.isTrusted,
     maxTokens: normalizeOptionalPositiveInteger(config.get("maxTokens", null)),
     autoStart: config.get("autoStart", true),
     automatedModelFeedback: config.get("automatedModelFeedback", false)

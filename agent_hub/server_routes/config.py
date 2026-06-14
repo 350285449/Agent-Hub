@@ -297,6 +297,14 @@ def handle_get(handler: object, path: str) -> bool:
             lambda: handler.server.diagnostics_service.plugins_body(),
         )
         return True
+    if path == "/v1/audit":
+        from ..observability import audit_snapshot
+
+        handler._send_cached_diagnostics_json(
+            "GET /v1/audit",
+            lambda: audit_snapshot(handler.server.config.state_dir),
+        )
+        return True
     if path == "/v1/mcp/status":
         handler._send_cached_diagnostics_json(
             "GET /v1/mcp/status",

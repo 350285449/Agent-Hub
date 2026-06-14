@@ -16,6 +16,7 @@ STREAM_FILES = {
     "permissions": "permission_audit.jsonl",
     "security_audit": "security_audit.jsonl",
     "enterprise_audit": "enterprise_audit.jsonl",
+    "audit": "local_audit.jsonl",
     "tools": "tool_execution_history.jsonl",
     "workflows": "workflow_execution.jsonl",
     "adaptive": "adaptive_learning_events.jsonl",
@@ -75,6 +76,29 @@ def usage_snapshot(state_dir: str | Path, provider_health: dict[str, dict[str, A
         "permission_events": len(permission_events),
         "recent_tool_executions": tool_events[-25:],
         "recent_permissions": permission_events[-25:],
+    }
+
+
+def audit_snapshot(state_dir: str | Path, *, limit: int = 100) -> dict[str, Any]:
+    audit_events = recent_events(state_dir, "audit", limit=limit)
+    tool_events = recent_events(state_dir, "tools", limit=limit)
+    permission_events = recent_events(state_dir, "permissions", limit=limit)
+    security_events = recent_events(state_dir, "security_audit", limit=limit)
+    plugin_events = recent_events(state_dir, "plugin_audit", limit=limit)
+    events = [*audit_events, *tool_events, *permission_events, *security_events, *plugin_events]
+    events.sort(key=lambda item: float(item.get("time") or 0.0))
+    events = events[-max(1, min(limit, MAX_RECENT_EVENTS)) :]
+    count_source = audit_events or events
+    return {
+        "object": "agent_hub.audit",
+        "events": events,
+        "counts": {
+            "files_read": sum(1 for item in count_source if item.get("action") == "file_read"),
+            "files_modified": sum(1 for item in count_source if item.get("action") == "file_modified"),
+            "commands_executed": sum(1 for item in count_source if item.get("action") == "command_executed" or item.get("type") == "command_execution"),
+            "plugins_invoked": sum(1 for item in count_source if item.get("action") == "plugin_invoked"),
+            "denied_actions": sum(1 for item in count_source if item.get("denied") is True or item.get("permission_denied") is True),
+        },
     }
 
 

@@ -117,6 +117,8 @@ class AgentToolbox:
 
     @property
     def allow_shell(self) -> bool:
+        if not self._workspace_trusted():
+            return False
         value = _request_option(self.request, "allow_shell_tools", self.config.allow_shell_tools)
         return bool(value)
 
@@ -347,7 +349,12 @@ class AgentToolbox:
         return decision.requires_approval
 
     def _get_approval_mode(self) -> str:
+        if not self._workspace_trusted():
+            return "readonly"
         return approval_mode_from_request(self.request, self.config.approval_mode)
+
+    def _workspace_trusted(self) -> bool:
+        return _truthy(_request_option(self.request, "workspace_trusted", getattr(self.config, "workspace_trusted", True)))
 
     def _approval_granted(self) -> bool:
         return approval_granted_from_request(self.request)
@@ -376,11 +383,27 @@ class AgentToolbox:
                     "resource": decision.request.resource if decision.request else "",
                 },
             )
+            if decision.denied or decision.requires_approval:
+                record_event(
+                    self.config.state_dir,
+                    "audit",
+                    {
+                        "type": "audit",
+                        "action": "action_denied" if decision.denied else "approval_required",
+                        "session_id": self.request.session_id,
+                        "tool": name,
+                        "denied": decision.denied,
+                        "requires_approval": decision.requires_approval,
+                        "reason": decision.reason,
+                        "resource": decision.request.resource if decision.request else "",
+                    },
+                )
         except Exception:
             return
 
     def _record_tool_event(self, name: str, args: dict[str, Any], response: dict[str, Any]) -> None:
         try:
+            paths = self._get_affected_files(name, args)
             record_event(
                 self.config.state_dir,
                 "tools",
@@ -392,9 +415,33 @@ class AgentToolbox:
                     "approval_required": bool(response.get("approval_required")),
                     "permission_denied": bool(response.get("permission_denied")),
                     "error": response.get("error", ""),
-                    "paths": self._get_affected_files(name, args),
+                    "paths": paths,
                 },
             )
+            action = ""
+            if name == "read_file":
+                action = "file_read"
+                paths = [str(args.get("path") or "")]
+            elif name in MUTATING_AGENT_TOOLS:
+                action = "file_modified"
+            elif name == "run_command":
+                action = "command_executed"
+            if action:
+                record_event(
+                    self.config.state_dir,
+                    "audit",
+                    {
+                        "type": "audit",
+                        "action": action,
+                        "session_id": self.request.session_id,
+                        "tool": name,
+                        "ok": response.get("ok") is not False,
+                        "permission_denied": bool(response.get("permission_denied")),
+                        "paths": paths,
+                        "command": str(args.get("command") or "")[:500] if name == "run_command" else "",
+                        "error": response.get("error", ""),
+                    },
+                )
         except Exception:
             return
 
@@ -538,6 +585,8 @@ class AgentToolbox:
                 return [change["path"] for change in self._patch_plan(args)["changes"]]
             except ToolError:
                 return []
+        if name == "read_file":
+            return [args.get("path", "")]
         # For run_command, we cannot know for sure; return empty
         return []
 

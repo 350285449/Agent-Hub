@@ -36,7 +36,7 @@ from .api.compatibility import (
     safe_header_value,
     stream_response_headers,
 )
-from .config import HubConfig
+from .config import MAX_REQUEST_SIZE, HubConfig
 from .context import request_context_diagnostics
 from .models import HubRequest, HubResponse
 from .observability import permission_snapshot, recent_events, record_event, usage_snapshot
@@ -161,6 +161,7 @@ DIAGNOSTIC_ENDPOINTS = {
     "/v1/tools",
     "/v1/workflows/status",
     "/v1/plugins",
+    "/v1/audit",
     "/v1/extension-contract",
     "/v1/enterprise/audit",
     "/api/metrics/summary",
@@ -493,9 +494,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             return False
-        maximum = int(getattr(self.server.config, "max_json_body_bytes", 1_000_000) or 1_000_000)
+        maximum = int(getattr(self.server.config, "max_json_body_bytes", MAX_REQUEST_SIZE) or MAX_REQUEST_SIZE)
         if length <= maximum:
             return False
+        self.close_connection = True
         self._send_json(
             {
                 "error": {
@@ -504,6 +506,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 }
             },
             status=413,
+            headers={"Connection": "close"},
         )
         return True
 
@@ -1065,7 +1068,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             raise ValueError("Invalid Content-Length") from exc
         if length <= 0:
             raise ValueError("Expected a JSON request body")
-        maximum = int(getattr(self.server.config, "max_json_body_bytes", 1_000_000) or 1_000_000)
+        maximum = int(getattr(self.server.config, "max_json_body_bytes", MAX_REQUEST_SIZE) or MAX_REQUEST_SIZE)
         if length > maximum:
             raise PayloadTooLargeError(f"JSON request body exceeds the {maximum} byte limit.")
         body = self.rfile.read(length).decode("utf-8")
@@ -2710,13 +2713,13 @@ def serve(config: HubConfig) -> None:
     config.ensure_dirs()
     if not getattr(config, "dev_unauthenticated_mode", False):
         config.local_auth_required = True
-    credentials = ensure_local_credentials(config)
     if _public_bind_host(str(config.host or "")) and not _api_token(config):
         raise SystemExit(
             "Agent Hub refuses to bind publicly without API authentication. "
             "Set api_auth_token/api_auth_token_env (or the legacy diagnostics_auth_token/"
             "diagnostics_auth_token_env) before using host 0.0.0.0, ::, or another public host."
         )
+    credentials = ensure_local_credentials(config)
     try:
         server = AgentHubHTTPServer((config.host, config.port), config)
     except OSError as exc:
