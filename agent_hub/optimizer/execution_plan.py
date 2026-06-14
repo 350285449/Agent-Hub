@@ -468,7 +468,7 @@ def optimization_plan_from_dict(data: dict[str, Any] | None) -> OptimizationPlan
         map_files=_int(data.get("map_files"), base.map_files),
     )
     target_context_ratio = round(_clamp(_float(data.get("target_context_ratio"), token_budget.target_context_ratio), 0.22, 0.94), 3)
-    max_context_tokens = max(1, _int(token_budget.max_context_tokens, repo_max_chars // 4))
+    max_context_tokens = max(1, min(_int(token_budget.max_context_tokens, repo_max_chars // 4), repo_max_chars // 4))
     target_context_tokens = token_budget.target_context_tokens
     if target_context_tokens is None or target_context_tokens <= 0 or target_context_tokens > max_context_tokens:
         target_context_tokens = _target_context_tokens(max_context_tokens, target_context_ratio)
@@ -526,6 +526,8 @@ def optimization_plan_from_dict(data: dict[str, Any] | None) -> OptimizationPlan
 def optimization_plan_from_request(request: Any) -> OptimizationPlan | None:
     raw = getattr(request, "raw", {}) if request is not None else {}
     hub = raw.get("agent_hub") if isinstance(raw, dict) and isinstance(raw.get("agent_hub"), dict) else {}
+    if hub.get("trusted_internal") is not True:
+        return None
     for key in ("optimization_plan", "boost_plan"):
         plan = optimization_plan_from_dict(hub.get(key) if isinstance(hub.get(key), dict) else None)
         if plan is not None:

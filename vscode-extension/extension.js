@@ -50,6 +50,15 @@ const MAX_TOKEN_SAVE_OUTPUT_TOKENS = 800;
 const BOOST_SAVE_LABEL = "Boost + Save Tokens";
 const BOOST_SAVE_ACTIVE_LABEL = "Boosted + Saving Tokens";
 const BOOST_SAVE_STOP_LABEL = "Turn Off Boost";
+const BOOST_MODE_OPTIONS = [
+  { mode: "save_tokens", label: "Save Tokens", meta: "Lowest spend", simple: true },
+  { mode: "balanced", label: "Balanced", meta: "Everyday work", simple: true },
+  { mode: "best_code", label: "Best Result", meta: "More quality", simple: true },
+  { mode: "turbo_boost", label: "Turbo Boost", meta: "Adaptive max", simple: false },
+  { mode: "big_refactor", label: "Big Refactor", meta: "Large changes", simple: false },
+  { mode: "fast_fix", label: "Fast Fix", meta: "Small bugs", simple: false },
+  { mode: "local_first", label: "Local First", meta: "Private route", simple: false }
+];
 const CODEX_CLI_MICRO_CONTEXT_BUDGET = 1200;
 const CODEX_CLI_CONTEXT_BUDGET = 2400;
 const CODEX_CLI_RESCUE_CONTEXT_BUDGET = 3600;
@@ -171,43 +180,50 @@ const API_KEY_SECRETS = [
     id: "ollama",
     label: "Ollama Cloud",
     env: "OLLAMA_API_KEY",
-    secret: "agentHub.ollamaApiKey"
+    secret: "agentHub.ollamaApiKey",
+    keyUrl: "https://ollama.com/settings/keys"
   },
   {
     id: "openai",
     label: "OpenAI / Codex",
     env: "OPENAI_API_KEY",
-    secret: "agentHub.openaiApiKey"
+    secret: "agentHub.openaiApiKey",
+    keyUrl: "https://platform.openai.com/api-keys"
   },
   {
     id: "anthropic",
     label: "Claude",
     env: "ANTHROPIC_API_KEY",
-    secret: "agentHub.anthropicApiKey"
+    secret: "agentHub.anthropicApiKey",
+    keyUrl: "https://console.anthropic.com/settings/keys"
   },
   {
     id: "gemini",
     label: "Gemini",
     env: "GEMINI_API_KEY",
-    secret: "agentHub.geminiApiKey"
+    secret: "agentHub.geminiApiKey",
+    keyUrl: "https://aistudio.google.com/app/apikey"
   },
   {
     id: "groq",
     label: "Groq",
     env: "GROQ_API_KEY",
-    secret: "agentHub.groqApiKey"
+    secret: "agentHub.groqApiKey",
+    keyUrl: "https://console.groq.com/keys"
   },
   {
     id: "openrouter",
     label: "OpenRouter",
     env: "OPENROUTER_API_KEY",
-    secret: "agentHub.openrouterApiKey"
+    secret: "agentHub.openrouterApiKey",
+    keyUrl: "https://openrouter.ai/settings/keys"
   },
   {
     id: "cerebras",
     label: "Cerebras",
     env: "CEREBRAS_API_KEY",
-    secret: "agentHub.cerebrasApiKey"
+    secret: "agentHub.cerebrasApiKey",
+    keyUrl: "https://cloud.cerebras.ai/"
   },
   {
     id: "together",
@@ -231,7 +247,8 @@ const API_KEY_SECRETS = [
     id: "mistral",
     label: "Mistral",
     env: "MISTRAL_API_KEY",
-    secret: "agentHub.mistralApiKey"
+    secret: "agentHub.mistralApiKey",
+    keyUrl: "https://admin.mistral.ai/organization/api-keys"
   },
   {
     id: "sambanova",
@@ -243,25 +260,29 @@ const API_KEY_SECRETS = [
     id: "nvidia",
     label: "NVIDIA NIM",
     env: "NVIDIA_API_KEY",
-    secret: "agentHub.nvidiaApiKey"
+    secret: "agentHub.nvidiaApiKey",
+    keyUrl: "https://build.nvidia.com/settings/api-keys"
   },
   {
     id: "github",
     label: "GitHub Models",
     env: "GITHUB_TOKEN",
-    secret: "agentHub.githubToken"
+    secret: "agentHub.githubToken",
+    keyUrl: "https://docs.github.com/en/github-models/quickstart"
   },
   {
     id: "huggingface",
     label: "Hugging Face",
     env: "HUGGINGFACE_API_KEY",
-    secret: "agentHub.huggingfaceApiKey"
+    secret: "agentHub.huggingfaceApiKey",
+    keyUrl: "https://huggingface.co/settings/tokens"
   },
   {
     id: "cloudflare",
     label: "Cloudflare",
     env: "CLOUDFLARE_API_TOKEN",
-    secret: "agentHub.cloudflareApiToken"
+    secret: "agentHub.cloudflareApiToken",
+    keyUrl: "https://developers.cloudflare.com/workers-ai/get-started/rest-api/"
   },
   {
     id: "hyperbolic",
@@ -686,6 +707,11 @@ class AgentHubSidebarProvider {
       await this.refresh();
       return;
     }
+    if (message.type === "setBoostMode") {
+      await setBoostModeCommand(message.mode, { refreshSidebar: false });
+      await this.refresh();
+      return;
+    }
     if (message.type === "enableFreeOnlyMode") {
       await enableFreeOnlyModeCommand({ refreshSidebar: false });
       await this.refresh();
@@ -946,6 +972,9 @@ function dashboardModeLabel(dashboard = {}) {
   if (dashboard.tokenSafeMode) {
     return BOOST_SAVE_LABEL;
   }
+  if (dashboard.boostMode && dashboard.boostMode !== "balanced") {
+    return `Boost: ${dashboard.boostModeLabel || boostModeLabel(dashboard.boostMode)}`;
+  }
   return "";
 }
 
@@ -959,6 +988,8 @@ async function sidebarDashboardState() {
     agentProviderMode: config.agentProviderMode,
     agentMode: config.agentMode,
     approvalMode: config.approvalMode,
+    boostMode: modes.boostMode,
+    boostModeLabel: modes.boostModeLabel,
     tokenSafeMode: modes.tokenSafeMode,
     freeOnlyStrictMode: modes.freeOnlyStrictMode,
     codexCliMode: modes.codexCliMode,
@@ -1179,6 +1210,7 @@ function sidebarFailedModels(health, limits) {
   const providerHealth = health && health.provider_health && typeof health.provider_health === "object"
     ? health.provider_health
     : {};
+
   const rows = [];
   for (const [agent, row] of Object.entries(providerHealth)) {
     if (row && row.last_error_message) {
@@ -1412,6 +1444,13 @@ function sidebarModelStats(dashboard, leaderboard, benchmarks, costDashboard) {
     costSummary.average_known_cost_usd,
     costDashboard && costDashboard.average_known_cost_usd
   );
+  const ledger = objectValue(costDashboard && costDashboard.usage_ledger);
+  const proofSavings = proofSavingsSummary(ledger);
+  const worstModel = failedModels[0]
+    ? [failedModels[0].provider || failedModels[0].agent || "", failedModels[0].model || ""].filter(Boolean).join(" / ")
+    : rows.slice().reverse().find((row) => row && row.model)
+      ? [rows.slice().reverse().find((row) => row && row.model).provider || "", rows.slice().reverse().find((row) => row && row.model).model || ""].filter(Boolean).join(" / ")
+      : "learning pending";
 
   const incidents = [];
   if (!gatewayOnline) {
@@ -1535,6 +1574,31 @@ function sidebarModelStats(dashboard, leaderboard, benchmarks, costDashboard) {
         label: "Cost",
         value: moneySummaryText(knownCost, averageKnownCost),
         detail: pricingCoverage ? `${pricingCoverage}% pricing coverage` : "pricing pending"
+      },
+      {
+        label: "Tokens saved",
+        value: compactStatValue(proofSavings.tokensSaved),
+        detail: "estimated from context optimization"
+      },
+      {
+        label: "Cost avoided",
+        value: "$" + Number(proofSavings.costAvoided || 0).toFixed(4),
+        detail: "vs configured baselines"
+      },
+      {
+        label: "Retries avoided",
+        value: compactStatValue(proofSavings.retriesAvoided),
+        detail: "fallback/retry proof signal"
+      },
+      {
+        label: "Best model for this repo",
+        value: leader.model || "learning pending",
+        detail: leader.provider || leader.agent || "waiting for samples"
+      },
+      {
+        label: "Worst model for this repo",
+        value: worstModel || "learning pending",
+        detail: "lowest/failing local signal"
       }
     ],
     routerRows,
@@ -1752,6 +1816,19 @@ function compactStatValue(value) {
     return `${(number / 1000).toFixed(1).replace(/\.0$/, "")}k`;
   }
   return String(Math.round(number));
+}
+
+function proofSavingsSummary(ledger) {
+  const rows = Array.isArray(ledger && ledger.baseline_savings) ? ledger.baseline_savings : [];
+  const costAvoided = rows.reduce((total, row) => {
+    const value = Number(row && row.savings_usd);
+    return total + (Number.isFinite(value) && value > 0 ? value : 0);
+  }, 0);
+  return {
+    tokensSaved: Number(ledger && ledger.tokens_saved) || 0,
+    costAvoided,
+    retriesAvoided: Number(ledger && ledger.retries_avoided) || 0
+  };
 }
 
 function moneySummaryText(knownCost, averageKnownCost) {
@@ -2334,6 +2411,7 @@ function sidebarTrustControls(config, permissions, tools) {
     shellAllowed,
     rows,
     allowedTools,
+
     blockedTools,
     presets: [
       { id: "safe", label: "Safe" },
@@ -2730,6 +2808,17 @@ function sidebarActionHelp(label, help) {
   const safeLabel = escapeHtml(label);
   const safeHelp = escapeHtml(help);
   return `<button class="action-help" type="button" aria-label="${safeLabel} help: ${safeHelp}" title="${safeHelp}" data-help="${safeHelp}">i</button>`;
+}
+
+function boostModeButtons(simple) {
+  return BOOST_MODE_OPTIONS
+    .filter((option) => option.simple === simple)
+    .map((option) => `
+      <button class="boost-mode-option" type="button" data-boost-mode="${escapeHtml(option.mode)}" title="Set Boost Mode to ${escapeHtml(option.label)}">
+        <span class="boost-mode-main">${escapeHtml(option.label)}</span>
+        <span class="boost-mode-meta">${escapeHtml(option.meta)}</span>
+      </button>`)
+    .join("");
 }
 
 function sidebarHtml(webview, logoPath) {
@@ -3523,6 +3612,7 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .progress-track {
+
       height: 6px;
       overflow: hidden;
       border-radius: 999px;
@@ -4208,6 +4298,7 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .mode-toggle[data-active="true"],
+    .boost-mode-option[data-active="true"],
     .trust-preset[data-active="true"] {
       color: #ffffff;
       border-color: color-mix(in srgb, var(--ok) 58%, var(--subtle-border));
@@ -4218,6 +4309,49 @@ function sidebarHtml(webview, logoPath) {
     }
 
     .command-button.mode-toggle[data-active="true"] .button-meta {
+      color: color-mix(in srgb, #ffffff 78%, var(--ok));
+    }
+
+    .boost-mode-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .boost-mode-grid.advanced {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .boost-mode-option {
+      min-height: 48px;
+      display: grid;
+      align-content: center;
+      gap: 2px;
+      text-align: left;
+      padding: 8px;
+    }
+
+    .boost-mode-main,
+    .boost-mode-meta {
+      display: block;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .boost-mode-main {
+      font-weight: 700;
+      color: inherit;
+    }
+
+    .boost-mode-meta {
+      color: var(--muted-fg);
+      font-size: 11px;
+    }
+
+    .boost-mode-option[data-active="true"] .boost-mode-meta {
       color: color-mix(in srgb, #ffffff 78%, var(--ok));
     }
 
@@ -4679,6 +4813,7 @@ function sidebarHtml(webview, logoPath) {
 
     .row[data-tone="error"] .row-badge {
       color: var(--error);
+
       border-color: color-mix(in srgb, var(--error) 42%, var(--subtle-border));
       background: var(--error-soft);
     }
@@ -4852,11 +4987,11 @@ function sidebarHtml(webview, logoPath) {
           ${sidebarActionHelp("Checkup", "Run setup repair, dependency checks, server start, and route diagnostics in one pass.")}
         </div>
         <div class="action-with-help">
-          <button class="command-button" id="quickSettings" type="button" title="Configure Agent Hub models and providers" data-icon="M">
+          <button class="command-button" id="quickSettings" type="button" title="Choose a no-key model path or configure providers" data-icon="M">
             <span class="button-main">Models</span>
-            <span class="button-meta">Add provider</span>
+            <span class="button-meta">No-key first</span>
           </button>
-          ${sidebarActionHelp("Models", "Open the model and provider menu to choose local models, add cloud providers, save keys, or edit the config.")}
+          ${sidebarActionHelp("Models", "Choose signed-in Codex CLI or a local model first; cloud provider keys stay in advanced options.")}
         </div>
       </div>
     </section>
@@ -4871,16 +5006,19 @@ function sidebarHtml(webview, logoPath) {
         <span>Base URL: ${escapeHtml(settings().serverUrl.replace(/\/+$/, ""))}/v1</span>
         <span>Model: agent-hub-coding</span>
       </div>
+      <div class="boost-mode-grid" id="boostModeGrid">
+        ${boostModeButtons(true)}
+      </div>
       <div class="actions tool-actions">
         <button class="primary" id="connectClaudeCode" type="button">Connect Claude Code</button>
         <button id="connectCodex" type="button">Connect Codex</button>
-        <button class="primary" id="boostMyAgent" type="button">${BOOST_SAVE_LABEL}</button>
         <button class="primary" id="autoSetupCline" type="button">Auto-Configure Cline</button>
         <button id="setupCodingTool" type="button">Copy + Test Tool</button>
         <button id="copyCodingToolConfigQuick" type="button">Copy Values</button>
         <button id="testCodingToolConnectionQuick" type="button">Test</button>
         <button id="showCodingToolSetupQuick" type="button">Guide</button>
       </div>
+      <div class="detail" id="boostModeInstructions">Choose a Boost Mode, then send work through Chat, Code, Cline, Claude Code, or Codex using model agent-hub-coding.</div>
     </section>
     <details class="panel">
       <summary class="section-head">
@@ -4995,6 +5133,9 @@ function sidebarHtml(webview, logoPath) {
             </button>
             ${sidebarActionHelp("Install Codex CLI", "Install or sign in to the Codex CLI runtime used by Agent Hub.")}
           </div>
+        </div>
+        <div class="boost-mode-grid advanced" id="advancedBoostModeGrid">
+          ${boostModeButtons(false)}
         </div>
       </section>
     <section class="model-control-plane">
@@ -5283,6 +5424,7 @@ function sidebarHtml(webview, logoPath) {
     const heroReadiness = document.getElementById("heroReadiness");
     const heroCostMode = document.getElementById("heroCostMode");
     const heroCostPill = document.getElementById("heroCostPill");
+    const boostModeInstructions = document.getElementById("boostModeInstructions");
     const setupProgressText = document.getElementById("setupProgressText");
     const setupProgressFill = document.getElementById("setupProgressFill");
     const nextStepTitle = document.getElementById("nextStepTitle");
@@ -5575,7 +5717,7 @@ function sidebarHtml(webview, logoPath) {
         return "Open a workspace folder so Agent Hub can create or find its config.";
       }
       if (label === "Model provider") {
-        return "Save an API key, start Ollama or LM Studio, or choose a local model.";
+        return "Choose signed-in Codex CLI, start Ollama or LM Studio, or open advanced provider keys.";
       }
       if (label === "Node.js" || label === "npm") {
         return "Install Node.js 20 or newer to package the extension or install Codex CLI.";
@@ -5872,6 +6014,7 @@ function sidebarHtml(webview, logoPath) {
         meta.textContent = template.meta || "";
         button.append(main, meta);
         button.addEventListener("click", () => runWorkflowPrompt(template.prompt));
+
         row.append(
           button,
           createActionHelpButton(
@@ -6596,9 +6739,17 @@ function sidebarHtml(webview, logoPath) {
     }
 
     function renderModeToggles(dashboard) {
+      const boostMode = dashboard.boostMode || "balanced";
       const tokenSafeActive = !!dashboard.tokenSafeMode;
       const freeOnlyActive = !!dashboard.freeOnlyStrictMode;
       const codexCliActive = !!dashboard.codexCliMode;
+      for (const button of document.querySelectorAll(".boost-mode-option")) {
+        const active = button.getAttribute("data-boost-mode") === boostMode;
+        button.dataset.active = active ? "true" : "false";
+      }
+      if (boostModeInstructions) {
+        boostModeInstructions.textContent = boostModeInstructionText(boostMode);
+      }
       updateCommandToggle(
         "quickTokenSafeMode",
         tokenSafeActive,
@@ -6631,6 +6782,28 @@ function sidebarHtml(webview, logoPath) {
       );
       updatePlainToggle("tokenSafeMode", tokenSafeActive, BOOST_SAVE_STOP_LABEL, BOOST_SAVE_LABEL);
       updatePlainToggle("freeOnlyMode", freeOnlyActive, "Turn Off Free Models Only", "Free Models Only");
+    }
+
+    function boostModeInstructionText(mode) {
+      if (mode === "save_tokens") {
+        return "Save Tokens: premium routes are guarded, context is compacted, and free helpers are preferred when they fit.";
+      }
+      if (mode === "best_code") {
+        return "Best Result: Agent Hub can use stronger models, deeper context, and stricter validation for important work.";
+      }
+      if (mode === "turbo_boost") {
+        return "Turbo Boost: advanced adaptive routing with larger evidence and confidence-gated escalation.";
+      }
+      if (mode === "big_refactor") {
+        return "Big Refactor: advanced broad-map context and safer retries for larger codebase changes.";
+      }
+      if (mode === "fast_fix") {
+        return "Fast Fix: advanced small-bug routing with tight context and fast validation.";
+      }
+      if (mode === "local_first") {
+        return "Local First: advanced private/local routing before cloud candidates.";
+      }
+      return "Balanced: the default solo-dev mode for everyday coding with moderate context and cost controls.";
     }
 
     function updateCommandToggle(id, active, activeMain, inactiveMain, activeMeta, inactiveMeta, activeTitle, inactiveTitle) {
@@ -6929,7 +7102,6 @@ function sidebarHtml(webview, logoPath) {
     document.getElementById("openSettings").addEventListener("click", (event) => postFromEvent("openSettings", event));
     document.getElementById("connectClaudeCode").addEventListener("click", (event) => postFromEvent("copyClaudeCodeConfig", event));
     document.getElementById("connectCodex").addEventListener("click", (event) => postFromEvent("enableCodexCliMode", event));
-    document.getElementById("boostMyAgent").addEventListener("click", (event) => postFromEvent("enableTokenSafeMode", event));
     document.getElementById("autoSetupCline").addEventListener("click", (event) => postFromEvent("autoSetupCline", event));
     document.getElementById("setupCodingTool").addEventListener("click", (event) => postFromEvent("setupCodingTool", event));
     document.getElementById("copyCodingToolConfigQuick").addEventListener("click", (event) => postFromEvent("copyClineConfig", event));
@@ -6947,6 +7119,15 @@ function sidebarHtml(webview, logoPath) {
         vscode.postMessage({
           type: "applyTrustPreset",
           preset: button.getAttribute("data-preset") || "safe"
+        });
+      });
+    }
+    for (const button of document.querySelectorAll(".boost-mode-option")) {
+      button.addEventListener("click", (event) => {
+        markButtonRunning(event.currentTarget);
+        vscode.postMessage({
+          type: "setBoostMode",
+          mode: button.getAttribute("data-boost-mode") || "balanced"
         });
       });
     }
@@ -7034,6 +7215,7 @@ async function handleParticipantRequest(request, chatContext, stream, token) {
     return { metadata: { command, ok: false } };
   }
   if (token && token.isCancellationRequested) {
+
     return { metadata: { command, cancelled: true } };
   }
 
@@ -7734,7 +7916,10 @@ function chatSettingsPayload(config) {
 function modeToggleState(config = settings()) {
   const cloudSettings = cloudModelSettingsPayload(config);
   const cooperativeCodex = isCooperativeCodexBoostMode(config);
+  const boostMode = activeRequestBoostMode(config) || "balanced";
   return {
+    boostMode,
+    boostModeLabel: boostModeLabel(boostMode),
     tokenSafeMode: isFreeCloudSavingsMode(config) || cooperativeCodex,
     freeOnlyStrictMode: cloudSettings.freeOnly !== false && cloudSettings.disableNonFreeModels === true,
     codexCliMode: isCodexCliTokenOptimizedMode(config) && !cooperativeCodex
@@ -7791,6 +7976,19 @@ async function enableTokenSafeModeCommand(options = {}) {
   const result = modes.tokenSafeMode && options.forceEnable !== true
     ? await applyStandardCloudModeSettings(options.rawSettings, BOOST_SAVE_LABEL)
     : await applyTokenSafeModeSettings(options.rawSettings);
+  return finishModeCommand(result, options);
+}
+
+async function setBoostModeCommand(mode, options = {}) {
+  const boostMode = normalizeBoostMode(mode);
+  if (!boostMode) {
+    return finishModeCommand({ ok: false, message: "Unknown Boost Mode." }, options);
+  }
+  if (boostMode === "save_tokens") {
+    const result = await applyTokenSafeModeSettings(options.rawSettings);
+    return finishModeCommand(result, options);
+  }
+  const result = await applyBoostModeSettings(boostMode, options.rawSettings);
   return finishModeCommand(result, options);
 }
 
@@ -8218,6 +8416,7 @@ async function setupRequirementRows(config, workspace) {
       detail: node.detail,
       actionType: node.ok ? "" : "installNode",
       actionLabel: "Install Node"
+
     },
     {
       label: "npm",
@@ -8794,6 +8993,68 @@ async function applyTokenSafeModeSettings(rawSettings) {
   }
 }
 
+async function applyBoostModeSettings(mode, rawSettings) {
+  const boostMode = normalizeBoostMode(mode);
+  const label = boostModeLabel(boostMode);
+  if (!boostMode) {
+    return { ok: false, cancelled: false, message: "Unknown Boost Mode." };
+  }
+  try {
+    const baseSettings = chatSettingsPayload(settings());
+    const next = normalizeChatSettingsInput({
+      ...baseSettings,
+      ...(rawSettings && typeof rawSettings === "object" ? rawSettings : {})
+    });
+    const workspace = workspaceRoot();
+    const resource = workspace
+      ? resolveConfigPath(next.workspaceSettings.configPath, workspace)
+      : "running backend";
+    if (!(await requestPermission({
+      category: "config_edit",
+      description: `Agent Hub wants to set Boost Mode to ${label}.`,
+      resource,
+      risk: "medium",
+      detail: "This changes the server-side boost policy used for routing, context budget, retry budget, model preference, and guardrails. Advanced modes stay hidden unless you choose them from the Advanced section."
+    }))) {
+      return {
+        ok: false,
+        cancelled: true,
+        message: `Boost Mode was not changed.`
+      };
+    }
+
+    let configChanged = false;
+    if (workspace) {
+      const configPath = resolveConfigPath(next.workspaceSettings.configPath, workspace);
+      configChanged = await updateBoostModeConfigFile(configPath, next, boostMode);
+    }
+    const contextMode = boostModeContextMode(boostMode);
+    const target = vscode.ConfigurationTarget.Global;
+    const config = vscode.workspace.getConfiguration("agentHub");
+    await config.update("contextMode", contextMode, target);
+    if (workspace) {
+      await clearWorkspaceAgentHubSettings(config, ["contextMode"]);
+    }
+    const boostSynced = await syncRunningBackendBoostMode(boostMode);
+    const restartNote = serverProcess || (await isServerOnline())
+      ? " Restart Agent Hub if an already-running provider route should reload config defaults."
+      : "";
+    const configNote = configChanged ? " Updated Agent Hub config." : "";
+    const boostSyncNote = boostSynced ? " Synced Boost Mode to the running backend." : "";
+    return {
+      ok: true,
+      cancelled: false,
+      message: `Boost Mode set to ${label}.${configNote}${boostSyncNote}${restartNote}`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      cancelled: false,
+      message: `Could not set Boost Mode to ${label}: ${error.message}`
+    };
+  }
+}
+
 async function applyStandardCloudModeSettings(rawSettings, modeName = "mode") {
   try {
     const baseSettings = chatSettingsPayload(settings());
@@ -9187,6 +9448,26 @@ function agentHubRequestOptions(config, extra = {}) {
   return options;
 }
 
+function boostModeOption(mode) {
+  const normalized = normalizeBoostMode(mode) || "balanced";
+  return BOOST_MODE_OPTIONS.find((option) => option.mode === normalized) || BOOST_MODE_OPTIONS.find((option) => option.mode === "balanced");
+}
+
+function boostModeLabel(mode) {
+  return boostModeOption(mode).label;
+}
+
+function boostModeContextMode(mode) {
+  const normalized = normalizeBoostMode(mode);
+  if (["best_code", "turbo_boost", "big_refactor"].includes(normalized)) {
+    return "deep";
+  }
+  if (["save_tokens", "fast_fix"].includes(normalized)) {
+    return "minimal";
+  }
+  return "balanced";
+}
+
 function tokenSafeCodexBudget(config) {
   const budget = Number(config && config.agentContextBudgetTokens);
   if (Number.isFinite(budget) && budget > 0) {
@@ -9336,6 +9617,7 @@ function normalizeBoostMode(value) {
   }
   return "";
 }
+
 
 function cloudModelSettingsPayload(config) {
   const fallback = {
@@ -10536,6 +10818,7 @@ function chatHtml(webview, logoPath, initialSettings = settings()) {
     }
 
     details {
+
       color: var(--muted);
       font-size: 12px;
     }
@@ -11736,6 +12019,7 @@ ${apiKeyFieldsHtml()}
           status: "stopped",
           detail: "stopped"
         }, { active: true });
+
       }
       recordFailovers(payload.failover, payload.role);
     }
@@ -12936,6 +13220,7 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
   data.disable_non_free_models = effectiveCloudSettings.disableNonFreeModels === true;
   data.enable_load_balancing = effectiveCloudSettings.enableLoadBalancing !== false;
   data.expose_routing_details = !!effectiveCloudSettings.exposeRoutingDetails;
+
   data.cloud_control_selection = {
     route_mode: normalizeCloudRouteMode(effectiveCloudSettings.cloudRouteMode),
     api_key_models_enabled: !!effectiveCloudSettings.apiKeyModelsEnabled,
@@ -12976,6 +13261,49 @@ async function saveCloudModelSettingsToConfig(configPath, cloudSettings, options
   ensureConfigDirectory(configPath);
   fs.writeFileSync(configPath, nextText, "utf8");
   output.appendLine(`Configured cloud route mode: ${data.cloud_control_selection.route_mode}.`);
+  return true;
+}
+
+async function updateBoostModeConfigFile(configPath, settingsInput, boostMode) {
+  const workspaceDir = generatedConfigWorkspaceDir(settingsInput.workspaceSettings.configPath, workspaceRoot());
+  const storageDir = generatedConfigStorageDir(settingsInput.workspaceSettings.configPath, workspaceRoot());
+  const existingText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
+  let data;
+  let backedUpExisting = false;
+  if (existingText) {
+    try {
+      data = parseJsonConfigText(existingText).value;
+    } catch (_error) {
+      const backupPath = backupConfigFile(configPath);
+      backedUpExisting = true;
+      output.appendLine(`Backed up unreadable Agent Hub config to ${backupPath}.`);
+    }
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    const sources = await detectLocalModelSources();
+    data = localConfigForLocalModels(sources.length ? sources : fallbackLocalModelSources(), {
+      cloudRouteMode: settingsInput.cloudSettings.cloudRouteMode,
+      cloudSettings: settingsInput.cloudSettings,
+      workspaceDir,
+      storageDir
+    });
+  }
+  if (workspaceDir) {
+    data.workspace_dir = workspaceDir;
+  }
+  applyGeneratedStoragePaths(data, storageDir, workspaceDir);
+  applyBoostModeToConfig(data, boostMode);
+  const nextText = `${JSON.stringify(data, null, 2)}\n`;
+  if (existingText && stableConfigText(existingText) === stableConfigText(nextText)) {
+    return false;
+  }
+  if (existingText && !backedUpExisting) {
+    const backupPath = backupConfigFile(configPath);
+    output.appendLine(`Backed up Agent Hub config to ${backupPath}.`);
+  }
+  ensureConfigDirectory(configPath);
+  fs.writeFileSync(configPath, nextText, "utf8");
+  output.appendLine(`Configured Boost Mode: ${boostModeLabel(boostMode)}.`);
   return true;
 }
 
@@ -13056,6 +13384,35 @@ function applyMaxTokenSaveModeToConfig(data, settings = {}) {
     max_context_tokens: budget,
     codex_cli_prompt_optimized: true,
     codex_cli_prompt_budget_tokens: budget
+  };
+}
+
+function applyBoostModeToConfig(data, mode) {
+  const boostMode = normalizeBoostMode(mode) || "balanced";
+  clearModeOptimizationFromConfig(data);
+  data.boost_mode = boostMode;
+  const deepModes = new Set(["best_code", "turbo_boost", "big_refactor"]);
+  const minimalModes = new Set(["save_tokens", "fast_fix"]);
+  data.context_mode = deepModes.has(boostMode)
+    ? "deep"
+    : minimalModes.has(boostMode)
+      ? "minimal"
+      : "balanced";
+  data.agent_context_compaction_enabled = true;
+  data.free_only = false;
+  data.disable_non_free_models = false;
+  data.enable_load_balancing = true;
+  data.routing = {
+    ...(data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)
+      ? data.routing
+      : {}),
+    token_saver_enabled: boostMode === "save_tokens",
+    cooperative_codex_enabled: boostMode === "save_tokens",
+    cooperative_codex_mode: false,
+    free_first: boostMode !== "best_code" && boostMode !== "turbo_boost",
+    prefer_available_quota: true,
+    max_tokens_mode: "auto",
+    simple_cloud_exploration_enabled: false
   };
 }
 
@@ -14064,6 +14421,7 @@ function chooseLmStudioModel(models) {
   const available = Array.isArray(models) ? models.filter(Boolean) : [];
   const preferences = [
     /coder/i,
+
     /qwen/i,
     /deepseek/i,
     /llama/i,
@@ -14486,6 +14844,65 @@ async function configureModelsProvidersCommand() {
   const choice = await vscode.window.showQuickPick(
     [
       {
+        label: "$(terminal) Use signed-in Codex CLI",
+        description: "no API key",
+        detail: "Route through the Codex CLI account that is already signed in on this machine.",
+        action: "codexCli"
+      },
+      {
+        label: "$(device-desktop) Choose local model",
+        description: "no API key",
+        detail: "Use Ollama or LM Studio running locally, or pull a recommended Ollama model.",
+        action: "localModel"
+      },
+      {
+        label: "$(checklist) Choose free cloud models",
+        description: "provider keys only if needed",
+        detail: "Pick free/free-tier cloud models. Agent Hub asks for a key only when that provider requires one.",
+        action: "chooseFreeModels"
+      },
+      {
+        label: "$(settings-gear) Advanced providers",
+        description: "keys, config, restart",
+        detail: "Add paid/API-key providers, save keys, enable presets, or open the Agent Hub config.",
+        action: "advanced"
+      }
+    ],
+    {
+      title: "Agent Hub Models",
+      placeHolder: "Pick a simple no-key setup, or open advanced provider options"
+    }
+  );
+  if (!choice) {
+    return { ok: false, cancelled: true };
+  }
+  if (choice.action === "codexCli") {
+    return enableCodexCliModeCommand();
+  }
+  if (choice.action === "localModel") {
+    await chooseLocalModel(commandWebviewShim("Local model"));
+    refreshSidebar();
+    return { ok: true };
+  }
+  if (choice.action === "chooseFreeModels") {
+    return configureSelectedFreeCloudModelsCommand();
+  }
+  if (choice.action === "advanced") {
+    return configureAdvancedModelsProvidersCommand();
+  }
+  return { ok: false, cancelled: true };
+}
+
+async function configureAdvancedModelsProvidersCommand() {
+  const choice = await vscode.window.showQuickPick(
+    [
+      {
+        label: "$(checklist) Choose free cloud models",
+        description: "click models to install/configure",
+        detail: "Pick Ollama Cloud models or specific free-tier provider models.",
+        action: "chooseFreeModels"
+      },
+      {
         label: "$(server-process) Add API-key or cloud provider",
         description: "model + optional key",
         detail: "Pick OpenAI, Claude, Gemini, Groq, OpenRouter, GitHub Models, or a custom OpenAI-compatible endpoint.",
@@ -14543,6 +14960,9 @@ async function configureModelsProvidersCommand() {
     return { ok: false, cancelled: true };
   }
 
+  if (choice.action === "chooseFreeModels") {
+    return configureSelectedFreeCloudModelsCommand();
+  }
   if (choice.action === "addProvider") {
     return configureCloudProviderCommand();
   }
@@ -14572,6 +14992,256 @@ async function configureModelsProvidersCommand() {
     return { ok: true };
   }
   return { ok: false, cancelled: true };
+}
+
+async function configureSelectedFreeCloudModelsCommand() {
+  const availableKeys = await availableApiKeyEnvs();
+  const picked = await vscode.window.showQuickPick(
+    freeCloudModelPickerItems(availableKeys),
+    {
+      title: "Install Free Cloud Models",
+      placeHolder: "Pick cloud models. Agent Hub configures them and asks only for required sign-in/API keys.",
+      canPickMany: true,
+      ignoreFocusOut: true
+    }
+  );
+  if (!picked || !picked.length) {
+    return { ok: false, cancelled: true };
+  }
+
+  const cloudSources = picked
+    .filter((item) => item.kind === "cloud")
+    .map((item) => ({ ...item.source, enabled: true, free: true }));
+
+  for (const item of picked.filter((entry) => entry.kind === "cloud" && entry.source.apiKeyEnv)) {
+    const keyResult = await ensureModelProviderKey(item.source);
+    if (!keyResult.ok) {
+      return keyResult;
+    }
+  }
+
+  const configResult = await saveSelectedFreeCloudModelsToConfig({
+    cloudSources,
+    selectedLabels: picked.map((item) => item.cleanLabel || item.label)
+  });
+  if (!configResult.ok) {
+    return configResult;
+  }
+
+  await syncApiKeyProviderAvailabilityForCurrentWorkspace();
+  await offerRestartAfterProviderChange(`Configured ${picked.length} selected free model(s).`);
+  refreshSidebar();
+  return { ok: true };
+}
+
+function freeCloudModelPickerItems(availableKeys = new Set()) {
+  const allKeyEnvs = new Set(API_KEY_SECRETS.map((spec) => spec.env));
+  const cloudSources = [
+    ...ollamaCloudModelSources(),
+    ...freeCloudPresetSources({
+      freeCloudPresetsEnabled: true,
+      availableApiKeyEnvs: Array.from(allKeyEnvs)
+    })
+  ];
+  const cloudItems = cloudSources.map((source) => {
+    const hasKey = !source.apiKeyEnv || availableKeys.has(source.apiKeyEnv) || !!process.env[source.apiKeyEnv];
+    return {
+      label: `$(server-process) ${source.label}`,
+      cleanLabel: source.label,
+      description: source.apiKeyEnv ? `${source.providerType} / ${source.apiKeyEnv}` : source.providerType || "ollama-cloud",
+      detail: source.apiKeyEnv
+        ? `${source.model}. ${hasKey ? "Key available; click to configure." : "Will ask for this provider key if not already saved."}`
+        : `${source.model}. No provider API key prompt is needed.`,
+      picked: !source.apiKeyEnv && OLLAMA_CLOUD_AGENT_NAMES.includes(source.name),
+      kind: "cloud",
+      source
+    };
+  });
+  return cloudItems;
+}
+
+async function ensureModelProviderKey(source) {
+  const spec = apiKeySecretForEnv(source.apiKeyEnv);
+  if (!spec || process.env[source.apiKeyEnv]) {
+    return { ok: true, saved: false };
+  }
+  const existing = extensionContext && extensionContext.secrets
+    ? await extensionContext.secrets.get(spec.secret)
+    : "";
+  if (existing && existing.trim()) {
+    return { ok: true, saved: false };
+  }
+  const value = await promptForProviderKey(spec, {
+    title: `${source.label} Provider Key`,
+    prompt: `Paste ${spec.env} for ${source.label}, or leave blank to configure the model disabled until the key is available.`,
+    providerLabel: source.label,
+    allowBlank: true
+  });
+  if (value === undefined) {
+    return { ok: false, cancelled: true };
+  }
+  if (!value.trim()) {
+    return { ok: true, saved: false };
+  }
+  if (!(await requestPermission({
+    category: "secret_edit",
+    description: `Agent Hub wants to save ${spec.label} API key for ${source.label}.`,
+    resource: spec.env,
+    risk: "high"
+  }))) {
+    return { ok: false, cancelled: true };
+  }
+  if (!extensionContext || !extensionContext.secrets) {
+    vscode.window.showErrorMessage("VS Code secret storage is unavailable.");
+    return { ok: false, cancelled: false };
+  }
+  await extensionContext.secrets.store(spec.secret, value.trim());
+  return { ok: true, saved: true };
+}
+
+async function promptForProviderKey(spec, options = {}) {
+  const providerLabel = options.providerLabel || spec.label;
+  if (spec.keyUrl) {
+    const actions = ["Open Provider Website", "Paste Key"];
+    if (options.allowBlank) {
+      actions.push("Skip");
+    }
+    const choice = await vscode.window.showInformationMessage(
+      `${providerLabel} needs ${spec.env}. Open the provider website to create or copy the key, then paste it into Agent Hub.`,
+      ...actions
+    );
+    if (choice === "Open Provider Website") {
+      await vscode.env.openExternal(vscode.Uri.parse(spec.keyUrl));
+    } else if (choice === "Skip") {
+      return "";
+    } else if (!choice) {
+      return undefined;
+    }
+  }
+  return vscode.window.showInputBox({
+    title: options.title || `${spec.label} API Key`,
+    prompt: options.prompt || `Paste the key for ${spec.env}. It will be saved in VS Code Secret Storage.`,
+    password: true,
+    ignoreFocusOut: true
+  });
+}
+
+async function saveSelectedFreeCloudModelsToConfig(options = {}) {
+  const workspace = workspaceRoot();
+  if (!workspace) {
+    vscode.window.showWarningMessage("Open a workspace folder before configuring free cloud models.");
+    return { ok: false, cancelled: true };
+  }
+  const config = settings();
+  const configPath = resolveConfigPath(config.configPath, workspace);
+  if (!(await requestPermission({
+    category: "config_edit",
+    description: "Agent Hub wants to configure the free cloud models you selected.",
+    resource: configPath,
+    risk: "medium",
+    detail: (options.selectedLabels || []).join(", ")
+  }))) {
+    return { ok: false, cancelled: true };
+  }
+  await ensureLocalConfig(config, workspace);
+  const changed = await applySelectedFreeCloudModelsToConfig(configPath, {
+    ...options,
+    workspaceDir: generatedConfigWorkspaceDir(config.configPath, workspace),
+    storageDir: generatedConfigStorageDir(config.configPath, workspace)
+  });
+  return { ok: true, changed, configPath };
+}
+
+async function applySelectedFreeCloudModelsToConfig(configPath, options = {}) {
+  const workspaceDir = normalizeWorkspaceDirOption(options.workspaceDir);
+  const storageDir = normalizeWorkspaceDirOption(options.storageDir);
+  const keyEnvs = await availableApiKeyEnvs();
+  const existingText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
+  let data;
+  let backedUpExisting = false;
+  if (existingText) {
+    try {
+      data = parseJsonConfigText(existingText).value;
+    } catch (_error) {
+      const backupPath = backupConfigFile(configPath);
+      backedUpExisting = true;
+      output.appendLine(`Backed up unreadable Agent Hub config to ${backupPath}.`);
+    }
+  }
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    data = localConfigForLocalModels(fallbackLocalModelSources(), {
+      workspaceDir,
+      storageDir,
+      cloudRouteMode: "ollama-cloud",
+      cloudSettings: {
+        freeOnly: true,
+        disableNonFreeModels: true,
+        freeCloudPresetsEnabled: true,
+        apiKeyModelsEnabled: false,
+        availableApiKeyEnvs: Array.from(keyEnvs)
+      }
+    });
+  }
+  if (workspaceDir) {
+    data.workspace_dir = workspaceDir;
+  }
+  applyGeneratedStoragePaths(data, storageDir, workspaceDir);
+  data.agents = Array.isArray(data.agents) ? data.agents : [];
+  data.routes = Array.isArray(data.routes) ? data.routes : [];
+  data.free_only = true;
+  data.disable_non_free_models = true;
+  data.enable_load_balancing = true;
+  data.cloud_control_selection = {
+    ...(data.cloud_control_selection && typeof data.cloud_control_selection === "object" && !Array.isArray(data.cloud_control_selection)
+      ? data.cloud_control_selection
+      : {}),
+    route_mode: "ollama-cloud",
+    api_key_models_enabled: false,
+    free_cloud_presets_enabled: true,
+    selected_free_models: options.selectedLabels || [],
+    disable_non_free_models: true
+  };
+  data.routing = {
+    ...(data.routing && typeof data.routing === "object" && !Array.isArray(data.routing)
+      ? data.routing
+      : {}),
+    free_first: true,
+    token_saver_enabled: false,
+    prefer_available_quota: true
+  };
+
+  for (const source of options.cloudSources || []) {
+    const agent = OLLAMA_CLOUD_AGENT_NAMES.includes(source.name)
+      ? {
+        ...ollamaCloudModelAgentConfig(source),
+        enabled: true
+      }
+      : cloudModelAgentConfig({
+        ...source,
+        enabled: source.apiKeyEnv ? keyEnvs.has(source.apiKeyEnv) || !!process.env[source.apiKeyEnv] : true,
+        free: true
+      });
+    upsertAgentConfig(data.agents, agent);
+    ensureRouteContainsAgent(data.routes, "cloud-agent", [], agent.name, { first: true });
+    ensureRouteContainsAgent(data.routes, "hybrid-agent", [], agent.name, { first: true });
+    ensureRouteContainsAgent(data.routes, "coding", ["code", "bug", "fix", "refactor", "test", "repo"], agent.name, { first: true });
+  }
+  applyStrictFreeOnlyModeToConfig(data);
+  applyCloudRouteMode(data, "ollama-cloud");
+
+  const nextText = `${JSON.stringify(data, null, 2)}\n`;
+  if (existingText && stableConfigText(existingText) === stableConfigText(nextText)) {
+    return false;
+  }
+  if (existingText && !backedUpExisting) {
+    const backupPath = backupConfigFile(configPath);
+    output.appendLine(`Backed up Agent Hub config to ${backupPath}.`);
+  }
+  ensureConfigDirectory(configPath);
+  fs.writeFileSync(configPath, nextText, "utf8");
+  output.appendLine(`Configured selected free cloud models: ${(options.selectedLabels || []).join(", ")}.`);
+  return true;
 }
 
 async function configureCloudProviderCommand() {
@@ -14779,11 +15449,9 @@ async function saveProviderApiKeyCommand() {
   if (!spec) {
     return { ok: false, cancelled: true };
   }
-  const value = await vscode.window.showInputBox({
+  const value = await promptForProviderKey(spec.spec, {
     title: `${spec.spec.label} API Key`,
-    prompt: `Paste the key for ${spec.spec.env}. It will be saved in VS Code Secret Storage.`,
-    password: true,
-    ignoreFocusOut: true
+    prompt: `Paste the key for ${spec.spec.env}. It will be saved in VS Code Secret Storage.`
   });
   if (!value || !value.trim()) {
     return { ok: false, cancelled: true };
@@ -14814,11 +15482,10 @@ async function promptAndMaybeSaveProviderKey(provider) {
   if (!spec) {
     return { ok: true, saved: false };
   }
-  const value = await vscode.window.showInputBox({
+  const value = await promptForProviderKey(spec, {
     title: `${spec.label} API Key`,
     prompt: `Optional: paste ${spec.env} now, or leave blank if it is already in your environment.`,
-    password: true,
-    ignoreFocusOut: true
+    allowBlank: true
   });
   if (value === undefined) {
     return { ok: false, cancelled: true };
@@ -15264,6 +15931,7 @@ function truncateProgressText(text, limit) {
   }
   return `${value.slice(0, Math.max(0, limit - 3)).trim()}...`;
 }
+
 
 function formatDuration(ms) {
   const totalSeconds = Math.max(0, Math.round(Number(ms || 0) / 1000));
@@ -16464,6 +17132,7 @@ async function ensureClineCliInstalled() {
         location: vscode.ProgressLocation.Notification,
         title: "Agent Hub: Installing Cline CLI",
         cancellable: false
+
       },
       installClineCliWithNpm
     );
@@ -17664,6 +18333,7 @@ async function localModelServerSummary(label, url, collectionKey) {
       text: models.length ? `${label} (${models.slice(0, 3).join(", ")})` : `${label} (no models reported)`,
     };
   } catch (_error) {
+
     return { online: false, text: `${label} offline` };
   }
 }
@@ -18003,6 +18673,25 @@ function appendBoostTrace(response) {
   }
   if (trace.plan_diff && typeof trace.plan_diff.summary === "string") {
     output.appendLine(`- Plan diff: ${trace.plan_diff.summary}`);
+  }
+  const planned = Array.isArray(trace.planned_algorithms) ? trace.planned_algorithms.filter(Boolean) : [];
+  const executed = Array.isArray(trace.executed_algorithms) ? trace.executed_algorithms.filter(Boolean) : [];
+  const disabled = Array.isArray(trace.disabled_by_guardrail) ? trace.disabled_by_guardrail.filter(Boolean) : [];
+  if (planned.length) {
+    output.appendLine(`- Planned algorithms: ${planned.slice(0, 6).join(", ")}${planned.length > 6 ? "..." : ""}`);
+  }
+  if (executed.length) {
+    output.appendLine(`- Executed algorithms: ${executed.slice(0, 6).join(", ")}${executed.length > 6 ? "..." : ""}`);
+  }
+  if (disabled.length) {
+    const labels = disabled.slice(0, 4).map((row) => {
+      if (!row || typeof row !== "object") {
+        return String(row);
+      }
+      const reasons = Array.isArray(row.reasons) ? row.reasons.join("+") : row.reason || "guardrail";
+      return `${row.agent || row.model || row.provider || "candidate"} (${reasons})`;
+    });
+    output.appendLine(`- Disabled by guardrail: ${labels.join(", ")}${disabled.length > 4 ? "..." : ""}`);
   }
 }
 
@@ -18584,3 +19273,4 @@ module.exports = {
   activate,
   deactivate
 };
+

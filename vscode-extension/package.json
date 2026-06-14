@@ -2,7 +2,7 @@
   "name": "agent-hub-vscode",
   "displayName": "Agent Hub Workspace",
   "description": "Agent Hub optimizes repo context, routes each task by success-per-token, validates outputs, and retries failed attempts automatically.",
-  "version": "9.6.8",
+  "version": "9.7.0",
   "publisher": "agent-hub",
   "license": "MIT",
   "icon": "assets/agent-hub-icon.png",

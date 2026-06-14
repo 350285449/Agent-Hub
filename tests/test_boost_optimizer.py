@@ -6,7 +6,7 @@ from pathlib import Path
 
 from agent_hub.boost import build_boost_plan, boost_policy, is_valid_boost_mode_value, normalize_boost_mode
 from agent_hub.config import AgentConfig, HubConfig, config_from_dict, config_to_dict
-from agent_hub.core.router import AgentRouter
+from agent_hub.core.router import AgentRouter, RouterError
 from agent_hub.core.task_classifier import TaskClassifier
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.optimizer import (
@@ -33,12 +33,20 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertEqual(normalize_boost_mode("Boost + Save Tokens"), "save_tokens")
         self.assertEqual(normalize_boost_mode("Turbo Boost!"), "turbo_boost")
         self.assertEqual(boost_policy("local first").routing_mode, "local_private")
+        for mode in ("balanced", "save_tokens", "best_code", "turbo_boost", "fast_fix", "big_refactor", "local_first"):
+            policy = boost_policy(mode)
+            self.assertGreaterEqual(
+                policy.repo_max_files,
+                policy.full_files + policy.compressed_files + policy.map_files,
+                mode,
+            )
 
     def test_boost_mode_runtime_selector_options(self) -> None:
         config = HubConfig()
 
         self.assertEqual(config.boost_mode_label, "Balanced")
-        self.assertIn("Best Code", [option["label"] for option in config.boost_mode_options])
+        self.assertEqual([option["label"] for option in config.boost_mode_options], ["Balanced", "Save Tokens", "Best Result"])
+        self.assertIn("Turbo Boost", [option["label"] for option in config.boost_mode_options_for_advanced(True)])
         self.assertEqual(config.set_boost_mode("Save Tokens"), "save_tokens")
         self.assertEqual(config.boost_mode_label, "Save Tokens")
         self.assertEqual(config.context_mode, "minimal")
@@ -53,6 +61,52 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertTrue(is_valid_boost_mode_value("another level"))
         self.assertFalse(is_valid_boost_mode_value("quality please"))
         self.assertFalse(is_valid_boost_mode_value("fix a bug quickly"))
+
+    def test_client_boost_plans_are_ignored_unless_trusted_internal(self) -> None:
+        request = request_from_openai_chat(
+            {
+                "model": "agent-hub",
+                "messages": [{"role": "user", "content": "Fix a tiny bug."}],
+                "agent_hub": {
+                    "boost_mode": "save_tokens",
+                    "boost_plan": {
+                        "task_type": "migration",
+                        "context_policy": "broad_repo_map",
+                        "model_policy": "premium_first",
+                        "validation_policy": "run_tests",
+                        "repo_max_chars": 999_999,
+                    },
+                    "optimization_plan": {
+                        "task_type": "migration",
+                        "context_policy": "broad_repo_map",
+                        "model_policy": "premium_first",
+                        "validation_policy": "run_tests",
+                        "repo_max_chars": 999_999,
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(request.raw["agent_hub"], {"boost_mode": "save_tokens"})
+        plan = build_boost_plan(
+            task_type="debug",
+            task_category="debugging",
+            text="Fix a tiny bug.",
+            boost_mode="save_tokens",
+        )
+        trusted = request_from_openai_chat(
+            {
+                "model": "agent-hub",
+                "messages": [{"role": "user", "content": "Fix a tiny bug."}],
+                "agent_hub": {
+                    "trusted_internal": True,
+                    "boost_mode": "save_tokens",
+                    "boost_plan": plan.to_dict(),
+                },
+            }
+        )
+
+        self.assertIn("boost_plan", trusted.raw["agent_hub"])
 
     def test_turbo_boost_expands_complex_feature_context_and_retry_policy(self) -> None:
         plan = build_boost_plan(
@@ -71,6 +125,8 @@ class BoostOptimizerTests(unittest.TestCase):
         self.assertEqual(plan.boost_mode, "turbo_boost")
         self.assertEqual(plan.model_policy, "adaptive_quality_speed")
         self.assertGreaterEqual(plan.repo_max_files, 12)
+        self.assertGreaterEqual(plan.map_files, 10)
+        self.assertGreaterEqual(plan.repo_max_files, plan.full_files + plan.compressed_files + plan.map_files)
         self.assertGreater(plan.quality_weight, plan.cost_weight)
         self.assertGreaterEqual(plan.retry_policy.max_retries, 3)
         self.assertEqual(plan.retry_policy.strategy_for("missing context"), "expand_context")
@@ -635,9 +691,16 @@ index 867a3ee..b77d49d 100644
         self.assertIn("boost_plan", decision.to_dict())
         self.assertIn("anchored_bug_context", decision.boost_plan["algorithms"])
         self.assertIn("route_efficiency", decision.candidate_scores[0])
+        self.assertIn("base_score", decision.candidate_scores[0])
+        self.assertIn("score_adjustments", decision.candidate_scores[0])
+        self.assertIn("final_score", decision.candidate_scores[0])
+        self.assertIn("selected_reason", decision.to_dict())
+        self.assertIn("routing_context", decision.to_dict())
+        self.assertIn("boost_limits", decision.to_dict())
         self.assertIn("task_policy", decision.to_dict())
 
-    def test_compatible_chat_inherits_config_boost_mode(self) -> None:
+    def test_boost_guardrails_disable_premium_candidates_and_trace_algorithms(self) -> None:
+        _CaptureProvider.last_request = None
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = HubConfig(
@@ -646,30 +709,77 @@ index 867a3ee..b77d49d 100644
                 free_only=False,
                 repo_context_enabled=False,
                 boost_mode="save_tokens",
-                default_route=["cheap"],
+                default_route=["premium", "free"],
                 agents={
-                    "cheap": AgentConfig(
-                        name="cheap",
+                    "premium": AgentConfig(
+                        name="premium",
+                        provider="openai",
+                        model="premium-model",
+                        free=False,
+                        coding_score=1.0,
+                        context_window=128_000,
+                        cost_per_million_input=10.0,
+                        cost_per_million_output=30.0,
+                    ),
+                    "free": AgentConfig(
+                        name="free",
                         provider="openai-compatible",
-                        model="cheap-model",
+                        model="free-model",
                         base_url="http://127.0.0.1:9999",
                         free=True,
+                        coding_score=0.5,
                         context_window=32_000,
+                        cost_per_million_input=0.0,
+                        cost_per_million_output=0.0,
                     ),
                 },
             )
-            request = request_from_openai_chat(
-                {
-                    "model": "agent-hub-coding",
-                    "messages": [{"role": "user", "content": "Summarize this file."}],
-                }
+            response = AgentRouter(config, provider_factory=_CaptureProvider).route(
+                HubRequest(
+                    session_id="s",
+                    messages=[{"role": "user", "content": "Explain this helper briefly."}],
+                )
             )
-            request.route = None
-            decision = AgentRouter(config, provider_factory=_OkProvider).decide(request)
 
-        self.assertEqual(request.api_shape, "openai-chat")
-        self.assertEqual(decision.boost_mode, "save_tokens")
-        self.assertEqual(decision.routing_mode, "cheapest")
+        self.assertEqual(response.agent, "free")
+        assert _CaptureProvider.last_request is not None
+        hub = _CaptureProvider.last_request.raw["agent_hub"]
+        self.assertTrue(hub["trusted_internal"])
+        self.assertEqual(hub["disabled_by_guardrail"][0]["agent"], "premium")
+        trace = hub["optimization_trace"]
+        self.assertIn("planned_algorithms", trace)
+        self.assertIn("executed_algorithms", trace)
+        self.assertEqual(trace["disabled_by_guardrail"][0]["agent"], "premium")
+
+    def test_save_tokens_guardrail_fails_closed_without_free_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / "state",
+                free_only=False,
+                repo_context_enabled=False,
+                boost_mode="save_tokens",
+                default_route=["premium"],
+                agents={
+                    "premium": AgentConfig(
+                        name="premium",
+                        provider="openai",
+                        model="premium-model",
+                        free=False,
+                        coding_score=1.0,
+                        cost_per_million_input=10.0,
+                        cost_per_million_output=30.0,
+                    ),
+                },
+            )
+            request = HubRequest(
+                session_id="s",
+                messages=[{"role": "user", "content": "Explain this helper briefly."}],
+            )
+
+            with self.assertRaises(RouterError):
+                AgentRouter(config, provider_factory=_OkProvider).route(request)
 
     def test_boost_guardrails_disable_unknown_cost_paid_candidates(self) -> None:
         _CaptureProvider.last_request = None
@@ -718,6 +828,7 @@ index 867a3ee..b77d49d 100644
                     messages=[{"role": "user", "content": "Explain this helper briefly."}],
                     raw={
                         "agent_hub": {
+                            "trusted_internal": True,
                             "boost_mode": "balanced",
                             "boost_plan": plan,
                         }
@@ -730,6 +841,40 @@ index 867a3ee..b77d49d 100644
         disabled = _CaptureProvider.last_request.raw["agent_hub"]["disabled_by_guardrail"]
         self.assertEqual(disabled[0]["agent"], "paid-unknown")
         self.assertIn("estimated_cost_unknown", disabled[0]["reasons"])
+
+    def test_compatible_chat_inherits_config_boost_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                workspace_dir=root,
+                state_dir=root / "state",
+                free_only=False,
+                repo_context_enabled=False,
+                boost_mode="save_tokens",
+                default_route=["cheap"],
+                agents={
+                    "cheap": AgentConfig(
+                        name="cheap",
+                        provider="openai-compatible",
+                        model="cheap-model",
+                        base_url="http://127.0.0.1:9999",
+                        free=True,
+                        context_window=32_000,
+                    ),
+                },
+            )
+            request = request_from_openai_chat(
+                {
+                    "model": "agent-hub-coding",
+                    "messages": [{"role": "user", "content": "Summarize this file."}],
+                }
+            )
+            request.route = None
+            decision = AgentRouter(config, provider_factory=_OkProvider).decide(request)
+
+        self.assertEqual(request.api_shape, "openai-chat")
+        self.assertEqual(decision.boost_mode, "save_tokens")
+        self.assertEqual(decision.routing_mode, "cheapest")
 
     def test_efficiency_routing_beats_base_model_with_less_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

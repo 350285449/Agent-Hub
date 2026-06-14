@@ -673,6 +673,7 @@ vars:
 Useful commands:
 
 ```powershell
+python -m agent_hub free-models
 python -m agent_hub providers
 python -m agent_hub presets
 python -m agent_hub presets apply free-only
@@ -691,6 +692,13 @@ python -m agent_hub doctor --providers
 python -m agent_hub route-test --route cloud-agent "hello"
 python -m agent_hub benchmark --route cloud-agent
 ```
+
+For the simplest setup, set any free-provider key you already have, then run
+`python -m agent_hub free-models`. It merges the editable free presets, enables
+only the presets whose keys are currently available, keeps local/Ollama
+candidates in the route, and turns on strict free-only routing. Use
+`python -m agent_hub free-models --enable-all` only when you want every preset
+enabled before the keys are present.
 
 Common env vars include `OLLAMA_API_KEY` when your Ollama setup requires it,
 `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `CEREBRAS_API_KEY`,

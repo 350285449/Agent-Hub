@@ -471,6 +471,30 @@ class CliTests(unittest.TestCase):
             self.assertIn("groq-qwen3-32b", names)
             self.assertIn("openrouter-deepseek-free", names)
 
+    def test_free_models_command_enables_keyed_free_presets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            buffer = io.StringIO()
+
+            with patch.dict("os.environ", {"GROQ_API_KEY": "test-key"}, clear=True):
+                with redirect_stdout(buffer):
+                    code = main(["--config", str(path), "free-models"])
+
+            self.assertEqual(code, 0)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(data["free_only"])
+            self.assertTrue(data["disable_non_free_models"])
+            groq = next(agent for agent in data["agents"] if agent["name"] == "groq-qwen3-32b")
+            self.assertTrue(groq["enabled"])
+            self.assertTrue(groq["free"])
+            self.assertEqual(groq["api_key_env"], "GROQ_API_KEY")
+            openrouter = next(
+                agent for agent in data["agents"] if agent["name"] == "openrouter-deepseek-free"
+            )
+            self.assertFalse(openrouter["enabled"])
+            cloud_route = next(route for route in data["routes"] if route["name"] == "cloud-agent")
+            self.assertIn("groq-qwen3-32b", cloud_route["agents"])
+
     def test_local_only_routing_preset_keeps_private_agents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"

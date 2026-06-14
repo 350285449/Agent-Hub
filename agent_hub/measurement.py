@@ -56,7 +56,11 @@ class UsageEvent:
     latency_ms: float | None
     success: bool
     failover_count: int
-    measurement_source: str
+    tests_passed_count: int = 0
+    tests_failed_count: int = 0
+    files_changed_count: int = 0
+    user_accepted: bool | None = None
+    measurement_source: str = "estimated"
     rejected_alternatives: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -114,9 +118,11 @@ class UsageLedger:
                         input_tokens_actual, output_tokens_actual,
                         input_tokens_estimated, output_tokens_estimated,
                         cost_usd_actual, cost_usd_estimated, cost_source,
-                        latency_ms, success, failover_count, measurement_source,
+                        latency_ms, success, failover_count, tests_passed_count,
+                        tests_failed_count, files_changed_count, user_accepted,
+                        measurement_source,
                         rejected_alternatives_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event.request_id,
@@ -137,6 +143,10 @@ class UsageLedger:
                         event.latency_ms,
                         int(event.success),
                         event.failover_count,
+                        event.tests_passed_count,
+                        event.tests_failed_count,
+                        event.files_changed_count,
+                        None if event.user_accepted is None else int(event.user_accepted),
                         event.measurement_source,
                         _json(event.rejected_alternatives),
                     ),
@@ -231,7 +241,11 @@ class UsageLedger:
                         SUM(COALESCE(cost_usd_actual, 0.0)) AS actual,
                         SUM(COALESCE(cost_usd_estimated, 0.0)) AS estimated,
                         SUM(CASE WHEN success THEN 1 ELSE 0 END) AS successes,
-                        SUM(CASE WHEN success THEN 0 ELSE 1 END) AS failures
+                        SUM(CASE WHEN success THEN 0 ELSE 1 END) AS failures,
+                        SUM(COALESCE(tests_passed_count, 0)) AS tests_passed,
+                        SUM(COALESCE(tests_failed_count, 0)) AS tests_failed,
+                        SUM(COALESCE(files_changed_count, 0)) AS files_changed,
+                        SUM(CASE WHEN user_accepted THEN 1 ELSE 0 END) AS accepted
                     FROM requests
                     """
                 ).fetchone()
@@ -248,11 +262,33 @@ class UsageLedger:
                     ORDER BY baseline_name
                     """
                 ).fetchall()
+                token_baselines = connection.execute(
+                    """
+                    SELECT
+                        baseline_name,
+                        SUM(
+                            CASE
+                                WHEN cost_usd > COALESCE(r.cost_usd_actual, r.cost_usd_estimated, 0.0)
+                                THEN COALESCE(r.input_tokens_actual, r.input_tokens_estimated, 0)
+                                   + COALESCE(r.output_tokens_actual, r.output_tokens_estimated, 0)
+                                ELSE 0
+                            END
+                        ) AS tokens_saved
+                    FROM baseline_comparisons b
+                    JOIN requests r ON r.request_id = b.request_id
+                    GROUP BY baseline_name
+                    ORDER BY baseline_name
+                    """
+                ).fetchall()
                 recent = connection.execute(
                     """
                     SELECT request_id, timestamp, route, task_type, selected_provider,
                            selected_model, cost_usd_actual, cost_usd_estimated,
-                           cost_source, measurement_source, success
+                           cost_source, measurement_source, success, failover_count,
+                           tests_passed_count, tests_failed_count, files_changed_count,
+                           user_accepted, input_tokens_actual, output_tokens_actual,
+                           input_tokens_estimated, output_tokens_estimated,
+                           rejected_alternatives_json
                     FROM requests
                     ORDER BY timestamp DESC
                     LIMIT ?
@@ -287,6 +323,10 @@ class UsageLedger:
             "measurement_sources": measurement_sources,
             "success_count": int(costs["successes"] or 0) if costs else 0,
             "failure_count": int(costs["failures"] or 0) if costs else 0,
+            "tests_passed_count": int(costs["tests_passed"] or 0) if costs else 0,
+            "tests_failed_count": int(costs["tests_failed"] or 0) if costs else 0,
+            "files_changed_count": int(costs["files_changed"] or 0) if costs else 0,
+            "user_accepted_count": int(costs["accepted"] or 0) if costs else 0,
             "confidence": {
                 "level": confidence_level,
                 "actual_usage_pct": actual_usage_pct,
@@ -305,10 +345,11 @@ class UsageLedger:
                     "priced_count": int(row["priced_count"] or 0),
                     "baseline_cost_usd": round(float(row["baseline_cost_usd"] or 0.0), 8),
                     "savings_usd": round(float(row["savings_usd"] or 0.0), 8),
+                    "tokens_saved": _tokens_saved_for_baseline(token_baselines, str(row["baseline_name"] or "")),
                 }
                 for row in baselines
             ],
-            "recent_requests": [dict(row) for row in recent],
+            "recent_requests": [_recent_request_dict(row) for row in recent],
         }
 
 
@@ -372,6 +413,10 @@ def record_completed_request(
     task_type: str = "",
     input_tokens_estimated: int = 0,
     output_tokens_estimated: int = 0,
+    tests_passed_count: int = 0,
+    tests_failed_count: int = 0,
+    files_changed_count: int = 0,
+    user_accepted: bool | None = None,
 ) -> None:
     now = time.time()
     selected_model = model or agent.model
@@ -405,6 +450,10 @@ def record_completed_request(
         latency_ms=round(max(0.0, float(latency_seconds or 0.0)) * 1000, 2) if latency_seconds is not None else None,
         success=success,
         failover_count=len(failover),
+        tests_passed_count=max(0, int(tests_passed_count or 0)),
+        tests_failed_count=max(0, int(tests_failed_count or 0)),
+        files_changed_count=max(0, int(files_changed_count or 0)),
+        user_accepted=user_accepted,
         measurement_source=token_measurement["source"],
         rejected_alternatives=_rejected_alternatives(candidate_scores or [], selected_agent=agent.name),
     )
@@ -421,6 +470,8 @@ def record_completed_request(
         success_boolean=success,
         quality_score_0_to_1=None,
         evaluation_method="provider_success_only",
+        tests_passed=(tests_failed_count <= 0) if tests_passed_count or tests_failed_count else None,
+        user_rating=1.0 if user_accepted is True else (0.0 if user_accepted is False else None),
     )
     UsageLedger(usage_ledger_path(config)).record(
         event,
@@ -528,6 +579,10 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             latency_ms REAL,
             success INTEGER NOT NULL DEFAULT 0,
             failover_count INTEGER NOT NULL DEFAULT 0,
+            tests_passed_count INTEGER NOT NULL DEFAULT 0,
+            tests_failed_count INTEGER NOT NULL DEFAULT 0,
+            files_changed_count INTEGER NOT NULL DEFAULT 0,
+            user_accepted INTEGER,
             measurement_source TEXT NOT NULL DEFAULT 'estimated',
             rejected_alternatives_json TEXT
         )
@@ -552,6 +607,16 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             FOREIGN KEY(request_id) REFERENCES requests(request_id)
         )
         """
+    )
+    _ensure_columns(
+        connection,
+        "requests",
+        {
+            "tests_passed_count": "INTEGER NOT NULL DEFAULT 0",
+            "tests_failed_count": "INTEGER NOT NULL DEFAULT 0",
+            "files_changed_count": "INTEGER NOT NULL DEFAULT 0",
+            "user_accepted": "INTEGER",
+        },
     )
     connection.execute(
         """
@@ -626,6 +691,16 @@ def _upsert_model_prices(connection: sqlite3.Connection, prices: list[ModelPrice
                 now,
             ),
         )
+
+
+def _ensure_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {
+        str(row[1])
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    for name, definition in columns.items():
+        if name not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
 def _token_measurement(
@@ -952,6 +1027,39 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":"))
 
 
+def _json_list(value: str | None) -> list[dict[str, Any]]:
+    if not value:
+        return []
+    try:
+        import json
+
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def _recent_request_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["rejected_models"] = _json_list(str(data.pop("rejected_alternatives_json") or ""))
+    data["input_tokens"] = data.get("input_tokens_actual")
+    if data["input_tokens"] is None:
+        data["input_tokens"] = data.get("input_tokens_estimated")
+    data["output_tokens"] = data.get("output_tokens_actual")
+    if data["output_tokens"] is None:
+        data["output_tokens"] = data.get("output_tokens_estimated")
+    return data
+
+
+def _tokens_saved_for_baseline(rows: list[sqlite3.Row], baseline_name: str) -> int:
+    for row in rows:
+        if str(row["baseline_name"] or "") == baseline_name:
+            return int(row["tokens_saved"] or 0)
+    return 0
+
+
 def _empty_summary(path: Path, *, unavailable: bool = False) -> dict[str, Any]:
     return {
         "object": "agent_hub.usage_ledger",
@@ -961,6 +1069,10 @@ def _empty_summary(path: Path, *, unavailable: bool = False) -> dict[str, Any]:
         "measurement_sources": {},
         "success_count": 0,
         "failure_count": 0,
+        "tests_passed_count": 0,
+        "tests_failed_count": 0,
+        "files_changed_count": 0,
+        "user_accepted_count": 0,
         "confidence": {
             "level": "none",
             "actual_usage_pct": 0.0,

@@ -26,6 +26,7 @@ class BoostModePolicy:
     prefer_local: bool = False
     prefer_premium: bool = False
     compression_aggression: float = 0.55
+    simple_mode: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -46,6 +47,7 @@ class BoostModePolicy:
             "prefer_local": self.prefer_local,
             "prefer_premium": self.prefer_premium,
             "compression_aggression": self.compression_aggression,
+            "simple_mode": self.simple_mode,
         }
 
 
@@ -58,6 +60,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         context_policy="focused_files",
         model_policy="best_outcome_per_token",
         validation_policy="basic_quality_checks",
+        repo_max_files=12,
     ),
     "save_tokens": BoostModePolicy(
         mode="save_tokens",
@@ -68,7 +71,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         model_policy="cheap_first",
         validation_policy="basic_quality_checks",
         routing_mode="cheapest",
-        repo_max_files=5,
+        repo_max_files=8,
         repo_max_chars=7_000,
         full_files=1,
         compressed_files=2,
@@ -78,14 +81,14 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
     ),
     "best_code": BoostModePolicy(
         mode="best_code",
-        label="Best Code",
+        label="Best Result",
         behavior="premium models + validation",
         context_mode="deep",
         context_policy="validated_context",
         model_policy="premium_first",
         validation_policy="strict_quality_checks",
         routing_mode="coding",
-        repo_max_files=12,
+        repo_max_files=18,
         repo_max_chars=24_000,
         full_files=4,
         compressed_files=6,
@@ -103,7 +106,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         model_policy="adaptive_quality_speed",
         validation_policy="confidence_gated_checks",
         routing_mode="coding",
-        repo_max_files=14,
+        repo_max_files=24,
         repo_max_chars=30_000,
         full_files=4,
         compressed_files=7,
@@ -111,6 +114,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         retry_budget=3,
         prefer_premium=True,
         compression_aggression=0.42,
+        simple_mode=False,
     ),
     "fast_fix": BoostModePolicy(
         mode="fast_fix",
@@ -121,13 +125,14 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         model_policy="fastest_successful",
         validation_policy="run_targeted_tests",
         routing_mode="fastest",
-        repo_max_files=6,
+        repo_max_files=8,
         repo_max_chars=8_000,
         full_files=2,
         compressed_files=2,
         map_files=4,
         retry_budget=1,
         compression_aggression=0.65,
+        simple_mode=False,
     ),
     "big_refactor": BoostModePolicy(
         mode="big_refactor",
@@ -138,7 +143,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         model_policy="long_context_quality",
         validation_policy="run_tests",
         routing_mode="long_context",
-        repo_max_files=18,
+        repo_max_files=25,
         repo_max_chars=40_000,
         full_files=5,
         compressed_files=8,
@@ -146,6 +151,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         retry_budget=3,
         prefer_premium=True,
         compression_aggression=0.32,
+        simple_mode=False,
     ),
     "local_first": BoostModePolicy(
         mode="local_first",
@@ -156,7 +162,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         model_policy="local_first",
         validation_policy="basic_quality_checks",
         routing_mode="local_private",
-        repo_max_files=8,
+        repo_max_files=12,
         repo_max_chars=12_000,
         full_files=2,
         compressed_files=4,
@@ -164,6 +170,7 @@ BOOST_MODES: dict[str, BoostModePolicy] = {
         retry_budget=2,
         prefer_local=True,
         compression_aggression=0.55,
+        simple_mode=False,
     ),
 }
 
