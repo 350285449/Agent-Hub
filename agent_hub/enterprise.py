@@ -11,6 +11,13 @@ from .observability import record_event
 from .security.secrets import redact_secrets
 
 
+DEFAULT_ENTERPRISE_ROLES = {
+    "viewer": ["read", "dashboard:view", "audit:view"],
+    "developer": ["read", "route", "benchmark:run", "settings:view"],
+    "admin": ["*", "settings:change", "policy:change", "audit:view"],
+}
+
+
 @dataclass(slots=True)
 class UserIdentity:
     id: str
@@ -108,6 +115,9 @@ class EnterprisePolicy:
     grants: list[PermissionGrant] = field(default_factory=list)
     default_workspace_id: str = "default"
     state_dir: Path | None = None
+    never_use_external_models: bool = False
+    never_use_premium_models: bool = False
+    only_local_models: bool = False
 
     @classmethod
     def from_config(cls, config: Any) -> "EnterprisePolicy":
@@ -130,6 +140,8 @@ class EnterprisePolicy:
             for role in (_role_from_dict(item) for item in getattr(config, "enterprise_roles", []) or [])
             if role.name
         }
+        for name, permissions in DEFAULT_ENTERPRISE_ROLES.items():
+            roles.setdefault(name, RoleDefinition(name=name, permissions=list(permissions)))
         grants = [
             grant
             for grant in (
@@ -148,7 +160,22 @@ class EnterprisePolicy:
                 getattr(config, "enterprise_default_workspace_id", "default") or "default"
             ),
             state_dir=Path(getattr(config, "state_dir", ".agent-hub/state")),
+            never_use_external_models=bool(getattr(config, "enterprise_never_use_external_models", False)),
+            never_use_premium_models=bool(getattr(config, "enterprise_never_use_premium_models", False)),
+            only_local_models=bool(getattr(config, "enterprise_only_local_models", False)),
         )
+
+    def allows_model(self, agent: Any) -> tuple[bool, str]:
+        provider = str(getattr(agent, "provider", "") or "")
+        local = bool(getattr(agent, "local_only", False)) or provider in {"ollama", "local-research"} or "local" in provider
+        premium = bool(getattr(agent, "free", None) is False)
+        if self.only_local_models and not local:
+            return False, "Enterprise policy allows only local models."
+        if self.never_use_external_models and not local:
+            return False, "Enterprise policy blocks external models."
+        if self.never_use_premium_models and premium:
+            return False, "Enterprise policy blocks premium models."
+        return True, ""
 
     def allows(
         self,
@@ -495,6 +522,7 @@ def _grant_from_dict(data: dict[str, Any]) -> PermissionGrant:
 
 
 __all__ = [
+    "DEFAULT_ENTERPRISE_ROLES",
     "EnterpriseAuditEvent",
     "EnterprisePolicy",
     "PermissionGrant",

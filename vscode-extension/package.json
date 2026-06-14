@@ -343,7 +343,7 @@
       },
       {
         "command": "agentHub.runPersonalBenchmark",
-        "title": "Agent Hub: Run Personal Benchmark",
+        "title": "Agent Hub: Run Benchmark",
         "icon": "$(beaker)"
       },
       {

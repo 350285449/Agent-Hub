@@ -37,4 +37,8 @@ def extract_risk_features(task: dict[str, Any] | None = None, *, candidate: dict
         "is_refactor": "refactor" in str(task.get("task_type") or task_text).lower(),
         "is_docs_task": any(term in str(task.get("task_type") or task_text).lower() for term in ("doc", "readme", "comment")),
         "cheap_or_small_model": any(term in model.lower() for term in ("flash", "small", "mini", "local")),
+        "repo_size": int(task.get("repo_size") or task.get("file_count") or file_count or 0),
+        "language": str(task.get("language") or candidate.get("language") or "unknown"),
+        "provider": str(candidate.get("provider") or candidate.get("name") or "unknown"),
+        "retry_count": int(task.get("retry_count") or candidate.get("retry_count") or 0),
     }

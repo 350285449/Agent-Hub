@@ -12,6 +12,7 @@ from ..enterprise import EnterprisePolicy, RoleDefinition, export_enterprise_aud
 from ..evaluation import ProviderScoreStore
 from ..inbox import SUPPORTED_API_SHAPES, inbox_task_preview
 from ..measurement import usage_ledger_summary
+from ..visual_proof_dashboard import visual_proof_dashboard_body
 from ..mcp import normalize_mcp_tools
 from ..models import HubRequest
 from ..plugins import discover_plugins
@@ -372,6 +373,18 @@ class DiagnosticsApplicationService:
             "measurement_plan": _benchmark_measurement_plan(self.config, snapshot),
             "coverage_snapshot": snapshot,
             "reports": reports,
+            "visual_proof_dashboard": visual_proof_dashboard_body(
+                usage=usage_ledger_summary(self.config),
+                benchmarks={"summary": {
+                    "report_count": len(reports),
+                    "latest_report": reports[0]["name"] if reports else None,
+                    "total_result_count": sum(
+                        len(report.get("results", []))
+                        for report in reports
+                        if isinstance(report.get("results"), list)
+                    ),
+                }, "reports": reports, "coverage_snapshot": snapshot},
+            ),
         }
 
     def workspace_checkpoints_body(self) -> dict[str, Any]:
