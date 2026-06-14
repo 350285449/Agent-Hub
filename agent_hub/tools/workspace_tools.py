@@ -333,6 +333,8 @@ class AgentToolbox:
             return response
 
     def _permission_decision(self, name: str, args: dict[str, Any]) -> PermissionDecision:
+        if name == "run_command":
+            return self._shell_permission_decision(name, args)
         return PermissionManager(
             self._get_approval_mode(),
             approval_granted=self._approval_granted(),
@@ -341,6 +343,53 @@ class AgentToolbox:
             enterprise_user_id=enterprise_subject_from_request(self.request),
             enterprise_workspace_id=enterprise_workspace_from_request(self.config, self.request),
         ).check(tool_permission_request(name, args))
+
+    def _shell_permission_decision(self, name: str, args: dict[str, Any]) -> PermissionDecision:
+        request = tool_permission_request(name, args)
+        policy = self.shell_command_policy
+        if policy == "deny":
+            if self._get_approval_mode() == "ask":
+                return PermissionDecision(
+                    False,
+                    requires_approval=True,
+                    reason="User approval is required before this shell command can run.",
+                    mode=policy,
+                    request=request,
+                )
+            return PermissionDecision(
+                False,
+                denied=True,
+                reason="run_command is disabled by shell_command_policy=deny.",
+                mode=policy,
+                request=request,
+            )
+        if policy == "ask" and not self._approval_granted():
+            if self.shell_permission_callback is None:
+                return PermissionDecision(
+                    False,
+                    requires_approval=True,
+                    reason="User approval is required before this shell command can run.",
+                    mode=policy,
+                    request=request,
+                )
+            try:
+                allowed = bool(self.shell_permission_callback(request.to_dict()))
+            except Exception as exc:
+                return PermissionDecision(
+                    False,
+                    denied=True,
+                    reason=f"Permission prompt failed: {exc}",
+                    mode=policy,
+                    request=request,
+                )
+            return PermissionDecision(
+                allowed,
+                denied=not allowed,
+                reason="" if allowed else "User denied permission to run shell command.",
+                mode=policy,
+                request=request,
+            )
+        return PermissionDecision(True, mode=policy, request=request)
 
     def _is_approval_needed(self, name: str, args: dict[str, Any]) -> bool:
         """Determine if a tool requires approval based on the centralized manager."""
@@ -1217,7 +1266,7 @@ class AgentToolbox:
     def _check_shell_permission(self, *, command: str, cwd: Path, timeout_seconds: int) -> None:
         if self.shell_command_policy != "ask":
             return
-        if self._approval_granted() or self._get_approval_mode() in {"ask", "safe", "shell-ask"}:
+        if self._approval_granted():
             return
         if self.shell_permission_callback is None:
             raise ToolError(

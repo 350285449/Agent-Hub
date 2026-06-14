@@ -207,6 +207,7 @@ def _write_portable_server_config(path: Path, *, workspace: Path, port: int) -> 
         "approval_mode": "safe",
         "allow_shell_tools": False,
         "shell_command_policy": "deny",
+        "dev_unauthenticated_mode": True,
         "auto_detect_local_models": False,
         "auto_enable_available_providers": False,
         "debug_echo_enabled": True,

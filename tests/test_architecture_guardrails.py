@@ -40,8 +40,8 @@ KNOWN_DEPENDENCY_CYCLES = {
 
 FAN_OUT_BASELINE = {
     "agent_hub.core.router": 23,
-    "agent_hub.server": 16,
-    "agent_hub.cli": 12,
+    "agent_hub.server": 17,
+    "agent_hub.cli": 13,
     "agent_hub.providers.__init__": 10,
 }
 

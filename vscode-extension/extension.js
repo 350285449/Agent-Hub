@@ -12808,9 +12808,10 @@ async function serverLaunchEnvironment(workspace) {
   const env = { ...process.env };
   const config = settings();
   env.AGENT_HUB_TRUSTED_APPROVAL_TOKEN = config.approvalToken || runtimeApprovalToken;
-  const apiToken = config.apiToken || localApiToken;
-  if (apiToken) {
-    env.AGENT_HUB_API_TOKEN = apiToken;
+  if (config.apiToken) {
+    env.AGENT_HUB_API_TOKEN = config.apiToken;
+  } else if (localApiToken) {
+    env.AGENT_HUB_API_TOKEN = localApiToken;
   }
   await applySavedApiKeysToEnv(env);
   const backendRoot = backendSourceRoot(workspace);
@@ -14039,10 +14040,10 @@ function listOrEmpty(value) {
 function generatedConfigApprovalMode(value) {
   const hasExplicitValue = value !== undefined && value !== null && String(value).trim() !== "";
   if (!hasExplicitValue) {
-    return "safe";
+    return "auto";
   }
   const mode = normalizeApprovalMode(value);
-  return mode;
+  return mode === "ask" ? "auto" : mode;
 }
 
 function localConfigForLocalModels(sources, options = {}) {

@@ -62,9 +62,9 @@ def diagnostics_auth_error(config: HubConfig, headers: Any) -> tuple[dict[str, A
 def api_auth_required(config: HubConfig) -> bool:
     if bool(getattr(config, "dev_unauthenticated_mode", False)):
         return False
-    return bool(getattr(config, "local_auth_required", False)) or public_bind_host(
-        str(getattr(config, "host", "127.0.0.1") or "127.0.0.1")
-    )
+    if public_bind_host(str(getattr(config, "host", "127.0.0.1") or "127.0.0.1")):
+        return True
+    return bool(getattr(config, "local_auth_required", False)) and bool(api_token(config))
 
 
 def diagnostics_auth_required(config: HubConfig) -> bool:
