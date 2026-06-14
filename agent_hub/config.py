@@ -150,6 +150,8 @@ class MCPServerConfig:
 
     name: str
     enabled: bool = True
+    publisher: str = ""
+    verified_publisher: bool = False
     command: str | None = None
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
@@ -186,6 +188,11 @@ class HubConfig:
     trusted_approval_token_env: str | None = None
     diagnostics_auth_token: str | None = None
     diagnostics_auth_token_env: str | None = None
+    cors_allowed_origins: list[str] = field(default_factory=list)
+    rate_limit_requests_per_minute: int = 100
+    local_rate_limit_unlimited: bool = True
+    session_remember_device_days: int = 30
+    sharing_mode: str = "local"
     allow_shell_tools: bool = False
     shell_command_policy: str = "deny"
     tool_loop_enabled: bool = True
@@ -820,6 +827,8 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         MCPServerConfig(
             name=str(item.get("name") or ""),
             enabled=_bool_with_default(item.get("enabled"), True),
+            publisher=str(item.get("publisher") or ""),
+            verified_publisher=_bool_with_default(item.get("verified_publisher"), False),
             command=item.get("command") if isinstance(item.get("command"), str) else None,
             args=_string_list(item.get("args")),
             env=_string_map(item.get("env")),
@@ -895,6 +904,21 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             if raw.get("diagnostics_auth_token_env") not in (None, "")
             else None
         ),
+        cors_allowed_origins=_string_list(raw.get("cors_allowed_origins")),
+        rate_limit_requests_per_minute=_normalize_positive_int(
+            raw.get("rate_limit_requests_per_minute"),
+            100,
+            minimum=1,
+            maximum=100_000,
+        ),
+        local_rate_limit_unlimited=_bool_with_default(raw.get("local_rate_limit_unlimited"), True),
+        session_remember_device_days=_normalize_positive_int(
+            raw.get("session_remember_device_days"),
+            30,
+            minimum=1,
+            maximum=365,
+        ),
+        sharing_mode=_normalize_sharing_mode(raw.get("sharing_mode", "local")),
         allow_shell_tools=_bool_with_default(raw.get("allow_shell_tools"), False),
         shell_command_policy=_normalize_shell_command_policy(
             raw.get("shell_command_policy", raw.get("shell_tools_policy", "deny"))
@@ -1168,6 +1192,11 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "trusted_approval_token_env": config.trusted_approval_token_env,
         "diagnostics_auth_token": config.diagnostics_auth_token,
         "diagnostics_auth_token_env": config.diagnostics_auth_token_env,
+        "cors_allowed_origins": config.cors_allowed_origins,
+        "rate_limit_requests_per_minute": config.rate_limit_requests_per_minute,
+        "local_rate_limit_unlimited": config.local_rate_limit_unlimited,
+        "session_remember_device_days": config.session_remember_device_days,
+        "sharing_mode": config.sharing_mode,
         "allow_shell_tools": config.allow_shell_tools,
         "shell_command_policy": config.shell_command_policy,
         "tool_loop_enabled": config.tool_loop_enabled,
@@ -1259,6 +1288,8 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
                 {
                     "name": server.name,
                     "enabled": server.enabled,
+                    "publisher": server.publisher,
+                    "verified_publisher": server.verified_publisher,
                     "command": server.command,
                     "args": server.args,
                     "env": server.env,
@@ -1504,6 +1535,17 @@ def _normalize_native_stream_failure_policy(value: Any) -> str:
     if text in {"fallback", "failover", "failover_provider"}:
         return "fallback_provider"
     return "recover"
+
+
+def _normalize_sharing_mode(value: Any) -> str:
+    text = str(value or "local").strip().lower().replace("_", "-")
+    if text in {"local", "local-only", "localhost"}:
+        return "local"
+    if text in {"lan", "network", "private-network"}:
+        return "lan"
+    if text in {"internet", "public"}:
+        return "internet"
+    return "local"
 
 
 def _normalize_context_change_bar_mode(value: Any) -> str:

@@ -62,9 +62,11 @@ class RiskAssessment:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        trust_level = str(self.metadata.get("trust_level") or trust_level_for_risk(self.risk_level, self.blocked))
         return {
             "category": self.category,
             "risk_level": self.risk_level,
+            "trust_level": trust_level,
             "reason": self.reason,
             "blocked": self.blocked,
             "explicit_approval_required": self.explicit_approval_required,
@@ -110,6 +112,14 @@ def classify_shell_command(command: str) -> RiskAssessment:
     blocked = False
     explicit = False
 
+    if _looks_like_read_only_shell(normalized):
+        return RiskAssessment(
+            category="read",
+            risk_level="low",
+            reason="Read-only shell command.",
+            metadata={"command": command[:500], "trust_level": "safe"},
+        )
+
     critical_patterns = (
         r"\brm\s+-[^\n;&|]*r[^\n;&|]*f\b",
         r"\bremove-item\b[^\n;&|]*\b-recurse\b[^\n;&|]*\b-force\b",
@@ -132,6 +142,7 @@ def classify_shell_command(command: str) -> RiskAssessment:
             blocked=True,
             explicit_approval_required=True,
             findings=[{"kind": "blocked_command", "command": command[:240]}],
+            metadata={"command": command[:500], "trust_level": "dangerous"},
         )
 
     package_patterns = (
@@ -185,6 +196,7 @@ def classify_shell_command(command: str) -> RiskAssessment:
             blocked=True,
             explicit_approval_required=True,
             findings=[{"kind": "install_script", "command": command[:240]}],
+            metadata={"command": command[:500], "trust_level": "dangerous"},
         )
 
     upload_patterns = (
@@ -241,8 +253,42 @@ def classify_shell_command(command: str) -> RiskAssessment:
         blocked=blocked,
         explicit_approval_required=explicit,
         findings=findings,
-        metadata={"command": command[:500]},
+        metadata={"command": command[:500], "trust_level": trust_level_for_risk(risk, blocked)},
     )
+
+
+def trust_level_for_risk(risk_level: str, blocked: bool = False) -> str:
+    if blocked or str(risk_level).lower() == "critical":
+        return "dangerous"
+    if str(risk_level).lower() in {"medium", "high"}:
+        return "elevated"
+    return "safe"
+
+
+def _looks_like_read_only_shell(normalized: str) -> bool:
+    if re.search(r"[;&|<>`]", normalized):
+        return False
+    if _matches_any(
+        normalized,
+        (
+            r"\b(?:rm|del|erase|move|mv|cp|copy|chmod|chown|kill|pkill|taskkill|sudo|runas)\b",
+            r"\b(?:remove-item|set-content|add-content|new-item|start-process)\b",
+            r"\bfind\b[^\n]*\b(?:-delete|-exec)\b",
+        ),
+    ):
+        return False
+    if _matches_any(
+        normalized,
+        (
+            r"\b(?:ls|dir|cat|type|grep|rg|find|where|which|pwd|tree)\b",
+            r"\b(?:get-content|select-string|get-childitem|get-location)\b",
+            r"\bgit\s+(?:status|diff|log|show|branch|rev-parse|remote)\b",
+            r"\b(?:python|python3|py|node)\s+--version\b",
+            r"\b(?:npm|pnpm|yarn|pip|pip3|uv)\s+(?:--version|-v|list|show)\b",
+        ),
+    ):
+        return True
+    return False
 
 
 def classify_file_mutation(tool_name: str, args: dict[str, Any]) -> RiskAssessment:

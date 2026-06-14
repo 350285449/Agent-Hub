@@ -74,6 +74,11 @@ def handle_get(handler: object, path: str) -> bool:
         body = server_module._provider_health_body(handler.server.config, handler.server.router)
         handler._send_html(_provider_health_dashboard_html(body))
         return True
+    if path == "/dashboard/system-health":
+        from .health import _system_health_body
+
+        handler._send_html(_system_health_dashboard_html(_system_health_body(handler)))
+        return True
     if path == "/dashboard/production-check":
         body = handler.server.diagnostics_service.production_check_body(handler.server.router)
         handler._send_html(_production_check_dashboard_html(body))
@@ -862,6 +867,43 @@ def _provider_health_dashboard_html(body: dict[str, Any]) -> str:
         content,
         body,
         json_path="/v1/provider-health",
+    )
+
+
+def _system_health_dashboard_html(body: dict[str, Any]) -> str:
+    components = body.get("components") if isinstance(body.get("components"), list) else []
+    rows = "".join(
+        f"<tr><td>{_html(row.get('component'))}</td><td>{_html(row.get('status'))}</td></tr>"
+        for row in components
+        if isinstance(row, dict)
+    )
+    if not rows:
+        rows = "<tr><td colspan=\"2\" class=\"muted\">No component status is available.</td></tr>"
+    content = f"""
+<section class="panel">
+  <h2>System Health</h2>
+  <table>
+    <thead><tr><th>Component</th><th>Status</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>
+<section class="panel">
+  <h2>Support</h2>
+  <p>Generate Support Bundle creates a redacted package with logs, config summary, provider status, and validation output.</p>
+  <p><code>{_html(body.get('support_bundle') or 'agent-hub support-bundle')}</code></p>
+</section>"""
+    cards = [
+        ("Status", body.get("status", "unknown")),
+        ("Components", len(components)),
+        ("Advanced", body.get("advanced_view", "/health")),
+    ]
+    return _dashboard_page(
+        "Agent Hub System Health",
+        "A safe health view for sharing status without secrets, local paths, raw payloads, or stack traces.",
+        cards,
+        content,
+        body,
+        json_path="/v1/system-health",
     )
 
 

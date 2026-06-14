@@ -71,12 +71,17 @@ class PermissionRequest:
     details: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        security = self.details.get("security") if isinstance(self.details, dict) else {}
+        trust_level = ""
+        if isinstance(security, dict):
+            trust_level = str(security.get("trust_level") or "")
         data = {
             "action": self.action,
             "category": self.category,
             "description": self.description,
             "resource": self.resource,
             "risk_level": self.risk_level,
+            "trust_level": trust_level or _trust_level_for_risk(self.risk_level),
             "details": self.details,
         }
         for key, value in self.details.items():
@@ -617,3 +622,12 @@ def _looks_like_dangerous_command(command: str) -> bool:
 
 def _risk_at_least(value: str, threshold: str) -> bool:
     return RISK_ORDER.get(str(value or "low").lower(), 0) >= RISK_ORDER.get(threshold, 0)
+
+
+def _trust_level_for_risk(risk_level: str) -> str:
+    text = str(risk_level or "low").lower()
+    if text == "critical":
+        return "dangerous"
+    if text in {"medium", "high"}:
+        return "elevated"
+    return "safe"

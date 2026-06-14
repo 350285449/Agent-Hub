@@ -1101,6 +1101,27 @@ class CliTests(unittest.TestCase):
                 validation = json.loads(archive.read("validation.json").decode("utf-8"))
                 self.assertEqual(validation["object"], "agent_hub.release_validation")
 
+    def test_support_bundle_alias_exports_redacted_zip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["agents"][0]["api_key"] = "sk-test-secret-value-1234567890"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            output = Path(tmp) / "support.zip"
+
+            with (
+                patch("agent_hub.commands_server._debug_doctor_output", return_value={"ok": True}),
+                patch("agent_hub.commands_server._debug_validation_result", return_value={"ok": True}),
+                redirect_stdout(io.StringIO()),
+            ):
+                code = main(["--config", str(path), "support-bundle", "--output", str(output)])
+
+            self.assertEqual(code, 0)
+            with zipfile.ZipFile(output) as archive:
+                config = json.loads(archive.read("config.json").decode("utf-8"))
+                self.assertEqual(config["agents"][0]["api_key"], "[REDACTED]")
+
     def test_chat_runs_one_turn_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"

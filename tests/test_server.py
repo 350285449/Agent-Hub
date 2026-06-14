@@ -113,6 +113,50 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertEqual(data["runtime_usability"]["state"], "needs_local_model")
             self.assertEqual(data["feature_status"]["provider_routing"]["state"], "needs_setup")
 
+    def test_system_health_endpoint_hides_sensitive_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                data = _get_json(f"http://127.0.0.1:{server.server_address[1]}/v1/system-health")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(data["object"], "agent_hub.system_health")
+            components = {row["component"]: row["status"] for row in data["components"]}
+            self.assertIn("Workspace", components)
+            self.assertNotIn(str(root), json.dumps(data))
+            self.assertNotIn("api_key", json.dumps(data).lower())
+
+    def test_cors_allows_localhost_origin_without_wildcard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                workspace_dir=Path(tmp),
+                default_route=["echo"],
+                agents={"echo": AgentConfig(name="echo", provider="echo", model="echo")},
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                port = server.server_address[1]
+                request = Request(
+                    f"http://127.0.0.1:{port}/health",
+                    headers={"Origin": f"http://localhost:{port}"},
+                )
+                with urlopen(request, timeout=5) as response:
+                    origin = response.headers.get("Access-Control-Allow-Origin")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(origin, f"http://localhost:{port}")
+
     def test_health_uses_short_lived_diagnostics_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -15,6 +15,7 @@ from agent_hub.security.command_runner import (
     CommandRunnerError,
     run_workspace_command,
 )
+from agent_hub.security.credentials import ensure_local_credentials
 
 
 class ToolSecurityTests(unittest.TestCase):
@@ -89,6 +90,35 @@ class ToolSecurityTests(unittest.TestCase):
 
         self.assertTrue(assessment.blocked)
         self.assertEqual(assessment.risk_level, "critical")
+        self.assertEqual(assessment.to_dict()["trust_level"], "dangerous")
+
+    def test_read_only_shell_commands_are_safe_trust_level(self) -> None:
+        assessment = classify_shell_command("rg api_auth_token agent_hub")
+
+        self.assertEqual(assessment.category, "read")
+        self.assertEqual(assessment.risk_level, "low")
+        self.assertEqual(assessment.to_dict()["trust_level"], "safe")
+
+    def test_read_only_shell_detection_rejects_shell_operators(self) -> None:
+        assessment = classify_shell_command("ls > output.txt")
+
+        self.assertNotEqual(assessment.category, "read")
+        self.assertEqual(assessment.to_dict()["trust_level"], "elevated")
+
+    def test_package_install_is_elevated_trust_level(self) -> None:
+        assessment = classify_shell_command("npm install")
+
+        self.assertEqual(assessment.category, "package_install")
+        self.assertEqual(assessment.to_dict()["trust_level"], "elevated")
+
+    def test_generated_credentials_are_stored_outside_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(state_dir=Path(tmp) / "state")
+            report = ensure_local_credentials(config)
+
+            self.assertTrue(report["created"])
+            self.assertTrue(config.api_auth_token)
+            self.assertTrue((Path(tmp) / "state" / "credentials.json").exists())
 
     def test_detect_secrets_redacts_findings(self) -> None:
         findings = detect_secrets("token = ghp_abcdefghijklmnopqrstuvwxyz123456")

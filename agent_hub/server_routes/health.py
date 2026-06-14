@@ -26,6 +26,12 @@ def handle_get(handler: object, path: str) -> bool:
             lambda: handler.server.diagnostics_service.feature_scorecard_body(handler.server.router),
         )
         return True
+    if path == "/v1/system-health":
+        handler._send_cached_diagnostics_json(
+            "GET /v1/system-health",
+            lambda: _system_health_body(handler),
+        )
+        return True
     if path == "/v1/limits":
         handler._send_cached_diagnostics_json(
             "GET /v1/limits",
@@ -127,6 +133,47 @@ def _metrics_body(handler: object) -> dict:
     )
     metrics["optimization"] = handler.server.adaptive_service.optimization_summary()
     return metrics
+
+
+def _system_health_body(handler: object) -> dict:
+    config = handler.server.config
+    provider_health = handler.server.router.health_snapshot(include_history=False)
+    agents = getattr(config, "agents", {}) or {}
+    enabled = [agent for agent in agents.values() if getattr(agent, "enabled", True)]
+    openai = any(str(getattr(agent, "provider", "")).lower() == "openai" for agent in enabled)
+    anthropic = any(str(getattr(agent, "provider", "")).lower() == "anthropic" for agent in enabled)
+    components = [
+        _component("OpenAI", "healthy" if openai else "not_configured"),
+        _component("Anthropic", "healthy" if anthropic else "not_configured"),
+        _component("Workspace", "healthy" if getattr(config, "workspace_dir", None) else "needs_attention"),
+        _component("Database", "healthy"),
+    ]
+    if isinstance(provider_health, dict) and provider_health:
+        unhealthy = [
+            name
+            for name, row in provider_health.items()
+            if isinstance(row, dict) and row.get("available") is False
+        ]
+        if unhealthy and len(unhealthy) == len(provider_health):
+            components.append(_component("Providers", "needs_attention"))
+        else:
+            components.append(_component("Providers", "healthy"))
+    return {
+        "object": "agent_hub.system_health",
+        "status": "healthy" if all(row["status"] in {"healthy", "not_configured"} for row in components) else "needs_attention",
+        "components": components,
+        "advanced_view": "/health",
+        "support_bundle": "agent-hub support-bundle",
+    }
+
+
+def _component(name: str, status: str) -> dict:
+    labels = {
+        "healthy": "Healthy",
+        "not_configured": "Not configured",
+        "needs_attention": "Needs attention",
+    }
+    return {"component": name, "status": labels.get(status, status)}
 
 
 def _health_body(handler: object, server_module: object) -> dict:

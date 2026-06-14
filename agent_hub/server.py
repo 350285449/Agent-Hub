@@ -42,6 +42,7 @@ from .models import HubRequest, HubResponse
 from .observability import permission_snapshot, recent_events, record_event, usage_snapshot
 from .permissions import UNTRUSTED_EXTERNAL, mark_trusted_approval
 from .runtime_kernel import AgentHubRuntimeKernel
+from .security.credentials import ensure_local_credentials
 from .security.secrets import redact_secrets
 from .streaming import safe_stream_failure_chunk
 from .core.router import NO_TOOL_CAPABLE_MODEL, AgentRouter, RouterError
@@ -252,6 +253,8 @@ class AgentHubHTTPServer(ThreadingHTTPServer):
         self._diagnostics_cache_hits = 0
         self._diagnostics_cache_misses = 0
         self._diagnostics_cache_invalidations = 0
+        self._rate_limit_lock = threading.RLock()
+        self._rate_limit_windows: dict[str, tuple[float, int]] = {}
 
     def diagnostics_cache_get(
         self,
@@ -326,6 +329,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self._begin_kernel_request()
         try:
+            if self._reject_rate_limited_request():
+                return
             if self._reject_unauthenticated_public_request():
                 return
             path = _request_path(self.path)
@@ -341,6 +346,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self._begin_kernel_request()
         try:
+            if self._reject_rate_limited_request():
+                return
             self.send_response(204)
             self._send_common_headers()
             self.send_header(
@@ -367,6 +374,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._begin_kernel_request()
         try:
+            if self._reject_rate_limited_request(drain_body=True):
+                return
             if self._reject_unauthenticated_public_request(drain_body=True):
                 return
             try:
@@ -389,6 +398,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         self._begin_kernel_request()
         try:
+            if self._reject_rate_limited_request():
+                return
             if self._reject_unauthenticated_public_request():
                 return
             path = _request_path(self.path)
@@ -441,6 +452,39 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             self._discard_request_body()
         body, status = auth_error
         self._send_json(body, status=status)
+        return True
+
+    def _reject_rate_limited_request(self, *, drain_body: bool = False) -> bool:
+        config = self.server.config
+        if not _public_bind_host(str(config.host or "")) and getattr(config, "local_rate_limit_unlimited", True):
+            return False
+        limit = int(getattr(config, "rate_limit_requests_per_minute", 100) or 100)
+        if limit <= 0:
+            return False
+        client = str(self.client_address[0] if self.client_address else "unknown")
+        now = time.monotonic()
+        with self.server._rate_limit_lock:
+            start, count = self.server._rate_limit_windows.get(client, (now, 0))
+            if now - start >= 60:
+                start, count = now, 0
+            count += 1
+            self.server._rate_limit_windows[client] = (start, count)
+            limited = count > limit
+        if not limited:
+            return False
+        if drain_body:
+            self._discard_request_body()
+        retry_after = max(1, int(60 - (now - start)))
+        self._send_json(
+            {
+                "error": {
+                    "type": "rate_limit_exceeded",
+                    "message": "Agent Hub rate limit exceeded. Try again shortly.",
+                }
+            },
+            status=429,
+            headers={"Retry-After": str(retry_after)},
+        )
         return True
 
     def _discard_request_body(self) -> None:
@@ -1068,7 +1112,10 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             return False
 
     def _send_common_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self._allowed_cors_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header(
             "Access-Control-Expose-Headers",
@@ -1086,6 +1133,14 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 "X-Agent-Hub-Cache"
             ),
         )
+
+    def _allowed_cors_origin(self) -> str:
+        origin = self.headers.get("Origin")
+        allowed = _allowed_cors_origins(self.server.config)
+        if isinstance(origin, str) and origin.strip():
+            origin = origin.strip()
+            return origin if origin in allowed else ""
+        return f"http://{self.server.config.host}:{self.server.config.port}"
 
     def _root_html(self) -> str:
         config = self.server.config
@@ -1273,6 +1328,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 "Operate",
                 [
                     ("Runtime Kernel", "/dashboard/kernel", "Subsystem health, request telemetry, cache flow"),
+                    ("System Health", "/dashboard/system-health", "Safe component status and support bundle"),
                     ("Status", "/dashboard/status", "Backend, providers, and next dashboard links"),
                     ("Readiness", "/dashboard/readiness", "Setup scorecard and next action"),
                     ("Feature Scorecard", "/dashboard/feature-scorecard", "10/10 area proof and remaining blockers"),
@@ -2576,8 +2632,21 @@ def _cline_permission_guidance_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _allowed_cors_origins(config: HubConfig) -> set[str]:
+    origins = {
+        f"http://localhost:{config.port}",
+        f"http://127.0.0.1:{config.port}",
+    }
+    for origin in getattr(config, "cors_allowed_origins", []) or []:
+        text = str(origin or "").strip().rstrip("/")
+        if text:
+            origins.add(text)
+    return origins
+
+
 def serve(config: HubConfig) -> None:
     config.ensure_dirs()
+    credentials = ensure_local_credentials(config)
     if _public_bind_host(str(config.host or "")) and not _api_token(config):
         raise SystemExit(
             "Agent Hub refuses to bind publicly without API authentication. "
@@ -2593,12 +2662,17 @@ def serve(config: HubConfig) -> None:
             "change the agentHub.serverUrl/port setting, or run agent-hub serve --port <free-port>."
         ) from exc
     build = build_metadata()
+    print("Agent Hub started")
     print(
         "Agent Hub "
         f"{BACKEND_VERSION} ({build.get('commit', 'unknown')}"
         f"{', dirty' if build.get('dirty') else ''}) "
         f"listening on http://{config.host}:{config.port}"
     )
+    if credentials.get("created"):
+        print("Authentication configured automatically.")
+    print("Dashboard:")
+    print(f"http://{config.host}:{config.port}")
     print(f"Runtime config hash: {config_runtime_hash(config)}")
     print(f"JSON inbox: {config.inbox_dir}")
     try:

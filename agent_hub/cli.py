@@ -74,6 +74,7 @@ from .commands_server import (
     _wants_agent_mode,
 )
 from .output import _print_route_error, _print_table, _shell_permission_prompt
+from .server_routes.middleware import public_bind_host
 
 
 def _doctor_report(config: Any, config_path: str) -> dict[str, Any]:
@@ -298,6 +299,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Also process JSON files from the configured inbox directory.",
     )
+    start_parser = subparsers.add_parser("start", help="Start Agent Hub with secure local defaults.")
+    start_parser.add_argument("--host", help="Override configured host.")
+    start_parser.add_argument("--port", type=int, help="Override configured port.")
+    start_parser.add_argument(
+        "--watch-inbox",
+        action="store_true",
+        help="Also process JSON files from the configured inbox directory.",
+    )
 
     watch_parser = subparsers.add_parser("watch", help="Process JSON files forever.")
     watch_parser.add_argument("--interval", type=float, default=1.0)
@@ -510,6 +519,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     debug_bundle_parser = subparsers.add_parser("debug-bundle", help="Export a zipped debug bundle.")
     debug_bundle_parser.add_argument("--output", help="Output zip path.")
+    support_bundle_parser = subparsers.add_parser(
+        "support-bundle",
+        help="Generate a redacted support bundle zip.",
+    )
+    support_bundle_parser.add_argument("--output", help="Output zip path.")
 
     chat_parser = subparsers.add_parser("chat", help="Open an interactive Codex-style workspace chat.")
     chat_parser.add_argument("--route", default="cloud-agent", help="Route to use for chat turns.")
@@ -698,7 +712,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if command == "export-logs":
         return _export_logs(config, output_format=args.format, output_path=args.output, config_path=args.config)
-    if command == "debug-bundle":
+    if command in {"debug-bundle", "support-bundle"}:
         return _export_logs(config, output_format="zip", output_path=args.output, config_path=args.config)
     if command == "local-models":
         report = _local_models_report(config)
@@ -735,7 +749,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_tokens=args.output_tokens,
             as_json=args.json,
         )
-    if command == "serve":
+    if command in {"serve", "start"}:
+        if public_bind_host(str(config.host or "")) and not _confirm_public_bind_host(config.host):
+            print("Agent Hub start cancelled.")
+            return 1
         if getattr(args, "watch_inbox", False):
             processor = InboxProcessor(config)
             thread = threading.Thread(target=processor.watch, daemon=True)
@@ -951,6 +968,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     parser.error(f"Unknown command {command!r}")
     return 2
+
+
+def _confirm_public_bind_host(host: str) -> bool:
+    import os
+    import sys
+
+    if os.environ.get("AGENT_HUB_ASSUME_YES", "").strip().lower() in {"1", "true", "yes", "y"}:
+        return True
+    print("You're exposing Agent Hub to your network.")
+    print()
+    if not sys.stdin.isatty():
+        print("Run from an interactive terminal or set AGENT_HUB_ASSUME_YES=1 to continue.")
+        return False
+    answer = input("Continue? [Y/n] ").strip().lower()
+    return answer in {"", "y", "yes"}
 
 
 if __name__ == "__main__":
