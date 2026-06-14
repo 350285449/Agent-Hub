@@ -194,6 +194,8 @@ class RoutingMemoryTests(unittest.TestCase):
             self.assertGreaterEqual(stats["total_records"], 1)
             self.assertEqual(stats["summary"]["data_state"], "measured_ready")
             self.assertIn("feedback", stats["summary"]["signals_tracked"])
+            self.assertIn("self_adjusting", stats)
+            self.assertGreaterEqual(stats["self_adjusting"]["profile_count"], 1)
             self.assertEqual(recent["object"], "agent_hub.routing_memory.recent")
             self.assertTrue(decision["found"])
             self.assertEqual(reset["object"], "agent_hub.routing_memory.reset")

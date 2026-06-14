@@ -340,6 +340,7 @@ class RoutingMemoryStore:
             "fallback_frequency": _fallback_frequency(rows),
             "cost_performance_winner": _cost_performance_winner(rows),
             "routing_memory_influence_per_request": _memory_influence(rows[-25:]),
+            "self_adjusting": _self_adjusting_memory_summary(rows),
         }
 
     def reset(self) -> dict[str, Any]:
@@ -604,6 +605,17 @@ def _most_successful_models(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "attempts": attempts,
                 "success_rate": round(success_rate, 4),
                 "average_outcome_score": round(row["score_total"] / attempts, 4),
+                "retry_frequency": round(row["retry_total"] / max(1, attempts), 4),
+                "average_cost_usd": round(row["cost_total"] / max(1, row["cost_count"]), 8)
+                if row["cost_count"]
+                else None,
+                "cost_performance_score": round(
+                    (row["score_total"] / attempts)
+                    / max(0.000001, (row["cost_total"] / row["cost_count"]) + 0.000001),
+                    4,
+                )
+                if row["cost_count"]
+                else None,
             }
         )
     return sorted(
@@ -732,6 +744,71 @@ def _memory_influence(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result[-25:]
 
 
+def _self_adjusting_memory_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    segments: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        agent = str(row.get("agent") or "")
+        language = str(row.get("language") or "unknown")
+        framework = str(row.get("framework") or "unknown")
+        if not agent:
+            continue
+        key = "|".join((agent, language, framework))
+        target = segments.setdefault(
+            key,
+            {
+                "agent": agent,
+                "language": language,
+                "framework": framework,
+                "attempts": 0,
+                "successes": 0,
+                "token_total": 0,
+                "retry_total": 0,
+                "score_total": 0.0,
+            },
+        )
+        target["attempts"] += 1
+        target["successes"] += int(row.get("success") is True)
+        target["token_total"] += int(row.get("input_tokens") or 0) + int(row.get("output_tokens") or 0)
+        target["retry_total"] += int(row.get("retry_count") or row.get("fallback_count") or 0)
+        target["score_total"] += _safe_float(row.get("outcome_score"), 0.0)
+    profiles = []
+    for segment in segments.values():
+        attempts = int(segment["attempts"])
+        if attempts <= 0:
+            continue
+        success_rate = segment["successes"] / attempts
+        avg_retries = segment["retry_total"] / attempts
+        avg_tokens = segment["token_total"] / attempts
+        confidence = min(1.0, attempts / 10.0)
+        adjustment = ((success_rate - 0.68) * 18.0 - min(5.0, avg_retries * 3.0) - min(3.0, avg_tokens / 40000.0)) * confidence
+        profiles.append(
+            {
+                "agent": segment["agent"],
+                "segment": f"{segment['language']}/{segment['framework']}",
+                "attempts": attempts,
+                "success_rate": round(success_rate, 4),
+                "average_tokens": round(avg_tokens, 2),
+                "average_retries": round(avg_retries, 2),
+                "average_outcome_score": round(segment["score_total"] / attempts, 4),
+                "suggested_adjustment": round(_clamp(adjustment, -10.0, 10.0), 4),
+                "active": attempts >= 2 and abs(adjustment) >= 0.2,
+            }
+        )
+    profiles.sort(
+        key=lambda item: (
+            -int(item["attempts"]),
+            -abs(float(item["suggested_adjustment"])),
+            str(item["agent"]),
+        )
+    )
+    return {
+        "active_profiles": sum(1 for item in profiles if item["active"]),
+        "profile_count": len(profiles),
+        "minimum_samples": 2,
+        "profiles": profiles[:25],
+    }
+
+
 def _group_model_task(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -754,6 +831,7 @@ def _group_model_task(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
                 "score_total": 0.0,
                 "cost_total": 0.0,
                 "cost_count": 0,
+                "retry_total": 0,
             },
         )
         target["attempts"] += 1
@@ -761,6 +839,7 @@ def _group_model_task(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         target["failures"] += int(row.get("success") is not True)
         target["timeouts"] += int(row.get("timeout") is True)
         target["score_total"] += _safe_float(row.get("outcome_score"), 0.0)
+        target["retry_total"] += int(row.get("retry_count") or row.get("fallback_count") or 0)
         cost = row.get("estimated_cost_usd")
         if cost is not None:
             target["cost_total"] += _safe_float(cost, 0.0)

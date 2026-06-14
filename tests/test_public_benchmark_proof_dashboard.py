@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from agent_hub.application.diagnostics_service import DiagnosticsApplicationService
+from agent_hub.benchmarks.report_builder import build_public_150_reference_report
 from agent_hub.benchmarks.task_suite import public_150_suite
 from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.core.router import AgentRouter
@@ -23,6 +24,17 @@ class PublicBenchmarkProofDashboardTests(unittest.TestCase):
         self.assertEqual(counts["bug_fix"], 50)
         self.assertEqual(counts["refactor"], 50)
         self.assertEqual(counts["feature_request"], 50)
+
+    def test_public_reference_report_publishes_required_counts(self) -> None:
+        report = build_public_150_reference_report()
+
+        self.assertEqual(report["object"], "agent_hub.public_benchmark_results")
+        self.assertEqual(report["task_count"], 150)
+        self.assertEqual(
+            report["category_counts"],
+            {"bug_fix": 50, "refactor": 50, "feature_request": 50},
+        )
+        self.assertGreater(report["savings"], 0)
 
     def test_context_intelligence_is_in_routing_scorecards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -43,6 +55,14 @@ class PublicBenchmarkProofDashboardTests(unittest.TestCase):
             )
 
         self.assertTrue(decision.routing_context["context_intelligence"]["active"])
+        stages = {
+            row["stage"]
+            for row in decision.routing_context["context_intelligence"]["routing_stages"]
+        }
+        self.assertEqual(
+            stages,
+            {"classification", "context_ranking", "context_packing", "candidate_scoring", "explainability"},
+        )
         self.assertIn("context_intelligence", decision.candidate_scores[0])
         self.assertIn("context_intelligence_adjustment", decision.candidate_scores[0])
 
@@ -75,6 +95,7 @@ class PublicBenchmarkProofDashboardTests(unittest.TestCase):
         self.assertIn("Cost Saved", labels)
         self.assertIn("Success Rate", labels)
         self.assertIn("Retry Reduction", labels)
+        self.assertIn("repository_proof", body)
         self.assertIn("model_performance", body)
         self.assertEqual(body["repository"]["name"], root.name)
 

@@ -21,7 +21,7 @@ def visual_proof_dashboard_body(
     fallback = routing_memory.get("fallback_frequency") if isinstance(routing_memory.get("fallback_frequency"), dict) else {}
     cards = [
         _card("Tokens Saved", _percent(comparison.get("token_reduction")), "tokens_saved"),
-        _card("Cost Saved", _money(outcomes.get("cost_saved_usd")), "cost_saved"),
+        _card("Cost Saved", _money(_cost_saved(outcomes, comparison)), "cost_saved"),
         _card("Requests Optimized", usage.get("request_count") or summary.get("total_result_count") or 0, "requests_optimized"),
         _card("Models Avoided", outcomes.get("models_avoided") or _models_avoided(benchmarks), "models_avoided"),
         _card("Failures Prevented", fallback.get("fallbacks") or outcomes.get("failures_prevented") or 0, "failures_prevented"),
@@ -32,6 +32,7 @@ def visual_proof_dashboard_body(
         "object": "agent_hub.visual_proof_dashboard",
         "repository": repository,
         "cards": cards,
+        "repository_proof": _repository_proof(repository, usage, benchmarks, routing_memory, comparison, outcomes),
         "model_performance": _model_performance(routing_memory),
         "trend_graphs": _trend_graphs(benchmarks),
         "summary": {card["id"]: card["value"] for card in cards},
@@ -91,10 +92,72 @@ def _model_performance(routing_memory: dict[str, Any]) -> list[dict[str, Any]]:
             "attempts": row.get("attempts"),
             "success_rate": _percent_value(row.get("success_rate")),
             "average_outcome_score": row.get("average_outcome_score"),
+            "retry_frequency": _percent_value(row.get("retry_frequency")),
+            "cost_performance_score": row.get("cost_performance_score"),
         }
         for row in rows[:25]
         if isinstance(row, dict)
     ]
+
+
+def _repository_proof(
+    repository: dict[str, Any],
+    usage: dict[str, Any],
+    benchmarks: dict[str, Any],
+    routing_memory: dict[str, Any],
+    comparison: dict[str, Any],
+    outcomes: dict[str, Any],
+) -> dict[str, Any]:
+    fallback = routing_memory.get("fallback_frequency") if isinstance(routing_memory.get("fallback_frequency"), dict) else {}
+    memory = routing_memory.get("summary") if isinstance(routing_memory.get("summary"), dict) else {}
+    return {
+        "repository": {
+            "name": repository.get("name"),
+            "path": repository.get("path"),
+        },
+        "tokens_saved": {
+            "value": comparison.get("token_reduction"),
+            "display": _percent(comparison.get("token_reduction")),
+            "basis": comparison.get("token_savings_basis") or outcomes.get("token_savings_basis") or "benchmark_or_usage_reports",
+        },
+        "cost_saved": {
+            "value": _cost_saved(outcomes, comparison),
+            "display": _money(_cost_saved(outcomes, comparison)),
+            "basis": "known provider costs when available; benchmark comparison otherwise",
+        },
+        "success_rate": {
+            "value": outcomes.get("success_rate"),
+            "display": _percent_value(outcomes.get("success_rate")),
+        },
+        "retry_reduction": {
+            "value": outcomes.get("retry_reduction") or _retry_reduction(routing_memory),
+            "display": _percent_value(outcomes.get("retry_reduction") or _retry_reduction(routing_memory)),
+        },
+        "model_performance_rows": len(_model_performance(routing_memory)),
+        "routing_memory_records": memory.get("total_records") or routing_memory.get("total_records") or 0,
+        "fallbacks": fallback.get("fallbacks") or 0,
+        "requests": usage.get("request_count") or fallback.get("requests") or 0,
+        "benchmark_reports": (benchmarks.get("summary") or {}).get("report_count")
+        if isinstance(benchmarks.get("summary"), dict)
+        else None,
+    }
+
+
+def _cost_saved(outcomes: dict[str, Any], comparison: dict[str, Any]) -> float | None:
+    value = outcomes.get("cost_saved_usd")
+    try:
+        if value is not None:
+            return float(value)
+    except (TypeError, ValueError):
+        pass
+    reduction = comparison.get("cost_reduction")
+    baseline = comparison.get("baseline_cost_usd") or outcomes.get("baseline_cost_usd")
+    try:
+        if reduction is not None and baseline is not None:
+            return max(0.0, float(baseline) * (float(reduction) / 100.0))
+    except (TypeError, ValueError):
+        pass
+    return None
 
 
 def _card(label: str, value: Any, key: str) -> dict[str, Any]:

@@ -4085,6 +4085,51 @@ class AgentRouter:
         packed = pack_context(items, token_budget=budget)
         signal = {
             "active": bool(packed),
+            "routing_stages": [
+                {
+                    "stage": "classification",
+                    "active": True,
+                    "signals": {
+                        "mentioned_paths": changed_files,
+                        "task_type": getattr(classification, "task_type", ""),
+                        "language": getattr(classification, "language", "unknown"),
+                        "framework": getattr(classification, "framework", "unknown"),
+                    },
+                },
+                {
+                    "stage": "context_ranking",
+                    "active": True,
+                    "signals": {
+                        "symbol_count": len(symbols),
+                        "dependency_count": len(dependencies),
+                        "error_path_count": len(errors),
+                    },
+                },
+                {
+                    "stage": "context_packing",
+                    "active": bool(packed),
+                    "signals": {
+                        "packed_items": len(packed),
+                        "packed_tokens": sum(int(item.get("tokens") or 0) for item in packed),
+                        "budget_tokens": budget,
+                    },
+                },
+                {
+                    "stage": "candidate_scoring",
+                    "active": bool(packed),
+                    "signals": {
+                        "adjustment_policy": "context fit, tool capability, ranked symbols, dependencies, and error paths",
+                    },
+                },
+                {
+                    "stage": "explainability",
+                    "active": bool(packed),
+                    "signals": {
+                        "scorecard_field": "candidate_scores[].context_intelligence",
+                        "adjustment_field": "candidate_scores[].context_intelligence_adjustment",
+                    },
+                },
+            ],
             "symbols": symbols,
             "dependencies": dependencies,
             "error_paths": errors,
