@@ -50,6 +50,7 @@ from ...repository_intelligence import (
     build_failure_prediction,
     repository_routing_signal,
 )
+from ...research.telemetry import record_research_outcome, record_research_route_start
 from ...routing_memory import RoutingMemoryStore, outcome_score, self_adjusting_signal
 from ...security.provider_permissions import ProviderPermissionPolicy
 from ...session_store import SessionStore
@@ -4261,6 +4262,14 @@ class AgentRouter:
 
     def _record_route_event(self, event_type: str, *, request_id: str, request: HubRequest, **data: Any) -> None:
         self.event_recorder.route(event_type, request_id=request_id, request=request, **data)
+        if event_type in {"request_started", "stream_request_started"}:
+            record_research_route_start(
+                self.config.state_dir,
+                request_id=request_id,
+                request=request,
+                routing_decision=data.get("routing_decision") if isinstance(data.get("routing_decision"), dict) else {},
+                candidates=data.get("candidates") if isinstance(data.get("candidates"), list) else [],
+            )
 
     def _record_internal_event(
         self,
@@ -4360,6 +4369,29 @@ class AgentRouter:
             ),
             routing_mode=routing_mode or "",
             final=True,
+        )
+        record_research_outcome(
+            self.config.state_dir,
+            request_id=request_id,
+            request=request,
+            agent=agent,
+            model=result.model or agent.model,
+            success=True,
+            latency_seconds=latency_seconds,
+            failover_attempts=failover_attempts,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+            estimated_cost_usd=estimate_known_cost_usd(
+                agent,
+                input_tokens=tokens_in,
+                output_tokens=tokens_out,
+            ),
+            task_type=(
+                decision.task_type
+                if decision is not None and decision.task_type
+                else self._classify_task(request)
+            ),
+            validation_score=1.0,
         )
         if request_id is not None:
             self._record_usage_ledger_outcome(
@@ -4527,6 +4559,25 @@ class AgentRouter:
             error_type=normalized_error_type,
             routing_mode=routing_mode or "",
             final=False,
+        )
+        record_research_outcome(
+            self.config.state_dir,
+            request_id=request_id,
+            request=request,
+            agent=agent,
+            model=agent.model,
+            success=False,
+            latency_seconds=None,
+            failover_attempts=failover_attempts,
+            input_tokens=last_input_tokens,
+            output_tokens=0,
+            estimated_cost_usd=estimate_known_cost_usd(
+                agent,
+                input_tokens=last_input_tokens,
+                output_tokens=0,
+            ),
+            task_type=self._classify_task(request) if request is not None else "",
+            validation_score=0.0,
         )
 
     def record_tool_result(self, agent_name: str, ok: bool) -> None:

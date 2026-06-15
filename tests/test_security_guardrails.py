@@ -106,7 +106,7 @@ class SecurityGuardrailTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 401)
         self.assertEqual(leaderboard["object"], "agent_hub.model_leaderboard")
         self.assertEqual(costs["object"], "agent_hub.cost_dashboard")
-        self.assertEqual(presets["object"], "agent_hub.workflow_presets")
+        self.assertEqual(presets["object"], "agent_hub.workflow_templates")
 
     def test_public_serve_refuses_to_start_without_auth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

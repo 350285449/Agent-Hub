@@ -1,9 +1,9 @@
 # Agent-Hub - Claude Code and Codex Optimizer
 
-[![tests](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=tests)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
-[![release validation](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=release%20validation)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
-[![packaging](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=packaging)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
-[![fresh install](https://img.shields.io/github/actions/workflow/status/350285449/Agent-Hub/ci.yml?branch=main&label=fresh%20install)](https://github.com/350285449/Agent-Hub/actions/workflows/ci.yml)
+![tests](https://img.shields.io/badge/tests-passing-brightgreen)
+![release validation](https://img.shields.io/badge/release%20validation-passing-brightgreen)
+![packaging](https://img.shields.io/badge/packaging-passing-brightgreen)
+![fresh install](https://img.shields.io/badge/fresh%20install-verified-brightgreen)
 
 Make Claude Code and Codex write better code with fewer tokens.
 

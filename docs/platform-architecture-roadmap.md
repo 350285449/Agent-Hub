@@ -398,8 +398,13 @@ The first high-ROI slice is wired into the local platform contract:
   templates and routing profiles. Trusted memory-context plugins contribute
   read-only searchable memory records.
 - Memory economy slice: `MemoryService` now includes a deterministic semantic
-  compression interface that can compact stored memory without network calls
-  while preserving high-signal markers and compression metadata.
+  retrieval and tiered local state foundation plus a compression interface that
+  can compact stored memory without network calls while preserving high-signal
+  markers and compression metadata.
+- Research engine slice: `agent_hub.research` records route telemetry to
+  `.agent-hub/research/runs.jsonl`, computes Pareto frontiers, Bayesian success
+  estimates, context information density, context ablations, epsilon-greedy
+  bandit rewards, and Markdown/CSV research reports.
 - Universal routing profile slice: `/v1/routing-profiles` exposes built-in
   coding, research, private, cheapest, fastest, and enterprise profiles plus
   local profile CRUD; requests can select `agent_hub.routing_profile`, routing
