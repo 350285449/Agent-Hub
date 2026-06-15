@@ -390,10 +390,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     proof_parser.add_argument("action", nargs="?", default="run", choices=["run", "generate", "share"])
     proof_parser.add_argument("--coding", action="store_true", help="Run the coding proof lane.")
+    proof_parser.add_argument("--full", action="store_true", help="Run the full release proof lane.")
     proof_parser.add_argument("--route", default="cloud-agent", help="Route to benchmark.")
     proof_parser.add_argument("--baseline", default="", help="Baseline agent/model. Defaults to configured baseline.")
     proof_parser.add_argument("--limit", type=int, default=0, help="Maximum proof benchmark tasks.")
-    proof_parser.add_argument("--dataset", default="", help="Benchmark dataset. Defaults to coding-100 for --coding.")
+    proof_parser.add_argument(
+        "--dataset",
+        default="",
+        help="Benchmark dataset. Defaults to coding-100 for --coding and proof-full for --full.",
+    )
     proof_parser.add_argument("--corpus", default="", help="Benchmark corpus directory.")
     proof_parser.add_argument("--output-dir", default="", help="Directory for benchmark-report files.")
     proof_parser.add_argument("--export", default="", help="One-click JSON export path.")
@@ -916,7 +921,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 open_links=not args.no_open,
                 as_json=args.json,
             )
-        dataset = args.dataset or ("coding-100" if args.coding else "")
+        dataset = args.dataset or ("proof-full" if args.full else "coding-100" if args.coding else "")
         return _benchmark_run(
             config,
             route=args.route,

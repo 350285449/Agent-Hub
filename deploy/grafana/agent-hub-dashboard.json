@@ -1,0 +1,15 @@
+{
+  "title": "Agent-Hub Operations",
+  "tags": ["agent-hub", "providers", "routing"],
+  "timezone": "browser",
+  "panels": [
+    {"title": "Provider Health", "type": "stat", "targets": [{"expr": "agent_hub_provider_available"}]},
+    {"title": "Cost And Tokens", "type": "timeseries", "targets": [{"expr": "agent_hub_tokens_total"}]},
+    {"title": "Latency", "type": "timeseries", "targets": [{"expr": "agent_hub_latency_ms"}]},
+    {"title": "Failures", "type": "timeseries", "targets": [{"expr": "agent_hub_failures_total"}]},
+    {"title": "Agent Success", "type": "stat", "targets": [{"expr": "agent_hub_agent_success_total"}]},
+    {"title": "Token Savings", "type": "stat", "targets": [{"expr": "agent_hub_token_savings_total"}]}
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}

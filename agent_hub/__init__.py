@@ -20,6 +20,7 @@ from .config import (
     load_config,          # Load configuration from file/sources
     normalize_provider,   # Normalize provider names
 )
+from .hub import AgentHub
 from .models import HubRequest, HubResponse, ProviderResult  # Data models for hub communication
 from .reasoning import ExecutionNode, ExecutionPlan, WorkspaceReasoningState
 from .core.router import AgentRouter  # Routes requests to appropriate agents
@@ -28,6 +29,7 @@ from .version import backend_version
 
 __all__ = [
     "AgentConfig",
+    "AgentHub",
     "AgentRunner",
     "AgentRouter",
     "TeamAgentRunner",

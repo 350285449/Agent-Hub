@@ -369,6 +369,19 @@ The first high-ROI slice is wired into the local platform contract:
 - Observability/security foundation: routing and permission events include
   stable trace fields, `PolicyService` centralizes new policy integrations, and
   `docs/threat-model.md` defines the platform trust boundaries.
+- Developer platform foundation: `AgentHub.load()` provides library mode,
+  `agent_hub.sdk.AgentHubClient` and `sdk/typescript/src/index.ts` provide
+  generated-style client contracts, and `/openapi.json` advertises the SDK
+  entry points.
+- Memory/context foundation: `agent_hub.memory.MemoryService` defines request,
+  session, workspace, and long-term tiers with searchable local persistence and
+  a session-store bridge.
+- 10/10 phase contracts: architecture guardrail reporting, VS Code typed
+  client/state/command modules, `proof run --full`, orchestration roles and
+  primitives, plugin lifecycle management, sandbox backend inventory,
+  OpenTelemetry/Prometheus/Grafana/Jaeger export contracts, Grafana dashboard
+  scaffolding, and security boundary/provider data policy docs now have
+  implementation anchors and tests.
 
 This sequence maximizes real-world usefulness and adoption while reducing the
 maintenance risks that would otherwise come from adding more features directly

@@ -41,6 +41,11 @@ def openapi_spec() -> dict[str, Any]:
             "/v1/extension-contract": _get_path("Backend feature contract consumed by the VS Code extension."),
             "/openapi.json": _get_path("OpenAPI 3.1 document for the Agent-Hub local API."),
         },
+        "x-agent-hub-sdk": {
+            "python": "agent_hub.sdk.AgentHubClient",
+            "typescript": "sdk/typescript/src/index.ts",
+            "library_mode": "from agent_hub import AgentHub",
+        },
         "components": {
             "securitySchemes": {
                 "AgentHubToken": {
