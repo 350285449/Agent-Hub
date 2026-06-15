@@ -34,6 +34,17 @@ Local plugin directories:
 Manifest filenames can be `agent-hub-plugin.json`, `plugin.json`, or
 `.agent-hub-plugin.json`.
 
+Install a local plugin directory into the workspace plugin store:
+
+```sh
+agent-hub install ./my-plugin --enable --trust --scope tool.register
+```
+
+The command validates the manifest with the same loader used by runtime
+discovery, copies the plugin into `.agent-hub/plugins/<plugin-id>`, enables
+plugin discovery in config, and only adds trust or capability grants when the
+corresponding flags are supplied. Manual `plugin_dirs` entries continue to work.
+
 Example:
 
 ```json

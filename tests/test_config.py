@@ -236,6 +236,50 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(data["agent_context_compaction_enabled"])
         self.assertFalse(data["prefer_multi_file_patches"])
 
+    def test_provider_data_policy_round_trips(self) -> None:
+        config = config_from_dict(
+            {
+                "provider_data_policy": {"blocked_categories": ["secrets"]},
+                "token_pooling_enabled": True,
+                "token_pooling_pools": [
+                    {
+                        "id": "owned-openai",
+                        "provider": "openai",
+                        "remaining_tokens": 1000,
+                        "user_owned_quota": True,
+                        "terms_confirmed": True,
+                    }
+                ],
+                "agents": [
+                    {
+                        "name": "cloud",
+                        "provider": "openai",
+                        "model": "gpt-test",
+                        "provider_data_policy": {
+                            "require_approval_categories": ["workspace_context"]
+                        },
+                    }
+                ],
+            }
+        )
+
+        data = config_to_dict(config)
+
+        self.assertEqual(config.provider_data_policy["blocked_categories"], ["secrets"])
+        self.assertTrue(config.token_pooling_enabled)
+        self.assertEqual(config.token_pooling_pools[0]["id"], "owned-openai")
+        self.assertEqual(
+            config.agents["cloud"].provider_data_policy["require_approval_categories"],
+            ["workspace_context"],
+        )
+        self.assertEqual(data["provider_data_policy"]["blocked_categories"], ["secrets"])
+        self.assertTrue(data["token_pooling_enabled"])
+        self.assertEqual(data["token_pooling_pools"][0]["provider"], "openai")
+        self.assertEqual(
+            data["agents"][0]["provider_data_policy"]["require_approval_categories"],
+            ["workspace_context"],
+        )
+
     def test_boost_mode_defaults_context_mode_when_omitted(self) -> None:
         save_tokens = config_from_dict({"boost_mode": "save_tokens", "agents": []})
         best_code = config_from_dict({"boost_mode": "best_code", "agents": []})
@@ -554,6 +598,11 @@ class ConfigTests(unittest.TestCase):
             {
                 "port": 999999,
                 "agent_max_steps": 999,
+                "analytics_retention_days": 999999,
+                "adaptive_retention_days": 999999,
+                "session_retention_days": 999999,
+                "analytics_max_events_per_stream": 999999999,
+                "session_max_records": 999999999,
                 "routing_memory_retention_days": 999999,
                 "validation_repair_attempts": 999,
                 "workspace_checkpoint_retention": 999,
@@ -563,6 +612,11 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.port, 65535)
         self.assertEqual(config.agent_max_steps, 50)
+        self.assertEqual(config.analytics_retention_days, 3650)
+        self.assertEqual(config.adaptive_retention_days, 3650)
+        self.assertEqual(config.session_retention_days, 3650)
+        self.assertEqual(config.analytics_max_events_per_stream, 1_000_000)
+        self.assertEqual(config.session_max_records, 100_000)
         self.assertEqual(config.routing_memory_retention_days, 3650)
         self.assertEqual(config.validation_repair_attempts, 50)
         self.assertEqual(config.workspace_checkpoint_retention, 100)
@@ -571,6 +625,11 @@ class ConfigTests(unittest.TestCase):
             {
                 "port": -1,
                 "agent_max_steps": -1,
+                "analytics_retention_days": -1,
+                "adaptive_retention_days": -1,
+                "session_retention_days": -1,
+                "analytics_max_events_per_stream": -1,
+                "session_max_records": -1,
                 "routing_memory_retention_days": -1,
                 "validation_repair_attempts": -1,
                 "workspace_checkpoint_retention": -1,
@@ -579,6 +638,11 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(minimums.port, 1)
         self.assertEqual(minimums.agent_max_steps, 1)
+        self.assertEqual(minimums.analytics_retention_days, 0)
+        self.assertEqual(minimums.adaptive_retention_days, 0)
+        self.assertEqual(minimums.session_retention_days, 0)
+        self.assertEqual(minimums.analytics_max_events_per_stream, 100)
+        self.assertEqual(minimums.session_max_records, 1)
         self.assertEqual(minimums.routing_memory_retention_days, 1)
         self.assertEqual(minimums.validation_repair_attempts, 0)
         self.assertEqual(minimums.workspace_checkpoint_retention, 0)

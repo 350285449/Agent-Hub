@@ -382,6 +382,65 @@ The first high-ROI slice is wired into the local platform contract:
   OpenTelemetry/Prometheus/Grafana/Jaeger export contracts, Grafana dashboard
   scaffolding, and security boundary/provider data policy docs now have
   implementation anchors and tests.
+- Platform API completion slice: `/v1/agents` provides runtime-local custom
+  agent CRUD, `/v1/workflow-templates` provides built-in plus local workflow
+  template CRUD with `/v1/workflow-presets` compatibility, and trusted
+  manifest-only provider plugins are projected into runtime `AgentConfig`
+  entries without executing plugin code. Trusted manifest-only tool plugins are
+  also projected into the runtime tool registry as policy-gated tool specs so
+  clients can discover them without granting code execution. Trusted workflow
+  and router-strategy plugin metadata is projected into read-only workflow
+  templates and routing profiles. Trusted memory-context plugins contribute
+  read-only searchable memory records.
+- Memory economy slice: `MemoryService` now includes a deterministic semantic
+  compression interface that can compact stored memory without network calls
+  while preserving high-signal markers and compression metadata.
+- Universal routing profile slice: `/v1/routing-profiles` exposes built-in
+  coding, research, private, cheapest, fastest, and enterprise profiles plus
+  local profile CRUD; requests can select `agent_hub.routing_profile`, routing
+  simulation reports the applied profile and fallback policy, and
+  `fallback_policy.max_provider_attempts` is enforced per request.
+- Analytics retention slice: startup now runs best-effort analytics maintenance
+  behind config knobs for observability JSONL streams, adaptive telemetry, and
+  session files; compaction preserves adaptive aggregates while trimming
+  dashboard/index data, records its report in `initialization_report`, and is
+  operable through `POST /v1/analytics/compact` plus SDK client helpers.
+- Plugin ecosystem install slice: `agent-hub install <plugin>` validates local
+  plugin manifests with the runtime loader, copies plugins into
+  `.agent-hub/plugins`, updates enable/trust/scope config only when requested,
+  and keeps manifest-only plus deny-by-default execution semantics intact.
+- Deployment examples slice: `deploy/docker-compose.providers.yml` adds
+  opt-in Compose profiles for Ollama and vLLM plus host LM Studio wiring, while
+  preserving the existing base `docker-compose.yml` and Dockerfile.
+- Token economy slice: `TokenBudgetLedger` records per-request/workflow stage
+  budgets to `token_budget_ledger.jsonl`, summarizes totals by stage/workflow,
+  and exposes the summary through `/v1/usage` alongside the provider usage
+  ledger.
+- Routing strategy slice: `agent_hub.routing_strategies` defines the public
+  `RoutingStrategy` protocol, read-only decision context, built-in strategy
+  descriptors, score-weight explanations, `/v1/routing-strategies`, and SDK
+  helpers; routing profiles now derive built-ins from those descriptors.
+- Bounded swarm slice: `agent_hub.orchestration.swarms` adds dry-run-only
+  `BoundedSwarmPlan` validation with role, stage, concurrency, token, and
+  validation-gate controls; `POST /v1/swarms/simulate` and SDK helpers expose
+  safe swarm planning without enabling autonomous fan-out execution.
+- Observability export slice: `/v1/observability/export`,
+  `/v1/observability/otlp`, and `/v1/observability/prometheus` expose the
+  OpenTelemetry/OTLP-style span and Prometheus-line contracts through
+  diagnostics-authenticated JSON endpoints, SDK helpers, and
+  `agent-hub observability-export`.
+- Provider isolation slice: provider permission policy now classifies outbound
+  data categories such as prompt, workspace context, repository files,
+  sensitive paths, secrets, prompt-injection findings, untrusted context, and
+  billable provider use; global, per-agent, and per-request
+  `provider_data_policy` rules can block or require approval for those
+  categories, with sanitized audit and policy-summary reporting.
+- Token pooling policy slice: `token_pooling_enabled` and
+  `token_pooling_pools` define an opt-in, dry-run-only user-owned quota pool
+  contract; `POST /v1/token-pools/simulate` recommends only pools marked
+  `user_owned_quota` and `terms_confirmed`, reports insufficient quota, and
+  explicitly avoids scraping, hidden account rotation, limit bypass, or runtime
+  execution changes.
 
 This sequence maximizes real-world usefulness and adoption while reducing the
 maintenance risks that would otherwise come from adding more features directly

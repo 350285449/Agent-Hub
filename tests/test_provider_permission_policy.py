@@ -100,6 +100,85 @@ class ProviderPermissionPolicyTests(unittest.TestCase):
             self.assertTrue(decision.denied)
             self.assertIn("Enterprise mode requires a user_id", decision.reason)
 
+    def test_global_provider_data_policy_blocks_workspace_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                approval_mode="auto",
+                free_only=False,
+                provider_data_policy={"blocked_categories": ["workspace_context"]},
+            )
+            agent = AgentConfig(
+                name="cloud",
+                provider="openai",
+                model="gpt-test",
+                api_key="secret",
+            )
+            request = HubRequest(
+                session_id="s",
+                messages=[{"role": "user", "content": "Current file: app.py\nprint('hi')"}],
+            )
+
+            decision = ProviderPermissionPolicy(config).check(agent, request)
+            permission_events = recent_events(config.state_dir, "permissions")
+
+            self.assertFalse(decision.allowed)
+            self.assertTrue(decision.denied)
+            self.assertIn("workspace_context", decision.reason)
+            self.assertIn("workspace_context", permission_events[-1]["data_categories"])
+
+    def test_agent_provider_data_policy_can_require_approval_for_sensitive_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                approval_mode="auto",
+                free_only=False,
+            )
+            agent = AgentConfig(
+                name="cloud",
+                provider="openai",
+                model="gpt-test",
+                api_key="secret",
+                provider_data_policy={"require_approval_categories": ["sensitive_paths"]},
+            )
+            request = HubRequest(
+                session_id="s",
+                messages=[{"role": "user", "content": "Current file: .env\nPLACEHOLDER=true"}],
+                raw={"agent_hub": {"security_context": {"sensitive_files": [".env"]}}},
+            )
+
+            decision = ProviderPermissionPolicy(config).check(agent, request)
+
+            self.assertFalse(decision.allowed)
+            self.assertTrue(decision.requires_approval)
+            security = decision.request.details["security"]
+            self.assertIn("sensitive_paths", security["reason"])
+
+    def test_request_provider_data_policy_allowlist_blocks_unapproved_categories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(
+                state_dir=Path(tmp) / "state",
+                approval_mode="auto",
+                free_only=False,
+            )
+            agent = AgentConfig(
+                name="cloud",
+                provider="openai",
+                model="gpt-test",
+                api_key="secret",
+            )
+            request = HubRequest(
+                session_id="s",
+                messages=[{"role": "user", "content": "hello"}],
+                raw={"agent_hub": {"provider_data_policy": {"allowed_categories": ["prompt"]}}},
+            )
+
+            decision = ProviderPermissionPolicy(config).check(agent, request)
+
+            self.assertFalse(decision.allowed)
+            self.assertTrue(decision.denied)
+            self.assertIn("billable_provider", decision.reason)
+
     def test_router_keeps_provider_permission_compatibility_delegate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = HubConfig(

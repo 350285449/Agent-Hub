@@ -8,7 +8,10 @@ from pathlib import Path
 from agent_hub.architecture import architecture_guardrail_report
 from agent_hub.observability_export import observability_integrations, prometheus_lines, to_otlp_span
 from agent_hub.orchestration import (
+    BoundedSwarmPlan,
     OrchestrationPlan,
+    SwarmStage,
+    bounded_swarm_plan_from_payload,
     default_agent_roles,
     default_orchestration_primitives,
 )
@@ -47,6 +50,16 @@ class TenTenPhaseContractTests(unittest.TestCase):
         self.assertFalse(plan.validate())
         self.assertTrue(plan.to_dict()["valid"])
 
+        swarm = bounded_swarm_plan_from_payload({"goal": "ship feature", "max_concurrency": 2})
+        self.assertTrue(swarm.to_dict()["valid"])
+        unsafe = BoundedSwarmPlan(
+            "bad",
+            [SwarmStage("vote", "vote", ["planner"], max_parallel=3)],
+            max_concurrency=2,
+        )
+        self.assertIn("vote:max_parallel_exceeds_plan_concurrency", unsafe.validate())
+        self.assertIn("vote:validation_gate_required", unsafe.validate())
+
     def test_plugin_lifecycle_and_sandbox_backends_cover_phase_eight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "source"
@@ -78,6 +91,20 @@ class TenTenPhaseContractTests(unittest.TestCase):
             self.assertTrue(remove.ok)
             self.assertEqual(PLUGIN_SANDBOX_BACKENDS, {"disabled", "local_process", "docker", "wasm"})
 
+    def test_plugin_lifecycle_rejects_invalid_manifest_on_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source"
+            source.mkdir()
+            (source / "plugin.json").write_text(
+                json.dumps({"id": "bad plugin", "type": "provider"}),
+                encoding="utf-8",
+            )
+
+            result = PluginLifecycleManager(Path(tmp) / "plugins").install(source)
+
+            self.assertFalse(result.ok)
+            self.assertIn("invalid_manifest", result.reason)
+
     def test_observability_export_contracts_cover_phase_ten(self) -> None:
         integrations = {item.id for item in observability_integrations()}
         span = to_otlp_span({"trace_id": "trace_a", "span_id": "span_b", "name": "router.route"})
@@ -93,6 +120,7 @@ class TenTenPhaseContractTests(unittest.TestCase):
             "docs/security-boundaries.md",
             "docs/plugin-sandbox.md",
             "docs/provider-data-policy.md",
+            "deploy/docker-compose.providers.yml",
             "deploy/grafana/agent-hub-dashboard.json",
             "vscode-extension/src/api/typedClient.js",
             "vscode-extension/src/state/stateManager.js",

@@ -51,6 +51,96 @@ class CliTests(unittest.TestCase):
             self.assertIn("custom-local", output)
             self.assertIn("allowed", output)
 
+    def test_install_plugin_command_copies_and_updates_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "agent-hub.config.json"
+            source = root / "plugin-source"
+            source.mkdir()
+            (source / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "tool.demo",
+                        "name": "Demo Tool",
+                        "type": "tool",
+                        "version": "0.1.0",
+                        "enabled_by_default": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer = io.StringIO()
+
+            with redirect_stdout(buffer):
+                code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "install",
+                        str(source),
+                        "--enable",
+                        "--trust",
+                        "--scope",
+                        "tool.register",
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            body = json.loads(buffer.getvalue())
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(body["ok"])
+            self.assertEqual(body["plugin_id"], "tool.demo")
+            self.assertTrue((root / ".agent-hub" / "plugins" / "tool.demo" / "plugin.json").exists())
+            self.assertIn("tool.demo", data["enabled_plugins"])
+            self.assertIn("tool.demo", data["trusted_plugins"])
+            self.assertEqual(data["plugin_capability_grants"]["tool.demo"], ["tool.register"])
+
+    def test_observability_export_command_prints_otlp_and_prometheus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "agent-hub.config.json"
+            _write_minimal_config(path)
+            record_event(
+                root / "state",
+                "routing",
+                {
+                    "type": "provider_selected",
+                    "request_id": "req-cli-observe",
+                    "trace_id": "trace-cli-observe",
+                    "span_id": "span-cli-observe",
+                },
+            )
+            otlp_buffer = io.StringIO()
+            prometheus_buffer = io.StringIO()
+
+            with redirect_stdout(otlp_buffer):
+                otlp_code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "observability-export",
+                        "--format",
+                        "otlp",
+                    ]
+                )
+            with redirect_stdout(prometheus_buffer):
+                prometheus_code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "observability-export",
+                        "--format",
+                        "prometheus",
+                    ]
+                )
+
+            otlp = json.loads(otlp_buffer.getvalue())
+            self.assertEqual(otlp_code, 0)
+            self.assertEqual(prometheus_code, 0)
+            self.assertTrue(any(span["traceId"] == "trace-cli-observe" for span in otlp["spans"]))
+            self.assertIn("# HELP agent_hub_counter", prometheus_buffer.getvalue())
+
     def test_health_command_prints_provider_health(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"

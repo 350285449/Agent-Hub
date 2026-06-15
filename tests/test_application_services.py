@@ -6,19 +6,285 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_hub.application import AdaptiveApplicationService, DiagnosticsApplicationService
+from agent_hub.application import (
+    AgentApplicationService,
+    AdaptiveApplicationService,
+    AnalyticsMaintenanceService,
+    DiagnosticsApplicationService,
+    RoutingProfileApplicationService,
+    WorkflowTemplateApplicationService,
+)
 from agent_hub.config import AgentConfig, HubConfig, MCPServerConfig, RouteRule
 from agent_hub.core.router import AgentRouter
 from agent_hub.evaluation import BenchmarkResult, ProviderScoreStore
 from agent_hub.models import HubRequest, ProviderResult
+from agent_hub.observability import record_event
+from agent_hub.plugins.registration import apply_plugin_registrations, register_plugin_tools
 from agent_hub.runtime_usability import (
     runtime_route_smoke,
     runtime_usability_body,
     save_runtime_usability_record,
 )
+from agent_hub.tools import ToolCall, ToolExecutionContext, ToolExecutionPipeline, ToolRegistry
 
 
 class ApplicationServiceTests(unittest.TestCase):
+    def test_agent_service_crud_normalizes_and_redacts_agent_config(self) -> None:
+        config = HubConfig()
+        service = AgentApplicationService(config)
+
+        created = service.create_agent(
+            {
+                "name": "custom.coder",
+                "provider": "openai-compatible",
+                "provider_type": "lm-studio",
+                "model": "local-coder",
+                "api_key": "sk-local-secret",
+                "supports_tools": True,
+                "add_to_default_route": True,
+            }
+        )
+        updated = service.update_agent("custom.coder", {"model": "local-coder-v2", "enabled": False})
+        listed = service.list_agents()
+        self.assertIn("custom.coder", config.default_route)
+        deleted = service.delete_agent("custom.coder")
+
+        self.assertTrue(created["created"])
+        self.assertNotIn("api_key", created["data"])
+        self.assertTrue(created["data"]["has_api_key"])
+        self.assertEqual(updated["data"]["model"], "local-coder-v2")
+        self.assertFalse(updated["data"]["enabled"])
+        self.assertTrue(updated["data"]["has_api_key"])
+        self.assertEqual(listed["count"], 1)
+        self.assertTrue(deleted["deleted"])
+        self.assertNotIn("custom.coder", config.agents)
+        self.assertNotIn("custom.coder", config.default_route)
+
+    def test_workflow_template_service_layers_local_templates_over_builtins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(state_dir=Path(tmp) / "state")
+            service = WorkflowTemplateApplicationService(config)
+
+            initial = service.list_templates()
+            created = service.create_template(
+                {
+                    "id": "release-review",
+                    "workflow": "review",
+                    "pattern": "team_reviewed",
+                    "description": "Review a release candidate.",
+                    "stages": [
+                        {"name": "triage", "role": "planner", "preference": "reasoning"},
+                        {"name": "audit", "role": "reviewer", "preference": "reliable"},
+                    ],
+                }
+            )
+            fetched = service.get_template("release-review")
+            updated = service.update_template("release-review", {"enabled": False})
+            deleted = service.delete_template("release-review")
+
+        self.assertTrue(any(row["id"] == "code" for row in initial["data"]))
+        self.assertTrue(any(row["id"] == "preset:bug_fixer" for row in initial["data"]))
+        self.assertTrue(created["created"])
+        self.assertEqual(fetched["data"]["pattern"], "team_reviewed")
+        self.assertEqual(len(fetched["data"]["stages"]), 2)
+        self.assertFalse(updated["data"]["enabled"])
+        self.assertTrue(deleted["deleted"])
+
+    def test_trusted_workflow_plugin_registers_readonly_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "workflow-demo"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "workflow.release",
+                        "name": "Release Workflow",
+                        "type": "workflow",
+                        "enabled_by_default": True,
+                        "metadata": {
+                            "template_id": "release-hardening",
+                            "workflow": "review",
+                            "pattern": "team_reviewed",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                plugin_dirs=[root / "plugins"],
+                trusted_plugins=["workflow.release"],
+            )
+
+            body = WorkflowTemplateApplicationService(config).list_templates()
+
+        template = next(row for row in body["data"] if row["id"] == "release-hardening")
+        self.assertEqual(template["source"], "plugin")
+        self.assertEqual(template["plugin_id"], "workflow.release")
+        self.assertEqual(template["pattern"], "team_reviewed")
+
+    def test_trusted_provider_plugin_registration_adds_runtime_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "provider-demo"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "provider.demo",
+                        "name": "Provider Demo",
+                        "type": "provider",
+                        "enabled_by_default": True,
+                        "metadata": {
+                            "agent_name": "demo-agent",
+                            "provider_type": "demo-compatible",
+                            "base_url": "http://127.0.0.1:9999/v1",
+                            "models": ["demo-model"],
+                            "supports_streaming": True,
+                            "add_to_default_route": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                plugin_dirs=[root / "plugins"],
+                trusted_plugins=["provider.demo"],
+            )
+
+            report = apply_plugin_registrations(config)
+
+        self.assertEqual(report["provider_count"], 1)
+        self.assertIn("demo-agent", config.agents)
+        self.assertEqual(config.agents["demo-agent"].provider_type, "demo-compatible")
+        self.assertEqual(config.agents["demo-agent"].model, "demo-model")
+        self.assertTrue(config.agents["demo-agent"].supports_streaming)
+        self.assertIn("demo-agent", config.default_route)
+
+    def test_trusted_tool_plugin_registration_adds_policy_gated_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "tool-demo"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "tool.demo",
+                        "name": "Tool Demo",
+                        "type": "tool",
+                        "enabled_by_default": True,
+                        "permissions": ["read"],
+                        "metadata": {
+                            "tools": [
+                                {
+                                    "name": "plugin.demo.lookup",
+                                    "description": "Lookup demo data.",
+                                    "input_schema": {
+                                        "type": "object",
+                                        "properties": {"query": {"type": "string"}},
+                                    },
+                                    "permissions": ["read"],
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                plugin_dirs=[root / "plugins"],
+                trusted_plugins=["tool.demo"],
+                approval_mode="auto",
+            )
+            registry = ToolRegistry()
+
+            report = register_plugin_tools(registry, config)
+            result = ToolExecutionPipeline(registry).execute(
+                ToolCall(name="plugin.demo.lookup", arguments={"query": "x"}),
+                ToolExecutionContext(config=config),
+            )
+
+        self.assertEqual(report["tool_count"], 1)
+        self.assertIn("plugin.demo.lookup", registry.names())
+        self.assertFalse(result.ok)
+        self.assertEqual(result.metadata["status"], "execution_policy_gated")
+
+    def test_routing_profile_service_applies_profile_to_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(state_dir=Path(tmp) / "state")
+            service = RoutingProfileApplicationService(config)
+
+            profiles = service.list_profiles()
+            created = service.create_profile(
+                {
+                    "id": "low-cost-ci",
+                    "label": "Low Cost CI",
+                    "routing_mode": "cheapest",
+                    "fallback_policy": {"max_provider_attempts": 2, "order": "cost_first"},
+                }
+            )
+            request = service.apply_to_request(
+                HubRequest(
+                    session_id="profile",
+                    messages=[{"role": "user", "content": "explain this"}],
+                    raw={"agent_hub": {"routing_profile": "low-cost-ci"}},
+                )
+            )
+            deleted = service.delete_profile("low-cost-ci")
+
+        self.assertTrue(any(row["id"] == "private" for row in profiles["data"]))
+        private = next(row for row in profiles["data"] if row["id"] == "private")
+        self.assertEqual(private["metadata"]["strategy_id"], "private")
+        self.assertIn("score_weights", private["metadata"])
+        self.assertTrue(any(row["id"] == "cheapest" for row in profiles["strategies"]))
+        self.assertTrue(created["created"])
+        self.assertEqual(request.raw["routing_mode"], "cheapest")
+        self.assertEqual(request.raw["agent_hub"]["fallback_policy"]["max_provider_attempts"], 2)
+        self.assertEqual(request.metadata["routing_profile"]["id"], "low-cost-ci")
+        self.assertTrue(deleted["deleted"])
+
+    def test_trusted_router_strategy_plugin_registers_readonly_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "strategy-demo"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "strategy.low-latency",
+                        "name": "Low Latency Strategy",
+                        "type": "router_strategy",
+                        "enabled_by_default": True,
+                        "metadata": {
+                            "profile_id": "low-latency-plugin",
+                            "routing_mode": "fastest",
+                            "fallback_policy": {"max_provider_attempts": 3, "order": "latency_first"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = HubConfig(
+                state_dir=root / "state",
+                workspace_dir=root,
+                plugin_dirs=[root / "plugins"],
+                trusted_plugins=["strategy.low-latency"],
+            )
+
+            body = RoutingProfileApplicationService(config).list_profiles()
+
+        profile = next(row for row in body["data"] if row["id"] == "low-latency-plugin")
+        self.assertEqual(profile["source"], "plugin")
+        self.assertEqual(profile["plugin_id"], "strategy.low-latency")
+        self.assertEqual(profile["routing_mode"], "fastest")
+        self.assertEqual(profile["fallback_policy"]["max_provider_attempts"], 3)
+
     def test_adaptive_service_runs_auto_and_records_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(Path(tmp))
@@ -478,6 +744,76 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertFalse(checks["readiness_warnings"]["ok"])
             self.assertFalse(checks["compatibility_metadata_policy"]["ok"])
             self.assertLess(report["score"], 100)
+
+    def test_analytics_maintenance_compacts_events_adaptive_and_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = time.time()
+            config = HubConfig(
+                state_dir=root / "state",
+                analytics_retention_days=7,
+                analytics_max_events_per_stream=2,
+                adaptive_retention_days=7,
+                session_retention_days=7,
+                session_max_records=2,
+            )
+            record_event(config.state_dir, "routing", {"type": "old", "time": now - 20 * 86400})
+            record_event(config.state_dir, "routing", {"type": "recent-1", "time": now - 10})
+            record_event(config.state_dir, "routing", {"type": "recent-2", "time": now - 5})
+            record_event(config.state_dir, "routing", {"type": "recent-3", "time": now - 1})
+            adaptive_path = config.state_dir / "adaptive_learning.json"
+            adaptive_path.parent.mkdir(parents=True, exist_ok=True)
+            adaptive_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "updated_at": now,
+                        "aggregates": {"global|coder": {"attempts": 3, "last_seen_at": now - 30 * 86400}},
+                        "workflow_patterns": {},
+                        "role_agents": {},
+                        "request_index": {
+                            "old": {"request_id": "old", "updated_at": now - 30 * 86400},
+                            "recent": {"request_id": "recent", "updated_at": now},
+                        },
+                        "recent_decisions": [
+                            {"request_id": "old", "time": now - 30 * 86400},
+                            {"request_id": "recent", "time": now},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            sessions = config.state_dir / "sessions"
+            sessions.mkdir(parents=True)
+            for name, updated_at in {
+                "old": now - 30 * 86400,
+                "recent": now,
+                "recent-2": now - 1,
+            }.items():
+                (sessions / f"{name}.json").write_text(
+                    json.dumps({"session_id": name, "updated_at": updated_at}),
+                    encoding="utf-8",
+                )
+
+            report = AnalyticsMaintenanceService(config).compact(now=now)
+
+            self.assertTrue(report["enabled"])
+            self.assertGreaterEqual(report["removed_count"], 3)
+            routing_lines = (config.state_dir / "routing_decisions.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(routing_lines), 2)
+            adaptive = json.loads(adaptive_path.read_text(encoding="utf-8"))
+            self.assertEqual(list(adaptive["request_index"].keys()), ["recent"])
+            self.assertEqual(adaptive["recent_decisions"][0]["request_id"], "recent")
+            self.assertIn("global|coder", adaptive["aggregates"])
+            self.assertFalse((sessions / "old.json").exists())
+
+    def test_analytics_maintenance_can_be_disabled(self) -> None:
+        config = HubConfig(analytics_compaction_enabled=False)
+
+        report = AnalyticsMaintenanceService(config).compact()
+
+        self.assertFalse(report["enabled"])
+        self.assertEqual(report["removed_count"], 0)
 
 
 class _Provider:

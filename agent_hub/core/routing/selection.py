@@ -40,6 +40,7 @@ from ...optimizer import (
 from ...output_validator import build_task_explanation, validate_output
 from ...measurement import record_completed_request
 from ...payloads import content_to_text, request_text
+from ...plugins.registration import register_plugin_tools
 from ...providers import Provider, ProviderError, create_provider
 from ...response_normalization import validate_provider_result
 from ...repository import repo_context_for_request
@@ -397,6 +398,10 @@ class AgentRouter:
         self.tool_registry = create_builtin_registry(config)
         try:
             self.tool_registry.extend(MCPServerRegistry(config).agent_hub_tools())
+        except Exception:
+            pass
+        try:
+            register_plugin_tools(self.tool_registry, config)
         except Exception:
             pass
         self.context_preparation = ContextPreparationService(

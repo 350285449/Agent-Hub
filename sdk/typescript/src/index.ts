@@ -25,6 +25,82 @@ export class AgentHubClient {
     return this.post("/v1/routing/simulate", payload);
   }
 
+  listAgents(): Promise<Record<string, unknown>> {
+    return this.get("/v1/agents");
+  }
+
+  createAgent(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.post("/v1/agents", payload);
+  }
+
+  updateAgent(name: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.post(`/v1/agents/${encodeURIComponent(name)}`, payload);
+  }
+
+  deleteAgent(name: string): Promise<Record<string, unknown>> {
+    return this.request("DELETE", `/v1/agents/${encodeURIComponent(name)}`);
+  }
+
+  listWorkflowTemplates(): Promise<Record<string, unknown>> {
+    return this.get("/v1/workflow-templates");
+  }
+
+  createWorkflowTemplate(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.post("/v1/workflow-templates", payload);
+  }
+
+  updateWorkflowTemplate(id: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.post(`/v1/workflow-templates/${encodeURIComponent(id)}`, payload);
+  }
+
+  deleteWorkflowTemplate(id: string): Promise<Record<string, unknown>> {
+    return this.request("DELETE", `/v1/workflow-templates/${encodeURIComponent(id)}`);
+  }
+
+  listRoutingProfiles(): Promise<Record<string, unknown>> {
+    return this.get("/v1/routing-profiles");
+  }
+
+  listRoutingStrategies(): Promise<Record<string, unknown>> {
+    return this.get("/v1/routing-strategies");
+  }
+
+  createRoutingProfile(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.post("/v1/routing-profiles", payload);
+  }
+
+  updateRoutingProfile(id: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.post(`/v1/routing-profiles/${encodeURIComponent(id)}`, payload);
+  }
+
+  deleteRoutingProfile(id: string): Promise<Record<string, unknown>> {
+    return this.request("DELETE", `/v1/routing-profiles/${encodeURIComponent(id)}`);
+  }
+
+  compactAnalytics(): Promise<Record<string, unknown>> {
+    return this.post("/v1/analytics/compact", {});
+  }
+
+  observabilityExport(): Promise<Record<string, unknown>> {
+    return this.get("/v1/observability/export");
+  }
+
+  otlpExport(): Promise<Record<string, unknown>> {
+    return this.get("/v1/observability/otlp");
+  }
+
+  prometheusExport(): Promise<Record<string, unknown>> {
+    return this.get("/v1/observability/prometheus");
+  }
+
+  simulateSwarm(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.post("/v1/swarms/simulate", payload);
+  }
+
+  simulateTokenPooling(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.post("/v1/token-pools/simulate", payload);
+  }
+
   readiness(): Promise<Record<string, unknown>> {
     return this.get("/v1/readiness");
   }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -11,6 +12,7 @@ from urllib.request import Request, urlopen
 from agent_hub.config import AgentConfig, HubConfig, RouteRule
 from agent_hub.models import HubRequest, ProviderResult
 from agent_hub.core.router import AgentRouter
+from agent_hub.observability import record_event
 from agent_hub.server import (
     BACKEND_FEATURES,
     BACKEND_VERSION,
@@ -981,6 +983,324 @@ class ServerCompatibilityTests(unittest.TestCase):
             self.assertIn("Workflow Analytics", dashboard)
             self.assertIn("Model Win Rates", dashboard)
 
+    def test_agent_crud_endpoints_manage_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                created = _post_json(
+                    f"{base}/v1/agents",
+                    {
+                        "name": "custom-coder",
+                        "provider": "openai-compatible",
+                        "provider_type": "lm-studio",
+                        "model": "local-coder",
+                        "api_key": "sk-local-secret",
+                        "supports_tools": True,
+                        "add_to_default_route": True,
+                    },
+                )
+                fetched = _get_json(f"{base}/v1/agents/custom-coder")
+                updated = _post_json(
+                    f"{base}/v1/agents/custom-coder",
+                    {"model": "local-coder-v2", "enabled": False},
+                )
+                listed = _get_json(f"{base}/v1/agents")
+                openapi = _get_json(f"{base}/openapi.json")
+                deleted = _delete_json(f"{base}/v1/agents/custom-coder")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(created["object"], "agent_hub.agent")
+            self.assertEqual(created["data"]["name"], "custom-coder")
+            self.assertNotIn("api_key", created["data"])
+            self.assertTrue(created["data"]["has_api_key"])
+            self.assertEqual(fetched["data"]["provider_type"], "lm-studio")
+            self.assertEqual(updated["data"]["model"], "local-coder-v2")
+            self.assertFalse(updated["data"]["enabled"])
+            self.assertTrue(any(agent["name"] == "custom-coder" for agent in listed["data"]))
+            self.assertIn("/v1/agents", openapi["paths"])
+            self.assertIn("/v1/agents/{name}", openapi["paths"])
+            self.assertTrue(deleted["deleted"])
+            self.assertNotIn("custom-coder", config.agents)
+            self.assertNotIn("custom-coder", config.default_route)
+
+    def test_workflow_template_endpoints_manage_local_templates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                presets = _get_json(f"{base}/v1/workflow-presets")
+                created = _post_json(
+                    f"{base}/v1/workflow-templates",
+                    {
+                        "id": "release-review",
+                        "workflow": "review",
+                        "pattern": "team_reviewed",
+                        "description": "Review a release candidate.",
+                    },
+                )
+                fetched = _get_json(f"{base}/v1/workflow-templates/release-review")
+                updated = _post_json(
+                    f"{base}/v1/workflow-templates/release-review",
+                    {"enabled": False},
+                )
+                openapi = _get_json(f"{base}/openapi.json")
+                deleted = _delete_json(f"{base}/v1/workflow-templates/release-review")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(presets["object"], "agent_hub.workflow_templates")
+            self.assertTrue(any(row["id"] == "code" for row in presets["data"]))
+            self.assertTrue(created["created"])
+            self.assertEqual(fetched["data"]["workflow"], "review")
+            self.assertEqual(fetched["data"]["pattern"], "team_reviewed")
+            self.assertFalse(updated["data"]["enabled"])
+            self.assertIn("/v1/workflow-templates", openapi["paths"])
+            self.assertIn("/v1/workflow-templates/{id}", openapi["paths"])
+            self.assertTrue(deleted["deleted"])
+
+    def test_routing_profile_endpoints_and_simulation_apply_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                profiles = _get_json(f"{base}/v1/routing-profiles")
+                strategies = _get_json(f"{base}/v1/routing-strategies")
+                created = _post_json(
+                    f"{base}/v1/routing-profiles",
+                    {
+                        "id": "low-cost-ci",
+                        "routing_mode": "cheapest",
+                        "fallback_policy": {"max_provider_attempts": 2, "order": "cost_first"},
+                    },
+                )
+                simulation = _post_json(
+                    f"{base}/v1/routing/simulate",
+                    {
+                        "messages": [{"role": "user", "content": "explain this"}],
+                        "agent_hub": {"routing_profile": "low-cost-ci"},
+                    },
+                )
+                openapi = _get_json(f"{base}/openapi.json")
+                deleted = _delete_json(f"{base}/v1/routing-profiles/low-cost-ci")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(profiles["object"], "agent_hub.routing_profiles")
+            self.assertTrue(any(profile["id"] == "private" for profile in profiles["data"]))
+            self.assertEqual(strategies["object"], "agent_hub.routing_strategies")
+            self.assertTrue(any(strategy["id"] == "fastest" for strategy in strategies["data"]))
+            self.assertTrue(created["created"])
+            self.assertEqual(simulation["routing_decision"]["routing_mode"], "cheapest")
+            self.assertEqual(simulation["routing_profile"]["id"], "low-cost-ci")
+            self.assertEqual(simulation["fallback_policy"]["max_provider_attempts"], 2)
+            self.assertIn("/v1/routing-profiles", openapi["paths"])
+            self.assertIn("/v1/routing-strategies", openapi["paths"])
+            self.assertTrue(deleted["deleted"])
+
+    def test_analytics_compaction_endpoint_runs_maintenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            config.analytics_retention_days = 7
+            config.analytics_max_events_per_stream = 1
+            now = time.time()
+            record_event(config.state_dir, "routing", {"type": "old", "time": now - 20 * 86400})
+            record_event(config.state_dir, "routing", {"type": "recent", "time": now})
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                body = _post_json(f"{base}/v1/analytics/compact", {})
+                openapi = _get_json(f"{base}/openapi.json")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(body["object"], "agent_hub.analytics_maintenance")
+            self.assertTrue(body["enabled"])
+            self.assertIn("/v1/analytics/compact", openapi["paths"])
+            self.assertIn("analytics_maintenance", config.initialization_report)
+
+    def test_swarm_simulation_endpoint_returns_bounded_dry_run_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                body = _post_json(
+                    f"{base}/v1/swarms/simulate",
+                    {"goal": "ship feature", "max_concurrency": 2},
+                )
+                openapi = _get_json(f"{base}/openapi.json")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(body["object"], "agent_hub.bounded_swarm_plan")
+            self.assertTrue(body["valid"])
+            self.assertTrue(body["dry_run"])
+            self.assertEqual(body["execution_policy"], "dry_run_only")
+            self.assertIn("/v1/swarms/simulate", openapi["paths"])
+
+    def test_token_pool_simulation_endpoint_returns_policy_safe_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            config.token_pooling_enabled = True
+            config.token_pooling_pools = [
+                {
+                    "id": "owned-openai",
+                    "provider": "openai",
+                    "agents": ["tooly"],
+                    "remaining_tokens": 5000,
+                    "user_owned_quota": True,
+                    "terms_confirmed": True,
+                }
+            ]
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                body = _post_json(
+                    f"{base}/v1/token-pools/simulate",
+                    {"provider": "openai", "estimated_tokens": 1000},
+                )
+                openapi = _get_json(f"{base}/openapi.json")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(body["object"], "agent_hub.token_pool_simulation")
+            self.assertTrue(body["dry_run"])
+            self.assertTrue(body["policy"]["user_owned_quotas_only"])
+            self.assertEqual(body["selected"]["id"], "owned-openai")
+            self.assertIn("/v1/token-pools/simulate", openapi["paths"])
+
+    def test_observability_export_endpoints_return_otlp_and_prometheus_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _compat_config(Path(tmp))
+            record_event(
+                config.state_dir,
+                "routing",
+                {
+                    "type": "provider_selected",
+                    "request_id": "req-observe",
+                    "trace_id": "trace-observe",
+                    "span_id": "span-observe",
+                    "agent": "tooly",
+                },
+            )
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                combined = _get_json(f"{base}/v1/observability/export")
+                otlp = _get_json(f"{base}/v1/observability/otlp")
+                prometheus = _get_json(f"{base}/v1/observability/prometheus")
+                openapi = _get_json(f"{base}/openapi.json")
+            finally:
+                _stop(server, thread)
+
+            self.assertEqual(combined["object"], "agent_hub.observability_export")
+            self.assertTrue(any(item["id"] == "opentelemetry" for item in combined["integrations"]))
+            self.assertEqual(otlp["object"], "agent_hub.otlp_export")
+            self.assertTrue(any(span["traceId"] == "trace-observe" for span in otlp["spans"]))
+            self.assertEqual(prometheus["object"], "agent_hub.prometheus_export")
+            self.assertIn("# HELP agent_hub_counter", prometheus["text"])
+            self.assertIn("/v1/observability/export", openapi["paths"])
+            self.assertIn("/v1/observability/otlp", openapi["paths"])
+            self.assertIn("/v1/observability/prometheus", openapi["paths"])
+
+    def test_server_startup_applies_trusted_provider_plugin_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "provider-demo"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "provider.demo",
+                        "name": "Provider Demo",
+                        "type": "provider",
+                        "enabled_by_default": True,
+                        "metadata": {
+                            "agent_name": "demo-agent",
+                            "provider_type": "demo-compatible",
+                            "model": "demo-model",
+                            "base_url": "http://127.0.0.1:9999/v1",
+                            "supports_json": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = _compat_config(root)
+            config.plugin_dirs = [root / "plugins"]
+            config.trusted_plugins = ["provider.demo"]
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                agents = _get_json(f"{base}/v1/agents")
+            finally:
+                _stop(server, thread)
+
+        self.assertTrue(any(agent["name"] == "demo-agent" for agent in agents["data"]))
+        self.assertIn("demo-agent", config.agents)
+        self.assertEqual(
+            config.initialization_report["plugin_runtime_registrations"]["provider_count"],
+            1,
+        )
+
+    def test_server_startup_registers_trusted_plugin_tool_specs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "tool-demo"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "tool.demo",
+                        "name": "Tool Demo",
+                        "type": "tool",
+                        "enabled_by_default": True,
+                        "permissions": ["read"],
+                        "metadata": {
+                            "tools": [
+                                {
+                                    "name": "plugin.demo.lookup",
+                                    "description": "Lookup demo data.",
+                                    "input_schema": {
+                                        "type": "object",
+                                        "properties": {"query": {"type": "string"}},
+                                    },
+                                    "permissions": ["read"],
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = _compat_config(root)
+            config.plugin_dirs = [root / "plugins"]
+            config.trusted_plugins = ["tool.demo"]
+            server = AgentHubHTTPServer(("127.0.0.1", 0), config)
+            thread = _start(server)
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                tools = _get_json(f"{base}/v1/tools")
+            finally:
+                _stop(server, thread)
+
+        names = {tool["name"] for tool in tools["tools"]}
+        self.assertIn("plugin.demo.lookup", names)
+        self.assertEqual(config.initialization_report["plugin_tool_registrations"]["tool_count"], 1)
+
     def test_routing_intelligence_endpoint_and_dashboard_are_exposed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _compat_config(Path(tmp))
@@ -1648,6 +1968,12 @@ def _get_json_with_headers_from_request(request: Request) -> tuple[dict, object]
 def _get_text(url: str) -> str:
     with urlopen(url, timeout=5) as response:
         return response.read().decode("utf-8")
+
+
+def _delete_json(url: str) -> dict:
+    request = Request(url, method="DELETE")
+    with urlopen(request, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 def _post_text_with_headers(

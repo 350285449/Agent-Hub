@@ -53,6 +53,63 @@ class AgentHubClient:
     def simulate_route(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.post("/v1/routing/simulate", payload)
 
+    def list_agents(self) -> dict[str, Any]:
+        return self.get("/v1/agents")
+
+    def create_agent(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post("/v1/agents", payload)
+
+    def update_agent(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post(f"/v1/agents/{name}", payload)
+
+    def delete_agent(self, name: str) -> dict[str, Any]:
+        return self._request("DELETE", f"/v1/agents/{name}")
+
+    def list_workflow_templates(self) -> dict[str, Any]:
+        return self.get("/v1/workflow-templates")
+
+    def create_workflow_template(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post("/v1/workflow-templates", payload)
+
+    def update_workflow_template(self, template_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post(f"/v1/workflow-templates/{template_id}", payload)
+
+    def delete_workflow_template(self, template_id: str) -> dict[str, Any]:
+        return self._request("DELETE", f"/v1/workflow-templates/{template_id}")
+
+    def list_routing_profiles(self) -> dict[str, Any]:
+        return self.get("/v1/routing-profiles")
+
+    def list_routing_strategies(self) -> dict[str, Any]:
+        return self.get("/v1/routing-strategies")
+
+    def create_routing_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post("/v1/routing-profiles", payload)
+
+    def update_routing_profile(self, profile_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post(f"/v1/routing-profiles/{profile_id}", payload)
+
+    def delete_routing_profile(self, profile_id: str) -> dict[str, Any]:
+        return self._request("DELETE", f"/v1/routing-profiles/{profile_id}")
+
+    def compact_analytics(self) -> dict[str, Any]:
+        return self.post("/v1/analytics/compact", {})
+
+    def observability_export(self) -> dict[str, Any]:
+        return self.get("/v1/observability/export")
+
+    def otlp_export(self) -> dict[str, Any]:
+        return self.get("/v1/observability/otlp")
+
+    def prometheus_export(self) -> dict[str, Any]:
+        return self.get("/v1/observability/prometheus")
+
+    def simulate_swarm(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post("/v1/swarms/simulate", payload)
+
+    def simulate_token_pooling(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.post("/v1/token-pools/simulate", payload)
+
     def readiness(self) -> dict[str, Any]:
         return self.get("/v1/readiness")
 

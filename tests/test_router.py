@@ -347,6 +347,50 @@ class RouterTests(unittest.TestCase):
             self.assertIn("max_output_tokens", health["fast"])
             self.assertTrue(health["slow"]["supports_streaming"])
 
+    def test_request_fallback_policy_caps_provider_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            config = HubConfig(
+                state_dir=Path(tmp),
+                workspace_dir=Path(tmp),
+                enable_load_balancing=False,
+                default_route=["primary", "fallback"],
+                agents={
+                    "primary": AgentConfig(
+                        name="primary",
+                        provider="openai-compatible",
+                        model="primary-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                    "fallback": AgentConfig(
+                        name="fallback",
+                        provider="openai-compatible",
+                        model="fallback-test",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                },
+            )
+
+            class FailingProvider:
+                def __init__(self, agent: AgentConfig) -> None:
+                    self.agent = agent
+
+                def complete(self, request: HubRequest) -> ProviderResult:
+                    calls.append(self.agent.name)
+                    raise ProviderError("boom", retryable=True, error_type="provider_error")
+
+            request = HubRequest(
+                session_id="abc",
+                messages=[{"role": "user", "content": "hello"}],
+                raw={"agent_hub": {"fallback_policy": {"max_provider_attempts": 1}}},
+            )
+
+            with self.assertRaises(RouterError) as raised:
+                AgentRouter(config, provider_factory=FailingProvider).route(request)
+
+            self.assertEqual(calls, ["primary"])
+            self.assertEqual(raised.exception.failover[-1].error_type, "max_provider_attempts_reached")
+
     def test_provider_health_persists_across_router_restarts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             calls: list[str] = []

@@ -4,6 +4,7 @@ Agent Hub ships basic deployment templates:
 
 - `Dockerfile`
 - `docker-compose.yml`
+- `deploy/docker-compose.providers.yml`
 - `.env.example`
 - `examples/agent-hub.production.json`
 
@@ -12,6 +13,18 @@ Build and run:
 ```sh
 docker compose up --build
 ```
+
+Optional local provider stacks are available as Compose profiles:
+
+```sh
+docker compose -f docker-compose.yml -f deploy/docker-compose.providers.yml --profile ollama up --build
+docker compose -f docker-compose.yml -f deploy/docker-compose.providers.yml --profile vllm up --build
+```
+
+The provider overlay points Agent-Hub at Ollama, vLLM, and host LM Studio
+defaults through `AGENT_HUB_OLLAMA_BASE_URL`, `AGENT_HUB_VLLM_BASE_URL`, and
+`AGENT_HUB_LM_STUDIO_BASE_URL`. LM Studio usually runs as a desktop app on the
+host, so the Compose overlay uses `http://host.docker.internal:1234`.
 
 Healthcheck:
 

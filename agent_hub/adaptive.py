@@ -84,6 +84,45 @@ class AdaptiveLearningStore:
         }
         _atomic_write_text(self.path, json.dumps(payload, indent=2, ensure_ascii=False))
 
+    def compact(self, *, retention_days: int | None = None, now: float | None = None) -> dict[str, Any]:
+        """Trim time-bounded adaptive telemetry while preserving learned aggregates."""
+
+        state = self.load()
+        cutoff = _retention_cutoff(retention_days, now=now)
+        recent_decisions = [item for item in list(state.get("recent_decisions") or []) if isinstance(item, dict)]
+        request_index = {
+            str(key): value
+            for key, value in dict(state.get("request_index") or {}).items()
+            if isinstance(value, dict)
+        }
+        original_recent_count = len(recent_decisions)
+        original_request_count = len(request_index)
+        if cutoff is not None:
+            recent_decisions = [
+                item
+                for item in recent_decisions
+                if _safe_float(item.get("time"), 0.0) <= 0.0 or _safe_float(item.get("time"), 0.0) >= cutoff
+            ]
+            request_index = {
+                key: value
+                for key, value in request_index.items()
+                if _safe_float(value.get("updated_at"), 0.0) <= 0.0
+                or _safe_float(value.get("updated_at"), 0.0) >= cutoff
+            }
+        state["recent_decisions"] = recent_decisions[-MAX_RECENT_DECISIONS:]
+        state["request_index"] = _trim_request_index(request_index)
+        self.save(state)
+        return {
+            "object": "agent_hub.adaptive_compaction",
+            "retention_days": retention_days,
+            "recent_decisions_before": original_recent_count,
+            "recent_decisions_after": len(state["recent_decisions"]),
+            "request_index_before": original_request_count,
+            "request_index_after": len(state["request_index"]),
+            "removed_count": max(0, original_recent_count - len(state["recent_decisions"]))
+            + max(0, original_request_count - len(state["request_index"])),
+        }
+
     def record_outcome(
         self,
         *,
@@ -1664,6 +1703,27 @@ def _trim_request_index(index: dict[str, Any]) -> dict[str, Any]:
     ]
     rows.sort(key=lambda item: _safe_float(item[1].get("updated_at"), 0.0), reverse=True)
     return dict(rows[:500])
+
+
+def compact_adaptive_state(
+    state_dir: str | Path,
+    *,
+    retention_days: int | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    return AdaptiveLearningStore(state_dir).compact(retention_days=retention_days, now=now)
+
+
+def _retention_cutoff(retention_days: int | None, *, now: float | None) -> float | None:
+    if retention_days is None:
+        return None
+    try:
+        days = int(retention_days)
+    except (TypeError, ValueError):
+        return None
+    if days <= 0:
+        return None
+    return float(now if now is not None else time.time()) - days * 86400.0
 
 
 def _optional_cost(value: Any) -> float | None:

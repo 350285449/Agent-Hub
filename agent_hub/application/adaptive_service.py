@@ -14,6 +14,7 @@ from ..repository_intelligence import (
     build_model_performance_database,
 )
 from ..workflows import WorkflowSelector, with_workflow_selection_raw
+from .routing_profile_service import RoutingProfileApplicationService
 
 
 class AdaptiveApplicationService:
@@ -107,6 +108,7 @@ class AdaptiveApplicationService:
     def simulate_request(self, request: HubRequest) -> dict[str, Any]:
         """Dry-run auto workflow and router choices without provider calls."""
 
+        request = RoutingProfileApplicationService(self.config).apply_to_request(request)
         selection = WorkflowSelector(self.config).select(request)
         auto_request = replace(
             request,
@@ -152,11 +154,15 @@ class AdaptiveApplicationService:
             routing_memory=optimization.get("routing_memory", {}),
             dna=dna,
         )
+        hub_options = auto_request.raw.get("agent_hub") if isinstance(auto_request.raw, dict) else {}
+        hub_options = hub_options if isinstance(hub_options, dict) else {}
         return {
             "object": "agent_hub.routing_simulation",
             "dry_run": True,
             "message": "No provider request was sent and no adaptive state was changed.",
             "route": auto_request.route,
+            "routing_profile": hub_options.get("routing_profile", {}),
+            "fallback_policy": hub_options.get("fallback_policy", {}),
             "workflow_selection": selection.to_dict(),
             "routing_decision": decision.to_dict(),
             "repository_dna": dna,
@@ -175,6 +181,7 @@ class AdaptiveApplicationService:
         }
 
     def execute_auto(self, request: HubRequest) -> Any:
+        request = RoutingProfileApplicationService(self.config).apply_to_request(request)
         selection = WorkflowSelector(self.config).select(request)
         auto_request = replace(
             request,

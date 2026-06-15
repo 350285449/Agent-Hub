@@ -53,6 +53,7 @@ class ProviderPermissionPolicy:
 
         if getattr(self.config, "provider_privacy_mode_enabled", True):
             _apply_provider_privacy_policy(
+                config=self.config,
                 agent=agent,
                 request=request,
                 permission_request=permission_request,
@@ -192,6 +193,9 @@ class ProviderPermissionPolicy:
                 "category": permission_request.category,
                 "risk_level": permission_request.risk_level,
                 "resource": permission_request.resource,
+                "data_categories": list(permission_request.details.get("data_categories") or [])
+                if isinstance(permission_request.details, dict)
+                else [],
             },
         )
 
@@ -210,6 +214,7 @@ def _explicit_security_approval_required(permission_request: PermissionRequest) 
 
 def _apply_provider_privacy_policy(
     *,
+    config: HubConfig,
     agent: AgentConfig,
     request: HubRequest,
     permission_request: PermissionRequest,
@@ -222,6 +227,14 @@ def _apply_provider_privacy_policy(
     )
     if not isinstance(security, dict):
         return
+    categories = _provider_data_categories(permission_request)
+    data_policy = _merged_provider_data_policy(config, agent, request)
+    policy_decision = _provider_data_policy_decision(categories, data_policy)
+    security["data_categories"] = categories
+    security["provider_data_policy"] = data_policy
+    if isinstance(permission_request.details, dict):
+        permission_request.details["data_categories"] = categories
+        permission_request.details["provider_data_policy"] = data_policy
     sends_workspace = bool(
         permission_request.details.get("sends_workspace_content")
         if isinstance(permission_request.details, dict)
@@ -239,6 +252,11 @@ def _apply_provider_privacy_policy(
     )
     if trust_level == LOCAL:
         return
+    if policy_decision["action"] == "block":
+        _block_security(security, str(policy_decision["reason"]))
+        return
+    if policy_decision["action"] == "approval":
+        _require_security_approval(security, str(policy_decision["reason"]))
     if bool(getattr(agent, "local_only", False)):
         _block_security(
             security,
@@ -269,6 +287,125 @@ def _block_security(security: dict[str, Any], reason: str) -> None:
     security["explicit_approval_required"] = True
     security["risk_level"] = "critical"
     security["reason"] = reason
+
+
+def _require_security_approval(security: dict[str, Any], reason: str) -> None:
+    security["explicit_approval_required"] = True
+    security["risk_level"] = "critical"
+    security["reason"] = reason
+
+
+def _provider_data_categories(permission_request: PermissionRequest) -> list[str]:
+    details = permission_request.details if isinstance(permission_request.details, dict) else {}
+    security = details.get("security") if isinstance(details.get("security"), dict) else {}
+    prepared = (
+        details.get("prepared_security_context")
+        if isinstance(details.get("prepared_security_context"), dict)
+        else {}
+    )
+    transparency = (
+        details.get("cloud_transparency")
+        if isinstance(details.get("cloud_transparency"), dict)
+        else {}
+    )
+    categories: set[str] = {"prompt"}
+    if bool(details.get("sends_workspace_content")):
+        categories.add("workspace_context")
+        categories.add("repository_files")
+    sensitive_files = security.get("metadata", {}).get("sensitive_files") if isinstance(security.get("metadata"), dict) else []
+    if sensitive_files or prepared.get("sensitive_files"):
+        categories.add("sensitive_paths")
+    if (
+        prepared.get("has_secret_findings")
+        or prepared.get("has_unredacted_secrets")
+        or transparency.get("has_secret_findings")
+        or security.get("findings")
+    ):
+        categories.add("secrets")
+    metadata = security.get("metadata") if isinstance(security.get("metadata"), dict) else {}
+    if metadata.get("prompt_injection_findings") or prepared.get("injection_findings"):
+        categories.add("prompt_injection")
+    if metadata.get("repo_files_untrusted") or prepared.get("repo_files_untrusted"):
+        categories.add("untrusted_context")
+    if bool(details.get("may_cost_money")):
+        categories.add("billable_provider")
+    return sorted(categories)
+
+
+def _merged_provider_data_policy(
+    config: HubConfig,
+    agent: AgentConfig,
+    request: HubRequest,
+) -> dict[str, list[str]]:
+    raw: list[Any] = [
+        getattr(config, "provider_data_policy", {}),
+        getattr(agent, "provider_data_policy", {}),
+    ]
+    hub = request.raw.get("agent_hub") if isinstance(request.raw, dict) else {}
+    if isinstance(hub, dict):
+        raw.append(hub.get("provider_data_policy"))
+        raw.append(hub.get("data_policy"))
+    result = {
+        "allowed_categories": [],
+        "blocked_categories": [],
+        "require_approval_categories": [],
+    }
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        result["allowed_categories"] = _merge_category_list(
+            result["allowed_categories"],
+            item.get("allowed_categories", item.get("allow_categories")),
+        )
+        result["blocked_categories"] = _merge_category_list(
+            result["blocked_categories"],
+            item.get("blocked_categories", item.get("block_categories")),
+        )
+        result["require_approval_categories"] = _merge_category_list(
+            result["require_approval_categories"],
+            item.get("require_approval_categories", item.get("approval_categories")),
+        )
+    return result
+
+
+def _provider_data_policy_decision(categories: list[str], policy: dict[str, list[str]]) -> dict[str, str]:
+    category_set = set(categories)
+    blocked = sorted(category_set & set(policy.get("blocked_categories") or []))
+    if blocked:
+        return {
+            "action": "block",
+            "reason": "Provider data policy blocks outbound categories: " + ", ".join(blocked) + ".",
+        }
+    allowed = set(policy.get("allowed_categories") or [])
+    if allowed:
+        disallowed = sorted(category_set - allowed)
+        if disallowed:
+            return {
+                "action": "block",
+                "reason": "Provider data policy allows only approved categories; blocked: " + ", ".join(disallowed) + ".",
+            }
+    approval = sorted(category_set & set(policy.get("require_approval_categories") or []))
+    if approval:
+        return {
+            "action": "approval",
+            "reason": "Provider data policy requires explicit approval for categories: " + ", ".join(approval) + ".",
+        }
+    return {"action": "allow", "reason": ""}
+
+
+def _merge_category_list(existing: list[str], value: Any) -> list[str]:
+    merged = list(existing)
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, list):
+        candidates = value
+    else:
+        candidates = []
+    for item in candidates:
+        text = str(item).strip().lower().replace("-", "_")
+        if text and text not in merged:
+            merged.append(text)
+    return merged
 
 
 __all__ = ["ProviderPermissionPolicy"]

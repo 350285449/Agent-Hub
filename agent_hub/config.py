@@ -116,6 +116,7 @@ class AgentConfig:
     safe_for_code: bool = True
     safe_for_secrets: bool = False
     never_send_workspace_files: bool = False
+    provider_data_policy: dict[str, Any] = field(default_factory=dict)
 
     @property
     def resolved_api_key(self) -> str | None:
@@ -231,6 +232,12 @@ class HubConfig:
     adaptive_learning_enabled: bool = True
     adaptive_routing_enabled: bool = True
     adaptive_workflow_upgrades_enabled: bool = True
+    analytics_compaction_enabled: bool = True
+    analytics_retention_days: int = 30
+    analytics_max_events_per_stream: int = 10_000
+    adaptive_retention_days: int = 90
+    session_retention_days: int = 90
+    session_max_records: int = 1000
     routing_memory_enabled: bool = True
     routing_memory_store_prompts: bool = False
     routing_memory_retention_days: int = 30
@@ -239,7 +246,10 @@ class HubConfig:
     failure_prediction_enabled: bool = True
     cost_optimizer_enabled: bool = True
     autonomous_night_mode_enabled: bool = False
+    token_pooling_enabled: bool = False
+    token_pooling_pools: list[dict[str, Any]] = field(default_factory=list)
     provider_privacy_mode_enabled: bool = True
+    provider_data_policy: dict[str, Any] = field(default_factory=dict)
     secret_scanning_enabled: bool = True
     prompt_injection_defense_enabled: bool = True
     model_tournament_enabled: bool = True
@@ -833,6 +843,7 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
                 item.get("never_send_workspace_files"),
                 False,
             ),
+            provider_data_policy=_dict_value(item.get("provider_data_policy")),
         )
     routes = [
         RouteRule(
@@ -1010,6 +1021,31 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
             raw.get("adaptive_workflow_upgrades_enabled"),
             True,
         ),
+        analytics_compaction_enabled=_bool_with_default(
+            raw.get("analytics_compaction_enabled"),
+            True,
+        ),
+        analytics_retention_days=_normalize_retention_days(
+            raw.get("analytics_retention_days", 30)
+        ),
+        analytics_max_events_per_stream=_normalize_positive_int(
+            raw.get("analytics_max_events_per_stream"),
+            10_000,
+            minimum=100,
+            maximum=1_000_000,
+        ),
+        adaptive_retention_days=_normalize_retention_days(
+            raw.get("adaptive_retention_days", 90)
+        ),
+        session_retention_days=_normalize_retention_days(
+            raw.get("session_retention_days", 90)
+        ),
+        session_max_records=_normalize_positive_int(
+            raw.get("session_max_records"),
+            1000,
+            minimum=1,
+            maximum=100_000,
+        ),
         routing_memory_enabled=_bool_with_default(
             raw.get("routing_memory_enabled", os.environ.get("ROUTING_MEMORY_ENABLED")),
             True,
@@ -1033,7 +1069,10 @@ def config_from_dict(raw: dict[str, Any]) -> HubConfig:
         failure_prediction_enabled=_bool_with_default(raw.get("failure_prediction_enabled"), True),
         cost_optimizer_enabled=_bool_with_default(raw.get("cost_optimizer_enabled"), True),
         autonomous_night_mode_enabled=_bool_with_default(raw.get("autonomous_night_mode_enabled"), False),
+        token_pooling_enabled=_bool_with_default(raw.get("token_pooling_enabled"), False),
+        token_pooling_pools=_dict_list(raw.get("token_pooling_pools")),
         provider_privacy_mode_enabled=_bool_with_default(raw.get("provider_privacy_mode_enabled"), True),
+        provider_data_policy=_dict_value(raw.get("provider_data_policy")),
         secret_scanning_enabled=_bool_with_default(raw.get("secret_scanning_enabled"), True),
         prompt_injection_defense_enabled=_bool_with_default(
             raw.get("prompt_injection_defense_enabled"),
@@ -1269,6 +1308,12 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "adaptive_learning_enabled": config.adaptive_learning_enabled,
         "adaptive_routing_enabled": config.adaptive_routing_enabled,
         "adaptive_workflow_upgrades_enabled": config.adaptive_workflow_upgrades_enabled,
+        "analytics_compaction_enabled": config.analytics_compaction_enabled,
+        "analytics_retention_days": config.analytics_retention_days,
+        "analytics_max_events_per_stream": config.analytics_max_events_per_stream,
+        "adaptive_retention_days": config.adaptive_retention_days,
+        "session_retention_days": config.session_retention_days,
+        "session_max_records": config.session_max_records,
         "routing_memory_enabled": config.routing_memory_enabled,
         "routing_memory_store_prompts": config.routing_memory_store_prompts,
         "routing_memory_retention_days": config.routing_memory_retention_days,
@@ -1277,7 +1322,10 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
         "failure_prediction_enabled": config.failure_prediction_enabled,
         "cost_optimizer_enabled": config.cost_optimizer_enabled,
         "autonomous_night_mode_enabled": config.autonomous_night_mode_enabled,
+        "token_pooling_enabled": config.token_pooling_enabled,
+        "token_pooling_pools": config.token_pooling_pools,
         "provider_privacy_mode_enabled": config.provider_privacy_mode_enabled,
+        "provider_data_policy": config.provider_data_policy,
         "secret_scanning_enabled": config.secret_scanning_enabled,
         "prompt_injection_defense_enabled": config.prompt_injection_defense_enabled,
         "model_tournament_enabled": config.model_tournament_enabled,
@@ -1374,6 +1422,7 @@ def config_to_dict(config: HubConfig) -> dict[str, Any]:
                     "safe_for_code": agent.safe_for_code,
                     "safe_for_secrets": agent.safe_for_secrets,
                     "never_send_workspace_files": agent.never_send_workspace_files,
+                    "provider_data_policy": agent.provider_data_policy,
                 }
             )
             for agent in config.agents.values()
@@ -1894,6 +1943,12 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _dict_value(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return dict(value)
 
 
 def _string_list(value: Any, *, default: list[str] | None = None) -> list[str]:

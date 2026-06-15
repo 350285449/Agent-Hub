@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from ..measurement import metrics_savings, metrics_summary, usage_ledger_summary
 from ..observability import metrics_snapshot, permission_snapshot, usage_snapshot
+from ..observability import recent_events
+from ..observability_export import observability_integrations, prometheus_lines, to_otlp_span
 from ..security.secrets import redact_secrets
+from ..token_budget import token_budget_ledger_summary
 
 
 def handle_get(handler: object, path: str) -> bool:
@@ -54,6 +57,24 @@ def handle_get(handler: object, path: str) -> bool:
         handler._send_cached_diagnostics_json(
             "GET /api/metrics/savings",
             lambda: metrics_savings(handler.server.config),
+        )
+        return True
+    if path == "/v1/observability/export":
+        handler._send_cached_diagnostics_json(
+            "GET /v1/observability/export",
+            lambda: _observability_export_body(handler),
+        )
+        return True
+    if path == "/v1/observability/otlp":
+        handler._send_cached_diagnostics_json(
+            "GET /v1/observability/otlp",
+            lambda: _otlp_body(handler),
+        )
+        return True
+    if path == "/v1/observability/prometheus":
+        handler._send_cached_diagnostics_json(
+            "GET /v1/observability/prometheus",
+            lambda: _prometheus_body(handler),
         )
         return True
     if path == "/health":
@@ -123,6 +144,7 @@ def _usage_body(handler: object) -> dict:
         handler.server.router.health_snapshot(include_history=True),
     )
     body["usage_ledger"] = usage_ledger_summary(handler.server.config)
+    body["token_budget_ledger"] = token_budget_ledger_summary(handler.server.config.state_dir)
     return body
 
 
@@ -133,6 +155,46 @@ def _metrics_body(handler: object) -> dict:
     )
     metrics["optimization"] = handler.server.adaptive_service.optimization_summary()
     return metrics
+
+
+def _observability_export_body(handler: object) -> dict:
+    return {
+        "object": "agent_hub.observability_export",
+        "integrations": [item.to_dict() for item in observability_integrations()],
+        "otlp": _otlp_body(handler),
+        "prometheus": _prometheus_body(handler),
+    }
+
+
+def _otlp_body(handler: object) -> dict:
+    state_dir = handler.server.config.state_dir
+    events = [
+        *recent_events(state_dir, "requests", limit=50),
+        *recent_events(state_dir, "routing", limit=50),
+        *recent_events(state_dir, "events", limit=50),
+        *recent_events(state_dir, "tools", limit=50),
+        *recent_events(state_dir, "workflows", limit=50),
+    ]
+    events.sort(key=lambda item: float(item.get("time") or 0.0))
+    spans = [to_otlp_span(event) for event in events[-100:]]
+    return {
+        "object": "agent_hub.otlp_export",
+        "resource": {"service.name": "agent-hub"},
+        "span_count": len(spans),
+        "spans": spans,
+    }
+
+
+def _prometheus_body(handler: object) -> dict:
+    metrics = _metrics_body(handler)
+    lines = prometheus_lines(metrics)
+    return {
+        "object": "agent_hub.prometheus_export",
+        "content_type": "text/plain; version=0.0.4",
+        "line_count": len(lines),
+        "lines": lines,
+        "text": "\n".join(lines) + "\n",
+    }
 
 
 def _system_health_body(handler: object) -> dict:

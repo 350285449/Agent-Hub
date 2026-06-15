@@ -31,6 +31,14 @@ sending the provider payload:
 Diagnostics expose incoming, compacted, protected, and dropped token counts via
 `/debug/context`, `/debug/request`, and `agent-hub inspect-request`.
 
+## Token Budget Ledger
+
+`TokenBudgetLedger` records per-request or per-workflow stage budgets to
+`.agent-hub/state/token_budget_ledger.jsonl`. Each row can include the stage,
+workflow, role, planned/effective budget, actual or estimated input/output
+tokens, and tokens saved. `/v1/usage` exposes a `token_budget_ledger` summary
+with recent rows, totals, and counts by stage/workflow.
+
 Additional Phase 2 options:
 
 ```json

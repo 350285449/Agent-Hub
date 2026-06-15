@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .boost import boost_mode_from_request, boost_policy
 from .context import estimate_message_tokens
+from .observability import recent_events, record_event
 
 CONTEXT_MODES = {"minimal", "balanced", "deep"}
 MODE_BUDGET_FRACTION = {
@@ -112,6 +114,95 @@ class TokenBudgetManager:
         }
 
 
+class TokenBudgetLedger:
+    """Durable per-request and per-workflow token budget stage ledger."""
+
+    def __init__(self, state_dir: str | Path) -> None:
+        self.state_dir = Path(state_dir)
+
+    def record_stage(
+        self,
+        *,
+        request_id: str,
+        stage: str,
+        budget: TokenBudget | dict[str, Any],
+        usage: dict[str, Any] | None = None,
+        workflow: str = "",
+        role: str = "",
+        status: str = "planned",
+    ) -> dict[str, Any]:
+        budget_payload = budget.to_dict() if isinstance(budget, TokenBudget) else dict(budget or {})
+        usage_payload = dict(usage or {})
+        row = {
+            "type": "token_budget_stage",
+            "request_id": str(request_id or ""),
+            "workflow": str(workflow or ""),
+            "role": str(role or ""),
+            "stage": str(stage or "request"),
+            "status": str(status or "planned"),
+            "budget": budget_payload,
+            "usage": usage_payload,
+            "effective_budget": _optional_int(budget_payload.get("effective_budget")),
+            "input_tokens": _optional_int(
+                usage_payload.get("input_tokens")
+                or usage_payload.get("estimated_input_tokens")
+                or usage_payload.get("prompt_tokens")
+            ),
+            "output_tokens": _optional_int(
+                usage_payload.get("output_tokens")
+                or usage_payload.get("completion_tokens")
+            ),
+            "tokens_saved": _optional_int(
+                usage_payload.get("estimated_tokens_saved")
+                or usage_payload.get("tokens_saved")
+            ),
+        }
+        record_event(self.state_dir, "token_budget", row)
+        return row
+
+    def summary(self, *, limit: int = 100) -> dict[str, Any]:
+        rows = recent_events(self.state_dir, "token_budget", limit=limit)
+        stages = [row for row in rows if row.get("type") == "token_budget_stage"]
+        return {
+            "object": "agent_hub.token_budget_ledger",
+            "count": len(stages),
+            "recent": stages[-25:],
+            "totals": {
+                "input_tokens": sum(_positive_int(row.get("input_tokens")) for row in stages),
+                "output_tokens": sum(_positive_int(row.get("output_tokens")) for row in stages),
+                "tokens_saved": sum(_positive_int(row.get("tokens_saved")) for row in stages),
+            },
+            "by_stage": _group_counts(stages, "stage"),
+            "by_workflow": _group_counts(stages, "workflow"),
+        }
+
+
+def record_token_budget_stage(
+    state_dir: str | Path,
+    *,
+    request_id: str,
+    stage: str,
+    budget: TokenBudget | dict[str, Any],
+    usage: dict[str, Any] | None = None,
+    workflow: str = "",
+    role: str = "",
+    status: str = "planned",
+) -> dict[str, Any]:
+    return TokenBudgetLedger(state_dir).record_stage(
+        request_id=request_id,
+        stage=stage,
+        budget=budget,
+        usage=usage,
+        workflow=workflow,
+        role=role,
+        status=status,
+    )
+
+
+def token_budget_ledger_summary(state_dir: str | Path, *, limit: int = 100) -> dict[str, Any]:
+    return TokenBudgetLedger(state_dir).summary(limit=limit)
+
+
 def normalize_context_mode(value: Any) -> str:
     text = str(value or "balanced").strip().lower()
     return text if text in CONTEXT_MODES else "balanced"
@@ -130,6 +221,27 @@ def content_to_text(content: Any) -> str:
 def _min_positive(*values: int | None) -> int | None:
     positives = [int(value) for value in values if value is not None and int(value) > 0]
     return min(positives) if positives else None
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, number)
+
+
+def _positive_int(value: Any) -> int:
+    parsed = _optional_int(value)
+    return int(parsed or 0)
+
+
+def _group_counts(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(key) or "default")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
 
 
 def _has_explicit_boost_mode(raw: Any, hub_options: Any) -> bool:

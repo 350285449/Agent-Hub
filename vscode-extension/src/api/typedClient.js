@@ -18,6 +18,78 @@ class AgentHubApiClient {
     return this.post("/v1/routing/simulate", payload);
   }
 
+  listAgents() {
+    return this.get("/v1/agents");
+  }
+
+  createAgent(payload) {
+    return this.post("/v1/agents", payload);
+  }
+
+  updateAgent(name, payload) {
+    return this.post(`/v1/agents/${encodeURIComponent(name)}`, payload);
+  }
+
+  deleteAgent(name) {
+    return this.request("DELETE", `/v1/agents/${encodeURIComponent(name)}`);
+  }
+
+  listWorkflowTemplates() {
+    return this.get("/v1/workflow-templates");
+  }
+
+  createWorkflowTemplate(payload) {
+    return this.post("/v1/workflow-templates", payload);
+  }
+
+  updateWorkflowTemplate(id, payload) {
+    return this.post(`/v1/workflow-templates/${encodeURIComponent(id)}`, payload);
+  }
+
+  deleteWorkflowTemplate(id) {
+    return this.request("DELETE", `/v1/workflow-templates/${encodeURIComponent(id)}`);
+  }
+
+  listRoutingProfiles() {
+    return this.get("/v1/routing-profiles");
+  }
+
+  listRoutingStrategies() {
+    return this.get("/v1/routing-strategies");
+  }
+
+  createRoutingProfile(payload) {
+    return this.post("/v1/routing-profiles", payload);
+  }
+
+  updateRoutingProfile(id, payload) {
+    return this.post(`/v1/routing-profiles/${encodeURIComponent(id)}`, payload);
+  }
+
+  deleteRoutingProfile(id) {
+    return this.request("DELETE", `/v1/routing-profiles/${encodeURIComponent(id)}`);
+  }
+
+  compactAnalytics() {
+    return this.post("/v1/analytics/compact", {});
+  }
+
+  observabilityExport() {
+    return this.get("/v1/observability/export");
+  }
+
+  otlpExport() {
+    return this.get("/v1/observability/otlp");
+  }
+
+  prometheusExport() {
+    return this.get("/v1/observability/prometheus");
+  }
+
+  simulateSwarm(payload) {
+    return this.post("/v1/swarms/simulate", payload);
+  }
+
   async get(path) {
     return this.request("GET", path);
   }

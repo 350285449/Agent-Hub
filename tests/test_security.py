@@ -49,6 +49,7 @@ class ToolSecurityTests(unittest.TestCase):
         self.assertTrue(decision.requires_approval)
         self.assertEqual(summary["object"], "agent_hub.policy_service")
         self.assertIn("provider", summary["boundaries"])
+        self.assertIn("workspace_context", summary["provider_data_categories"])
 
     def test_safe_mode_requires_approval_for_file_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

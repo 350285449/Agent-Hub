@@ -1,5 +1,10 @@
 from __future__ import annotations
 
-from .service import MemoryRecord, MemoryService
+from .service import DeterministicSemanticCompressor, MemoryCompressionResult, MemoryRecord, MemoryService
 
-__all__ = ["MemoryRecord", "MemoryService"]
+__all__ = [
+    "DeterministicSemanticCompressor",
+    "MemoryCompressionResult",
+    "MemoryRecord",
+    "MemoryService",
+]

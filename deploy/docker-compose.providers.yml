@@ -1,0 +1,49 @@
+# Optional provider-stack examples for local Agent-Hub development.
+#
+# Usage examples:
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.providers.yml --profile ollama up --build
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.providers.yml --profile vllm up --build
+#
+# LM Studio is usually a desktop host service. Point Agent-Hub at it with:
+#   AGENT_HUB_LM_STUDIO_BASE_URL=http://host.docker.internal:1234
+
+services:
+  agent-hub:
+    environment:
+      AGENT_HUB_OLLAMA_BASE_URL: ${AGENT_HUB_OLLAMA_BASE_URL:-http://ollama:11434}
+      AGENT_HUB_VLLM_BASE_URL: ${AGENT_HUB_VLLM_BASE_URL:-http://vllm:8000}
+      AGENT_HUB_LM_STUDIO_BASE_URL: ${AGENT_HUB_LM_STUDIO_BASE_URL:-http://host.docker.internal:1234}
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    profiles: ["vllm"]
+    ports:
+      - "8000:8000"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    command:
+      - --model
+      - ${VLLM_MODEL:-TinyLlama/TinyLlama-1.1B-Chat-v1.0}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    volumes:
+      - vllm-cache:/root/.cache/huggingface
+
+volumes:
+  ollama-data:
+  vllm-cache:

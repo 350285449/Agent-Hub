@@ -15,6 +15,7 @@ from .application import (
     BACKEND_FEATURES,
     BACKEND_VERSION,
     DiagnosticsApplicationService,
+    run_analytics_maintenance,
 )
 from .api.compatibility import (
     apply_model_routing,
@@ -41,6 +42,8 @@ from .context import request_context_diagnostics
 from .models import HubRequest, HubResponse
 from .observability import permission_snapshot, recent_events, record_event, usage_snapshot
 from .permissions import UNTRUSTED_EXTERNAL, mark_trusted_approval
+from .application.routing_profile_service import RoutingProfileApplicationService
+from .plugins.registration import apply_plugin_registrations
 from .runtime_kernel import AgentHubRuntimeKernel
 from .security.credentials import ensure_local_credentials
 from .security.secrets import redact_secrets
@@ -62,7 +65,11 @@ from .server_routes.middleware import (
     request_query as _request_query,
     trusted_approval_from_headers as _trusted_approval_from_headers,
 )
-from .server_routes import handle_get as handle_route_get, handle_post as handle_route_post
+from .server_routes import (
+    handle_delete as handle_route_delete,
+    handle_get as handle_route_get,
+    handle_post as handle_route_post,
+)
 from .server_routes.chat import (
     _response_headers,
     _stream_response_headers,
@@ -146,6 +153,7 @@ DIAGNOSTIC_ENDPOINTS = {
     "/v1/routing-memory/recent",
     "/v1/routing/status",
     "/v1/routing/last-decision",
+    "/v1/routing-profiles",
     "/v1/routing-intelligence",
     "/v1/routing/test-failover",
     "/v1/routing-history",
@@ -160,6 +168,8 @@ DIAGNOSTIC_ENDPOINTS = {
     "/v1/optimization",
     "/v1/tools",
     "/v1/workflows/status",
+    "/v1/workflow-presets",
+    "/v1/workflow-templates",
     "/v1/plugins",
     "/v1/audit",
     "/v1/extension-contract",
@@ -240,6 +250,15 @@ class AgentHubHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], config: HubConfig) -> None:
         super().__init__(server_address, AgentHubHandler)
         self.config = config
+        try:
+            self.config.initialization_report["analytics_maintenance"] = run_analytics_maintenance(self.config)
+        except Exception as exc:
+            self.config.initialization_report["analytics_maintenance"] = {
+                "object": "agent_hub.analytics_maintenance",
+                "enabled": bool(getattr(self.config, "analytics_compaction_enabled", False)),
+                "error": str(exc),
+            }
+        apply_plugin_registrations(self.config)
         self.router = AgentRouter(config)
         self.agent_runner = AgentRunner(config, self.router)
         self.team_agent_runner = TeamAgentRunner(config, self.router)
@@ -422,6 +441,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
             if self._reject_unauthenticated_public_request():
                 return
             path = _request_path(self.path)
+            if handle_route_delete(self, path):
+                return
             if path == "/v1/routing-memory":
                 auth_error = _diagnostics_auth_error(self.server.config, self.headers)
                 if auth_error is not None:
@@ -560,6 +581,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         return True
 
     def _trusted_request(self, request: HubRequest) -> HubRequest:
+        request = RoutingProfileApplicationService(self.server.config).apply_to_request(request)
         trusted, source = _trusted_approval_from_headers(
             self.server.config,
             self.headers,

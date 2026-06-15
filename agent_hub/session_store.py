@@ -73,6 +73,47 @@ class SessionStore:
         return self.sessions_dir / f"{safe}.json"
 
 
+def compact_session_store(
+    state_dir: str | Path,
+    *,
+    retention_days: int | None = None,
+    max_sessions: int | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Prune old session files by retention policy and bounded count."""
+
+    sessions_dir = Path(state_dir) / "sessions"
+    try:
+        paths = [path for path in sessions_dir.glob("*.json") if path.is_file()]
+    except OSError:
+        paths = []
+    rows: list[tuple[Path, float]] = [(path, _session_updated_at(path)) for path in paths]
+    cutoff = _retention_cutoff(retention_days, now=now)
+    remove: set[Path] = set()
+    if cutoff is not None:
+        remove.update(path for path, updated_at in rows if updated_at > 0 and updated_at < cutoff)
+    kept = [(path, updated_at) for path, updated_at in rows if path not in remove]
+    if max_sessions is not None:
+        keep_count = max(0, int(max_sessions or 0))
+        kept.sort(key=lambda item: item[1], reverse=True)
+        remove.update(path for path, _updated_at in kept[keep_count:])
+    removed = 0
+    for path in remove:
+        try:
+            path.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            continue
+    return {
+        "object": "agent_hub.session_compaction",
+        "retention_days": retention_days,
+        "max_sessions": max_sessions,
+        "original_count": len(paths),
+        "removed_count": removed,
+        "retained_count": max(0, len(paths) - removed),
+    }
+
+
 def _same_message_at_tail(messages: list[Message], message: Message) -> bool:
     return bool(messages) and messages[-1].get("role") == message.get("role") and messages[
         -1
@@ -111,3 +152,33 @@ def _atomic_write_text(path: Path, content: str) -> None:
                 Path(temp_name).unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _session_updated_at(path: Path) -> float:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raw = {}
+    if isinstance(raw, dict):
+        try:
+            value = float(raw.get("updated_at"))
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            return value
+    try:
+        return float(path.stat().st_mtime)
+    except OSError:
+        return 0.0
+
+
+def _retention_cutoff(retention_days: int | None, *, now: float | None) -> float | None:
+    if retention_days is None:
+        return None
+    try:
+        days = int(retention_days)
+    except (TypeError, ValueError):
+        return None
+    if days <= 0:
+        return None
+    return float(now if now is not None else time.time()) - days * 86400.0

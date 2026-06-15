@@ -61,6 +61,17 @@ class PolicyService:
             "object": "agent_hub.policy_service",
             "approval_mode": self.config.approval_mode,
             "provider_privacy_mode_enabled": bool(getattr(self.config, "provider_privacy_mode_enabled", True)),
+            "provider_data_policy": _provider_data_policy_summary(getattr(self.config, "provider_data_policy", {})),
+            "provider_data_categories": [
+                "billable_provider",
+                "prompt",
+                "prompt_injection",
+                "repository_files",
+                "secrets",
+                "sensitive_paths",
+                "untrusted_context",
+                "workspace_context",
+            ],
             "secret_scanning_enabled": bool(getattr(self.config, "secret_scanning_enabled", True)),
             "prompt_injection_defense_enabled": bool(getattr(self.config, "prompt_injection_defense_enabled", True)),
             "plugin_execution_enabled": bool(getattr(self.config, "plugin_execution_enabled", False)),
@@ -68,6 +79,19 @@ class PolicyService:
             "workspace_trusted": bool(getattr(self.config, "workspace_trusted", True)),
             "boundaries": ["provider", "tool", "plugin", "mcp", "workspace"],
         }
+
+
+def _provider_data_policy_summary(value: Any) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        return {}
+    summary: dict[str, list[str]] = {}
+    for key in ("allowed_categories", "blocked_categories", "require_approval_categories"):
+        items = value.get(key)
+        if isinstance(items, str):
+            summary[key] = [items]
+        elif isinstance(items, list):
+            summary[key] = [str(item) for item in items if str(item).strip()]
+    return summary
 
 
 __all__ = ["PolicyService"]

@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from .discovery import load_plugin_manifest
+from .models import MANIFEST_NAMES, PluginLoadError, PluginManifest
+
 
 PluginLifecycleAction = Literal["install", "enable", "disable", "audit", "remove"]
 
@@ -39,15 +42,27 @@ class PluginLifecycleManager:
         self.plugin_dir.mkdir(parents=True, exist_ok=True)
 
     def install(self, source: str | Path) -> PluginLifecycleResult:
-        source_path = Path(source)
-        manifest = _read_manifest(source_path)
-        plugin_id = str(manifest.get("id") or source_path.name)
+        source_root, manifest_path = _source_manifest_path(Path(source))
+        if manifest_path is None:
+            return PluginLifecycleResult(False, "install", "", str(source), "plugin_manifest_not_found")
+        loaded = load_plugin_manifest(manifest_path, root=source_root)
+        if isinstance(loaded, PluginLoadError):
+            return PluginLifecycleResult(False, "install", "", str(source_root), f"invalid_manifest: {loaded.message}")
+        manifest = loaded
+        plugin_id = manifest.id
         target = self.plugin_dir / _safe_plugin_id(plugin_id)
         if target.exists():
             return PluginLifecycleResult(False, "install", plugin_id, str(target), "plugin_already_installed")
-        shutil.copytree(source_path, target)
-        self._write_state(plugin_id, {"enabled": bool(manifest.get("enabled_by_default")), "installed": True})
-        return PluginLifecycleResult(True, "install", plugin_id, str(target), "plugin_installed")
+        shutil.copytree(source_root, target)
+        self._write_state(plugin_id, {"enabled": bool(manifest.enabled_by_default), "installed": True})
+        return PluginLifecycleResult(
+            True,
+            "install",
+            plugin_id,
+            str(target),
+            "plugin_installed",
+            _manifest_audit(manifest),
+        )
 
     def enable(self, plugin_id: str) -> PluginLifecycleResult:
         return self._set_enabled(plugin_id, True)
@@ -59,14 +74,20 @@ class PluginLifecycleManager:
         path = self.plugin_dir / _safe_plugin_id(plugin_id)
         if not path.exists():
             return PluginLifecycleResult(False, "audit", plugin_id, str(path), "plugin_not_installed")
-        manifest = _read_manifest(path)
+        source_root, manifest_path = _source_manifest_path(path)
+        loaded = load_plugin_manifest(manifest_path, root=source_root) if manifest_path is not None else {}
+        manifest = loaded if isinstance(loaded, PluginManifest) else None
         state = self._read_state(plugin_id)
         audit = {
-            "manifest_present": bool(manifest),
-            "entrypoint": manifest.get("entrypoint"),
-            "permissions": list(manifest.get("permissions") or []),
+            "manifest_present": manifest is not None,
+            "id": manifest.id if manifest else plugin_id,
+            "type": manifest.type if manifest else "",
+            "version": manifest.version if manifest else "",
+            "manifest_hash": manifest.manifest_hash if manifest else "",
+            "entrypoint": manifest.entrypoint if manifest else None,
+            "permissions": list(manifest.permissions) if manifest else [],
             "enabled": bool(state.get("enabled")),
-            "code_execution": bool(manifest.get("entrypoint")),
+            "code_execution": bool(manifest and manifest.entrypoint),
         }
         return PluginLifecycleResult(True, "audit", plugin_id, str(path), "plugin_audited", audit)
 
@@ -101,16 +122,29 @@ class PluginLifecycleManager:
         self._state_path(plugin_id).write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
-def _read_manifest(path: Path) -> dict[str, Any]:
-    for name in ("agent-hub-plugin.json", "plugin.json", ".agent-hub-plugin.json"):
-        manifest = path / name
+def _source_manifest_path(source: Path) -> tuple[Path, Path | None]:
+    source_path = source.expanduser().resolve()
+    if source_path.is_file():
+        return source_path.parent, source_path if source_path.name in MANIFEST_NAMES else None
+    for name in MANIFEST_NAMES:
+        manifest = source_path / name
         if manifest.exists():
-            try:
-                data = json.loads(manifest.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                return {}
-            return data if isinstance(data, dict) else {}
-    return {}
+            return source_path, manifest
+    return source_path, None
+
+
+def _manifest_audit(manifest: PluginManifest) -> dict[str, Any]:
+    return {
+        "manifest_present": True,
+        "id": manifest.id,
+        "name": manifest.name,
+        "type": manifest.type,
+        "version": manifest.version,
+        "manifest_hash": manifest.manifest_hash,
+        "entrypoint": manifest.entrypoint,
+        "permissions": list(manifest.permissions),
+        "enabled_by_default": manifest.enabled_by_default,
+    }
 
 
 def _safe_plugin_id(plugin_id: str) -> str:

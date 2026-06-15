@@ -99,6 +99,8 @@ def _sanitize_permission(permission: dict[str, Any] | None) -> dict[str, Any]:
             "model",
             "may_cost_money",
             "sends_workspace_content",
+            "data_categories",
+            "provider_data_policy",
         )
         if key in details
     }
@@ -111,6 +113,8 @@ def _sanitize_permission(permission: dict[str, Any] | None) -> dict[str, Any]:
                 "reason",
                 "blocked",
                 "explicit_approval_required",
+                "data_categories",
+                "provider_data_policy",
                 "findings",
                 "metadata",
             )

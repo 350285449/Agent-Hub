@@ -28,6 +28,7 @@ from .commands_doctor import (
     _print_doctor,
     _print_checkup,
 )
+from .commands_observability import _observability_export_command
 from .commands_provider import (
     _add_free_presets,
     _add_provider,
@@ -66,6 +67,7 @@ from .commands_provider import (
     _share_proof,
     _setup_free_models,
 )
+from .commands_plugins import _install_plugin
 from .commands_server import (
     _add_agent_runtime_flags,
     _apply_agent_runtime_flags,
@@ -169,6 +171,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     metrics_parser.add_argument("--route", default="cloud-agent", help="Route to summarize.")
     metrics_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    observability_parser = subparsers.add_parser(
+        "observability-export",
+        help="Export observability catalog, OTLP spans, or Prometheus metrics.",
+    )
+    observability_parser.add_argument(
+        "--format",
+        choices=["all", "catalog", "otlp", "prometheus"],
+        default="all",
+        help="Export shape to print.",
+    )
+    observability_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     local_models_parser = subparsers.add_parser(
         "local-models",
         help="Probe free local OpenAI-compatible model servers.",
@@ -253,6 +267,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     add_presets_parser.add_argument("--enable", action="store_true", help="Enable added presets immediately.")
     add_presets_parser.add_argument("--route", default="cloud-agent", help="Route to append presets to.")
+
+    install_parser = subparsers.add_parser(
+        "install",
+        help="Install a local Agent-Hub plugin into .agent-hub/plugins.",
+    )
+    install_parser.add_argument("source", help="Plugin directory or manifest path to install.")
+    install_parser.add_argument("--enable", action="store_true", help="Add the plugin id to enabled_plugins.")
+    install_parser.add_argument("--trust", action="store_true", help="Add the plugin id to trusted_plugins.")
+    install_parser.add_argument(
+        "--scope",
+        action="append",
+        default=[],
+        help="Capability scope to grant when trusting, repeatable.",
+    )
+    install_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     free_models_parser = subparsers.add_parser(
         "free-models",
@@ -618,6 +647,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             route=args.route,
             enabled=args.enable,
         )
+
+    config = load_config(args.config)
+    if command == "install":
+        return _install_plugin(
+            config,
+            args.config,
+            args.source,
+            enable=args.enable,
+            trust=args.trust,
+            scopes=args.scope,
+            as_json=args.json,
+        )
     if command == "free-models":
         return _setup_free_models(
             args.config,
@@ -633,7 +674,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             as_json=args.json,
         )
 
-    config = load_config(args.config)
     if getattr(args, "host", None):
         config.host = args.host
     if getattr(args, "port", None):
@@ -703,6 +743,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             _print_metrics(report)
         return 0
+    if command == "observability-export":
+        return _observability_export_command(
+            config,
+            output_format=args.format,
+            as_json=args.json,
+        )
     if command == "providers":
         rows = provider_metadata_rows()
         if args.json:

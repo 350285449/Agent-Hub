@@ -337,6 +337,24 @@ def handle_get(handler: object, path: str) -> bool:
 
 
 def handle_post(handler: object, path: str, payload: dict[str, Any]) -> bool:
+    if path == "/v1/token-pools/simulate":
+        from ..token_pooling import simulate_token_pooling
+
+        handler._send_diagnostics_json(simulate_token_pooling(handler.server.config, payload))
+        return True
+    if path == "/v1/swarms/simulate":
+        from ..orchestration import bounded_swarm_plan_from_payload
+
+        handler._send_diagnostics_json(bounded_swarm_plan_from_payload(payload).to_dict())
+        return True
+    if path == "/v1/analytics/compact":
+        from ..application.analytics_service import AnalyticsMaintenanceService
+
+        report = AnalyticsMaintenanceService(handler.server.config).compact()
+        handler.server.invalidate_diagnostics_cache("POST /v1/analytics/compact")
+        handler.server.config.initialization_report["analytics_maintenance"] = report
+        handler._send_diagnostics_json(report)
+        return True
     if path == "/api/benchmarks/run":
         from ..measurement.benchmark_runner import run_benchmark
 

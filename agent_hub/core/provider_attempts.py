@@ -62,6 +62,7 @@ class ProviderAttemptExecutor:
             "max_provider_attempts",
             5,
         )
+        max_provider_attempts = _request_max_provider_attempts(effective_request, max_provider_attempts)
         continuation_text = ""
         continuation_reason = ""
 
@@ -712,6 +713,18 @@ class ProviderAttemptExecutor:
             decision=decision,
             task_type=getattr(decision, "task_type", "") or "general",
         )
+
+
+def _request_max_provider_attempts(request: HubRequest, default: int) -> int:
+    raw = request.raw if isinstance(request.raw, dict) else {}
+    hub = raw.get("agent_hub") if isinstance(raw.get("agent_hub"), dict) else {}
+    policy = hub.get("fallback_policy") if isinstance(hub.get("fallback_policy"), dict) else {}
+    value = policy.get("max_provider_attempts")
+    try:
+        attempts = int(value)
+    except (TypeError, ValueError):
+        attempts = int(default or 5)
+    return max(1, min(attempts, 20))
 
 
 __all__ = ["ProviderAttemptExecutor", "ProviderAttemptHelpers"]

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -20,7 +22,9 @@ STREAM_FILES = {
     "tools": "tool_execution_history.jsonl",
     "workflows": "workflow_execution.jsonl",
     "adaptive": "adaptive_learning_events.jsonl",
+    "token_budget": "token_budget_ledger.jsonl",
 }
+DEFAULT_COMPACT_STREAMS = tuple(STREAM_FILES.keys())
 
 
 def record_event(state_dir: str | Path, stream: str, event: dict[str, Any]) -> None:
@@ -51,6 +55,79 @@ def recent_events(state_dir: str | Path, stream: str, *, limit: int = 50) -> lis
         if isinstance(value, dict):
             rows.append(value)
     return rows
+
+
+def compact_event_stream(
+    state_dir: str | Path,
+    stream: str,
+    *,
+    retention_days: int | None = None,
+    max_events: int | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Prune one JSONL observability stream by age and count."""
+
+    filename = STREAM_FILES.get(stream, f"{stream}.jsonl")
+    path = Path(state_dir) / filename
+    rows, invalid_lines = _read_event_rows(path)
+    original_count = len(rows)
+    cutoff = _retention_cutoff(retention_days, now=now)
+    if cutoff is not None:
+        rows = [row for row in rows if _event_time(row) is None or _event_time(row) >= cutoff]
+    if max_events is not None:
+        keep = max(0, int(max_events or 0))
+        rows = rows[-keep:] if keep else []
+    rewritten = False
+    if invalid_lines or len(rows) != original_count:
+        _write_event_rows(path, rows)
+        rewritten = True
+    return {
+        "stream": stream,
+        "file": filename,
+        "original_count": original_count,
+        "retained_count": len(rows),
+        "removed_count": max(0, original_count - len(rows)),
+        "invalid_lines": invalid_lines,
+        "rewritten": rewritten,
+        "retention_days": retention_days,
+        "max_events": max_events,
+    }
+
+
+def compact_observability_state(
+    state_dir: str | Path,
+    *,
+    retention_days: int | None = None,
+    max_events_per_stream: int | None = None,
+    streams: list[str] | tuple[str, ...] | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Compact the local analytics JSONL files without affecting runtime behavior."""
+
+    selected = list(streams or DEFAULT_COMPACT_STREAMS)
+    reports = [
+        compact_event_stream(
+            state_dir,
+            stream,
+            retention_days=retention_days,
+            max_events=max_events_per_stream,
+            now=now,
+        )
+        for stream in selected
+    ]
+    return {
+        "object": "agent_hub.analytics_compaction",
+        "state_dir": str(Path(state_dir)),
+        "retention_days": retention_days,
+        "max_events_per_stream": max_events_per_stream,
+        "streams": reports,
+        "removed_count": sum(int(item.get("removed_count") or 0) for item in reports),
+        "rewritten_streams": [
+            str(item.get("stream"))
+            for item in reports
+            if item.get("rewritten")
+        ],
+    }
 
 
 def usage_snapshot(state_dir: str | Path, provider_health: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -207,6 +284,74 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
+def _read_event_rows(path: Path) -> tuple[list[dict[str, Any]], int]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return [], 0
+    rows: list[dict[str, Any]] = []
+    invalid = 0
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            invalid += 1
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+        else:
+            invalid += 1
+    return rows, invalid
+
+
+def _write_event_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not path.exists() and not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = "".join(json.dumps(row, separators=(",", ":"), ensure_ascii=False, default=str) + "\n" for row in rows)
+    temp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as handle:
+            temp_name = handle.name
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _retention_cutoff(retention_days: int | None, *, now: float | None) -> float | None:
+    if retention_days is None:
+        return None
+    try:
+        days = int(retention_days)
+    except (TypeError, ValueError):
+        return None
+    if days <= 0:
+        return None
+    return float(now if now is not None else time.time()) - days * 86400.0
+
+
+def _event_time(event: dict[str, Any]) -> float | None:
+    try:
+        value = float(event.get("time"))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
 def _recent_failures(
     provider_health: dict[str, dict[str, Any]],
     internal_events: list[dict[str, Any]],
@@ -221,3 +366,19 @@ def _recent_failures(
             if isinstance(event, dict):
                 failures.append(event)
     return failures[-25:]
+
+
+__all__ = [
+    "MAX_RECENT_EVENTS",
+    "STREAM_FILES",
+    "audit_snapshot",
+    "compact_event_stream",
+    "compact_observability_state",
+    "metrics_counters",
+    "metrics_snapshot",
+    "permission_snapshot",
+    "recent_events",
+    "record_event",
+    "record_structured_log",
+    "usage_snapshot",
+]

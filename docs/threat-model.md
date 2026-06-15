@@ -56,6 +56,10 @@ Mitigations:
 - Secret scanning and prompt-injection scanning feed provider approval policy.
 - Provider privacy flags can block workspace files, code, or secrets for a
   provider.
+- `provider_data_policy` can block or require approval for outbound data
+  categories including workspace context, repository files, sensitive paths,
+  secrets, prompt-injection findings, untrusted context, and billable provider
+  use.
 - `approval_mode=safe` is the default guarded posture.
 
 Residual risk: deterministic scanners can miss novel secret formats or secrets
