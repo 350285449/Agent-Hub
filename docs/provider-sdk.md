@@ -59,3 +59,19 @@ agent = DemoProvider.descriptor.create_agent(
 
 Built-in provider metadata can be inspected with
 `builtin_provider_descriptors()`.
+
+## Conformance Report
+
+Provider authors can run a no-network SDK contract check before wiring live
+credentials:
+
+```python
+from agent_hub.providers.sdk import provider_conformance_report
+
+report = provider_conformance_report(DemoProvider)
+assert report["ok"], report["checks"]
+```
+
+The report verifies the stable `ProviderAdapter` method surface, descriptor
+metadata, request/response normalization, health shape, and cost-estimate shape
+without making a provider call.

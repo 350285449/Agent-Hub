@@ -38,6 +38,8 @@ class RouterEventRecorderTests(unittest.TestCase):
             self.assertEqual(event["api_shape"], "openai-chat")
             self.assertEqual(event["source"], "cline")
             self.assertEqual(event["routing_decision"], {"selected_agent": "agent-a"})
+            self.assertTrue(event["trace_id"].startswith("trace_"))
+            self.assertTrue(event["span_id"].startswith("span_"))
 
     def test_internal_events_keep_request_context_and_sanitize_nested_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -60,6 +62,7 @@ class RouterEventRecorderTests(unittest.TestCase):
 
             self.assertEqual(event["name"], PROVIDER_SELECTED)
             self.assertEqual(event["request_id"], "hub-2")
+            self.assertTrue(event["trace_id"].startswith("trace_"))
             self.assertEqual(event["session_id"], "s")
             self.assertEqual(event["source"], "agent-hub-test")
             self.assertEqual(event["metadata"], {"visible": "ok"})

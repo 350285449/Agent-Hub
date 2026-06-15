@@ -348,7 +348,7 @@ class AgentToolbox:
         request = tool_permission_request(name, args)
         policy = self.shell_command_policy
         if policy == "deny":
-            if self._get_approval_mode() == "ask":
+            if self._get_approval_mode() in {"ask", "safe"}:
                 return PermissionDecision(
                     False,
                     requires_approval=True,

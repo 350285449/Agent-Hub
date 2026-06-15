@@ -164,6 +164,7 @@ DIAGNOSTIC_ENDPOINTS = {
     "/v1/audit",
     "/v1/extension-contract",
     "/v1/enterprise/audit",
+    "/openapi.json",
     "/api/metrics/summary",
     "/api/metrics/savings",
     "/api/benchmarks",
@@ -497,7 +498,8 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         maximum = int(getattr(self.server.config, "max_json_body_bytes", MAX_REQUEST_SIZE) or MAX_REQUEST_SIZE)
         if length <= maximum:
             return False
-        self.close_connection = True
+        drained = self._discard_request_body(max_bytes=max(8 * 1024 * 1024, maximum * 2))
+        self.close_connection = not drained
         self._send_json(
             {
                 "error": {
@@ -506,7 +508,7 @@ class AgentHubHandler(BaseHTTPRequestHandler):
                 }
             },
             status=413,
-            headers={"Connection": "close"},
+            headers={"Connection": "close"} if not drained else None,
         )
         return True
 
@@ -543,16 +545,19 @@ class AgentHubHandler(BaseHTTPRequestHandler):
         )
         return True
 
-    def _discard_request_body(self) -> None:
+    def _discard_request_body(self, *, max_bytes: int | None = None) -> bool:
         try:
             remaining = int(self.headers.get("Content-Length", "0"))
         except ValueError:
-            return
+            return False
+        if max_bytes is not None and remaining > max(0, int(max_bytes)):
+            return False
         while remaining > 0:
             chunk = self.rfile.read(min(remaining, 64 * 1024))
             if not chunk:
-                return
+                return False
             remaining -= len(chunk)
+        return True
 
     def _trusted_request(self, request: HubRequest) -> HubRequest:
         trusted, source = _trusted_approval_from_headers(

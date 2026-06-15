@@ -11,6 +11,7 @@ from ..enterprise import (
 )
 from ..models import HubRequest
 from ..observability import record_event
+from ..tracing import trace_event_fields
 from ..permissions import (
     LOCAL,
     TRUSTED_CLOUD,
@@ -172,6 +173,7 @@ class ProviderPermissionPolicy:
             "permissions",
             {
                 "type": "provider_permission",
+                **trace_event_fields(request),
                 "session_id": request.session_id,
                 "agent": agent.name,
                 "provider": agent.provider,

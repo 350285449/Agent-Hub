@@ -12,6 +12,7 @@ from agent_hub.plugins import execute_plugin
 from agent_hub.permissions import PermissionManager, tool_permission_request
 from agent_hub.core.router import AgentRouter, RouterError
 from agent_hub.security import classify_shell_command, detect_secrets
+from agent_hub.security.policy_service import PolicyService
 from agent_hub.security.command_runner import (
     CommandExecutionRequest,
     CommandRunnerError,
@@ -36,6 +37,18 @@ class ToolSecurityTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertTrue(decision.requires_approval)
         self.assertEqual(request.category, "package_install")
+
+    def test_policy_service_centralizes_tool_decisions(self) -> None:
+        config = HubConfig(approval_mode="auto")
+        service = PolicyService(config)
+
+        decision = service.check_tool("run_command", {"command": "npm install left-pad"})
+        summary = service.summary()
+
+        self.assertFalse(decision.allowed)
+        self.assertTrue(decision.requires_approval)
+        self.assertEqual(summary["object"], "agent_hub.policy_service")
+        self.assertIn("provider", summary["boundaries"])
 
     def test_safe_mode_requires_approval_for_file_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

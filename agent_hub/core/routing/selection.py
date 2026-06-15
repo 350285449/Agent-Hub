@@ -3176,8 +3176,12 @@ class AgentRouter:
             original_routing_score = self._routing_score(
                 agent,
                 request,
+                include_adaptive=False,
                 include_routing_memory=False,
                 include_token_saver=False,
+                include_repository=False,
+                include_context_intelligence=False,
+                include_efficiency=False,
             )
             token_saver = self._token_saver_signal(
                 agent,
@@ -3198,10 +3202,18 @@ class AgentRouter:
             outcome_signal = self._outcome_based_routing_signal(agent, request, classification)
             efficiency_signal = self._route_efficiency_signal(agent, request, classification)
             memory_adjustment = float(routing_memory.get("adjustment", 0.0) or 0.0)
+            adaptive_adjustment = float(adaptive.get("adaptive_bonus", 0.0) or 0.0)
             token_saver_adjustment = float(token_saver.get("adjustment", 0.0) or 0.0)
             repository_adjustment = float(repository_signal.get("adjustment", 0.0) or 0.0)
             efficiency_adjustment = float(efficiency_signal.get("routing_adjustment", 0.0) or 0.0)
-            final_routing_score = original_routing_score + memory_adjustment + token_saver_adjustment
+            final_routing_score = (
+                original_routing_score
+                + adaptive_adjustment
+                + memory_adjustment
+                + token_saver_adjustment
+                + repository_adjustment
+                + efficiency_adjustment
+            )
             context_intelligence = context.context_intelligence
             context_adjustment = self._context_intelligence_adjustment(
                 agent,
@@ -3211,6 +3223,7 @@ class AgentRouter:
             )
             final_routing_score += context_adjustment
             score_adjustments = [
+                {"name": "adaptive_learning", "value": round(adaptive_adjustment, 3), "summary": adaptive.get("summary")},
                 {"name": "routing_memory", "value": round(memory_adjustment, 3), "summary": routing_memory.get("summary")},
                 {"name": "token_saver", "value": round(token_saver_adjustment, 3), "summary": token_saver.get("summary")},
                 {"name": "repository_dna", "value": round(repository_adjustment, 3), "summary": repository_signal.get("summary")},
@@ -3230,6 +3243,7 @@ class AgentRouter:
                     "model": agent.model,
                     "original_routing_score": round(original_routing_score, 3),
                     "base_score": round(original_routing_score, 3),
+                    "adaptive_adjustment": round(adaptive_adjustment, 3),
                     "memory_adjustment": round(memory_adjustment, 3),
                     "token_saver_adjustment": round(token_saver_adjustment, 3),
                     "context_intelligence_adjustment": round(context_adjustment, 3),
@@ -3890,8 +3904,12 @@ class AgentRouter:
         agent: AgentConfig,
         request: HubRequest | None = None,
         *,
+        include_adaptive: bool = True,
         include_routing_memory: bool = True,
         include_token_saver: bool = True,
+        include_repository: bool = True,
+        include_context_intelligence: bool = True,
+        include_efficiency: bool = True,
     ) -> float:
         score = float(agent.priority or 0.0)
         capabilities = agent_capabilities(agent)
@@ -3968,7 +3986,7 @@ class AgentRouter:
             score -= 2.5
         score += provider_cost_efficiency_score(agent)
         if request is not None:
-            if self.config.adaptive_learning_enabled and self.config.adaptive_routing_enabled:
+            if include_adaptive and self.config.adaptive_learning_enabled and self.config.adaptive_routing_enabled:
                 score += self.adaptive_learning.routing_bonus(
                     agent.name,
                     route=request.route or "",
@@ -3976,21 +3994,23 @@ class AgentRouter:
                     workflow_pattern=_request_workflow_pattern(request),
                     workflow_role=_request_workflow_role(request),
                 )
-            repository_signal = self._repository_routing_signal(
-                agent,
-                self._classify_request(request),
-                self._repository_dna(),
-            )
-            score += float(repository_signal.get("adjustment", 0.0) or 0.0)
+            if include_repository:
+                repository_signal = self._repository_routing_signal(
+                    agent,
+                    self._classify_request(request),
+                    self._repository_dna(),
+                )
+                score += float(repository_signal.get("adjustment", 0.0) or 0.0)
             if include_routing_memory:
                 signal = self._routing_memory_signal(agent, request)
                 score += float(signal.get("adjustment", 0.0) or 0.0)
-            score += self._context_intelligence_adjustment(
-                agent,
-                request,
-                self._classify_request(request),
-                self._routing_context(request).context_intelligence,
-            )
+            if include_context_intelligence:
+                score += self._context_intelligence_adjustment(
+                    agent,
+                    request,
+                    self._classify_request(request),
+                    self._routing_context(request).context_intelligence,
+                )
             if include_token_saver:
                 token_saver = self._token_saver_signal(
                     agent,
@@ -3998,7 +4018,7 @@ class AgentRouter:
                     classification=self._classify_request(request),
                 )
                 score += float(token_saver.get("adjustment", 0.0) or 0.0)
-            if _routing_bool(self.config, "efficiency_routing_enabled", True):
+            if include_efficiency and _routing_bool(self.config, "efficiency_routing_enabled", True):
                 efficiency = self._route_efficiency_signal(agent, request, self._classify_request(request))
                 score += float(efficiency.get("routing_adjustment", 0.0) or 0.0)
         evaluation = self.provider_scores.get(agent.name) if isinstance(self.provider_scores, dict) else None

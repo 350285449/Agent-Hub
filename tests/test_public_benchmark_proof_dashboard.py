@@ -82,6 +82,62 @@ class PublicBenchmarkProofDashboardTests(unittest.TestCase):
         )
 
         self.assertEqual(learning["model_profiles"]["Claude"]["Python/FastAPI"]["success"], 100.0)
+        self.assertGreater(learning["ranking"][0]["confidence"], 0.0)
+        self.assertLess(learning["ranking"][0]["confidence"], 1.0)
+
+    def test_routing_memory_learning_weights_tokens_and_retries_by_similarity(self) -> None:
+        learning = learn_from_outcomes(
+            [
+                {
+                    "agent": "Claude",
+                    "language": "Python",
+                    "framework": "FastAPI",
+                    "success": True,
+                    "input_tokens": 1000,
+                    "output_tokens": 0,
+                    "retry_count": 1,
+                    "similarity": 1.0,
+                },
+                {
+                    "agent": "Claude",
+                    "language": "Python",
+                    "framework": "FastAPI",
+                    "success": True,
+                    "input_tokens": 1000,
+                    "output_tokens": 0,
+                    "retry_count": 1,
+                    "similarity": 0.5,
+                },
+            ]
+        )
+
+        profile = learning["model_profiles"]["Claude"]["Python/FastAPI"]
+        self.assertEqual(profile["weighted_attempts"], 1.5)
+        self.assertEqual(profile["avg_tokens"], 1000.0)
+        self.assertEqual(profile["avg_retries"], 1.0)
+        self.assertEqual(learning["ranking"][0]["confidence"], 0.1579)
+
+    def test_routing_memory_learning_handles_malformed_similarity_and_slashes(self) -> None:
+        learning = learn_from_outcomes(
+            [
+                {
+                    "agent": "Claude/Opus",
+                    "language": "C/C++",
+                    "framework": "Qt/Widgets",
+                    "success": True,
+                    "input_tokens": 1000,
+                    "output_tokens": 500,
+                    "retry_count": 0,
+                    "similarity": "nan",
+                    "latency_ms": "inf",
+                }
+            ]
+        )
+
+        profile = learning["model_profiles"]["Claude/Opus"]["C/C++/Qt/Widgets"]
+        self.assertEqual(profile["success"], 100.0)
+        self.assertEqual(profile["weighted_attempts"], 1.0)
+        self.assertEqual(profile["avg_latency_ms"], 0.0)
 
     def test_proof_dashboard_exposes_repository_cards_and_model_performance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

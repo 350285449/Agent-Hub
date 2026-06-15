@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -9,7 +10,9 @@ from agent_hub.config import AgentConfig, HubConfig
 from agent_hub.core.router import AgentRouter
 from agent_hub.evaluation import BenchmarkTask
 from agent_hub.evaluation.benchmark_suite import BenchmarkSuiteRunner
+from agent_hub.failure_prediction import explain_success_probability, route_by_success_probability, score_success_probability, train_success_model
 from agent_hub.models import HubRequest, ProviderResult
+from agent_hub.routing_memory.learning import learn_from_outcomes
 from agent_hub.workflows.selector import WorkflowSelector
 
 
@@ -70,6 +73,53 @@ class AdaptiveLearningTests(unittest.TestCase):
             self.assertEqual(summary["most_effective_providers"][0]["provider"], "anthropic")
             self.assertEqual(summary["recent_optimization_decisions"][-1]["retry_count"], 1)
             self.assertTrue(summary["dashboard"]["cards"])
+
+    def test_store_sanitizes_non_finite_latency_and_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = AgentConfig(name="claude", provider="anthropic", model="claude-test")
+            store = AdaptiveLearningStore(Path(tmp))
+
+            store.record_outcome(
+                request_id="bad-telemetry",
+                route="coding",
+                task_type="coding",
+                workflow_pattern="single_worker",
+                workflow_role="coder",
+                agent=agent,
+                model=agent.model,
+                success=True,
+                latency_seconds=float("nan"),
+                failover_attempts=0,
+                input_tokens=100,
+                output_tokens=50,
+                estimated_cost_usd=float("inf"),
+                final=True,
+            )
+            store.record_workflow_result(
+                request_id="bad-telemetry",
+                pattern="single_worker",
+                task_type="coding",
+                success=True,
+                latency_seconds=float("inf"),
+                recovered_by_failover=False,
+                final_status="completed",
+                agent=agent.name,
+                provider=agent.provider,
+                model=agent.model,
+                estimated_cost_usd=float("nan"),
+            )
+
+            summary = store.optimization_summary()
+
+            self.assertIsNone(summary["average_known_cost_usd"])
+            self.assertEqual(summary["recent_optimization_decisions"][-1]["latency_ms"], 0.0)
+            workflow = next(
+                item
+                for item in summary["workflow_patterns"]
+                if item["workflow_pattern"] == "single_worker"
+            )
+            self.assertEqual(workflow["average_latency_ms"], 0.0)
+            self.assertNotIn("average_known_cost_usd", workflow)
 
     def test_workflow_analytics_reports_task_rows_and_role_winners(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -215,6 +265,143 @@ class AdaptiveLearningTests(unittest.TestCase):
             self.assertTrue(ready["active"])
             self.assertGreater(ready["adaptive_bonus"], 0)
             self.assertEqual(ready["scorecard"]["success_rate"], 1.0)
+            self.assertIn("sample_confidence", ready["scorecard"])
+            self.assertIn("freshness_score", ready["scorecard"])
+            self.assertIn("adjusted_quality_score", ready["scorecard"])
+            self.assertIn("trend_score", ready["scorecard"])
+            self.assertIn("consistency_score", ready["scorecard"])
+            self.assertIn("retry_score", ready["scorecard"])
+
+    def test_adaptive_scorecard_rewards_recent_improvement_and_penalizes_instability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = AgentConfig(name="claude", provider="anthropic", model="claude-test")
+            store = AdaptiveLearningStore(Path(tmp))
+
+            for index, success in enumerate([False] * 12 + [True] * 18):
+                store.record_outcome(
+                    request_id=f"trend-{index}",
+                    route="coding",
+                    task_type="coding",
+                    workflow_pattern="single_worker",
+                    workflow_role="coder",
+                    agent=agent,
+                    model=agent.model,
+                    success=success,
+                    latency_seconds=1,
+                    failover_attempts=0,
+                    input_tokens=100,
+                    output_tokens=50,
+                    estimated_cost_usd=None,
+                    retry_count=0,
+                    error_type="" if success else "runtime_error",
+                    final=True,
+                )
+
+            signal = store.routing_signal(
+                "claude",
+                route="coding",
+                task_type="coding",
+                workflow_pattern="single_worker",
+                workflow_role="coder",
+            )
+            scorecard = signal["scorecard"]
+
+            self.assertTrue(signal["active"])
+            self.assertGreater(scorecard["trend_score"], 0.5)
+            self.assertEqual(scorecard["success_streak"], 18)
+            self.assertGreater(scorecard["error_rate"], 0.0)
+            self.assertLess(scorecard["error_score"], 1.0)
+
+    def test_adaptive_bonus_is_damped_by_confidence_and_freshness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = AgentConfig(name="claude", provider="anthropic", model="claude-test")
+            store = AdaptiveLearningStore(Path(tmp))
+
+            for index in range(20):
+                store.record_outcome(
+                    request_id=f"fresh-{index}",
+                    route="coding",
+                    task_type="coding",
+                    workflow_pattern="single_worker",
+                    workflow_role="coder",
+                    agent=agent,
+                    model=agent.model,
+                    success=True,
+                    latency_seconds=1,
+                    failover_attempts=0,
+                    input_tokens=100,
+                    output_tokens=50,
+                    estimated_cost_usd=None,
+                    final=True,
+                )
+
+            fresh = store.routing_signal(
+                "claude",
+                route="coding",
+                task_type="coding",
+                workflow_pattern="single_worker",
+                workflow_role="coder",
+            )
+            state = store.load()
+            for row in state["aggregates"].values():
+                row["last_seen_at"] = time.time() - (180 * 86400)
+            store.save(state)
+            stale = store.routing_signal(
+                "claude",
+                route="coding",
+                task_type="coding",
+                workflow_pattern="single_worker",
+                workflow_role="coder",
+            )
+
+            self.assertGreater(fresh["scorecard"]["sample_confidence"], 0.6)
+            self.assertLess(stale["scorecard"]["freshness_score"], fresh["scorecard"]["freshness_score"])
+            self.assertLess(stale["adaptive_bonus"], fresh["adaptive_bonus"])
+
+    def test_learning_ranking_uses_quality_recency_feedback_and_bad_data(self) -> None:
+        now = time.time()
+        rows = [
+            {
+                "agent": "fresh-good",
+                "language": "python",
+                "framework": "fastapi",
+                "success": True,
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "retry_count": 0,
+                "outcome_score": 0.92,
+                "latency_ms": 900,
+                "feedback_rating": "up",
+                "time": now,
+                "similarity": 1.0,
+            }
+            for _ in range(8)
+        ] + [
+            {
+                "agent": "stale-bad",
+                "language": "python",
+                "framework": "fastapi",
+                "success": False,
+                "input_tokens": 1000,
+                "output_tokens": 800,
+                "retry_count": 3,
+                "outcome_score": 0.25,
+                "latency_ms": 9000,
+                "feedback_rating": "down",
+                "time": now - (120 * 86400),
+                "similarity": 1.0,
+            }
+            for _ in range(8)
+        ]
+
+        learning = learn_from_outcomes(rows)
+        ranking = learning["ranking"]
+
+        self.assertEqual(ranking[0]["agent"], "fresh-good")
+        self.assertGreater(ranking[0]["rank_score"], ranking[1]["rank_score"])
+        self.assertIn("score_breakdown", ranking[0])
+        self.assertGreater(ranking[0]["freshness_score"], ranking[1]["freshness_score"])
+        self.assertLess(ranking[0]["bad_rate"], ranking[1]["bad_rate"])
 
     def test_router_uses_adaptive_bonus_after_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -270,6 +457,73 @@ class AdaptiveLearningTests(unittest.TestCase):
             self.assertEqual(decision["selected_agent"], "good")
             self.assertTrue(decision["candidate_scores"][0]["adaptive"]["active"])
             self.assertGreater(decision["candidate_scores"][0]["adaptive"]["adaptive_bonus"], 0)
+            self.assertGreater(decision["candidate_scores"][0]["adaptive_adjustment"], 0)
+            self.assertIn(
+                "adaptive_learning",
+                [item["name"] for item in decision["candidate_scores"][0]["score_adjustments"]],
+            )
+
+    def test_trained_cloud_model_strongly_beats_untrained_cloud_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = HubConfig(
+                state_dir=root / "state",
+                repo_context_enabled=False,
+                automatic_escalation_enabled=False,
+                default_route=["untrained-cloud", "trained-cloud"],
+                agents={
+                    "untrained-cloud": AgentConfig(
+                        name="untrained-cloud",
+                        provider="openai-compatible",
+                        provider_type="ollama-cloud",
+                        model="untrained:cloud",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                    "trained-cloud": AgentConfig(
+                        name="trained-cloud",
+                        provider="openai-compatible",
+                        provider_type="ollama-cloud",
+                        model="trained:cloud",
+                        base_url="http://127.0.0.1:9999",
+                    ),
+                },
+            )
+            trained = config.agents["trained-cloud"]
+            store = AdaptiveLearningStore(config.state_dir)
+            for index in range(36):
+                store.record_outcome(
+                    request_id=f"trained-cloud-{index}",
+                    route="",
+                    task_type="coding",
+                    workflow_pattern="",
+                    workflow_role="",
+                    agent=trained,
+                    model=trained.model,
+                    success=True,
+                    latency_seconds=1,
+                    failover_attempts=0,
+                    input_tokens=100,
+                    output_tokens=50,
+                    estimated_cost_usd=None,
+                    final=True,
+                )
+
+            config.expose_routing_details = True
+            decision = AgentRouter(config).decide(
+                HubRequest(session_id="s", messages=[{"role": "user", "content": "fix this code"}])
+            )
+
+            trained_score = next(row for row in decision.candidate_scores if row["agent"] == "trained-cloud")
+            untrained_score = next(row for row in decision.candidate_scores if row["agent"] == "untrained-cloud")
+
+            self.assertEqual(decision.selected_agent, "trained-cloud")
+            self.assertGreaterEqual(trained_score["adaptive"]["adaptive_bonus"], 20.0)
+            self.assertEqual(untrained_score["adaptive"]["adaptive_bonus"], 0.0)
+            self.assertEqual(trained_score["adaptive"]["scorecard"]["training_status"], "trained_cloud")
+            self.assertGreater(
+                trained_score["final_score"] - untrained_score["final_score"],
+                15.0,
+            )
 
     def test_router_keeps_cold_start_and_manual_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -423,6 +677,346 @@ class AdaptiveLearningTests(unittest.TestCase):
             self.assertTrue(selection.adaptive_upgrade)
             self.assertEqual(selection.baseline_pattern, "single_worker")
             self.assertEqual(override.pattern, "single_worker")
+
+    def test_workflow_upgrade_prefers_task_specific_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = HubConfig(state_dir=Path(tmp) / "state")
+            store = AdaptiveLearningStore(config.state_dir)
+            for index in range(5):
+                store.record_workflow_result(
+                    request_id=f"docs-single-{index}",
+                    pattern="single_worker",
+                    task_type="docs",
+                    success=False,
+                    latency_seconds=2,
+                    recovered_by_failover=False,
+                    final_status="blocked",
+                    agent="bad",
+                    provider="openai-compatible",
+                    model="bad-test",
+                )
+                store.record_workflow_result(
+                    request_id=f"docs-reviewed-{index}",
+                    pattern="reviewed_worker",
+                    task_type="docs",
+                    success=True,
+                    latency_seconds=3,
+                    recovered_by_failover=False,
+                    final_status="completed",
+                    agent="good",
+                    provider="openai-compatible",
+                    model="good-test",
+                )
+
+            selection = WorkflowSelector(config).select(
+                HubRequest(session_id="s", messages=[{"role": "user", "content": "fix app.py"}])
+            )
+
+            self.assertEqual(selection.pattern, "single_worker")
+            self.assertFalse(selection.adaptive_upgrade)
+
+    def test_record_workflow_result_replaces_duplicate_request_contribution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AdaptiveLearningStore(Path(tmp))
+            store.record_workflow_result(
+                request_id="repeat",
+                pattern="single_worker",
+                task_type="coding",
+                success=False,
+                latency_seconds=2,
+                recovered_by_failover=False,
+                final_status="blocked",
+                agent="bad",
+                provider="openai-compatible",
+                model="bad-test",
+                retry_count=2,
+                estimated_cost_usd=0.2,
+            )
+            store.record_workflow_result(
+                request_id="repeat",
+                pattern="single_worker",
+                task_type="coding",
+                success=True,
+                latency_seconds=4,
+                recovered_by_failover=True,
+                final_status="completed",
+                agent="good",
+                provider="openai-compatible",
+                model="good-test",
+                retry_count=1,
+                estimated_cost_usd=0.1,
+            )
+
+            row = next(
+                item
+                for item in store.optimization_summary()["workflow_patterns"]
+                if item["workflow_pattern"] == "single_worker"
+            )
+            analytics = next(
+                item
+                for item in store.optimization_summary()["workflow_analytics"]
+                if item["workflow_pattern"] == "single_worker" and item["task_type"] == "coding"
+            )
+
+            self.assertEqual(row["attempts"], 1)
+            self.assertEqual(row["success_rate"], 1.0)
+            self.assertEqual(row["total_retries"], 1)
+            self.assertEqual(row["average_latency_ms"], 4000.0)
+            self.assertEqual(analytics["average_known_cost_usd"], 0.1)
+
+    def test_feedback_workflow_override_keeps_duplicate_replacement_balanced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AdaptiveLearningStore(Path(tmp))
+            store.record_workflow_result(
+                request_id="repeat-feedback",
+                pattern="single_worker",
+                task_type="coding",
+                success=False,
+                latency_seconds=2,
+                recovered_by_failover=False,
+                final_status="blocked",
+                agent="bad",
+                provider="openai-compatible",
+                model="bad-test",
+            )
+            store.record_feedback(
+                request_id="repeat-feedback",
+                rating="up",
+                workflow_success=True,
+            )
+            store.record_workflow_result(
+                request_id="repeat-feedback",
+                pattern="single_worker",
+                task_type="coding",
+                success=True,
+                latency_seconds=3,
+                recovered_by_failover=False,
+                final_status="completed",
+                agent="good",
+                provider="openai-compatible",
+                model="good-test",
+            )
+
+            row = next(
+                item
+                for item in store.optimization_summary()["workflow_patterns"]
+                if item["workflow_pattern"] == "single_worker"
+            )
+
+            self.assertEqual(row["attempts"], 1)
+            self.assertEqual(row["success_rate"], 1.0)
+
+    def test_failure_prediction_training_matches_named_candidates(self) -> None:
+        model = train_success_model(
+            [
+                {"name": "fast-agent", "provider": "openai", "task_type": "coding", "success": True},
+                {"name": "fast-agent", "provider": "openai", "task_type": "coding", "success": True},
+                {"name": "slow-agent", "provider": "anthropic", "task_type": "coding", "success": False},
+                {"name": "slow-agent", "provider": "anthropic", "task_type": "coding", "success": False},
+            ]
+        )
+
+        scores = score_success_probability(
+            {"task_type": "coding"},
+            [
+                {"name": "fast-agent", "provider": "openai", "coding_score": 0.5},
+                {"name": "slow-agent", "provider": "anthropic", "coding_score": 0.5},
+            ],
+            model=model,
+        )
+
+        self.assertGreater(scores["fast-agent"], scores["slow-agent"])
+        self.assertGreater(scores["fast-agent"], 0.7)
+        self.assertLess(scores["slow-agent"], 0.4)
+
+    def test_failure_prediction_training_is_calibrated_and_confidence_weighted(self) -> None:
+        model = train_success_model(
+            [
+                {
+                    "name": "kimi-cloud",
+                    "provider": "openai-compatible",
+                    "provider_type": "ollama-cloud",
+                    "model": "kimi:cloud",
+                    "task_type": "coding",
+                    "language": "python",
+                    "success": True,
+                    "similarity": 1.0,
+                }
+                for _ in range(24)
+            ]
+            + [
+                {
+                    "name": "cold-cloud",
+                    "provider": "openai-compatible",
+                    "provider_type": "ollama-cloud",
+                    "model": "cold:cloud",
+                    "task_type": "coding",
+                    "language": "python",
+                    "success": False,
+                    "similarity": 1.0,
+                }
+                for _ in range(4)
+            ]
+        )
+
+        bucket = model["buckets"]["provider_task:kimi-cloud:coding"]
+        self.assertEqual(model["version"], 2)
+        self.assertGreater(bucket["confidence"], 0.75)
+        self.assertIn("smoothed_success_rate", bucket)
+        self.assertIn("evidence_strength", bucket)
+
+        scores = score_success_probability(
+            {"task_type": "coding", "language": "python"},
+            [
+                {
+                    "name": "kimi-cloud",
+                    "provider": "openai-compatible",
+                    "provider_type": "ollama-cloud",
+                    "model": "kimi:cloud",
+                    "coding_score": 0.5,
+                },
+                {
+                    "name": "cold-cloud",
+                    "provider": "openai-compatible",
+                    "provider_type": "ollama-cloud",
+                    "model": "cold:cloud",
+                    "coding_score": 0.5,
+                },
+                {
+                    "name": "new-cloud",
+                    "provider": "openai-compatible",
+                    "provider_type": "ollama-cloud",
+                    "model": "new:cloud",
+                    "coding_score": 0.5,
+                },
+            ],
+            model=model,
+        )
+
+        self.assertGreater(scores["kimi-cloud"] - scores["new-cloud"], 0.15)
+        self.assertGreater(scores["new-cloud"] - scores["cold-cloud"], 0.10)
+
+    def test_failure_prediction_ignores_non_finite_training_values(self) -> None:
+        model = train_success_model(
+            [
+                {
+                    "name": "steady-agent",
+                    "provider": "openai",
+                    "task_type": "coding",
+                    "success": True,
+                    "weight": "nan",
+                },
+                {
+                    "name": "steady-agent",
+                    "provider": "openai",
+                    "task_type": "coding",
+                    "success": True,
+                    "similarity": "inf",
+                },
+            ]
+        )
+
+        explanation = explain_success_probability(
+            {"task_type": "coding"},
+            [{"name": "steady-agent", "provider": "openai", "coding_score": "nan"}],
+            model={**model, "prior_success_rate": "inf"},
+        )
+
+        selected = explanation["candidates"][0]
+        self.assertGreater(selected["success_probability"], 0.5)
+        self.assertLess(selected["success_probability"], 0.99)
+        self.assertGreater(selected["trained_confidence"], 0.0)
+
+    def test_failure_prediction_trains_provider_type_and_normalized_feedback(self) -> None:
+        model = train_success_model(
+            [
+                {
+                    "name": "local-a",
+                    "provider": "openai-compatible",
+                    "provider_type": "ollama",
+                    "task_type": "coding",
+                    "success": True,
+                    "feedback_rating": " UP ",
+                },
+                {
+                    "name": "local-b",
+                    "provider": "openai-compatible",
+                    "provider_type": "ollama",
+                    "task_type": "coding",
+                    "success": False,
+                    "feedback_rating": " DOWN ",
+                },
+            ]
+        )
+
+        self.assertIn("provider_task:ollama:coding", model["buckets"])
+        self.assertGreater(model["buckets"]["provider_task:local-a:coding"]["attempts"], 1.0)
+        self.assertGreater(model["buckets"]["provider_task:local-b:coding"]["attempts"], 1.0)
+        self.assertEqual(model["sample_count"], 2)
+
+    def test_failure_prediction_explains_evidence_and_ranking(self) -> None:
+        model = train_success_model(
+            [
+                {
+                    "name": "deep-agent",
+                    "provider": "openai",
+                    "model": "deep-model",
+                    "task_type": "coding",
+                    "language": "python",
+                    "success": True,
+                    "similarity": 1.0,
+                }
+                for _ in range(10)
+            ]
+            + [
+                {
+                    "name": "shallow-agent",
+                    "provider": "openai",
+                    "model": "shallow-model",
+                    "task_type": "coding",
+                    "language": "python",
+                    "success": False,
+                    "similarity": 1.0,
+                }
+                for _ in range(6)
+            ]
+        )
+
+        explanation = explain_success_probability(
+            {
+                "task_type": "coding",
+                "language": "python",
+                "context_tokens": 70000,
+                "tests_available": True,
+                "public_api_change": True,
+            },
+            [
+                {"name": "shallow-agent", "provider": "openai", "model": "shallow-model", "coding_score": 0.5},
+                {"name": "deep-agent", "provider": "openai", "model": "deep-model", "coding_score": 0.5},
+            ],
+            model=model,
+        )
+        route = route_by_success_probability(
+            {"task_type": "coding", "language": "python"},
+            [
+                {"name": "shallow-agent", "provider": "openai", "model": "shallow-model", "coding_score": 0.5},
+                {"name": "deep-agent", "provider": "openai", "model": "deep-model", "coding_score": 0.5},
+            ],
+            model=model,
+        )
+
+        selected = explanation["candidates"][0]
+        self.assertEqual(explanation["object"], "agent_hub.failure_prediction.success_probability_explanation")
+        self.assertEqual(explanation["selected"], "deep-agent")
+        self.assertEqual(selected["name"], "deep-agent")
+        self.assertEqual(selected["evidence_level"], "strong")
+        self.assertGreater(selected["trained_confidence"], 0.75)
+        self.assertTrue(selected["bucket_matches"])
+        self.assertIn("trained_provider_task", [item["name"] for item in selected["adjustments"]])
+        self.assertIn("large_context", [item["name"] for item in selected["adjustments"]])
+        self.assertTrue(selected["top_reasons"])
+        self.assertEqual(route["selected"], "deep-agent")
+        self.assertEqual(route["ranking"][0]["name"], "deep-agent")
 
     def test_benchmark_suite_compares_static_and_adaptive_routing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

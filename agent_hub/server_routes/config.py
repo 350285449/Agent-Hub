@@ -9,6 +9,7 @@ from .middleware import request_query
 from ..learning_proof import learning_dashboard_body
 from ..measurement import usage_ledger_summary
 from ..observability import usage_snapshot
+from ..openapi import openapi_spec
 
 
 def handle_get(handler: object, path: str) -> bool:
@@ -19,6 +20,9 @@ def handle_get(handler: object, path: str) -> bool:
         return True
     if path == "/dashboard":
         handler._send_html(handler._root_html())
+        return True
+    if path == "/openapi.json":
+        handler._send_cached_diagnostics_json("GET /openapi.json", openapi_spec)
         return True
     if path == "/dashboard/kernel":
         body = handler.server.runtime_kernel.snapshot(

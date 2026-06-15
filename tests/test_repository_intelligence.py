@@ -48,6 +48,13 @@ class RepositoryIntelligenceTests(unittest.TestCase):
         self.assertEqual(decision.selected_agent, "claude")
         self.assertEqual(decision.repository_dna["project"], "Minecraft Mod")
         self.assertTrue(decision.failure_prediction["chance_of_success"] > 0)
+        self.assertIn("drivers", decision.failure_prediction)
+        self.assertIn("confidence", decision.failure_prediction)
+        self.assertTrue(decision.failure_prediction["drivers"])
+        self.assertIn(
+            "provider_health",
+            [item["name"] for item in decision.failure_prediction["drivers"]],
+        )
         self.assertTrue(decision.candidate_scores[0]["repository_dna"]["active"])
 
     def test_repository_dna_does_not_backfill_framework_across_languages(self) -> None:
@@ -88,6 +95,8 @@ class RepositoryIntelligenceTests(unittest.TestCase):
         self.assertEqual(simulation["object"], "agent_hub.routing_simulation")
         self.assertEqual(simulation["repository_dna"]["project"], "Minecraft Mod")
         self.assertIn("chance_of_success", simulation["failure_prediction"])
+        self.assertIn("drivers", simulation["failure_prediction"])
+        self.assertIn("confidence", simulation["failure_prediction"])
         self.assertIn("multi_agent_debate", simulation)
         self.assertIn("auto_repair_loop", simulation)
         self.assertIn("cost_optimizer", simulation)

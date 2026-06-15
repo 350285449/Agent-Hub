@@ -16,14 +16,14 @@ The next platform step is not to add every feature directly into the current
 large modules. The highest leverage move is to turn the internal foundations
 into stable extension contracts while steadily shrinking the largest files:
 
-- `agent_hub/agent_runner.py`: 4714 lines
-- `agent_hub/core/router.py`: 2779 lines
-- `agent_hub/agent_tools.py`: 2150 lines
-- `agent_hub/server.py`: 1935 lines
-- `agent_hub/cli.py`: 1653 lines
-- `agent_hub/config.py`: 1302 lines
-- `agent_hub/reasoning.py`: 1169 lines
-- `agent_hub/providers/shared.py`: 863 lines
+- `agent_hub/core/routing/selection.py`: about 6400 lines
+- `agent_hub/agent_runner.py`: about 4700 lines
+- `agent_hub/application/diagnostics_service.py`: about 3100 lines
+- `agent_hub/server.py`: about 2650 lines
+- `agent_hub/server_routes/config.py`: about 2200 lines
+- `agent_hub/commands_provider.py`: about 1800 lines
+- `agent_hub/config.py`: about 1770 lines
+- `agent_hub/adaptive.py`: about 1600 lines
 
 The roadmap below preserves backward compatibility by keeping existing
 endpoints, config fields, model aliases, provider names, and extension behavior
@@ -90,7 +90,7 @@ flowchart TD
 | Orchestration | `agent_runner.py`, `team_agent_runner.py`, `workflows/*`, `agents/*` | Good deterministic workflows | Agent role APIs, parallelism, consensus, and retries are not yet extension-grade |
 | Observability | `observability.py`, `events.py`, `evaluation`, `/metrics`, `/v1/optimization` | Good local diagnostics | No trace IDs across every boundary, no OpenTelemetry/Grafana export contract |
 | Extension integration | `vscode-extension/extension.js`, backend snapshot | Feature-rich | Single large extension file and backend snapshot drift make contribution harder |
-| Plugins | `plugins/*`, `docs/plugins.md` | Safe manifest/trust foundation | Plugins do not execute code or register live provider/tool/router implementations yet |
+| Plugins | `plugins/*`, `docs/plugins.md` | Safe manifest, trust, capability-inventory, and policy-gated local-process execution foundation | Trusted plugin metadata can register provider/tool/workflow/router/memory capabilities, but those registrations are still inventory/control-plane data rather than live provider/tool/router implementations |
 
 ## Dependency Graph
 
@@ -113,9 +113,9 @@ Critical dependency observations:
 
 - `server.py` depends directly on routing, workflows, runners, observability,
   plugins, enterprise audit, security redaction, and compatibility helpers.
-- `core/router.py` is the central runtime dependency hub. This is appropriate
-  for routing, but it should not keep absorbing context, provider execution,
-  adaptive learning, and event-recording responsibilities.
+- `core/routing/selection.py` is the central runtime dependency hub. This is
+  appropriate for routing, but it should not keep absorbing context, provider
+  execution, adaptive learning, and event-recording responsibilities.
 - `providers/__init__.py` is now a compatibility facade for provider imports,
   but `providers/shared.py` still contains mixed payload, retry, streaming, and
   local research helpers that should become SDK-ready boundaries.
@@ -170,8 +170,9 @@ plugins should be adapters behind those ports.
 - Keep config compatibility through additive fields and migrations.
 - Extract services behind old module facades before moving callers.
 - Keep tests green after each extraction.
-- Avoid executing third-party plugin code until trust, permissions, and
-  sandboxing are enforceable.
+- Keep third-party plugin execution policy-gated: validation and capability
+  inventory must remain safe without running plugin code; local-process
+  execution requires explicit trust, scopes, and sandbox policy.
 - Prefer thin public SDK contracts over exposing internal classes.
 
 ## Prioritized Roadmap
@@ -350,6 +351,24 @@ Exit criteria:
 6. Add trace IDs across routing, workflow, tool, and adaptive events.
 7. Add OpenAPI spec and SDK generation foundation.
 8. Add plugin provider registration for trusted local plugins.
+
+## Implemented 9.5 Slice
+
+The first high-ROI slice is wired into the local platform contract:
+
+- Provider SDK conformance: `provider_conformance_report()` validates adapter
+  method surface, descriptor metadata, request/response normalization, health,
+  and cost-estimate shape without network calls.
+- Proof command: `agent-hub proof run --coding` wraps the reproducible benchmark
+  runner with coding-proof defaults.
+- Developer platform spec: `/openapi.json` serves an OpenAPI 3.1 document for
+  stable chat, agent, routing, diagnostics, proof, plugin, and MCP endpoints.
+- Plugin/MCP maturity: `/v1/plugins` exposes capability inventory, blocked
+  registrations, execution policy, and readiness at 9.5+ while preserving
+  deny-by-default execution semantics.
+- Observability/security foundation: routing and permission events include
+  stable trace fields, `PolicyService` centralizes new policy integrations, and
+  `docs/threat-model.md` defines the platform trust boundaries.
 
 This sequence maximizes real-world usefulness and adoption while reducing the
 maintenance risks that would otherwise come from adding more features directly

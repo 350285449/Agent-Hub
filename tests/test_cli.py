@@ -997,6 +997,36 @@ class CliTests(unittest.TestCase):
             self.assertIn("Agent-Hub Benchmark", share_output)
             self.assertIn("twitter.com/intent/tweet", share_output)
 
+    def test_proof_run_coding_wraps_benchmark_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent-hub.config.json"
+            _write_minimal_config(path)
+
+            with patch("agent_hub.cli._benchmark_run", return_value=0) as benchmark_run:
+                code = main(
+                    [
+                        "--config",
+                        str(path),
+                        "proof",
+                        "run",
+                        "--coding",
+                        "--route",
+                        "coding",
+                        "--limit",
+                        "3",
+                        "--export",
+                        str(Path(tmp) / "proof.json"),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            kwargs = benchmark_run.call_args.kwargs
+            self.assertEqual(kwargs["route"], "coding")
+            self.assertEqual(kwargs["dataset"], "coding-100")
+            self.assertEqual(kwargs["limit"], 3)
+            self.assertTrue(kwargs["as_json"])
+
     def test_explain_route_accepts_recorded_request_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"

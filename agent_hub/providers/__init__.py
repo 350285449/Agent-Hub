@@ -82,9 +82,11 @@ _PROVIDER_EXPORTS = {
     "ProviderCapabilities": ("descriptors", "ProviderCapabilities"),
     "ProviderDescriptor": ("descriptors", "ProviderDescriptor"),
     "ProviderPricing": ("descriptors", "ProviderPricing"),
+    "REQUIRED_PROVIDER_METHODS": ("conformance", "REQUIRED_PROVIDER_METHODS"),
     "SimpleOpenAICompatibleProvider": ("sdk", "SimpleOpenAICompatibleProvider"),
     "builtin_provider_descriptors": ("descriptors", "builtin_provider_descriptors"),
     "descriptor_from_metadata": ("descriptors", "descriptor_from_metadata"),
+    "provider_conformance_report": ("conformance", "provider_conformance_report"),
 }
 
 
@@ -184,6 +186,7 @@ __all__ = [
     "ProviderPricing",
     "QUOTA_TEXT_MARKERS",
     "RATE_LIMIT_TEXT_MARKERS",
+    "REQUIRED_PROVIDER_METHODS",
     "RETRYABLE_ERROR_TYPES",
     "StreamChunk",
     "SimpleOpenAICompatibleProvider",
@@ -201,6 +204,7 @@ __all__ = [
     "provider_error_category",
     "provider_error_from_http",
     "provider_error_from_payload",
+    "provider_conformance_report",
     "provider_headers",
     "provider_registry_key",
     "provider_request_id_from_headers",

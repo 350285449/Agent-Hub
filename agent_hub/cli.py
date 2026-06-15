@@ -384,6 +384,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     generate_proof_parser.add_argument("--output", default="", help="Optional proof JSON output path.")
     generate_proof_parser.add_argument("--json", action="store_true", help="Print full proof JSON.")
 
+    proof_parser = subparsers.add_parser(
+        "proof",
+        help="Run or generate release-proof artifacts.",
+    )
+    proof_parser.add_argument("action", nargs="?", default="run", choices=["run", "generate", "share"])
+    proof_parser.add_argument("--coding", action="store_true", help="Run the coding proof lane.")
+    proof_parser.add_argument("--route", default="cloud-agent", help="Route to benchmark.")
+    proof_parser.add_argument("--baseline", default="", help="Baseline agent/model. Defaults to configured baseline.")
+    proof_parser.add_argument("--limit", type=int, default=0, help="Maximum proof benchmark tasks.")
+    proof_parser.add_argument("--dataset", default="", help="Benchmark dataset. Defaults to coding-100 for --coding.")
+    proof_parser.add_argument("--corpus", default="", help="Benchmark corpus directory.")
+    proof_parser.add_argument("--output-dir", default="", help="Directory for benchmark-report files.")
+    proof_parser.add_argument("--export", default="", help="One-click JSON export path.")
+    proof_parser.add_argument("--report", default="", help="Existing benchmark-report.json path for generate/share.")
+    proof_parser.add_argument("--output", default="", help="Output path for proof generate.")
+    proof_parser.add_argument("--no-open", action="store_true", help="Print share URLs without opening a browser.")
+    proof_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     share_proof_parser = subparsers.add_parser(
         "share-proof",
         help="Open share links for anonymous proof cards without using a backend.",
@@ -880,6 +898,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             config,
             report_path=args.report,
             output=args.output,
+            as_json=args.json,
+        )
+    if command == "proof":
+        if args.action == "generate":
+            return _generate_proof(
+                config,
+                report_path=args.report,
+                output=args.output,
+                as_json=args.json,
+            )
+        if args.action == "share":
+            return _share_proof(
+                config,
+                report_path=args.report,
+                targets=["all"],
+                open_links=not args.no_open,
+                as_json=args.json,
+            )
+        dataset = args.dataset or ("coding-100" if args.coding else "")
+        return _benchmark_run(
+            config,
+            route=args.route,
+            baseline=args.baseline,
+            limit=args.limit,
+            dataset=dataset,
+            corpus=args.corpus,
+            output_dir=args.output_dir,
+            export=args.export,
             as_json=args.json,
         )
     if command == "share-proof":

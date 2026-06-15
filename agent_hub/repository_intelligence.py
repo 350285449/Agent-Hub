@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -146,6 +147,7 @@ class RepositoryIntelligenceStore:
                 ),
             }
         )
+        self._cached_memory = None
         return dna
 
     def workspace_memory(self, *, force: bool = False) -> dict[str, Any]:
@@ -312,28 +314,43 @@ def build_failure_prediction(
     classification = decision_dict.get("task_classification") if isinstance(decision_dict.get("task_classification"), dict) else {}
     workflow = workflow_selection if isinstance(workflow_selection, dict) else {}
     probability = 0.62
+    drivers = [_prediction_driver("base_rate", 0.62, "Default completion prior before route evidence.")]
     reliability = _safe_float(health.get("reliability_score"), 0.7)
-    probability += (reliability - 0.7) * 0.35
+    reliability_delta = (reliability - 0.7) * 0.35
+    probability += reliability_delta
+    drivers.append(_prediction_driver("provider_health", reliability_delta, f"Provider reliability score is {reliability:.2f}."))
     if health.get("success_count"):
-        probability += min(0.08, int(health.get("success_count", 0)) * 0.008)
+        delta = min(0.08, int(health.get("success_count", 0)) * 0.008)
+        probability += delta
+        drivers.append(_prediction_driver("provider_success_history", delta, "Recent provider successes improve confidence."))
     if health.get("degraded"):
         probability -= 0.18
+        drivers.append(_prediction_driver("provider_degraded", -0.18, "Provider health is currently degraded."))
     if adaptive.get("active"):
         scorecard = adaptive.get("scorecard") if isinstance(adaptive.get("scorecard"), dict) else {}
-        probability += (_safe_float(scorecard.get("smoothed_success_rate"), 0.62) - 0.62) * 0.25
+        delta = (_safe_float(scorecard.get("smoothed_success_rate"), 0.62) - 0.62) * 0.25
+        probability += delta
+        drivers.append(_prediction_driver("adaptive_learning", delta, str(adaptive.get("summary") or "Adaptive samples adjusted the prediction.")))
     if memory.get("attempts"):
-        probability += (_safe_float(memory.get("success_rate"), 0.62) - 0.62) * 0.28
+        delta = (_safe_float(memory.get("success_rate"), 0.62) - 0.62) * 0.28
+        probability += delta
+        drivers.append(_prediction_driver("routing_memory", delta, "Similar historical outcomes adjusted the prediction."))
     risk = str(decision_dict.get("risk") or classification.get("risk_level") or "low").lower()
     complexity = str(decision_dict.get("complexity") or classification.get("complexity") or "low").lower()
     if risk in {"high", "critical"}:
-        probability -= 0.12 if risk == "high" else 0.20
+        delta = -0.12 if risk == "high" else -0.20
+        probability += delta
+        drivers.append(_prediction_driver("task_risk", delta, f"Task risk is {risk}."))
     if complexity == "high":
         probability -= 0.08
+        drivers.append(_prediction_driver("task_complexity", -0.08, "High complexity lowers first-pass success odds."))
     pattern = str(workflow.get("pattern") or decision_dict.get("selected_workflow") or "").lower()
     if pattern in {"reviewed_worker", "team_reviewed"} and risk in {"high", "critical"}:
         probability += 0.08
+        drivers.append(_prediction_driver("review_workflow", 0.08, "Review workflow offsets high-risk task exposure."))
     if pattern == "team_reviewed":
         probability += 0.04
+        drivers.append(_prediction_driver("team_workflow", 0.04, "Team-reviewed workflow adds extra verification coverage."))
     probability = _clamp(probability, 0.05, 0.98)
     estimated_cost = _safe_optional_float(selected.get("estimated_cost_usd"))
     latency_ms = _safe_float(health.get("average_latency_ms"), 0.0)
@@ -354,6 +371,8 @@ def build_failure_prediction(
         "chance_of_success_percent": round(probability * 100, 1),
         "estimated_cost_usd": estimated_cost,
         "estimated_time_seconds": round(estimated_time_seconds, 2),
+        "confidence": _prediction_confidence(health=health, adaptive=adaptive, memory=memory),
+        "drivers": _rank_prediction_drivers(drivers),
         "basis": [
             "provider health",
             "adaptive samples" if adaptive.get("active") else "adaptive cold start",
@@ -1279,6 +1298,55 @@ def _default_latency_ms(pattern: str, complexity: str) -> float:
     return 5_000.0
 
 
+def _prediction_driver(name: str, delta: float, summary: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "delta": round(float(delta), 4),
+        "delta_percent_points": round(float(delta) * 100, 2),
+        "direction": "up" if delta > 0 else "down" if delta < 0 else "neutral",
+        "summary": summary,
+    }
+
+
+def _rank_prediction_drivers(drivers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = list(drivers)
+    ranked.sort(
+        key=lambda item: (
+            item.get("name") == "base_rate",
+            -abs(_safe_float(item.get("delta"), 0.0)),
+            str(item.get("name") or ""),
+        )
+    )
+    return ranked
+
+
+def _prediction_confidence(
+    *,
+    health: dict[str, Any],
+    adaptive: dict[str, Any],
+    memory: dict[str, Any],
+) -> dict[str, Any]:
+    health_samples = int(health.get("success_count") or 0) + int(health.get("failure_count") or 0)
+    adaptive_attempts = int(adaptive.get("attempts") or 0)
+    memory_attempts = int(memory.get("attempts") or 0)
+    evidence = min(1.0, (health_samples / 20.0) * 0.35 + (adaptive_attempts / 20.0) * 0.40 + (memory_attempts / 20.0) * 0.25)
+    if evidence >= 0.75:
+        level = "strong"
+    elif evidence >= 0.40:
+        level = "moderate"
+    elif evidence > 0:
+        level = "weak"
+    else:
+        level = "cold_start"
+    return {
+        "level": level,
+        "score": round(evidence, 4),
+        "health_samples": health_samples,
+        "adaptive_attempts": adaptive_attempts,
+        "memory_attempts": memory_attempts,
+    }
+
+
 def _top_counts(values: list[str], *, limit: int) -> list[dict[str, Any]]:
     counts: dict[str, int] = {}
     for value in values:
@@ -1323,9 +1391,10 @@ def _safe_int(value: Any, default: int) -> int:
 
 def _safe_float(value: Any, default: float) -> float:
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return default
+    return number if math.isfinite(number) else default
 
 
 def _safe_optional_float(value: Any) -> float | None:
@@ -1333,7 +1402,7 @@ def _safe_optional_float(value: Any) -> float | None:
         parsed = float(value)
     except (TypeError, ValueError):
         return None
-    return parsed if parsed >= 0 else None
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:

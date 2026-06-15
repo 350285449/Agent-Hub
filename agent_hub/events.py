@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .observability import record_event
+from .tracing import trace_event_fields
 
 
 PROVIDER_SELECTED = "provider.selected"
@@ -39,6 +40,7 @@ class RouterEventRecorder:
                 {
                     "type": event_type,
                     "request_id": request_id,
+                    **trace_event_fields(request, request_id=request_id),
                     **request_event_context(request),
                     **data,
                 },
@@ -54,10 +56,13 @@ class RouterEventRecorder:
         request: Any,
         **data: Any,
     ) -> None:
+        trace = trace_event_fields(request, request_id=request_id)
+        trace.pop("request_id", None)
         record_internal_event(
             self.state_dir,
             name,
             request_id=request_id,
+            **trace,
             **request_event_context(request),
             **data,
         )

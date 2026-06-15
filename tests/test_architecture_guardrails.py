@@ -122,6 +122,7 @@ PUBLIC_IMPORTS = {
         "builtin_provider_descriptors",
         "create_provider",
         "descriptor_from_metadata",
+        "provider_conformance_report",
     ],
     "agent_hub.providers.sdk": [
         "ProviderAdapter",
@@ -131,6 +132,7 @@ PUBLIC_IMPORTS = {
         "SimpleOpenAICompatibleProvider",
         "builtin_provider_descriptors",
         "descriptor_from_metadata",
+        "provider_conformance_report",
     ],
     "agent_hub.providers.base": [
         "ProviderAdapter",
@@ -312,6 +314,20 @@ class ArchitectureGuardrailTests(unittest.TestCase):
         }
 
         self.assertEqual(too_many, {})
+
+    def test_architecture_roadmap_tracks_current_large_modules_and_plugin_maturity(self) -> None:
+        roadmap = (ROOT / "docs" / "platform-architecture-roadmap.md").read_text(encoding="utf-8")
+        large_modules = _largest_python_modules(limit=5)
+        missing = [
+            path.replace("\\", "/")
+            for path, _lines in large_modules
+            if path.replace("\\", "/") not in roadmap
+        ]
+
+        self.assertEqual(missing, [])
+        self.assertIn("policy-gated local-process execution foundation", roadmap)
+        self.assertIn("capability-inventory", roadmap)
+        self.assertNotIn("Plugins do not execute code", roadmap)
 
     def test_domain_candidate_modules_do_not_import_infrastructure(self) -> None:
         graph = _internal_import_graph()
@@ -526,6 +542,18 @@ def _module_paths() -> dict[str, Path]:
         relative = path.relative_to(ROOT).with_suffix("")
         paths[".".join(relative.parts)] = path
     return paths
+
+
+def _largest_python_modules(*, limit: int) -> list[tuple[str, int]]:
+    rows: list[tuple[str, int]] = []
+    for path in PACKAGE_ROOT.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        relative = str(path.relative_to(ROOT))
+        lines = len(path.read_text(encoding="utf-8").splitlines())
+        rows.append((relative, lines))
+    rows.sort(key=lambda item: item[1], reverse=True)
+    return rows[:limit]
 
 
 def _package_modules(modules: dict[str, Path]) -> set[str]:

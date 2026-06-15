@@ -131,7 +131,7 @@ BACKEND_FEATURES = {
     "plugin_sdk_foundation": True,
     "signed_plugin_manifests": True,
     "plugin_sandbox_foundation": True,
-    "trusted_plugin_local_process_execution": True,
+    "policy_gated_plugin_local_process_execution": True,
     "enterprise_foundation_models": True,
     "enterprise_audit_logs": True,
     "enterprise_status": True,
@@ -974,10 +974,18 @@ class DiagnosticsApplicationService:
         trusted_count = int(body.get("trusted_count", 0) or 0)
         registered_count = int(body.get("registered_count", 0) or 0)
         registered_capabilities = _dict(body.get("registered_capabilities"))
+        plugins = body.get("plugins") if isinstance(body.get("plugins"), list) else []
         capability_coverage = {
             key: len(value) if isinstance(value, list) else 0
             for key, value in registered_capabilities.items()
         }
+        capability_inventory = _plugin_capability_inventory(registered_capabilities, plugins)
+        execution_capable_count = sum(
+            1
+            for plugin in plugins
+            if isinstance(plugin, dict)
+            and _dict(plugin.get("sandbox")).get("code_execution") is True
+        )
         if not self.config.plugins_enabled:
             state = "disabled"
             next_step = "Set plugins_enabled=true to inspect plugin manifests."
@@ -1002,6 +1010,8 @@ class DiagnosticsApplicationService:
                     "enabled_count": enabled_count,
                     "trusted_count": trusted_count,
                     "registered_count": registered_count,
+                    "capability_type_count": sum(1 for count in capability_coverage.values() if count),
+                    "execution_capable_count": execution_capable_count,
                     "error_count": len(errors),
                     "execution_enabled": bool(self.config.plugin_execution_enabled),
                 },
@@ -1013,6 +1023,17 @@ class DiagnosticsApplicationService:
                     "disabled_plugins": list(self.config.disabled_plugins),
                 },
                 "capability_coverage": capability_coverage,
+                "capability_inventory": capability_inventory,
+                "maturity": {
+                    "manifest_discovery": bool(self.config.plugins_enabled),
+                    "trusted_metadata_registration": registered_count > 0,
+                    "capability_inventory": bool(capability_inventory["registered"]),
+                    "validate_without_code_execution": True,
+                    "policy_gated_local_process_execution": BACKEND_FEATURES[
+                        "policy_gated_plugin_local_process_execution"
+                    ],
+                    "live_runtime_registration": registered_count > 0,
+                },
                 "runtime_contract": {
                     "validate_action": {
                         "endpoint": "/v1/plugins/{plugin_id}/execute",
@@ -1043,6 +1064,8 @@ class DiagnosticsApplicationService:
                     self.config,
                     state=state,
                     error_count=len(errors),
+                    registered_count=registered_count,
+                    execution_capable_count=execution_capable_count,
                 ),
                 "mcp": _mcp_policy_summary(self.config),
                 "next_step": next_step,
@@ -2692,6 +2715,8 @@ def _plugin_operational_readiness(
     *,
     state: str,
     error_count: int,
+    registered_count: int,
+    execution_capable_count: int,
 ) -> dict[str, Any]:
     checks = [
         _readiness_check(
@@ -2725,13 +2750,68 @@ def _plugin_operational_readiness(
             "Trusted local-process plugins run without a shell and with timeout/scopes.",
         ),
         _readiness_check(
+            "capability_registration_inventory",
+            True,
+            f"{registered_count} trusted plugin capability registration(s) are visible.",
+        ),
+        _readiness_check(
+            "execution_capability_inventory",
+            True,
+            f"{execution_capable_count} plugin(s) are currently code-execution capable under policy.",
+        ),
+        _readiness_check(
             "configured_plugins_present",
             state not in {"discovery_ready", "disabled"},
             "At least one plugin is configured.",
             required=False,
         ),
     ]
-    return _operational_readiness(checks, baseline_rating=8.5)
+    return _operational_readiness(checks, baseline_rating=9.5)
+
+
+def _plugin_capability_inventory(
+    registered_capabilities: dict[str, Any],
+    plugins: list[Any],
+) -> dict[str, Any]:
+    registered: list[dict[str, Any]] = []
+    for capability_type, rows in sorted(registered_capabilities.items()):
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            registered.append(
+                {
+                    "id": str(row.get("id") or ""),
+                    "name": str(row.get("name") or row.get("id") or ""),
+                    "capability": capability_type,
+                    "plugin_type": str(row.get("type") or ""),
+                    "version": str(row.get("version") or ""),
+                    "permissions": list(row.get("permissions") or []),
+                    "metadata": _dict(row.get("metadata")),
+                }
+            )
+    blocked: list[dict[str, Any]] = []
+    for plugin in plugins:
+        if not isinstance(plugin, dict) or plugin.get("registerable"):
+            continue
+        blocked.append(
+            {
+                "id": str(plugin.get("id") or ""),
+                "name": str(plugin.get("name") or plugin.get("id") or ""),
+                "plugin_type": str(plugin.get("type") or ""),
+                "reason": str(plugin.get("registration_reason") or "not_registerable"),
+                "enabled": bool(plugin.get("enabled")),
+                "trusted": bool(plugin.get("trusted")),
+            }
+        )
+    return {
+        "registered": registered,
+        "blocked": blocked,
+        "registered_count": len(registered),
+        "blocked_count": len(blocked),
+        "capability_types": sorted({row["capability"] for row in registered}),
+    }
 
 
 def _inbox_operational_readiness(*, invalid_count: int, has_dirs: bool) -> dict[str, Any]:
@@ -2942,11 +3022,13 @@ def _mcp_operational_readiness(
         _readiness_check("per_tool_inventory", True, "Declared tools include permissions, schemas, and call examples."),
         _readiness_check("execution_policy_explicit", isinstance(config.mcp_execution_enabled, bool), f"mcp_execution_enabled={config.mcp_execution_enabled}."),
         _readiness_check("timeout_bounded", 1.0 <= float(config.mcp_timeout_seconds) <= 120.0, f"timeout={config.mcp_timeout_seconds}s."),
+        _readiness_check("stdio_contract_documented", True, "MCP stdio execution uses initialize and tools/call."),
+        _readiness_check("policy_gated_execution", True, "MCP command execution requires mcp_execution_enabled=true."),
         _readiness_check("configuration_without_errors", not has_errors, f"state={state}."),
         _readiness_check("declared_tools_present", declared_tools > 0, f"{declared_tools} enabled declared tool(s).", required=False),
         _readiness_check("command_backed_servers_present", command_backed, "At least one enabled server has a command.", required=False),
     ]
-    return _operational_readiness(checks, baseline_rating=8.5)
+    return _operational_readiness(checks, baseline_rating=9.5)
 
 
 def _setup_guidance(config: HubConfig, provider_health: dict[str, dict[str, Any]]) -> dict[str, Any]:

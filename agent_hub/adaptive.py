@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 import time
@@ -19,6 +20,23 @@ GLOBAL_SAMPLE_THRESHOLD = 20
 WORKFLOW_UPGRADE_SAMPLE_THRESHOLD = 5
 WORKFLOW_UPGRADE_MIN_SUCCESS_RATE = 0.70
 WORKFLOW_UPGRADE_MIN_DELTA = 0.15
+ADAPTIVE_CONFIDENCE_HALF_LIFE_SAMPLES = 10
+ADAPTIVE_FRESHNESS_HALF_LIFE_DAYS = 45.0
+TRAINED_CLOUD_SAMPLE_THRESHOLD = 12
+TRAINED_CLOUD_MIN_SUCCESS_RATE = 0.72
+TRAINED_CLOUD_MAX_LIFT = 18.0
+ADAPTIVE_RECENT_OUTCOME_LIMIT = 24
+LOCAL_PROVIDER_TYPES = {
+    "echo",
+    "local-research",
+    "ollama",
+    "ollama-local",
+    "lm-studio",
+    "localai",
+    "llama-cpp",
+    "vllm",
+    "custom-local",
+}
 WORKFLOW_PATTERN_COMPLEXITY = {
     "direct_route": 0,
     "single_worker": 1,
@@ -163,6 +181,8 @@ class AdaptiveLearningStore:
                 now=now,
             )
 
+        latency_ms = round(max(0.0, _safe_float(latency_seconds, 0.0)) * 1000, 2)
+        normalized_cost = _optional_cost(estimated_cost_usd)
         decision = {
             "time": now,
             "request_id": request_id,
@@ -175,10 +195,10 @@ class AdaptiveLearningStore:
             "provider_type": agent.provider_type or agent.provider,
             "model": model,
             "success": success,
-            "latency_ms": round(max(0.0, float(latency_seconds or 0.0)) * 1000, 2),
+            "latency_ms": latency_ms,
             "input_tokens": max(0, int(input_tokens or 0)),
             "output_tokens": max(0, int(output_tokens or 0)),
-            "estimated_cost_usd": estimated_cost_usd,
+            "estimated_cost_usd": normalized_cost,
             "failover_attempts": max(0, int(failover_attempts or 0)),
             "retry_count": normalized_retry_count,
             "error_type": error_type or "",
@@ -228,6 +248,8 @@ class AdaptiveLearningStore:
         state = self.load()
         task_type = str(task_type or "general").strip().lower() or "general"
         retry_count = max(0, int(retry_count or 0))
+        latency_seconds = _safe_float(latency_seconds, -1.0)
+        normalized_cost = _optional_cost(estimated_cost_usd)
         key = _workflow_key(pattern)
         task_key = _workflow_task_key(pattern, task_type)
         existing = state["request_index"].get(request_id)
@@ -236,7 +258,17 @@ class AdaptiveLearningStore:
             if isinstance(existing, dict) and isinstance(existing.get("workflow_success"), bool)
             else None
         )
+        previous_contribution = (
+            existing.get("workflow_contribution")
+            if isinstance(existing, dict) and isinstance(existing.get("workflow_contribution"), dict)
+            else {}
+        )
         workflow_keys = [key, task_key]
+        for old_key, old_contribution in previous_contribution.items():
+            if old_key not in workflow_keys:
+                old_aggregate = state["workflow_patterns"].get(old_key)
+                if isinstance(old_aggregate, dict):
+                    _remove_workflow_contribution(old_aggregate, old_contribution)
         for workflow_key in workflow_keys:
             scope = "workflow_task" if workflow_key == task_key else "workflow"
             aggregate = state["workflow_patterns"].setdefault(
@@ -267,20 +299,18 @@ class AdaptiveLearningStore:
             aggregate["agent"] = agent
             aggregate["provider"] = provider
             aggregate["model"] = model
+            _remove_workflow_contribution(aggregate, previous_contribution.get(workflow_key))
             aggregate["attempts"] = int(aggregate.get("attempts", 0)) + 1
-            _replace_workflow_success(aggregate, previous_workflow_success, success)
+            _apply_workflow_success(aggregate, success)
             aggregate["recovered_by_failover_count"] = int(aggregate.get("recovered_by_failover_count", 0)) + int(bool(recovered_by_failover))
             aggregate["total_retry_count"] = int(aggregate.get("total_retry_count", 0)) + retry_count
             aggregate["last_final_status"] = final_status
             aggregate["last_seen_at"] = time.time()
             if latency_seconds >= 0:
-                aggregate["total_latency_ms"] = float(aggregate.get("total_latency_ms", 0.0)) + latency_seconds * 1000
+                aggregate["total_latency_ms"] = _safe_float(aggregate.get("total_latency_ms"), 0.0) + latency_seconds * 1000
                 aggregate["latency_sample_count"] = int(aggregate.get("latency_sample_count", 0)) + 1
-            if estimated_cost_usd is not None:
-                aggregate["total_known_cost_usd"] = float(aggregate.get("total_known_cost_usd", 0.0)) + max(
-                    0.0,
-                    float(estimated_cost_usd),
-                )
+            if normalized_cost is not None:
+                aggregate["total_known_cost_usd"] = _safe_float(aggregate.get("total_known_cost_usd"), 0.0) + normalized_cost
                 aggregate["known_cost_count"] = int(aggregate.get("known_cost_count", 0)) + 1
 
         if isinstance(existing, dict):
@@ -293,13 +323,31 @@ class AdaptiveLearningStore:
                 if isinstance(item, dict):
                     _replace_workflow_success(item, previous_workflow_success, success)
 
-        if isinstance(existing, dict):
-            existing["workflow_key"] = key
-            existing["workflow_keys"] = workflow_keys
-            existing["workflow_pattern"] = pattern
-            existing["workflow_success"] = success
-            existing["workflow_retry_count"] = retry_count
-            existing["updated_at"] = time.time()
+        target = existing if isinstance(existing, dict) else {}
+        target.update(
+            {
+                "request_id": request_id,
+                "workflow_key": key,
+                "workflow_keys": workflow_keys,
+                "workflow_pattern": pattern,
+                "workflow_success": success,
+                "workflow_retry_count": retry_count,
+                "workflow_contribution": {
+                    workflow_key: {
+                        "success": success,
+                        "recovered_by_failover": bool(recovered_by_failover),
+                        "retry_count": retry_count,
+                        "latency_ms": latency_seconds * 1000 if latency_seconds >= 0 else None,
+                        "known_cost_usd": normalized_cost,
+                    }
+                    for workflow_key in workflow_keys
+                },
+                "updated_at": time.time(),
+            }
+        )
+        if request_id and not isinstance(existing, dict):
+            state["request_index"][request_id] = target
+            state["request_index"] = _trim_request_index(state["request_index"])
         self.save(state)
         record_event(
             self.state_dir,
@@ -362,7 +410,13 @@ class AdaptiveLearningStore:
                 )
         target["rating"] = rating
         if workflow_success is not None:
-            target["workflow_success"] = bool(workflow_success)
+            normalized_workflow_success = bool(workflow_success)
+            target["workflow_success"] = normalized_workflow_success
+            contribution = target.get("workflow_contribution")
+            if isinstance(contribution, dict):
+                for item in contribution.values():
+                    if isinstance(item, dict):
+                        item["success"] = normalized_workflow_success
         target["updated_at"] = time.time()
         self.save(state)
         record_event(
@@ -477,15 +531,15 @@ class AdaptiveLearningStore:
 
     def workflow_upgrade(self, current_pattern: str, *, task_type: str) -> dict[str, Any] | None:
         current_pattern = str(current_pattern or "").strip().lower()
+        task_type = str(task_type or "general").strip().lower() or "general"
         current_rank = WORKFLOW_PATTERN_COMPLEXITY.get(current_pattern)
         if current_rank is None:
             return None
         state = self.load()
-        workflows = [
-            row
-            for row in state.get("workflow_patterns", {}).values()
-            if isinstance(row, dict) and _workflow_scope(row) == "workflow"
-        ]
+        workflow_state = state.get("workflow_patterns", {})
+        if not isinstance(workflow_state, dict):
+            workflow_state = {}
+        workflows = _workflow_upgrade_rows(workflow_state, task_type)
         current = _workflow_pattern_row(workflows, current_pattern)
         if current is None or _workflow_attempts(current) < WORKFLOW_UPGRADE_SAMPLE_THRESHOLD:
             return None
@@ -705,6 +759,10 @@ def _aggregate(
             "total_output_tokens": 0,
             "recovered_by_failover_count": 0,
             "total_retry_count": 0,
+            "total_error_count": 0,
+            "success_streak": 0,
+            "failure_streak": 0,
+            "recent_outcomes": [],
             "last_error_type": "",
             "last_seen_at": 0.0,
         },
@@ -743,14 +801,36 @@ def _apply_attempt(
         aggregate["total_latency_ms"] = _safe_float(aggregate.get("total_latency_ms"), 0.0) + latency * 1000
         aggregate["latency_sample_count"] = int(aggregate.get("latency_sample_count", 0)) + 1
     if estimated_cost_usd is not None:
-        aggregate["total_known_cost_usd"] = _safe_float(aggregate.get("total_known_cost_usd"), 0.0) + max(0.0, float(estimated_cost_usd))
-        aggregate["known_cost_count"] = int(aggregate.get("known_cost_count", 0)) + 1
+        known_cost = _optional_cost(estimated_cost_usd)
+        if known_cost is not None:
+            aggregate["total_known_cost_usd"] = _safe_float(aggregate.get("total_known_cost_usd"), 0.0) + known_cost
+            aggregate["known_cost_count"] = int(aggregate.get("known_cost_count", 0)) + 1
     aggregate["total_input_tokens"] = int(aggregate.get("total_input_tokens", 0)) + max(0, int(input_tokens or 0))
     aggregate["total_output_tokens"] = int(aggregate.get("total_output_tokens", 0)) + max(0, int(output_tokens or 0))
     aggregate["recovered_by_failover_count"] = int(aggregate.get("recovered_by_failover_count", 0)) + int(success and failover_attempts > 0)
     aggregate["total_retry_count"] = int(aggregate.get("total_retry_count", 0)) + max(0, int(retry_count or 0))
+    if success:
+        aggregate["success_streak"] = int(aggregate.get("success_streak", 0)) + 1
+        aggregate["failure_streak"] = 0
+    else:
+        aggregate["failure_streak"] = int(aggregate.get("failure_streak", 0)) + 1
+        aggregate["success_streak"] = 0
     if error_type:
+        aggregate["total_error_count"] = int(aggregate.get("total_error_count", 0)) + 1
         aggregate["last_error_type"] = error_type
+    recent = [item for item in list(aggregate.get("recent_outcomes") or []) if isinstance(item, dict)]
+    recent.append(
+        {
+            "time": now,
+            "success": bool(success),
+            "latency_ms": round(max(0.0, latency) * 1000, 2),
+            "retry_count": max(0, int(retry_count or 0)),
+            "failover_attempts": max(0, int(failover_attempts or 0)),
+            "estimated_cost_usd": _optional_cost(estimated_cost_usd),
+            "error": bool(error_type),
+        }
+    )
+    aggregate["recent_outcomes"] = recent[-ADAPTIVE_RECENT_OUTCOME_LIMIT:]
     aggregate["last_seen_at"] = now
 
 
@@ -782,6 +862,59 @@ def _replace_workflow_success(aggregate: dict[str, Any], previous: Any, current:
     _apply_workflow_success(aggregate, current)
 
 
+def _remove_workflow_contribution(aggregate: dict[str, Any], contribution: Any) -> None:
+    if not isinstance(contribution, dict):
+        return
+    aggregate["attempts"] = max(0, int(aggregate.get("attempts", 0)) - 1)
+    success = contribution.get("success")
+    if success is True:
+        aggregate["workflow_successes"] = max(0, int(aggregate.get("workflow_successes", 0)) - 1)
+    elif success is False:
+        aggregate["workflow_failures"] = max(0, int(aggregate.get("workflow_failures", 0)) - 1)
+    if contribution.get("recovered_by_failover") is True:
+        aggregate["recovered_by_failover_count"] = max(0, int(aggregate.get("recovered_by_failover_count", 0)) - 1)
+    aggregate["total_retry_count"] = max(
+        0,
+        int(aggregate.get("total_retry_count", 0)) - max(0, int(contribution.get("retry_count") or 0)),
+    )
+    latency_ms = contribution.get("latency_ms")
+    parsed_latency_ms = _optional_cost(latency_ms)
+    if parsed_latency_ms is not None:
+        aggregate["total_latency_ms"] = max(
+            0.0,
+            _safe_float(aggregate.get("total_latency_ms"), 0.0) - parsed_latency_ms,
+        )
+        aggregate["latency_sample_count"] = max(0, int(aggregate.get("latency_sample_count", 0)) - 1)
+    known_cost = contribution.get("known_cost_usd")
+    parsed_known_cost = _optional_cost(known_cost)
+    if parsed_known_cost is not None:
+        aggregate["total_known_cost_usd"] = max(
+            0.0,
+            _safe_float(aggregate.get("total_known_cost_usd"), 0.0) - parsed_known_cost,
+        )
+        aggregate["known_cost_count"] = max(0, int(aggregate.get("known_cost_count", 0)) - 1)
+
+
+def _workflow_upgrade_rows(workflow_state: dict[str, Any], task_type: str) -> list[dict[str, Any]]:
+    all_task_rows = [
+        row
+        for row in workflow_state.values()
+        if isinstance(row, dict) and _workflow_scope(row) == "workflow_task"
+    ]
+    task_rows = [
+        row
+        for row in all_task_rows
+        if str(row.get("task_type") or "general").strip().lower() == task_type
+    ]
+    if task_rows or all_task_rows:
+        return task_rows
+    return [
+        row
+        for row in workflow_state.values()
+        if isinstance(row, dict) and _workflow_scope(row) == "workflow"
+    ]
+
+
 def _routing_signal_from_row(
     row: dict[str, Any],
     *,
@@ -801,7 +934,8 @@ def _routing_signal_from_row(
     if active:
         summary = (
             f"{scope} adaptive signal from {attempts} sample(s): "
-            f"{success_pct}% success, bonus {bonus:+.2f}."
+            f"{success_pct}% success, {float(scorecard['sample_confidence']) * 100:.0f}% confidence, "
+            f"bonus {bonus:+.2f}."
         )
     else:
         summary = (
@@ -836,6 +970,15 @@ def _adaptive_scorecard(aggregate: dict[str, Any]) -> dict[str, Any]:
     thumbs_down = int(aggregate.get("thumbs_down", 0))
     workflow_successes = int(aggregate.get("workflow_successes", 0))
     workflow_failures = int(aggregate.get("workflow_failures", 0))
+    raw_success_rate = successes / attempts if attempts else 0.0
+    recent = [item for item in list(aggregate.get("recent_outcomes") or []) if isinstance(item, dict)]
+    recent_attempts = len(recent)
+    recent_successes = sum(1 for item in recent if item.get("success") is True)
+    recent_success_rate = recent_successes / recent_attempts if recent_attempts else raw_success_rate
+    trend_delta = _clamp(recent_success_rate - raw_success_rate, -0.5, 0.5) if attempts else 0.0
+    trend_score = _clamp(0.5 + trend_delta, 0.0, 1.0)
+    volatility = _outcome_volatility(recent)
+    consistency = 1.0 - volatility
     success = (successes + 1) / max(1, attempts + 2)
     feedback = (thumbs_up + 1) / max(1, thumbs_up + thumbs_down + 2)
     workflow = (workflow_successes + 1) / max(1, workflow_successes + workflow_failures + 2)
@@ -850,15 +993,59 @@ def _adaptive_scorecard(aggregate: dict[str, Any]) -> dict[str, Any]:
     else:
         avg_cost = None
         cost = 0.5
-    quality = (0.55 * success) + (0.20 * feedback) + (0.15 * workflow) + (0.05 * latency) + (0.05 * cost)
+    avg_retries = int(aggregate.get("total_retry_count", 0)) / max(1, attempts)
+    retry_score = 1 / (1 + avg_retries)
+    error_rate = int(aggregate.get("total_error_count", 0)) / max(1, attempts)
+    error_score = 1.0 - _clamp(error_rate, 0.0, 1.0)
+    quality = (
+        (0.42 * success)
+        + (0.16 * feedback)
+        + (0.12 * workflow)
+        + (0.08 * latency)
+        + (0.06 * cost)
+        + (0.06 * retry_score)
+        + (0.04 * trend_score)
+        + (0.04 * consistency)
+        + (0.02 * error_score)
+    )
+    sample_confidence = _sample_confidence(attempts)
+    freshness = _freshness_score(aggregate)
+    trust = sample_confidence * freshness
+    adjusted_quality = 0.5 + ((quality - 0.5) * trust)
+    cloud_model = _is_cloud_aggregate(aggregate)
+    trained_cloud = (
+        cloud_model
+        and attempts >= TRAINED_CLOUD_SAMPLE_THRESHOLD
+        and raw_success_rate >= TRAINED_CLOUD_MIN_SUCCESS_RATE
+        and trust >= 0.35
+    )
+    training_strength = _training_strength(
+        attempts=attempts,
+        success_rate=raw_success_rate,
+        trust=trust,
+        cloud_model=cloud_model,
+    )
+    cloud_training_lift = TRAINED_CLOUD_MAX_LIFT * training_strength if trained_cloud else 0.0
     return {
         "attempts": attempts,
         "successes": successes,
         "failures": failures,
         "total_retries": int(aggregate.get("total_retry_count", 0)),
-        "average_retries": round(int(aggregate.get("total_retry_count", 0)) / max(1, attempts), 4),
-        "success_rate": round(successes / attempts, 4) if attempts else 0.0,
+        "average_retries": round(avg_retries, 4),
+        "retry_score": round(retry_score, 4),
+        "total_errors": int(aggregate.get("total_error_count", 0)),
+        "error_rate": round(error_rate, 4),
+        "error_score": round(error_score, 4),
+        "success_rate": round(raw_success_rate, 4) if attempts else 0.0,
         "smoothed_success_rate": round(success, 4),
+        "recent_attempts": recent_attempts,
+        "recent_success_rate": round(recent_success_rate, 4) if recent_attempts else 0.0,
+        "trend_delta": round(trend_delta, 4),
+        "trend_score": round(trend_score, 4),
+        "outcome_volatility": round(volatility, 4),
+        "consistency_score": round(consistency, 4),
+        "success_streak": int(aggregate.get("success_streak", 0)),
+        "failure_streak": int(aggregate.get("failure_streak", 0)),
         "thumbs_up": thumbs_up,
         "thumbs_down": thumbs_down,
         "feedback_rate": round(thumbs_up / max(1, thumbs_up + thumbs_down), 4) if thumbs_up or thumbs_down else 0.0,
@@ -877,12 +1064,71 @@ def _adaptive_scorecard(aggregate: dict[str, Any]) -> dict[str, Any]:
         "average_known_cost_usd": round(avg_cost, 8) if avg_cost is not None else None,
         "cost_score": round(cost, 4),
         "quality_score": round(quality, 4),
+        "sample_confidence": round(sample_confidence, 4),
+        "freshness_score": round(freshness, 4),
+        "trust_score": round(trust, 4),
+        "adjusted_quality_score": round(adjusted_quality, 4),
+        "cloud_model": cloud_model,
+        "training_status": "trained_cloud" if trained_cloud else ("untrained_cloud" if cloud_model else "trained" if attempts >= TRAINED_CLOUD_SAMPLE_THRESHOLD else "untrained"),
+        "training_strength": round(training_strength, 4),
+        "cloud_training_lift": round(cloud_training_lift, 4),
     }
 
 
 def _adaptive_bonus(aggregate: dict[str, Any]) -> float:
-    quality = float(_adaptive_scorecard(aggregate)["quality_score"])
-    return round(_clamp((quality - 0.5) * 20, -10.0, 15.0), 4)
+    scorecard = _adaptive_scorecard(aggregate)
+    quality = float(scorecard["adjusted_quality_score"])
+    base_bonus = (quality - 0.5) * 30
+    cloud_lift = float(scorecard.get("cloud_training_lift") or 0.0)
+    return round(_clamp(base_bonus + cloud_lift, -12.0, 35.0), 4)
+
+
+def _sample_confidence(attempts: int) -> float:
+    attempts = max(0, int(attempts or 0))
+    if attempts <= 0:
+        return 0.0
+    return attempts / (attempts + ADAPTIVE_CONFIDENCE_HALF_LIFE_SAMPLES)
+
+
+def _freshness_score(aggregate: dict[str, Any]) -> float:
+    last_seen = _safe_float(aggregate.get("last_seen_at"), 0.0)
+    if last_seen <= 0:
+        return 0.5
+    age_days = max(0.0, (time.time() - last_seen) / 86400.0)
+    return 1 / (1 + age_days / ADAPTIVE_FRESHNESS_HALF_LIFE_DAYS)
+
+
+def _outcome_volatility(recent: list[dict[str, Any]]) -> float:
+    if len(recent) < 2:
+        return 0.0
+    values = [1.0 if item.get("success") is True else 0.0 for item in recent]
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return _clamp((variance ** 0.5) * 2.0, 0.0, 1.0)
+
+
+def _training_strength(*, attempts: int, success_rate: float, trust: float, cloud_model: bool) -> float:
+    if attempts <= 0:
+        return 0.0
+    sample_strength = _clamp((attempts - TRAINED_CLOUD_SAMPLE_THRESHOLD + 1) / 24.0, 0.0, 1.0)
+    success_strength = _clamp((success_rate - TRAINED_CLOUD_MIN_SUCCESS_RATE) / 0.25, 0.0, 1.0)
+    cloud_weight = 1.0 if cloud_model else 0.45
+    return sample_strength * success_strength * _clamp(trust, 0.0, 1.0) * cloud_weight
+
+
+def _is_cloud_aggregate(aggregate: dict[str, Any]) -> bool:
+    values = [
+        str(aggregate.get("provider_type") or "").strip().lower(),
+        str(aggregate.get("provider") or "").strip().lower(),
+        str(aggregate.get("agent") or "").strip().lower(),
+        str(aggregate.get("model") or "").strip().lower(),
+    ]
+    provider_type = values[0] or values[1]
+    if provider_type in LOCAL_PROVIDER_TYPES:
+        return False
+    if any(value.endswith("-cloud") or ":cloud" in value or "cloud" in value for value in values):
+        return True
+    return provider_type not in {"", "openai-compatible"} and provider_type not in LOCAL_PROVIDER_TYPES
 
 
 def _workflow_success_rate(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1425,14 +1671,15 @@ def _optional_cost(value: Any) -> float | None:
         parsed = float(value)
     except (TypeError, ValueError):
         return None
-    return parsed if parsed >= 0 else None
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
 
 def _safe_float(value: Any, default: float) -> float:
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return default
+    return number if math.isfinite(number) else default
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:

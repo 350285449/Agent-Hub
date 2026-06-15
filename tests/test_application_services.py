@@ -281,6 +281,43 @@ class ApplicationServiceTests(unittest.TestCase):
             self.assertGreaterEqual(mcp["operational_readiness"]["rating"], 8.5)
             self.assertEqual(mcp["tools"][0]["call_example"]["name"], "mcp.local-tools.repo_search")
 
+    def test_plugins_body_exposes_capability_inventory_and_execution_maturity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_dir = root / "plugins" / "provider-demo"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.json").write_text(
+                json.dumps(
+                    {
+                        "id": "provider.demo",
+                        "name": "Provider Demo",
+                        "type": "provider",
+                        "enabled_by_default": True,
+                        "metadata": {"provider_type": "demo-compatible"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = _config(root)
+            config.plugin_dirs = [root / "plugins"]
+            config.trusted_plugins = ["provider.demo"]
+            config.plugin_capability_grants = {"provider.demo": ["provider.read"]}
+
+            body = DiagnosticsApplicationService(config).plugins_body()
+
+            self.assertEqual(body["summary"]["registered_count"], 1)
+            self.assertEqual(body["summary"]["capability_type_count"], 1)
+            self.assertEqual(body["capability_inventory"]["registered_count"], 1)
+            self.assertEqual(body["capability_inventory"]["registered"][0]["capability"], "providers")
+            self.assertEqual(body["capability_inventory"]["registered"][0]["id"], "provider.demo")
+            self.assertEqual(body["maturity"]["trusted_metadata_registration"], True)
+            self.assertEqual(body["maturity"]["policy_gated_local_process_execution"], True)
+            self.assertEqual(body["maturity"]["live_runtime_registration"], True)
+            checks = {check["id"]: check for check in body["operational_readiness"]["checks"]}
+            self.assertTrue(checks["capability_registration_inventory"]["ok"])
+            self.assertTrue(checks["execution_capability_inventory"]["ok"])
+            self.assertGreaterEqual(body["operational_readiness"]["rating"], 9.5)
+
     def test_inbox_status_reports_queue_and_recent_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
