@@ -19,7 +19,7 @@ from .descriptors import (
     builtin_provider_descriptors,
     descriptor_from_metadata,
 )
-from .conformance import REQUIRED_PROVIDER_METHODS, provider_conformance_report
+from .conformance import CONFORMANCE_DIMENSIONS, REQUIRED_PROVIDER_METHODS, provider_conformance_report
 from .openai_chat import OpenAIChatProvider
 
 
@@ -94,6 +94,7 @@ __all__ = [
     "ChatMessage",
     "ChatRequest",
     "ChatResponse",
+    "CONFORMANCE_DIMENSIONS",
     "ProviderAdapter",
     "ProviderCapabilities",
     "ProviderDescriptor",

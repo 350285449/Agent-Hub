@@ -27,6 +27,58 @@ class TenTenPhaseContractTests(unittest.TestCase):
         self.assertTrue(report.ok)
         self.assertGreater(report.checked_files, 0)
         self.assertTrue(all(finding.severity == "advisory" for finding in report.findings))
+        self.assertIn("function_findings", report.to_dict())
+        self.assertIn("import_cycle_findings", report.to_dict())
+        self.assertIn("layer_violation_findings", report.to_dict())
+        self.assertIn("api_stability_findings", report.to_dict())
+
+    def test_architecture_guardrail_report_covers_function_cycles_layers_and_api(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package = root / "agent_hub"
+            (package / "core").mkdir(parents=True)
+            (package / "api").mkdir()
+            (package / "providers").mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "core" / "__init__.py").write_text("", encoding="utf-8")
+            (package / "api" / "__init__.py").write_text("", encoding="utf-8")
+            (package / "providers" / "__init__.py").write_text("", encoding="utf-8")
+            (package / "core" / "domain.py").write_text(
+                "from agent_hub.api.entry import handler\n",
+                encoding="utf-8",
+            )
+            (package / "api" / "entry.py").write_text(
+                "from agent_hub.core.domain import model\n\n"
+                "def handler():\n"
+                "    return 'ok'\n",
+                encoding="utf-8",
+            )
+            (package / "providers" / "base.py").write_text(
+                "class ChatRequest:\n"
+                "    pass\n",
+                encoding="utf-8",
+            )
+            (package / "core" / "large.py").write_text(
+                "def large_function():\n"
+                + "".join(f"    value_{index} = {index}\n" for index in range(4))
+                + "    return value_0\n",
+                encoding="utf-8",
+            )
+
+            report = architecture_guardrail_report(
+                root,
+                max_file_lines=50,
+                max_function_lines=3,
+                enforce=True,
+                public_api={"agent_hub.providers.base": ["ChatRequest", "ChatResponse"]},
+            )
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.function_findings[0].function, "large_function")
+        self.assertTrue(report.import_cycle_findings)
+        self.assertEqual(report.layer_violation_findings[0].source, "agent_hub.core.domain")
+        self.assertEqual(report.api_stability_findings[0].name, "ChatResponse")
+        self.assertEqual(report.to_dict()["max_function_lines"], 3)
 
     def test_agent_roles_and_orchestration_primitives_cover_phase_six(self) -> None:
         roles = {role.id for role in default_agent_roles()}

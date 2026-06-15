@@ -1117,12 +1117,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(kwargs["limit"], 3)
             self.assertTrue(kwargs["as_json"])
 
-    def test_proof_run_full_wraps_benchmark_runner(self) -> None:
+    def test_proof_run_full_wraps_release_proof_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "agent-hub.config.json"
             _write_minimal_config(path)
 
-            with patch("agent_hub.cli._benchmark_run", return_value=0) as benchmark_run:
+            with patch("agent_hub.cli._proof_run", return_value=0) as proof_run:
                 code = main(
                     [
                         "--config",
@@ -1137,10 +1137,11 @@ class CliTests(unittest.TestCase):
                 )
 
             self.assertEqual(code, 0)
-            kwargs = benchmark_run.call_args.kwargs
+            kwargs = proof_run.call_args.kwargs
             self.assertEqual(kwargs["route"], "cloud-agent")
             self.assertEqual(kwargs["dataset"], "proof-full")
             self.assertEqual(kwargs["limit"], 5)
+            self.assertTrue(kwargs["full"])
             self.assertTrue(kwargs["as_json"])
 
     def test_explain_route_accepts_recorded_request_id(self) -> None:

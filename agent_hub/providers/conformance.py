@@ -20,6 +20,16 @@ REQUIRED_PROVIDER_METHODS = (
     "normalize_response",
 )
 
+CONFORMANCE_DIMENSIONS = (
+    "auth",
+    "streaming",
+    "tools",
+    "retries",
+    "errors",
+    "timeouts",
+    "costs",
+)
+
 
 def provider_conformance_report(
     provider_class: type[Any],
@@ -51,6 +61,7 @@ def provider_conformance_report(
     ]
     if isinstance(descriptor, ProviderDescriptor):
         checks.extend(_descriptor_checks(descriptor))
+        checks.extend(_dimension_checks(provider_class, descriptor))
         if agent is None:
             model = descriptor.models[0] if descriptor.models else "conformance-model"
             agent = descriptor.create_agent(name="conformance-provider", model=model)
@@ -71,6 +82,7 @@ def provider_conformance_report(
             "stream_chunk": StreamChunk.__name__,
             "health": ProviderHealth.__name__,
             "required_methods": list(REQUIRED_PROVIDER_METHODS),
+            "dimensions": list(CONFORMANCE_DIMENSIONS),
         },
     }
 
@@ -149,6 +161,69 @@ def _adapter_instance_checks(provider_class: type[Any], agent: AgentConfig) -> l
     ]
 
 
+def _dimension_checks(provider_class: type[Any], descriptor: ProviderDescriptor) -> list[dict[str, Any]]:
+    capabilities = descriptor.capabilities
+    pricing = descriptor.pricing
+    has_stream_method = hasattr(provider_class, "stream")
+    has_tool_method = hasattr(provider_class, "supports_tools")
+    has_error_normalization = hasattr(provider_class, "normalize_response")
+    auth_configured = bool(
+        descriptor.default_free
+        or descriptor.api_key_env
+        or descriptor.auth_scheme in {"none", "bearer", "api-key", "header"}
+        or descriptor.headers
+    )
+    return [
+        _check(
+            "auth",
+            auth_configured,
+            "Provider declares how authentication is configured or that it is free/local.",
+            auth_scheme=descriptor.auth_scheme,
+            api_key_env=descriptor.api_key_env,
+        ),
+        _check(
+            "streaming",
+            capabilities.supports_streaming is not True or has_stream_method,
+            "Streaming-capable providers expose the stream contract.",
+            supports_streaming=capabilities.supports_streaming,
+        ),
+        _check(
+            "tools",
+            capabilities.supports_tools is not True or has_tool_method,
+            "Tool-capable providers expose the tool capability contract.",
+            supports_tools=capabilities.supports_tools,
+        ),
+        _check(
+            "retries",
+            descriptor.default_cooldown_seconds >= 0,
+            "Provider descriptor includes retry/cooldown policy metadata.",
+            cooldown_seconds=descriptor.default_cooldown_seconds,
+        ),
+        _check(
+            "errors",
+            has_error_normalization,
+            "Provider exposes normalized response/error boundary hooks.",
+        ),
+        _check(
+            "timeouts",
+            descriptor.default_timeout_seconds > 0,
+            "Provider descriptor includes a positive timeout budget.",
+            timeout_seconds=descriptor.default_timeout_seconds,
+        ),
+        _check(
+            "costs",
+            bool(
+                descriptor.default_free
+                or pricing.cost_per_million_input is not None
+                or pricing.cost_per_million_output is not None
+            ),
+            "Provider descriptor declares free/local status or token pricing.",
+            free=descriptor.default_free,
+            currency=pricing.currency,
+        ),
+    ]
+
+
 def _check(
     check_id: str,
     ok: bool,
@@ -166,4 +241,4 @@ def _check(
     }
 
 
-__all__ = ["REQUIRED_PROVIDER_METHODS", "provider_conformance_report"]
+__all__ = ["CONFORMANCE_DIMENSIONS", "REQUIRED_PROVIDER_METHODS", "provider_conformance_report"]

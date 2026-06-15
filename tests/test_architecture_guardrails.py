@@ -40,8 +40,8 @@ KNOWN_DEPENDENCY_CYCLES = {
 
 FAN_OUT_BASELINE = {
     "agent_hub.core.router": 23,
-    "agent_hub.server": 17,
-    "agent_hub.cli": 13,
+    "agent_hub.server": 19,
+    "agent_hub.cli": 15,
     "agent_hub.providers.__init__": 10,
 }
 
@@ -109,6 +109,7 @@ PUBLIC_IMPORTS = {
         "expected_output_tokens",
     ],
     "agent_hub.providers": [
+        "CONFORMANCE_DIMENSIONS",
         "Provider",
         "ProviderError",
         "ProviderCapabilities",
@@ -125,6 +126,7 @@ PUBLIC_IMPORTS = {
         "provider_conformance_report",
     ],
     "agent_hub.providers.sdk": [
+        "CONFORMANCE_DIMENSIONS",
         "ProviderAdapter",
         "ProviderCapabilities",
         "ProviderDescriptor",

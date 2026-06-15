@@ -66,6 +66,7 @@ from .commands_provider import (
     _routing_preset_rows,
     _share_proof,
     _setup_free_models,
+    _proof_run,
 )
 from .commands_plugins import _install_plugin
 from .commands_server import (
@@ -968,6 +969,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 as_json=args.json,
             )
         dataset = args.dataset or ("proof-full" if args.full else "coding-100" if args.coding else "")
+        if args.full:
+            return _proof_run(
+                config,
+                route=args.route,
+                baseline=args.baseline,
+                limit=args.limit,
+                dataset=dataset,
+                corpus=args.corpus,
+                output_dir=args.output_dir,
+                export=args.export,
+                full=True,
+                as_json=args.json,
+            )
         return _benchmark_run(
             config,
             route=args.route,

@@ -75,3 +75,17 @@ assert report["ok"], report["checks"]
 The report verifies the stable `ProviderAdapter` method surface, descriptor
 metadata, request/response normalization, health shape, and cost-estimate shape
 without making a provider call.
+
+It also emits explicit conformance dimensions for platform readiness:
+
+- `auth`
+- `streaming`
+- `tools`
+- `retries`
+- `errors`
+- `timeouts`
+- `costs`
+
+These checks are intentionally static/no-network. Live credential and quota
+tests can be layered on top in provider-specific CI without making the default
+SDK conformance suite expensive or unsafe.

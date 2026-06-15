@@ -56,6 +56,7 @@ from .proof_artifacts import (
     format_route_replay,
     replay_route_body,
 )
+from .proof_runtime import format_runtime_proof_report, runtime_proof_report, write_runtime_proof_report
 from .provider_presets import (
     FREE_PROVIDER_PRESETS,
     agent_dict_from_preset,
@@ -1598,6 +1599,62 @@ def _benchmark_run(
             ["cost_reduction", "latency_reduction", "success_delta", "average_score_delta"],
         )
     return 0
+
+
+def _proof_run(
+    config: HubConfig,
+    *,
+    route: str,
+    baseline: str,
+    limit: int,
+    dataset: str,
+    corpus: str,
+    output_dir: str,
+    export: str,
+    full: bool,
+    as_json: bool,
+) -> int:
+    try:
+        benchmark_report = BenchmarkProofRunner(config).run(
+            route=route,
+            baseline=baseline,
+            limit=limit,
+            dataset=dataset,
+            corpus_dir=corpus or None,
+            output_dir=output_dir or None,
+        )
+    except (RouterError, ValueError) as exc:
+        if isinstance(exc, RouterError):
+            _print_route_error(exc)
+        else:
+            print(f"Proof failed: {exc}")
+        return 1
+
+    report = runtime_proof_report(
+        config,
+        route=route,
+        full=full,
+        benchmark_report=benchmark_report,
+        root=Path.cwd(),
+    )
+    target = Path(export) if export else _default_release_proof_path(config, output_dir)
+    report["report_path"] = str(write_runtime_proof_report(report, target))
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        print(format_runtime_proof_report(report), end="")
+        print(f"Release proof: {report['report_path']}")
+        benchmark_paths = benchmark_report.get("report_paths")
+        if isinstance(benchmark_paths, dict) and benchmark_paths.get("json"):
+            print(f"Benchmark proof: {benchmark_paths['json']}")
+    return 0 if report.get("ok") else 1
+
+
+def _default_release_proof_path(config: HubConfig, output_dir: str) -> Path:
+    if output_dir:
+        return Path(output_dir) / "release-proof.json"
+    state_dir = Path(config.state_dir or ".agent-hub/state")
+    return state_dir / "proof_reports" / "release-proof.json"
 
 
 def _benchmark_verify(

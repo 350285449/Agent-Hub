@@ -13,6 +13,7 @@ from agent_hub.provider_presets import (
 )
 from agent_hub.providers import ProviderDescriptor, SimpleOpenAICompatibleProvider
 from agent_hub.providers.sdk import (
+    CONFORMANCE_DIMENSIONS,
     ProviderCapabilities,
     ProviderPricing,
     builtin_provider_descriptors,
@@ -115,6 +116,7 @@ class ProviderSDKTests(unittest.TestCase):
                 provider_type="demo-ai",
                 display_name="Demo AI",
                 base_url="https://api.demo.invalid/v1",
+                api_key_env="DEMO_API_KEY",
                 capabilities=ProviderCapabilities(
                     context_window=128_000,
                     supports_streaming=True,
@@ -134,6 +136,19 @@ class ProviderSDKTests(unittest.TestCase):
         self.assertEqual(report["rating"], 10.0)
         self.assertIn("ChatRequest", report["contract"]["request"])
         self.assertIn("chat", report["contract"]["required_methods"])
+        self.assertEqual(tuple(report["contract"]["dimensions"]), CONFORMANCE_DIMENSIONS)
+        check_ids = {check["id"] for check in report["checks"]}
+        self.assertTrue(
+            {
+                "auth",
+                "streaming",
+                "tools",
+                "retries",
+                "errors",
+                "timeouts",
+                "costs",
+            }.issubset(check_ids)
+        )
 
     def test_builtin_descriptors_cover_local_openai_compatible_servers(self) -> None:
         descriptors = builtin_provider_descriptors()

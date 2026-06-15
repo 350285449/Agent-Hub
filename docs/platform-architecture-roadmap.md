@@ -184,7 +184,7 @@ plugins should be adapters behind those ports.
 | Create `agent_hub/application/` services for chat, auto workflow, diagnostics, and feedback | Removes endpoint logic from `server.py` and gives SDKs a stable internal API | Medium | High | Add service classes that wrap existing router/runners; move one endpoint group at a time; keep handler methods as delegates | Endpoints and response schemas remain unchanged |
 | Continue provider extraction from `providers/shared.py` into payload, retry, streaming, and local research helper modules | Makes provider SDK realistic and reduces merge risk after the facade split | Medium | High | Keep classes re-exported from `providers/__init__.py`; move helper clusters behind stable helper modules; preserve monkeypatch shims | Existing imports continue through re-exports |
 | Continue extracting router runtime services after `core/provider_attempts.py` | Separates ranking from execution/failover mechanics | High | High | Move context preparation, tool-loop execution, and health/adaptive recording behind smaller services | Routing decisions and failover payloads remain unchanged |
-| Convert architecture guardrails into package-boundary tests | Prevents future large-module regression | Low | High | Add import-rule tests for API -> application -> core -> adapters layering | No runtime behavior change |
+| Convert architecture guardrails into package-boundary tests | Prevents future large-module regression | Low | High | Phase 16 added advisory report coverage for function size, cycles, layer violations, and public API stability; next step is enabling enforcement package by package | No runtime behavior change |
 
 ### P1: Provider Expansion And SDK
 
@@ -360,7 +360,11 @@ The first high-ROI slice is wired into the local platform contract:
   method surface, descriptor metadata, request/response normalization, health,
   and cost-estimate shape without network calls.
 - Proof command: `agent-hub proof run --coding` wraps the reproducible benchmark
-  runner with coding-proof defaults.
+  runner with coding-proof defaults, and `agent-hub proof run --full` now emits
+  an additive `agent_hub.release_proof` CI gate covering backend startup,
+  diagnostics, provider availability, routing, agent execution, patch rollback,
+  extension connectivity, plugin safety, architecture guardrails, and benchmark
+  validation.
 - Developer platform spec: `/openapi.json` serves an OpenAPI 3.1 document for
   stable chat, agent, routing, diagnostics, proof, plugin, and MCP endpoints.
 - Plugin/MCP maturity: `/v1/plugins` exposes capability inventory, blocked
@@ -377,7 +381,8 @@ The first high-ROI slice is wired into the local platform contract:
   session, workspace, and long-term tiers with searchable local persistence and
   a session-store bridge.
 - 10/10 phase contracts: architecture guardrail reporting, VS Code typed
-  client/state/command modules, `proof run --full`, orchestration roles and
+  client/state/command modules, release-gated `proof run --full`,
+  orchestration roles and
   primitives, plugin lifecycle management, sandbox backend inventory,
   OpenTelemetry/Prometheus/Grafana/Jaeger export contracts, Grafana dashboard
   scaffolding, and security boundary/provider data policy docs now have
