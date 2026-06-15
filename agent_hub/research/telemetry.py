@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -22,6 +23,8 @@ class ResearchRun:
     success: bool | None = None
     validation_score: float = 0.0
     retry_count: int = 0
+    errors: list[str] = field(default_factory=list)
+    feedback: str = ""
     user_feedback: str = ""
     route: str = ""
     selected_agent: str = ""
@@ -44,6 +47,10 @@ def runs_path(state_dir: str | Path) -> Path:
     return research_dir(state_dir) / "runs.jsonl"
 
 
+def research_telemetry_enabled() -> bool:
+    return os.environ.get("AGENT_HUB_RESEARCH_TELEMETRY") == "1"
+
+
 def append_research_run(state_dir: str | Path, run: ResearchRun | dict[str, Any]) -> Path:
     path = runs_path(state_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,6 +68,8 @@ def record_research_route_start(
     routing_decision: dict[str, Any] | None = None,
     candidates: list[str] | None = None,
 ) -> None:
+    if not research_telemetry_enabled():
+        return
     decision = routing_decision or {}
     try:
         usage = _context_usage(request)
@@ -98,16 +107,19 @@ def record_research_outcome(
     task_type: str = "",
     validation_score: float | None = None,
     user_feedback: str = "",
+    errors: list[str] | None = None,
+    candidate_models: list[str] | None = None,
 ) -> None:
-    if not request_id:
+    if not request_id or not research_telemetry_enabled():
         return
     try:
         usage = _context_usage(request)
+        selected_model = model or getattr(agent, "model", "")
         run = ResearchRun(
             task_id=request_id,
             task_type=task_type,
-            selected_model=model or getattr(agent, "model", ""),
-            candidate_models=[model or getattr(agent, "model", "")],
+            selected_model=selected_model,
+            candidate_models=list(candidate_models or [selected_model]),
             input_tokens=max(0, int(input_tokens or 0)),
             output_tokens=max(0, int(output_tokens or 0)),
             context_files=_context_files(request, usage),
@@ -117,6 +129,8 @@ def record_research_outcome(
             success=bool(success),
             validation_score=float(validation_score if validation_score is not None else (1.0 if success else 0.0)),
             retry_count=max(0, int(failover_attempts or 0)),
+            errors=[str(item) for item in (errors or []) if str(item)],
+            feedback=user_feedback,
             user_feedback=user_feedback,
             route=str(getattr(request, "route", "") or ""),
             selected_agent=str(getattr(agent, "name", "") or ""),
@@ -124,6 +138,12 @@ def record_research_outcome(
             event_type="route_outcome",
         )
         append_research_run(state_dir, run)
+        try:
+            from .file_stats import update_file_stats
+
+            update_file_stats(state_dir, run)
+        except Exception:
+            pass
     except Exception:
         return
 
@@ -173,5 +193,6 @@ __all__ = [
     "record_research_outcome",
     "record_research_route_start",
     "research_dir",
+    "research_telemetry_enabled",
     "runs_path",
 ]

@@ -617,6 +617,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Run the native agent loop instead of a single model call.",
     )
 
+    research_parser = subparsers.add_parser("research", help="Run offline research analysis.")
+    research_parser.add_argument("action", nargs="?", default="analyze", choices=["analyze"])
+    research_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     args = parser.parse_args(argv)
     command = args.command or "serve"
     if command == "init":
@@ -1076,6 +1080,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_route_error(exc)
             return 1
         print(json.dumps(response.to_native_dict(), indent=2, ensure_ascii=False))
+        return 0
+    if command == "research":
+        research_analyze = importlib.import_module("agent_hub.research.analyze")
+        result = research_analyze.run_research_analysis(config.state_dir)
+        if args.json:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            print("Research analysis generated:")
+            for key, value in result.items():
+                if key != "object":
+                    print(f"- {key}: {value}")
         return 0
     parser.error(f"Unknown command {command!r}")
     return 2

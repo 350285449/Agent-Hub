@@ -4392,6 +4392,7 @@ class AgentRouter:
                 else self._classify_task(request)
             ),
             validation_score=1.0,
+            candidate_models=_research_candidate_models(decision),
         )
         if request_id is not None:
             self._record_usage_ledger_outcome(
@@ -4578,6 +4579,7 @@ class AgentRouter:
             ),
             task_type=self._classify_task(request) if request is not None else "",
             validation_score=0.0,
+            errors=[normalized_error_type or message],
         )
 
     def record_tool_result(self, agent_name: str, ok: bool) -> None:
@@ -6565,6 +6567,20 @@ def _context_intelligence_worth_scanning(text: str, mentioned_paths: list[str]) 
             "symbol",
         )
     )
+
+
+def _research_candidate_models(decision: RoutingDecision | None) -> list[str]:
+    if decision is None:
+        return []
+    models = [
+        str(row.get("model") or row.get("agent") or "")
+        for row in decision.candidate_scores
+        if isinstance(row, dict)
+    ]
+    models = [model for model in models if model]
+    if not models and decision.selected_model:
+        models = [decision.selected_model]
+    return models
 
 
 def _optimization_plan_diff(

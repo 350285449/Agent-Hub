@@ -18,6 +18,12 @@ epsilon-greedy reinforcement learning, and report artifact generation.
 - Added information-density context file selection under token budgets.
 - Added context ablation experiment runner for 0%, 25%, 50%, 75%, and 100%
   context levels.
+- Added context ablation dataset generation helpers for benchmark JSONL tasks.
+- Connected information-density ranking into `ContextPlanner` as an optional
+  `research_mode`.
+- Added heuristic-vs-information-density ranking comparison helpers.
+- Added Wilson confidence intervals and context-success text charts to research
+  reports.
 - Added epsilon-greedy bandit routing and reward calculation.
 - Added Markdown and CSV research report generation.
 

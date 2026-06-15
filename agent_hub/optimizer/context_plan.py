@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from ..research.information_context import select_ranked_files_by_information_density
 from .file_ranker import FileRanker, RankedFile
 
 
@@ -138,9 +139,18 @@ class ContextPlanner:
         compressed_files: int = 4,
         map_files: int = 6,
         compression_aggression: float = 0.55,
+        research_mode: bool = False,
+        token_budget: int | None = None,
     ) -> ContextPlan:
         ranked = self.ranker.rank_files(task, limit=max(80, max_files * 6))
-        selected = self.ranker.select_diverse(ranked, max_files=max(1, max_files), task=task)
+        if research_mode:
+            selected = select_ranked_files_by_information_density(
+                ranked,
+                max_files=max(1, max_files),
+                token_budget=token_budget or max(1, max_files) * 900,
+            )
+        else:
+            selected = self.ranker.select_diverse(ranked, max_files=max(1, max_files), task=task)
         selected_paths = {item.path for item in selected}
         omitted_ranked = [item for item in ranked if item.path not in selected_paths]
         context_files: list[ContextFile] = []
@@ -186,7 +196,11 @@ class ContextPlanner:
             raw_context_tokens=raw_tokens,
             optimized_context_tokens=optimized_tokens,
             total_files=self.ranker.total_rankable_files(),
-            reason=_selection_reason(selected),
+            reason=(
+                "Selected by research information-density per token."
+                if research_mode
+                else _selection_reason(selected)
+            ),
         )
 
 

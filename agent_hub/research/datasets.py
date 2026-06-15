@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Any
 
 
+CONTEXT_ABLATION_LEVELS = (0, 25, 50, 75, 100)
+
+
 def load_jsonl_dataset(path: str | Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -25,4 +28,38 @@ def write_jsonl_dataset(path: str | Path, rows: list[dict[str, Any]]) -> Path:
     return target
 
 
-__all__ = ["load_jsonl_dataset", "write_jsonl_dataset"]
+def context_ablation_variants(task: dict[str, Any], *, levels: tuple[int, ...] = CONTEXT_ABLATION_LEVELS) -> list[dict[str, Any]]:
+    base_id = str(task.get("task_id") or task.get("id") or "task")
+    variants: list[dict[str, Any]] = []
+    for level in levels:
+        variants.append(
+            {
+                **task,
+                "task_id": f"{base_id}:context-{level}",
+                "ablation_parent_task_id": base_id,
+                "context_percent": int(level),
+                "research_experiment": "context_ablation",
+            }
+        )
+    return variants
+
+
+def write_context_ablation_dataset(
+    path: str | Path,
+    tasks: list[dict[str, Any]],
+    *,
+    levels: tuple[int, ...] = CONTEXT_ABLATION_LEVELS,
+) -> Path:
+    rows: list[dict[str, Any]] = []
+    for task in tasks:
+        rows.extend(context_ablation_variants(task, levels=levels))
+    return write_jsonl_dataset(path, rows)
+
+
+__all__ = [
+    "CONTEXT_ABLATION_LEVELS",
+    "context_ablation_variants",
+    "load_jsonl_dataset",
+    "write_context_ablation_dataset",
+    "write_jsonl_dataset",
+]

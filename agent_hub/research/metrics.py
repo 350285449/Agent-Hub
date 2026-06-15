@@ -60,4 +60,14 @@ def summarize_runs(rows: list[dict[str, Any]]) -> ResearchSummary:
     )
 
 
-__all__ = ["ResearchSummary", "load_research_runs", "summarize_runs"]
+def wilson_interval(successes: int, total: int, *, z: float = 1.96) -> tuple[float, float]:
+    if total <= 0:
+        return (0.0, 0.0)
+    p = successes / total
+    denominator = 1 + z * z / total
+    center = (p + z * z / (2 * total)) / denominator
+    margin = z * ((p * (1 - p) + z * z / (4 * total)) / total) ** 0.5 / denominator
+    return (round(max(0.0, center - margin), 4), round(min(1.0, center + margin), 4))
+
+
+__all__ = ["ResearchSummary", "load_research_runs", "summarize_runs", "wilson_interval"]
