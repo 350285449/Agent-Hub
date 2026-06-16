@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..config import load_config
 from ..evaluation import BenchmarkTask, _score_text, default_benchmark_tasks
 from ..token_budget import estimate_messages_tokens
 from .ablation import append_context_ablation_result
@@ -256,6 +255,8 @@ def _useful_keyword_count(task: BenchmarkTask, ratio: float, selected: list[Cont
 
 
 def main(argv: list[str] | None = None) -> int:
+    from ..config import load_config
+
     parser = argparse.ArgumentParser(description="Run local context ablation research experiment.")
     parser.add_argument("--route", default="cloud-agent")
     parser.add_argument("--limit", type=int, default=0)

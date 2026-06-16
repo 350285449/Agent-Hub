@@ -10,7 +10,10 @@ from .hypothesis import compute_hypothesis_tests
 from .information_density import top_information_density_files
 from .metrics import load_research_runs
 from .real_model_validation import compute_real_model_validation_status
+from .real_model_ablation import compute_real_model_tau
 from .strategy_comparison import compute_context_strategy_comparison
+from .tau_repo_correlation import compute_tau_repo_correlation
+from .tau_validation import compute_cross_repo_tau
 from .telemetry import research_dir
 
 
@@ -24,9 +27,15 @@ def generate_math_research_summary(state_dir: str | Path, output: str | Path | N
     hypotheses = compute_hypothesis_tests(state_dir)
     strategy = compute_context_strategy_comparison(state_dir)
     real_model = compute_real_model_validation_status()
+    cross_tau = compute_cross_repo_tau(state_dir)
+    tau_correlation = compute_tau_repo_correlation(state_dir)
+    real_tau = compute_real_model_tau(state_dir)
     path = Path(output) if output is not None else research_dir(state_dir) / "math_research_summary.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_markdown(analysis, pareto, curve, top_files, curve_fit, hypotheses, strategy, real_model), encoding="utf-8")
+    path.write_text(
+        _markdown(analysis, pareto, curve, top_files, curve_fit, hypotheses, strategy, real_model, cross_tau, tau_correlation, real_tau),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -39,6 +48,9 @@ def _markdown(
     hypotheses: dict[str, Any],
     strategy: dict[str, Any],
     real_model: dict[str, Any],
+    cross_tau: dict[str, Any],
+    tau_correlation: dict[str, Any],
+    real_tau: dict[str, Any],
 ) -> str:
     best_success = _best_model(analysis, "success_rate")
     best_efficiency = _best_model(analysis, "efficiency_score")
@@ -83,6 +95,12 @@ def _markdown(
         f"- Status: {real_model.get('status', 'unknown')}",
         f"- Real model subset run: {real_model.get('real_model_subset_run', False)}",
         f"- Detail: {real_model.get('reason', '')}",
+        "",
+        "## Real Model Validation",
+        *_real_model_tau_lines(real_tau, strategy),
+        "",
+        "## Cross-Repository Tau Validation",
+        *_cross_repo_tau_lines(cross_tau, tau_correlation),
         "",
         "## Experiment Questions",
         f"1. Does more context improve success? {more_context}",
@@ -221,6 +239,75 @@ def _strategy_lines(payload: dict[str, Any]) -> list[str]:
                 f"- {name}: runs={row.get('runs')} success={row.get('success_rate')} validation={row.get('average_validation_score')} tokens={row.get('average_context_tokens')} success_per_1k={row.get('success_per_1k_tokens')}"
             )
     return lines
+
+
+def _cross_repo_tau_lines(cross_tau: dict[str, Any], tau_correlation: dict[str, Any]) -> list[str]:
+    repos = cross_tau.get("repositories") if isinstance(cross_tau.get("repositories"), list) else []
+    if not repos:
+        return [
+            "- Stable tau by repository: not enough cross-repository data.",
+            "- Saturating curve fit: not evaluated.",
+            "- Tau versus complexity: not evaluated.",
+            "- Repository sources: not available.",
+            "- Cannot claim cross-repository validity yet.",
+        ]
+    stable = all(float(repo.get("r2") or 0.0) >= 0.8 for repo in repos)
+    curve_fit = all(repo.get("best_fit_curve") == "saturating_exponential" for repo in repos)
+    sources = sorted({str(repo.get("repo_source") or "unknown") for repo in repos})
+    correlations = tau_correlation.get("correlations") if isinstance(tau_correlation.get("correlations"), dict) else {}
+    complexity_corr = correlations.get("approximate_complexity_score", 0.0)
+    lines = [
+        f"- Does each repository have a stable tau? {'yes' if stable else 'mixed'}; minimum R2={min(float(repo.get('r2') or 0.0) for repo in repos):.3f}.",
+        f"- Does the saturating curve still fit? {'yes' if curve_fit else 'mixed'} across {len(repos)} repositories.",
+        f"- Does tau increase with repository complexity? correlation={complexity_corr}.",
+        f"- Repository sources: {', '.join(sources)}.",
+        "- What cannot be claimed yet? These deterministic local results do not prove real-model behavior, causal context effects, or generality across large external corpora.",
+    ]
+    for repo in repos:
+        lines.append(
+            f"- {repo.get('repo_id')}: source={repo.get('repo_source')} tau={repo.get('tau_estimate')} R2={repo.get('r2')} best_bucket={repo.get('best_success_per_token_bucket')} diminishing={repo.get('diminishing_return_bucket')}"
+        )
+    return lines
+
+
+def _real_model_tau_lines(real_tau: dict[str, Any], strategy: dict[str, Any]) -> list[str]:
+    rows = real_tau.get("results") if isinstance(real_tau.get("results"), list) else []
+    if not rows:
+        return [
+            "- Did the context law survive? not evaluated with real model rows.",
+            "- Is tau stable across real models? not enough real model data.",
+            "- Which model has lowest tau? not enough data.",
+            "- Which model has highest tau? not enough data.",
+            f"- Does information-density context still win? deterministic strategy winner remains {strategy.get('winner_by_success_per_1k_tokens', 'unknown')}; real strategy data not collected.",
+            "- What evidence contradicts the theory? no real-model rows available.",
+            "- Final conclusion: B) Evidence is mixed.",
+        ]
+    saturating_wins = sum(1 for row in rows if row.get("winning_curve") == "saturating_exponential")
+    poor_fits = [row for row in rows if float(row.get("r2") or 0.0) < 0.5]
+    linear_wins = [row for row in rows if row.get("winning_curve") == "linear"]
+    no_gain = [row for row in rows if _real_more_context_does_not_help(row)]
+    lowest = min(rows, key=lambda row: float(row.get("tau") or 0.0))
+    highest = max(rows, key=lambda row: float(row.get("tau") or 0.0))
+    mixed = bool(poor_fits or linear_wins or no_gain or saturating_wins < len(rows))
+    conclusion = "B) Evidence is mixed." if mixed else "A) Evidence supports tau under real-model execution."
+    lines = [
+        f"- Did the context law survive? {'partially' if mixed else 'yes'}; saturating exponential won {saturating_wins}/{len(rows)} model-repository fits.",
+        f"- Is tau stable across real models? only one real model was tested; stability across models cannot be claimed.",
+        f"- Which model has lowest tau? {lowest.get('model')} on {lowest.get('repo_id')} tau={lowest.get('tau')}.",
+        f"- Which model has highest tau? {highest.get('model')} on {highest.get('repo_id')} tau={highest.get('tau')}.",
+        f"- Does information-density context still win? not measured in real ablation; deterministic strategy winner remains {strategy.get('winner_by_success_per_1k_tokens', 'unknown')}.",
+        f"- What evidence contradicts the theory? linear_wins={len(linear_wins)}, poor_tau_fits={len(poor_fits)}, no_context_gain={len(no_gain)}.",
+        f"- Final conclusion: {conclusion}",
+    ]
+    return lines
+
+
+def _real_more_context_does_not_help(row: dict[str, Any]) -> bool:
+    points = row.get("points") if isinstance(row.get("points"), list) else []
+    if len(points) < 2:
+        return True
+    baseline = float(points[0].get("success_rate") or 0.0)
+    return max(float(point.get("success_rate") or 0.0) for point in points[1:]) <= baseline
 
 
 def _file_lines(rows: list[dict[str, Any]]) -> list[str]:
