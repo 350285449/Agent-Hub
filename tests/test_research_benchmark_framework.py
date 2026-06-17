@@ -29,6 +29,7 @@ from agent_hub.research.theory_test_harness import (
     run_theory_suite,
     unified_theory_validation,
 )
+from agent_hub.research.primitive_variable_analysis import run_primitive_variable_analysis
 
 
 class ResearchBenchmarkFrameworkTests(unittest.TestCase):
@@ -114,6 +115,64 @@ class ResearchBenchmarkFrameworkTests(unittest.TestCase):
             dashboard = Path(paths["research_dashboard"]).read_text(encoding="utf-8")
             self.assertIn("Usable clean live rows: 0", dashboard)
             self.assertIn("undetermined until live rows are collected", dashboard)
+
+    def test_primitive_variable_analysis_generates_cloud_only_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / ".agent-hub" / "state"
+            research = state.parent / "research"
+            research.mkdir(parents=True, exist_ok=True)
+            rows = []
+            for index, model in enumerate(("gpt-5.5", "gemma4:31b-cloud", "nemotron-3-super:cloud")):
+                for repo in ("Agent-Hub", "face"):
+                    rows.append(
+                        {
+                            "dedupe_key": f"{model}-{repo}",
+                            "live": True,
+                            "synthetic": False,
+                            "model": model,
+                            "repository": repo,
+                            "category": "bug_fix" if repo == "Agent-Hub" else "feature_request",
+                            "context_budget": 50 if index else 0,
+                            "context_tokens": 1200 * (index + 1),
+                            "selected_files": ["a.py"] if index else [],
+                            "success": index != 1,
+                            "validation_score": 0.8 if index != 1 else 0.2,
+                            "latency": 1.0 + index,
+                            "retries": 0,
+                            "provider_type": "codex-cli" if model == "gpt-5.5" else "ollama-cloud",
+                        }
+                    )
+            rows.append(
+                {
+                    "dedupe_key": "local-row",
+                    "live": True,
+                    "model": "local-deterministic-proof",
+                    "repository": "Agent-Hub",
+                    "category": "bug_fix",
+                    "success": True,
+                    "validation_score": 1.0,
+                    "provider_type": "local-research",
+                }
+            )
+            (research / "balanced_live_matrix.jsonl").write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+            paths = run_primitive_variable_analysis(state)
+
+            self.assertEqual(
+                set(paths),
+                {
+                    "primitive_variable_stability",
+                    "primitive_variable_orthogonality",
+                    "primitive_variable_reduction",
+                    "primitive_variable_manifold",
+                    "primitive_information_accounting",
+                    "missing_primitive_variable",
+                    "primitive_variable_verdict",
+                },
+            )
+            stability = Path(paths["primitive_variable_stability"]).read_text(encoding="utf-8")
+            self.assertIn("Rows: 6", stability)
+            self.assertNotIn("local-deterministic-proof", stability)
 
     def test_cross_repo_holdout_validation_reports_each_requested_split(self) -> None:
         rows = _research_rows()

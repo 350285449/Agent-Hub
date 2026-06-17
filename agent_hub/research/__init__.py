@@ -163,6 +163,24 @@ def evaluate_eac_theory(*args, **kwargs):
 
     return _run(*args, **kwargs)
 
+
+def run_capability_margin_validation(*args, **kwargs):
+    from .capability_margin import run_capability_margin_validation as _run
+
+    return _run(*args, **kwargs)
+
+
+def run_primitive_variable_analysis(*args, **kwargs):
+    from .primitive_variable_analysis import run_primitive_variable_analysis as _run
+
+    return _run(*args, **kwargs)
+
+
+def run_evidence_access_measurement(*args, **kwargs):
+    from .evidence_access_measurement import run_evidence_access_measurement as _run
+
+    return _run(*args, **kwargs)
+
 __all__ = [
     "BanditArm",
     "BayesianSuccessRouter",
@@ -211,11 +229,14 @@ __all__ = [
     "unified_theory_validation",
     "run_data_quality_audit",
     "run_eac_theory_evaluation",
+    "run_evidence_access_measurement",
     "evaluate_eac_theory",
     "run_full_live_matrix_collection",
     "run_agent_difficulty_research_program",
     "run_balanced_live_matrix_experiment",
+    "run_capability_margin_validation",
     "run_fundamental_research_lab",
+    "run_primitive_variable_analysis",
     "run_research_discovery",
     "run_research_analysis",
     "run_state_space_theory_research_program",
