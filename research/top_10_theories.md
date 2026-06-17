@@ -1,0 +1,14 @@
+# Top 10 Theories Overall
+
+| rank | theory | group | score | why it survived | required future experiment |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Runtime Integrity Theory | Agent-Native | 8.285 | Adds candidate mechanism beyond controls while matching cloud-only trajectory and grounding evidence. | Prospective multi-provider cloud batch with ablation against Grounding Integrity and Execution Trajectories. |
+| 2 | Decisive Evidence Theory | Agent-Native | 8.228 | Adds candidate mechanism beyond controls while matching cloud-only trajectory and grounding evidence. | Prospective multi-provider cloud batch with ablation against Grounding Integrity and Execution Trajectories. |
+| 3 | Runtime Control Theory | Agent-Native | 8.088 | Adds candidate mechanism beyond controls while matching cloud-only trajectory and grounding evidence. | Prospective multi-provider cloud batch with ablation against Grounding Integrity and Execution Trajectories. |
+| 4 | Branch Collapse Theory | Agent-Native | 8.028 | Adds candidate mechanism beyond controls while matching cloud-only trajectory and grounding evidence. | Prospective multi-provider cloud batch with ablation against Grounding Integrity and Execution Trajectories. |
+| 5 | State Reachability Theory | Dynamical Systems | 7.971 | Adds candidate mechanism beyond controls while matching cloud-only trajectory and grounding evidence. | Prospective multi-provider cloud batch with ablation against Grounding Integrity and Execution Trajectories. |
+| 6 | Information Flow Theory | Information Theory | 7.962 | Adds candidate mechanism beyond controls while matching cloud-only trajectory and grounding evidence. | Prospective multi-provider cloud batch with ablation against Grounding Integrity and Execution Trajectories. |
+| 7 | Decisive Information Event Theory | Information Theory | 7.938 | Adds candidate mechanism beyond controls while matching cloud-only trajectory and grounding evidence. | Prospective multi-provider cloud batch with ablation against Grounding Integrity and Execution Trajectories. |
+| 8 | Uncertainty Collapse Theory | Agent-Native | 7.694 | Adds candidate mechanism beyond controls while matching cloud-only trajectory and grounding evidence. | Prospective multi-provider cloud batch with ablation against Grounding Integrity and Execution Trajectories. |
+| 9 | Execution Lock-In Theory | Agent-Native | 7.665 | Adds candidate mechanism beyond controls while matching cloud-only trajectory and grounding evidence. | Prospective multi-provider cloud batch with ablation against Grounding Integrity and Execution Trajectories. |
+| 10 | Error Recovery Theory | Cognitive Science | 7.655 | Adds candidate mechanism beyond controls while matching cloud-only trajectory and grounding evidence. | Prospective multi-provider cloud batch with ablation against Grounding Integrity and Execution Trajectories. |
