@@ -116,6 +116,12 @@ def prospective_predictions(*args, **kwargs):
     return _run(*args, **kwargs)
 
 
+def run_prospective_validation(*args, **kwargs):
+    from .prospective_evaluator import run_prospective_validation as _run
+
+    return _run(*args, **kwargs)
+
+
 def geometry_diagnostic(*args, **kwargs):
     from .theory_test_harness import geometry_diagnostic as _run
 
@@ -142,6 +148,18 @@ def analyze_balanced_live_matrix(*args, **kwargs):
 
 def run_balanced_live_matrix_experiment(*args, **kwargs):
     from .balanced_live_matrix import run_balanced_live_matrix_experiment as _run
+
+    return _run(*args, **kwargs)
+
+
+def run_eac_theory_evaluation(*args, **kwargs):
+    from .eac_theory import run_eac_theory_evaluation as _run
+
+    return _run(*args, **kwargs)
+
+
+def evaluate_eac_theory(*args, **kwargs):
+    from .eac_theory import evaluate_eac_theory as _run
 
     return _run(*args, **kwargs)
 
@@ -188,9 +206,12 @@ __all__ = [
     "certificate_theory_validation",
     "ml_ceiling_benchmark",
     "prospective_predictions",
+    "run_prospective_validation",
     "geometry_diagnostic",
     "unified_theory_validation",
     "run_data_quality_audit",
+    "run_eac_theory_evaluation",
+    "evaluate_eac_theory",
     "run_full_live_matrix_collection",
     "run_agent_difficulty_research_program",
     "run_balanced_live_matrix_experiment",
