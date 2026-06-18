@@ -1,6 +1,6 @@
 # Resumable Panel Runner
 
-Checkpoint path: `C:\Users\vladi\Downloads\Agent-Hub-main\.agent-hub\research\gct_frozen_panel_runs\panel_checkpoint.json`.
+Checkpoint path: `.agent-hub\research\gct_balanced_live_50_preflight\panel_checkpoint.json`.
 
 - The runner writes `row_result.json` after every row.
 - Accepted rows are recorded in `accepted_row_ids` and skipped on resume.

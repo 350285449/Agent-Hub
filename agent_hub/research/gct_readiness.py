@@ -25,6 +25,21 @@ RETRYABLE_PROVIDER_ERROR_TYPES = {
     "connection_error",
     "server_error",
 }
+DIVERSITY_POLICY_VERSION = 1
+DEFAULT_MAX_MODEL_FAMILY_SHARE = 0.50
+DEFAULT_MIN_MODEL_FAMILIES = 3
+DEFAULT_FAILURE_SKEW_TOLERANCE = 0.35
+ROUTE_FAILURE_CATEGORIES = (
+    "auth_failure",
+    "quota_failure",
+    "subscription_failure",
+    "cooldown",
+    "structured_output_failure",
+    "timeout",
+    "executor_incompatibility",
+    "provider_unavailable",
+    "other",
+)
 
 PRE_COMMIT_EVENT_TYPES = {
     "evidence_discovery",
@@ -214,6 +229,11 @@ def certify_execution_summary(
         or row.get("malformed_output_accepted")
         or row.get("synthetic_or_replay")
     ]
+    diversity = provider_diversity_gate(
+        rows,
+        expected_rows=expected_rows,
+        require_complete=False,
+    )
     blockers: list[str] = []
     if require_execute_mode and summary.get("mode") != "execute":
         blockers.append("full readiness requires execute mode, not dry_run")
@@ -221,13 +241,14 @@ def certify_execution_summary(
         blockers.append(f"expected {expected_rows} rows, observed {len(rows)}")
     if failures:
         blockers.append(f"{len(failures)} rows failed completion, validation, or instrumentation gates")
-    if len(provider_names) < 2:
-        blockers.append("multi-provider cloud support not demonstrated by completed rows")
+    if not diversity["passed"]:
+        blockers.extend(diversity["blockers"])
     return {
         "ready": not blockers,
         "row_count": len(rows),
         "provider_count": len(provider_names),
         "providers": sorted(provider for provider in provider_names if provider),
+        "diversity_gate": diversity,
         "blockers": blockers,
     }
 
@@ -266,6 +287,322 @@ def certify_cloud_provider(agent: AgentConfig, *, timeout_seconds: float = 4.0) 
 
 def certify_configured_cloud_providers(config: HubConfig, *, timeout_seconds: float = 4.0) -> list[dict[str, Any]]:
     return [certify_cloud_provider(agent, timeout_seconds=timeout_seconds) for agent in cloud_agents(config).values()]
+
+
+def approved_cloud_routes(
+    config: HubConfig,
+    certification: list[dict[str, Any]],
+    *,
+    require_certified: bool = True,
+) -> list[str]:
+    """Return cloud agent names that may be used as automatic replacements."""
+
+    certified = {
+        str(row.get("agent"))
+        for row in certification
+        if row.get("certified") or not require_certified
+    }
+    return [
+        name
+        for name, agent in cloud_agents(config).items()
+        if name in certified and agent.enabled and is_cloud_agent(agent)
+    ]
+
+
+def model_family(value: str) -> str:
+    """Normalize provider model ids into families for diversity accounting."""
+
+    text = str(value or "").lower().strip()
+    if not text:
+        return "unknown"
+    text = text.removesuffix(":cloud").removesuffix("-cloud")
+    text = re.sub(r"[:/_-]+cloud$", "", text)
+    for family in ("gemma", "qwen", "kimi", "glm", "nemotron", "claude", "gpt", "gemini", "llama", "mistral"):
+        if family in text:
+            return family
+    match = re.match(r"([a-z]+)", text)
+    return match.group(1) if match else text
+
+
+def route_family(agent: AgentConfig | dict[str, Any]) -> str:
+    if isinstance(agent, AgentConfig):
+        return model_family(agent.model or agent.name)
+    return model_family(str(agent.get("model") or agent.get("agent") or ""))
+
+
+def classify_route_failure(event: dict[str, Any] | str) -> str:
+    if isinstance(event, dict):
+        error_type = str(event.get("error_type") or "").lower()
+        reason = str(event.get("reason") or event.get("message") or "").lower()
+    else:
+        error_type = ""
+        reason = str(event or "").lower()
+    text = f"{error_type} {reason}"
+    if "subscription" in text or "upgrade for access" in text or "payment required" in text:
+        return "subscription_failure"
+    if "auth" in text or "unauthorized" in text or "permission denied" in text or "api key" in text:
+        return "auth_failure"
+    if "quota" in text or "insufficient balance" in text or "credits exhausted" in text:
+        return "quota_failure"
+    if "cooldown" in text or "temporary cooldown" in text:
+        return "cooldown"
+    if "structured output" in text or "json_decode" in text or "invalid response" in text or "missing_content" in text:
+        return "structured_output_failure"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    if "tool compatibility" in text or "native_streaming_unavailable" in text or "unsupported" in text:
+        return "executor_incompatibility"
+    if "unavailable" in text or "overloaded" in text or "server_error" in text:
+        return "provider_unavailable"
+    return "other"
+
+
+def provider_route_failure_audit(
+    summary: dict[str, Any],
+    *,
+    exclude_family: str = "gemma",
+) -> dict[str, Any]:
+    rows = [row for row in summary.get("rows") or [] if isinstance(row, dict)]
+    audit: dict[str, Any] = {
+        "object": "gct.provider_route_failure_audit",
+        "schema_version": DIVERSITY_POLICY_VERSION,
+        "exclude_family": exclude_family,
+        "routes": {},
+    }
+    for row in rows:
+        failure = row.get("failure") if isinstance(row.get("failure"), dict) else {}
+        for call in row.get("provider_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            events = list(call.get("failover") or [])
+            if call.get("valid_structured_output") is False:
+                events.append(
+                    {
+                        "agent": call.get("agent"),
+                        "provider": call.get("provider"),
+                        "model": call.get("model"),
+                        "error_type": "structured_output_failure",
+                        "reason": ",".join(call.get("structured_output_errors") or []) or "structured output validation failed",
+                    }
+                )
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                agent = str(event.get("agent") or "")
+                family = model_family(str(event.get("model") or agent))
+                if not agent or family == exclude_family:
+                    continue
+                route = audit["routes"].setdefault(
+                    agent,
+                    {
+                        "agent": agent,
+                        "provider": event.get("provider") or "",
+                        "model": event.get("model") or "",
+                        "family": family,
+                        "categories": {category: 0 for category in ROUTE_FAILURE_CATEGORIES},
+                        "examples": [],
+                    },
+                )
+                category = classify_route_failure(event)
+                route["categories"][category] = int(route["categories"].get(category) or 0) + 1
+                if len(route["examples"]) < 5:
+                    route["examples"].append(str(event.get("reason") or event.get("error_type") or "")[:220])
+        if failure:
+            for item in failure.get("quarantine") or []:
+                category = classify_route_failure(str(item))
+                if category == "other":
+                    continue
+    preflight = summary.get("preflight") if isinstance(summary.get("preflight"), dict) else {}
+    live_preflight = (
+        preflight.get("live_structured_preflight")
+        if isinstance(preflight.get("live_structured_preflight"), list)
+        else []
+    )
+    for item in live_preflight:
+        if not isinstance(item, dict) or item.get("passed"):
+            continue
+        agent = str(item.get("agent") or "")
+        family = model_family(str(item.get("model") or agent))
+        if not agent or family == exclude_family:
+            continue
+        route = audit["routes"].setdefault(
+            agent,
+            {
+                "agent": agent,
+                "provider": item.get("provider") or "",
+                "model": item.get("model") or "",
+                "family": family,
+                "categories": {category: 0 for category in ROUTE_FAILURE_CATEGORIES},
+                "examples": [],
+            },
+        )
+        category = classify_route_failure(
+            {
+                "error_type": item.get("category"),
+                "reason": item.get("message"),
+            }
+        )
+        route["categories"][category] = int(route["categories"].get(category) or 0) + 1
+        if len(route["examples"]) < 5:
+            route["examples"].append(str(item.get("message") or item.get("category") or "")[:220])
+    audit["routes"] = dict(sorted(audit["routes"].items()))
+    return audit
+
+
+def provider_diversity_gate(
+    rows: list[dict[str, Any]],
+    *,
+    expected_rows: int,
+    max_model_family_share: float = DEFAULT_MAX_MODEL_FAMILY_SHARE,
+    min_model_families: int = DEFAULT_MIN_MODEL_FAMILIES,
+    failure_skew_tolerance: float = DEFAULT_FAILURE_SKEW_TOLERANCE,
+    require_complete: bool = True,
+) -> dict[str, Any]:
+    accepted_rows = [
+        row
+        for row in rows
+        if row.get("status") == "completed"
+        and row.get("valid_instrumentation")
+        and not row.get("malformed_output_accepted")
+    ]
+    family_counts: dict[str, int] = {}
+    provider_counts: dict[str, int] = {}
+    for row in accepted_rows:
+        families = {
+            model_family(str(call.get("model") or call.get("agent") or ""))
+            for call in row.get("provider_calls") or []
+            if isinstance(call, dict) and call.get("valid_structured_output") is not False
+        }
+        if not families:
+            continue
+        for family in families:
+            family_counts[family] = family_counts.get(family, 0) + 1
+        for call in row.get("provider_calls") or []:
+            if isinstance(call, dict) and call.get("agent"):
+                provider_counts[str(call["agent"])] = provider_counts.get(str(call["agent"]), 0) + 1
+    total_family_rows = sum(family_counts.values())
+    max_family = max(family_counts.items(), key=lambda item: item[1], default=("", 0))
+    max_share = (max_family[1] / total_family_rows) if total_family_rows else 0.0
+
+    failure_counts: dict[str, int] = {}
+    for row in rows:
+        for call in row.get("provider_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            for event in call.get("failover") or []:
+                if isinstance(event, dict) and event.get("agent"):
+                    agent = str(event["agent"])
+                    failure_counts[agent] = failure_counts.get(agent, 0) + 1
+    failure_total = sum(failure_counts.values())
+    failure_skew = 0.0
+    if failure_total and len(failure_counts) > 1:
+        expected = failure_total / len(failure_counts)
+        failure_skew = max(abs(count - expected) / failure_total for count in failure_counts.values())
+
+    blockers: list[str] = []
+    if require_complete and len(rows) < expected_rows:
+        blockers.append(f"expected {expected_rows} rows before diversity gate, observed {len(rows)}")
+    if max_share > max_model_family_share:
+        blockers.append(
+            f"model family `{max_family[0]}` exceeds share cap: {max_share:.2%} > {max_model_family_share:.0%}"
+        )
+    if len(family_counts) < min_model_families:
+        blockers.append(f"fewer than {min_model_families} model families completed valid rows: {len(family_counts)}")
+    if failure_skew > failure_skew_tolerance:
+        blockers.append(f"provider failures are unevenly distributed: skew {failure_skew:.2%} > {failure_skew_tolerance:.0%}")
+    return {
+        "object": "gct.provider_diversity_gate",
+        "schema_version": DIVERSITY_POLICY_VERSION,
+        "passed": not blockers,
+        "expected_rows": expected_rows,
+        "accepted_rows": len(accepted_rows),
+        "family_counts": dict(sorted(family_counts.items())),
+        "provider_counts": dict(sorted(provider_counts.items())),
+        "max_model_family_share": max_model_family_share,
+        "max_observed_family": max_family[0],
+        "max_observed_share": round(max_share, 4),
+        "min_model_families": min_model_families,
+        "failure_counts": dict(sorted(failure_counts.items())),
+        "failure_skew": round(failure_skew, 4),
+        "blockers": blockers,
+    }
+
+
+def provider_balancing_policy_markdown() -> str:
+    return "\n".join(
+        [
+            "# Provider Balancing Policy",
+            "",
+            f"Policy version: `{DIVERSITY_POLICY_VERSION}`.",
+            "",
+            f"- Maximum accepted share per model family: `{DEFAULT_MAX_MODEL_FAMILY_SHARE:.0%}`.",
+            f"- Minimum valid cloud model families for prospective execution: `{DEFAULT_MIN_MODEL_FAMILIES}`.",
+            "- Replacement routes are limited to cloud agents that pass provider preflight/certification.",
+            "- The panel executor chooses the least-used eligible family first, then least-used agent.",
+            "- A route is temporarily backed off after provider failures, schema failures, timeouts, overload, quota, auth, or subscription errors.",
+            "- A capped family is removed from automatic replacement for the next row unless every other approved route is unavailable.",
+            "- Malformed outputs are quarantined before ingestion and do not count toward accepted diversity.",
+            "",
+        ]
+    )
+
+
+def provider_diversity_gate_markdown(gate: dict[str, Any] | None = None) -> str:
+    gate = gate or {}
+    lines = [
+        "# Provider Diversity Gate",
+        "",
+        "Abort full 200-row execution when any required diversity condition fails.",
+        "",
+        f"- Max model-family share: `{gate.get('max_model_family_share', DEFAULT_MAX_MODEL_FAMILY_SHARE)}`.",
+        f"- Minimum completed model families: `{gate.get('min_model_families', DEFAULT_MIN_MODEL_FAMILIES)}`.",
+        f"- Failure skew tolerance: `{DEFAULT_FAILURE_SKEW_TOLERANCE}`.",
+    ]
+    if gate:
+        lines.extend(
+            [
+                "",
+                f"Passed: `{gate.get('passed')}`.",
+                f"Accepted rows: `{gate.get('accepted_rows')}`.",
+                f"Family counts: `{gate.get('family_counts')}`.",
+                f"Failure counts: `{gate.get('failure_counts')}`.",
+                "Blockers: " + (", ".join(gate.get("blockers") or []) or "none"),
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def provider_route_failure_audit_markdown(audit: dict[str, Any]) -> str:
+    lines = [
+        "# Provider Route Failure Audit",
+        "",
+        "Scope: non-Gemma cloud routes observed in provider failover, quarantine, and structured-output validation traces.",
+        "",
+        "| route | family | auth | quota | subscription | cooldown | structured output | timeout | executor incompatibility | provider unavailable | other | examples |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    routes = audit.get("routes") if isinstance(audit.get("routes"), dict) else {}
+    if not routes:
+        lines.append("| none observed | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | - |")
+    for row in routes.values():
+        categories = row.get("categories") if isinstance(row.get("categories"), dict) else {}
+        lines.append(
+            "| {agent} | {family} | {auth} | {quota} | {subscription} | {cooldown} | {structured} | {timeout} | {executor} | {unavailable} | {other} | {examples} |".format(
+                agent=_md(row.get("agent")),
+                family=_md(row.get("family")),
+                auth=int(categories.get("auth_failure") or 0),
+                quota=int(categories.get("quota_failure") or 0),
+                subscription=int(categories.get("subscription_failure") or 0),
+                cooldown=int(categories.get("cooldown") or 0),
+                structured=int(categories.get("structured_output_failure") or 0),
+                timeout=int(categories.get("timeout") or 0),
+                executor=int(categories.get("executor_incompatibility") or 0),
+                unavailable=int(categories.get("provider_unavailable") or 0),
+                other=int(categories.get("other") or 0),
+                examples=_md("; ".join(row.get("examples") or [])),
+            )
+        )
+    return "\n".join(lines) + "\n"
 
 
 def estimate_execution_preflight(rows: list[dict[str, Any]], agents: dict[str, AgentConfig]) -> dict[str, Any]:

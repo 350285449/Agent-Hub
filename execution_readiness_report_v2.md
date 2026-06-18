@@ -1,16 +1,16 @@
 # Execution Readiness Report v2
 
-Mode: `execute`.
-Rows requested: `20`.
-Rows summarized: `20`.
+Mode: `dry_run`.
+Rows requested: `50`.
+Rows summarized: `50`.
 Ready for evidence collection: `False`.
 
 Dashboard:
-- Completed rows: `0`.
+- Completed rows: `50`.
 - Failed rows: `0`.
-- Quarantined rows: `20`.
-- Instrumentation coverage: `0.0`.
+- Quarantined rows: `0`.
+- Instrumentation coverage: `1.0`.
 
-Certification blockers: 20 rows failed completion, validation, or instrumentation gates
+Certification blockers: fewer than 3 model families completed valid rows: 0
 
-FINAL VERDICT: A. Not ready.
+FINAL VERDICT: B. Engineering blocked.

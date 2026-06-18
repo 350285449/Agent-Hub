@@ -14,7 +14,8 @@ from agent_hub.research.gct_instrumentation import (
     panel_run_id,
     validate_pre_commit_interventions,
 )
-from scripts.frozen_panel_executor import execute_row
+from agent_hub.research.gct_readiness import provider_diversity_gate
+from scripts.frozen_panel_executor import ProviderBalancer, execute_row
 
 
 class GCTInstrumentationTests(unittest.TestCase):
@@ -81,6 +82,52 @@ class GCTInstrumentationTests(unittest.TestCase):
             self.assertIn("evidence_discovery", event_types)
             self.assertIn("commitment_event", event_types)
 
+    def test_provider_diversity_gate_rejects_single_family_dominance(self) -> None:
+        rows = [
+            {
+                "status": "completed",
+                "valid_instrumentation": True,
+                "malformed_output_accepted": False,
+                "provider_calls": [
+                    {"agent": "ollama-gemma-cloud", "model": "gemma4:31b-cloud", "valid_structured_output": True}
+                ],
+            }
+            for _ in range(4)
+        ]
+
+        gate = provider_diversity_gate(rows, expected_rows=4, min_model_families=3)
+
+        self.assertFalse(gate["passed"])
+        self.assertIn("gemma", gate["family_counts"])
+        self.assertTrue(any("exceeds share cap" in blocker for blocker in gate["blockers"]))
+
+    def test_provider_balancer_prefers_underused_approved_family(self) -> None:
+        agents = {
+            "ollama-gemma-cloud": _agent("ollama-gemma-cloud", "gemma4:31b-cloud"),
+            "ollama-qwen-cloud": _agent("ollama-qwen-cloud", "qwen3.5:cloud"),
+            "ollama-kimi-cloud": _agent("ollama-kimi-cloud", "kimi-k2.6:cloud"),
+        }
+        balancer = ProviderBalancer(
+            agents,
+            approved_routes=list(agents),
+            max_family_share=0.5,
+            min_model_families=3,
+            expected_rows=50,
+        )
+        balancer.observe_result(
+            {
+                "status": "completed",
+                "valid_instrumentation": True,
+                "provider_calls": [
+                    {"agent": "ollama-gemma-cloud", "model": "gemma4:31b-cloud", "valid_structured_output": True}
+                ],
+            }
+        )
+
+        route = balancer.route_order()
+
+        self.assertNotEqual(route[0], "ollama-gemma-cloud")
+
 
 def _row() -> dict:
     return {
@@ -90,3 +137,9 @@ def _row() -> dict:
         "prompt": "Diagnose the failure and define a verifier.",
         "evidence_units_required": ["failure symptom", "branch comparison", "verifier condition"],
     }
+
+
+class _agent:
+    def __init__(self, name: str, model: str) -> None:
+        self.name = name
+        self.model = model
